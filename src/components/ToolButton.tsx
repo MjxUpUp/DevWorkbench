@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { IconTerminal, IconCode, IconFolderOpen, IconSparkles } from './Icons';
+import { useToast } from './Toast';
 
 interface ToolButtonProps {
   tool: string;
@@ -26,6 +27,7 @@ const TOOL_ICONS: Record<string, typeof IconTerminal> = {
 
 export function ToolButton({ tool, projectPath, installed, onClick }: ToolButtonProps) {
   const IconComponent = TOOL_ICONS[tool] || IconTerminal;
+  const toast = useToast();
 
   const handleClick = async () => {
     if (!installed) return;
@@ -48,7 +50,7 @@ export function ToolButton({ tool, projectPath, installed, onClick }: ToolButton
       }
       onClick?.();
     } catch (e) {
-      alert(`启动 ${TOOL_LABELS[tool]} 失败: ${e}`);
+      toast.error(`启动 ${TOOL_LABELS[tool]} 失败: ${e}`);
     }
   };
 

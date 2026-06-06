@@ -2,7 +2,9 @@ import { useState, useMemo } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ProjectGrid } from './components/ProjectGrid';
 import { AddProject } from './components/AddProject';
+import { EditProject } from './components/EditProject';
 import { Settings } from './components/Settings';
+import { ToastProvider } from './components/Toast';
 import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
 import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
@@ -20,6 +22,7 @@ function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
 
   const { projects, addProject, removeProject, updateProject, recordOpen, error: projectError } = useProjects();
   const { tools, isInstalled, error: toolsError } = useTools();
@@ -60,18 +63,7 @@ function App() {
   };
 
   const handleEdit = async (project: Project) => {
-    const newName = prompt('项目名称', project.name);
-    if (newName === null) return;
-    const newDesc = prompt('项目描述', project.description);
-    if (newDesc === null) return;
-    const newTags = prompt('标签（逗号分隔）', project.tags.join(', '));
-    if (newTags === null) return;
-
-    await updateProject(project.id, {
-      name: newName,
-      description: newDesc,
-      tags: newTags.split(',').map(t => t.trim()).filter(Boolean),
-    });
+    setEditingProject(project);
   };
 
   const handleRemove = async (id: string) => {
@@ -87,6 +79,7 @@ function App() {
   };
 
   return (
+    <ToastProvider>
     <div className="app">
       <Sidebar
         items={SIDEBAR_ITEMS}
@@ -137,7 +130,16 @@ function App() {
       {showSettings && (
         <Settings tools={tools} onClose={() => setShowSettings(false)} />
       )}
+
+      {editingProject && (
+        <EditProject
+          project={editingProject}
+          onSave={updateProject}
+          onClose={() => setEditingProject(null)}
+        />
+      )}
     </div>
+    </ToastProvider>
   );
 }
 
