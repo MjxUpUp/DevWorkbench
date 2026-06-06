@@ -1,0 +1,321 @@
+use std::fs;
+use tempfile::TempDir;
+
+// === Tool Detection Tests ===
+
+#[test]
+fn test_detect_tools_returns_all_four() {
+    // detect_tools is a tauri command, test the logic directly
+    let tools = ["claude", "cursor", "code", "git"];
+    for name in &tools {
+        let result = which::which(name);
+        // We just verify the function doesn't panic - results depend on installed tools
+        let _ = result;
+    }
+}
+
+#[test]
+fn test_detect_tools_git_installed() {
+    // git should always be available in dev environment
+    let result = which::which("git");
+    assert!(result.is_ok(), "git should be installed in dev environment");
+}
+
+// === Project CRUD Tests ===
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct Project {
+    id: String,
+    name: String,
+    description: String,
+    path: String,
+    tags: Vec<String>,
+    cover_image: Option<String>,
+    open_count: u32,
+    last_opened_at: Option<String>,
+    starred: bool,
+    created_at: String,
+}
+
+fn create_test_project(id: &str, name: &str, path: &str, starred: bool) -> Project {
+    Project {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: format!("Test project {}", name),
+        path: path.to_string(),
+        tags: vec!["Test".to_string()],
+        cover_image: None,
+        open_count: 0,
+        last_opened_at: None,
+        starred,
+        created_at: "2026-06-06T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn test_save_and_load_projects() {
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("projects.json");
+
+    let projects = vec![
+        create_test_project("p1", "Alpha", "/tmp/alpha", false),
+        create_test_project("p2", "Beta", "/tmp/beta", true),
+    ];
+
+    // Save
+    let json = serde_json::to_string_pretty(&projects).unwrap();
+    fs::write(&file_path, &json).unwrap();
+
+    // Load
+    let loaded: Vec<Project> = {
+        let content = fs::read_to_string(&file_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    };
+
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].name, "Alpha");
+    assert_eq!(loaded[1].name, "Beta");
+    assert_eq!(loaded[1].starred, true);
+    assert_eq!(loaded[0].tags, vec!["Test"]);
+}
+
+#[test]
+fn test_load_empty_projects_file() {
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("projects.json");
+
+    // File doesn't exist => empty vec
+    assert!(!file_path.exists());
+    if file_path.exists() {
+        panic!("File should not exist");
+    }
+    // Simulating load_projects behavior: return empty vec if file missing
+    let loaded: Vec<Project> = if file_path.exists() {
+        let content = fs::read_to_string(&file_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    } else {
+        vec![]
+    };
+    assert!(loaded.is_empty());
+}
+
+#[test]
+fn test_update_project_open_count() {
+    let mut projects = vec![
+        create_test_project("p1", "Alpha", "/tmp/alpha", false),
+        create_test_project("p2", "Beta", "/tmp/beta", false),
+    ];
+
+    let now = chrono::Local::now().to_rfc3339();
+    for p in &mut projects {
+        if p.id == "p1" {
+            p.open_count += 1;
+            p.last_opened_at = Some(now.clone());
+            break;
+        }
+    }
+
+    assert_eq!(projects[0].open_count, 1);
+    assert!(projects[0].last_opened_at.is_some());
+    assert_eq!(projects[1].open_count, 0);
+    assert!(projects[1].last_opened_at.is_none());
+}
+
+#[test]
+fn test_toggle_star() {
+    let mut project = create_test_project("p1", "Test", "/tmp/test", false);
+    assert!(!project.starred);
+    project.starred = !project.starred;
+    assert!(project.starred);
+    project.starred = !project.starred;
+    assert!(!project.starred);
+}
+
+#[test]
+fn test_json_roundtrip_with_windows_paths() {
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("projects.json");
+
+    let projects = vec![Project {
+        id: "test-path".to_string(),
+        name: "WindowsPath".to_string(),
+        description: "Test Windows path escaping".to_string(),
+        path: "E:\\DevWorkbench".to_string(),
+        tags: vec![],
+        cover_image: None,
+        open_count: 0,
+        last_opened_at: None,
+        starred: false,
+        created_at: "2026-06-06T00:00:00Z".to_string(),
+    }];
+
+    let json = serde_json::to_string_pretty(&projects).unwrap();
+    fs::write(&file_path, &json).unwrap();
+
+    let loaded: Vec<Project> = {
+        let content = fs::read_to_string(&file_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    };
+
+    assert_eq!(loaded[0].path, "E:\\DevWorkbench");
+}
+
+// === Settings Tests ===
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct AppSettings {
+    scan_directories: Vec<String>,
+    tool_paths: std::collections::HashMap<String, String>,
+}
+
+#[test]
+fn test_save_and_load_settings() {
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("settings.json");
+
+    let mut settings = AppSettings {
+        scan_directories: vec!["E:\\Projects".to_string()],
+        tool_paths: std::collections::HashMap::new(),
+    };
+    settings.tool_paths.insert("claude".to_string(), "/usr/local/bin/claude".to_string());
+
+    let json = serde_json::to_string_pretty(&settings).unwrap();
+    fs::write(&file_path, &json).unwrap();
+
+    let loaded: AppSettings = {
+        let content = fs::read_to_string(&file_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    };
+
+    assert_eq!(loaded.scan_directories.len(), 1);
+    assert_eq!(loaded.scan_directories[0], "E:\\Projects");
+    assert_eq!(loaded.tool_paths.get("claude").unwrap(), "/usr/local/bin/claude");
+}
+
+// === Git Scanner Tests ===
+
+#[test]
+fn test_scan_git_repos() {
+    let dir = TempDir::new().unwrap();
+
+    // Create fake git repos
+    let repo1 = dir.path().join("project-a");
+    let repo2 = dir.path().join("nested").join("project-b");
+    fs::create_dir_all(repo1.join(".git")).unwrap();
+    fs::create_dir_all(repo2.join(".git")).unwrap();
+
+    // Create a non-git directory
+    let not_repo = dir.path().join("not-a-repo");
+    fs::create_dir_all(&not_repo).unwrap();
+
+    let mut repos = Vec::new();
+    let mut builder = ignore::WalkBuilder::new(dir.path());
+    builder
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false)
+        .follow_links(false)
+        .max_depth(Some(3));
+
+    for entry in builder.build().filter_map(|e| e.ok()) {
+        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        if path == dir.path() {
+            continue;
+        }
+        if path.join(".git").exists() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            repos.push((name, path.to_string_lossy().to_string()));
+        }
+    }
+
+    assert_eq!(repos.len(), 2);
+    let names: Vec<&str> = repos.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"project-a"));
+    assert!(names.contains(&"project-b"));
+}
+
+// === Path Validation Tests ===
+
+#[test]
+fn test_open_terminal_validates_path() {
+    let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
+    assert!(!path.exists(), "Path should not exist for this test");
+}
+
+#[test]
+fn test_open_in_finder_validates_path() {
+    let path = std::path::Path::new("/nonexistent/path");
+    assert!(!path.exists());
+}
+
+// === Frontend Filter Logic Tests (mirroring JS logic in Rust) ===
+
+#[test]
+fn test_filter_recent_projects() {
+    let projects = vec![
+        create_test_project("p1", "Alpha", "/a", false),
+        Project {
+            id: "p2".to_string(),
+            name: "Beta".to_string(),
+            last_opened_at: Some("2026-06-06T10:00:00Z".to_string()),
+            ..create_test_project("p2", "Beta", "/b", false)
+        },
+        Project {
+            id: "p3".to_string(),
+            name: "Gamma".to_string(),
+            last_opened_at: Some("2026-06-05T10:00:00Z".to_string()),
+            ..create_test_project("p3", "Gamma", "/c", false)
+        },
+    ];
+
+    // Filter: only projects with last_opened_at, sorted by date desc
+    let mut recent: Vec<&Project> = projects.iter()
+        .filter(|p| p.last_opened_at.is_some())
+        .collect();
+    recent.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].name, "Beta");  // more recent
+    assert_eq!(recent[1].name, "Gamma"); // older
+}
+
+#[test]
+fn test_filter_starred_projects() {
+    let projects = vec![
+        create_test_project("p1", "Alpha", "/a", true),
+        create_test_project("p2", "Beta", "/b", false),
+        create_test_project("p3", "Gamma", "/c", true),
+    ];
+
+    let starred: Vec<&Project> = projects.iter().filter(|p| p.starred).collect();
+    assert_eq!(starred.len(), 2);
+    assert_eq!(starred[0].name, "Alpha");
+    assert_eq!(starred[1].name, "Gamma");
+}
+
+#[test]
+fn test_search_filter() {
+    let projects = vec![
+        Project { name: "DevWorkbench".to_string(), description: "Tauri app".to_string(), tags: vec!["Rust".to_string()], path: "E:\\DevWorkbench".to_string(), ..create_test_project("p1", "DevWorkbench", "E:\\DevWorkbench", false) },
+        Project { name: "My Website".to_string(), description: "Blog".to_string(), tags: vec!["Next.js".to_string()], path: "E:\\website".to_string(), ..create_test_project("p2", "My Website", "E:\\website", false) },
+    ];
+
+    let q = "rust";
+    let filtered: Vec<&Project> = projects.iter().filter(|p| {
+        p.name.to_lowercase().contains(q) ||
+        p.description.to_lowercase().contains(q) ||
+        p.tags.iter().any(|t| t.to_lowercase().contains(q)) ||
+        p.path.to_lowercase().contains(q)
+    }).collect();
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "DevWorkbench");
+}

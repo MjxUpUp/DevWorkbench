@@ -12,7 +12,15 @@ fn data_dir() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    // 优先使用 HOME / USERPROFILE 环境变量
+    // Windows 上 USERPROFILE 始终是原生路径（C:\Users\xxx），
+    // 而 HOME 可能是 Git Bash 设置的 Unix 风格路径（/c/Users/xxx），
+    // PathBuf 无法正确解析后者。所以 Windows 上优先用 USERPROFILE。
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            return PathBuf::from(home);
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home);
     }
