@@ -26,3 +26,13 @@ pub struct AppSettings {
     pub scan_directories: Vec<String>,
     pub tool_paths: std::collections::HashMap<String, String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatus {
+    pub branch: String,
+    pub is_dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub last_commit_time: Option<String>,
+}

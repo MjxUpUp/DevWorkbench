@@ -7,6 +7,7 @@ import { Settings } from './components/Settings';
 import { ToastProvider } from './components/Toast';
 import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
+import { useGitStatus } from './hooks/useGitStatus';
 import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
 import type { Project } from './types';
 import './styles/index.css';
@@ -26,6 +27,7 @@ function App() {
 
   const { projects, addProject, removeProject, updateProject, recordOpen, error: projectError } = useProjects();
   const { tools, isInstalled, error: toolsError } = useTools();
+  const { gitStatusMap } = useGitStatus(projects);
 
   const filteredProjects = useMemo(() => {
     let list = projects;
@@ -114,6 +116,7 @@ function App() {
 
         <ProjectGrid
           projects={filteredProjects}
+          gitStatusMap={gitStatusMap}
           isInstalled={isInstalled}
           onOpen={handleOpen}
           onEdit={handleEdit}

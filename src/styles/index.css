@@ -1145,3 +1145,49 @@ body::before {
   flex: 1;
   line-height: 1.4;
 }
+
+/* === Git Status Badge === */
+.git-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1;
+  z-index: 2;
+}
+
+.git-branch {
+  color: var(--text-secondary);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-dirty {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #F0B429;
+  flex-shrink: 0;
+}
+
+.git-ahead {
+  color: #6CB6FF;
+  font-weight: 500;
+}
+
+.git-behind {
+  color: #F47067;
+  font-weight: 500;
+}

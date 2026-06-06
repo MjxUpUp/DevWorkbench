@@ -26,3 +26,11 @@ export interface GitRepo {
   path: string;
   name: string;
 }
+
+export interface GitStatus {
+  branch: string;
+  isDirty: boolean;
+  ahead: number;
+  behind: number;
+  lastCommitTime: string | null;
+}

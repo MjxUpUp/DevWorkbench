@@ -1,9 +1,10 @@
-import type { Project } from '../types';
+import type { Project, GitStatus } from '../types';
 import { ProjectCard } from './ProjectCard';
 import { IconInbox } from './Icons';
 
 interface ProjectGridProps {
   projects: Project[];
+  gitStatusMap: Record<string, GitStatus | null>;
   isInstalled: (name: string) => boolean;
   onOpen: (id: string) => void;
   onEdit: (project: Project) => void;
@@ -12,7 +13,7 @@ interface ProjectGridProps {
   emptyText?: string;
 }
 
-export function ProjectGrid({ projects, isInstalled, onOpen, onEdit, onRemove, onToggleStar, emptyText }: ProjectGridProps) {
+export function ProjectGrid({ projects, gitStatusMap, isInstalled, onOpen, onEdit, onRemove, onToggleStar, emptyText }: ProjectGridProps) {
   if (projects.length === 0) {
     return (
       <div className="project-grid-empty">
@@ -28,6 +29,7 @@ export function ProjectGrid({ projects, isInstalled, onOpen, onEdit, onRemove, o
         <ProjectCard
           key={project.id}
           project={project}
+          gitStatus={gitStatusMap[project.path] ?? null}
           isInstalled={isInstalled}
           onOpen={onOpen}
           onEdit={onEdit}
