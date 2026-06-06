@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import { IconX } from './Icons';
 import type { GitRepo, Project } from '../types';
 
 interface AddProjectProps {
-  onAdd: (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred'>) => Promise<void>;
+  onAdd: (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred'>) => Promise<Project | void>;
   onClose: () => void;
+  existingProjects: Project[];
 }
 
-export function AddProject({ onAdd, onClose }: AddProjectProps) {
+export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps) {
   const [mode, setMode] = useState<'manual' | 'scan'>('manual');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -18,6 +20,9 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
   const [scanResults, setScanResults] = useState<GitRepo[]>([]);
   const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
   const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState('');
+
+  const existingPaths = new Set(existingProjects.map(p => p.path.toLowerCase()));
 
   const pickDirectory = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -26,6 +31,7 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
       if (!name) {
         setName(selected.split(/[/\\]/).filter(Boolean).pop() || '');
       }
+      setError('');
     }
   };
 
@@ -33,17 +39,22 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
     const selected = await open({ directory: true, multiple: false });
     if (selected && typeof selected === 'string') {
       setScanDir(selected);
+      setError('');
     }
   };
 
   const scan = async () => {
     if (!scanDir) return;
     setScanning(true);
+    setError('');
     try {
       const repos = await invoke<GitRepo[]>('scan_git_repos', { rootPath: scanDir, maxDepth: 3 });
+      if (repos.length === 0) {
+        setError('未在该目录下发现 Git 仓库');
+      }
       setScanResults(repos);
     } catch (e) {
-      console.error('扫描失败:', e);
+      setError(`扫描失败: ${e}`);
     } finally {
       setScanning(false);
     }
@@ -60,19 +71,38 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
 
   const addManual = async () => {
     if (!name || !path) return;
-    await onAdd({
-      name,
-      description,
-      path,
-      tags: tags.split(',').map(t => t.trim()).filter(Boolean),
-      cover_image: null,
-    });
-    onClose();
+
+    if (existingPaths.has(path.toLowerCase())) {
+      setError('该项目已存在');
+      return;
+    }
+
+    try {
+      await onAdd({
+        name,
+        description,
+        path,
+        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+        cover_image: null,
+      });
+      onClose();
+    } catch (e) {
+      setError(`添加失败: ${e}`);
+    }
   };
 
   const addScanned = async () => {
-    for (const repo of scanResults) {
-      if (selectedRepos.has(repo.path)) {
+    const newRepos = scanResults.filter(
+      r => selectedRepos.has(r.path) && !existingPaths.has(r.path.toLowerCase())
+    );
+
+    if (newRepos.length === 0) {
+      setError('选中的项目都已存在');
+      return;
+    }
+
+    try {
+      for (const repo of newRepos) {
         await onAdd({
           name: repo.name,
           description: '',
@@ -81,8 +111,10 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
           cover_image: null,
         });
       }
+      onClose();
+    } catch (e) {
+      setError(`添加失败: ${e}`);
     }
-    onClose();
   };
 
   return (
@@ -90,7 +122,7 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>添加项目</h2>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" onClick={onClose}><IconX size={16} /></button>
         </div>
 
         <div className="modal-tabs">
@@ -98,14 +130,16 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
           <button className={`tab ${mode === 'scan' ? 'active' : ''}`} onClick={() => setMode('scan')}>扫描目录</button>
         </div>
 
+        {error && <div className="error-banner">{error}</div>}
+
         {mode === 'manual' ? (
           <div className="modal-body">
             <label>项目名称 *</label>
-            <input value={name} onChange={e => setName(e.target.value)} placeholder="My Project" />
+            <input value={name} onChange={e => { setName(e.target.value); setError(''); }} placeholder="My Project" />
 
             <label>项目路径 *</label>
             <div className="input-row">
-              <input value={path} onChange={e => setPath(e.target.value)} placeholder="/path/to/project" />
+              <input value={path} onChange={e => { setPath(e.target.value); setError(''); }} placeholder="/path/to/project" />
               <button onClick={pickDirectory}>选择目录</button>
             </div>
 
@@ -121,7 +155,7 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
           <div className="modal-body">
             <label>扫描目录</label>
             <div className="input-row">
-              <input value={scanDir} onChange={e => setScanDir(e.target.value)} placeholder="选择要扫描的根目录" />
+              <input value={scanDir} onChange={e => { setScanDir(e.target.value); setError(''); }} placeholder="选择要扫描的根目录" />
               <button onClick={pickScanDir}>选择</button>
               <button onClick={scan} disabled={!scanDir || scanning}>{scanning ? '扫描中...' : '扫描'}</button>
             </div>
@@ -129,19 +163,24 @@ export function AddProject({ onAdd, onClose }: AddProjectProps) {
             {scanResults.length > 0 && (
               <div className="scan-results">
                 <p>找到 {scanResults.length} 个 Git 仓库：</p>
-                {scanResults.map(repo => (
-                  <label key={repo.path} className="scan-item">
-                    <input
-                      type="checkbox"
-                      checked={selectedRepos.has(repo.path)}
-                      onChange={() => toggleRepo(repo.path)}
-                    />
-                    <span className="scan-item-name">{repo.name}</span>
-                    <span className="scan-item-path">{repo.path}</span>
-                  </label>
-                ))}
+                {scanResults.map(repo => {
+                  const isDup = existingPaths.has(repo.path.toLowerCase());
+                  return (
+                    <label key={repo.path} className={`scan-item ${isDup ? 'scan-item-dup' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRepos.has(repo.path)}
+                        onChange={() => toggleRepo(repo.path)}
+                        disabled={isDup}
+                      />
+                      <span className="scan-item-name">{repo.name}</span>
+                      <span className="scan-item-path">{repo.path}</span>
+                      {isDup && <span className="scan-item-badge">已添加</span>}
+                    </label>
+                  );
+                })}
                 <button className="primary-btn" onClick={addScanned} disabled={selectedRepos.size === 0}>
-                  添加选中的 {selectedRepos.size} 个项目
+                  添加选中的 {scanResults.filter(r => selectedRepos.has(r.path) && !existingPaths.has(r.path.toLowerCase())).length} 个项目
                 </button>
               </div>
             )}

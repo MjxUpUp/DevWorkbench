@@ -5,13 +5,14 @@ import { AddProject } from './components/AddProject';
 import { Settings } from './components/Settings';
 import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
+import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
 import type { Project } from './types';
 import './styles/index.css';
 
 const SIDEBAR_ITEMS = [
-  { key: 'all', label: '全部项目', icon: '📂' },
-  { key: 'recent', label: '最近打开', icon: '🕐' },
-  { key: 'starred', label: '收藏', icon: '⭐' },
+  { key: 'all', label: '全部项目', IconComponent: IconFolder },
+  { key: 'recent', label: '最近打开', IconComponent: IconClock },
+  { key: 'starred', label: '收藏', IconComponent: IconStar },
 ];
 
 function App() {
@@ -20,8 +21,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const { projects, addProject, removeProject, updateProject, recordOpen } = useProjects();
-  const { tools, isInstalled } = useTools();
+  const { projects, addProject, removeProject, updateProject, recordOpen, error: projectError } = useProjects();
+  const { tools, isInstalled, error: toolsError } = useTools();
 
   const filteredProjects = useMemo(() => {
     let list = projects;
@@ -93,22 +94,29 @@ function App() {
         onSelect={setActiveView}
         footer={
           <button className="sidebar-item" onClick={() => setShowSettings(true)}>
-            <span className="sidebar-item-icon">⚙️</span>
+            <span className="sidebar-item-icon"><IconSettings /></span>
             <span className="sidebar-item-label">设置</span>
           </button>
         }
       />
 
       <main className="main-content">
+        {(projectError || toolsError) && <div className="error-banner">{projectError || toolsError}</div>}
         <div className="main-header">
-          <input
-            className="search-input"
-            type="text"
-            placeholder="搜索项目..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-          />
-          <button className="add-btn" onClick={() => setShowAdd(true)}>+ 新建项目</button>
+          <div className="search-wrap">
+            <IconSearch size={16} />
+            <input
+              className="search-input"
+              type="text"
+              placeholder="搜索项目..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+          </div>
+          <button className="add-btn" onClick={() => setShowAdd(true)}>
+            <IconPlus size={16} />
+            新建项目
+          </button>
         </div>
 
         <ProjectGrid
@@ -123,7 +131,7 @@ function App() {
       </main>
 
       {showAdd && (
-        <AddProject onAdd={addProject} onClose={() => setShowAdd(false)} />
+        <AddProject onAdd={addProject} onClose={() => setShowAdd(false)} existingProjects={projects} />
       )}
 
       {showSettings && (

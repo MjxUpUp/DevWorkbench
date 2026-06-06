@@ -2,13 +2,14 @@ use crate::models::{AppSettings, Project};
 use std::fs;
 use std::path::PathBuf;
 
-fn data_dir() -> PathBuf {
+fn data_dir() -> Result<PathBuf, String> {
     let home = dirs_home();
     let dir = home.join(".dev-workbench");
     if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("创建数据目录失败: {}", e))?;
     }
-    dir
+    Ok(dir)
 }
 
 fn dirs_home() -> PathBuf {
@@ -30,17 +31,17 @@ fn dirs_home() -> PathBuf {
     PathBuf::from(".")
 }
 
-fn projects_file() -> PathBuf {
-    data_dir().join("projects.json")
+fn projects_file() -> Result<PathBuf, String> {
+    data_dir().map(|d| d.join("projects.json"))
 }
 
-fn settings_file() -> PathBuf {
-    data_dir().join("settings.json")
+fn settings_file() -> Result<PathBuf, String> {
+    data_dir().map(|d| d.join("settings.json"))
 }
 
 #[tauri::command]
 pub fn load_projects() -> Result<Vec<Project>, String> {
-    let path = projects_file();
+    let path = projects_file()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -53,7 +54,7 @@ pub fn load_projects() -> Result<Vec<Project>, String> {
 
 #[tauri::command]
 pub fn save_projects(projects: Vec<Project>) -> Result<(), String> {
-    let path = projects_file();
+    let path = projects_file()?;
     let content = serde_json::to_string_pretty(&projects)
         .map_err(|e| format!("序列化项目数据失败: {}", e))?;
     fs::write(&path, content)
@@ -62,7 +63,7 @@ pub fn save_projects(projects: Vec<Project>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn load_settings() -> Result<AppSettings, String> {
-    let path = settings_file();
+    let path = settings_file()?;
     if !path.exists() {
         return Ok(AppSettings {
             scan_directories: Vec::new(),
@@ -78,24 +79,24 @@ pub fn load_settings() -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub fn save_settings(settings: AppSettings) -> Result<(), String> {
-    let path = settings_file();
+    let path = settings_file()?;
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("序列化设置失败: {}", e))?;
     fs::write(&path, content)
-        .map_err(|e| format!("写入设置文件失败: {}", e))
+        .map_err(|e| format!("写入设置失败: {}", e))
 }
 
 #[tauri::command]
-pub fn update_project_open(id: String, projects: Vec<Project>) -> Result<Vec<Project>, String> {
-    let mut updated = projects;
+pub fn update_project_open(id: String) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects()?;
     let now = chrono::Local::now().to_rfc3339();
-    for p in &mut updated {
+    for p in &mut projects {
         if p.id == id {
             p.open_count += 1;
             p.last_opened_at = Some(now);
             break;
         }
     }
-    save_projects(updated.clone())?;
-    Ok(updated)
+    save_projects(projects.clone())?;
+    Ok(projects)
 }

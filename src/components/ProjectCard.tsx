@@ -1,5 +1,6 @@
 import type { Project } from '../types';
 import { ToolButton } from './ToolButton';
+import { IconStar, IconEdit, IconTrash } from './Icons';
 
 interface ProjectCardProps {
   project: Project;
@@ -22,7 +23,7 @@ export function ProjectCard({ project, isInstalled, onOpen, onEdit, onRemove, on
           <img src={project.cover_image} alt={project.name} />
         ) : (
           <div className="card-cover-placeholder">
-            <span className="cover-text">{project.name.slice(0, 2)}</span>
+            <span className="cover-text">{project.name.slice(0, 2).toUpperCase()}</span>
           </div>
         )}
         <button
@@ -30,7 +31,7 @@ export function ProjectCard({ project, isInstalled, onOpen, onEdit, onRemove, on
           onClick={() => onToggleStar(project.id)}
           title={project.starred ? '取消收藏' : '收藏'}
         >
-          {project.starred ? '★' : '☆'}
+          <IconStar size={14} filled={project.starred} />
         </button>
       </div>
 
@@ -67,8 +68,12 @@ export function ProjectCard({ project, isInstalled, onOpen, onEdit, onRemove, on
       </div>
 
       <div className="card-actions">
-        <button className="action-btn" onClick={() => onEdit(project)} title="编辑">✏️</button>
-        <button className="action-btn danger" onClick={() => onRemove(project.id)} title="删除">🗑️</button>
+        <button className="action-btn" onClick={() => onEdit(project)} title="编辑">
+          <IconEdit size={15} />
+        </button>
+        <button className="action-btn danger" onClick={() => onRemove(project.id)} title="删除">
+          <IconTrash size={15} />
+        </button>
       </div>
     </div>
   );

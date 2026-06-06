@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
+import { IconTerminal, IconCode, IconFolderOpen, IconSparkles } from './Icons';
 
 interface ToolButtonProps {
-  tool: string;       // claude | cursor | code | terminal
+  tool: string;
   projectPath: string;
   installed: boolean;
   onClick?: () => void;
@@ -10,20 +11,22 @@ interface ToolButtonProps {
 const TOOL_LABELS: Record<string, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
-  code: 'VS Code',
-  terminal: 'Terminal',
-  finder: 'Finder',
+  code: 'VSCode',
+  terminal: 'Term',
+  finder: 'Files',
 };
 
-const TOOL_ICONS: Record<string, string> = {
-  claude: '🤖',
-  cursor: '📝',
-  code: '💻',
-  terminal: '⌨️',
-  finder: '📁',
+const TOOL_ICONS: Record<string, typeof IconTerminal> = {
+  claude: IconSparkles,
+  cursor: IconCode,
+  code: IconCode,
+  terminal: IconTerminal,
+  finder: IconFolderOpen,
 };
 
 export function ToolButton({ tool, projectPath, installed, onClick }: ToolButtonProps) {
+  const IconComponent = TOOL_ICONS[tool] || IconTerminal;
+
   const handleClick = async () => {
     if (!installed) return;
 
@@ -45,7 +48,7 @@ export function ToolButton({ tool, projectPath, installed, onClick }: ToolButton
       }
       onClick?.();
     } catch (e) {
-      console.error(`启动 ${tool} 失败:`, e);
+      alert(`启动 ${TOOL_LABELS[tool]} 失败: ${e}`);
     }
   };
 
@@ -56,7 +59,7 @@ export function ToolButton({ tool, projectPath, installed, onClick }: ToolButton
       disabled={!installed}
       title={installed ? `用 ${TOOL_LABELS[tool]} 打开` : `${TOOL_LABELS[tool]} 未安装`}
     >
-      <span className="tool-btn-icon">{TOOL_ICONS[tool]}</span>
+      <span className="tool-btn-icon"><IconComponent size={14} /></span>
       <span className="tool-btn-label">{TOOL_LABELS[tool]}</span>
     </button>
   );

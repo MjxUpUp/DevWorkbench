@@ -28,7 +28,7 @@ pub fn scan_git_repos(root_path: String, max_depth: Option<usize>) -> Result<Vec
     }
 
     for entry in builder.build().filter_map(|e| e.ok()) {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
             continue;
         }
 

@@ -5,11 +5,12 @@ import type { ToolStatus } from '../types';
 export function useTools() {
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<ToolStatus[]>('detect_tools')
-      .then(setTools)
-      .catch(console.error)
+      .then(data => { setTools(data); setError(null); })
+      .catch(e => setError(`工具检测失败: ${e}`))
       .finally(() => setLoading(false));
   }, []);
 
@@ -18,5 +19,5 @@ export function useTools() {
     return tool?.installed ?? false;
   };
 
-  return { tools, loading, isInstalled };
+  return { tools, loading, error, isInstalled };
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { IconX } from './Icons';
 import type { AppSettings, ToolStatus } from '../types';
 
 interface SettingsProps {
@@ -13,16 +14,22 @@ export function Settings({ tools, onClose }: SettingsProps) {
     tool_paths: {},
   });
   const [newScanDir, setNewScanDir] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<AppSettings>('load_settings')
-      .then(setSettings)
-      .catch(console.error);
+      .then(data => { setSettings(data); setError(null); })
+      .catch(e => setError(`加载设置失败: ${e}`));
   }, []);
 
   const save = async (updated: AppSettings) => {
-    await invoke('save_settings', { settings: updated });
-    setSettings(updated);
+    try {
+      await invoke('save_settings', { settings: updated });
+      setSettings(updated);
+      setError(null);
+    } catch (e) {
+      setError(`保存设置失败: ${e}`);
+    }
   };
 
   const addScanDir = () => {
@@ -44,8 +51,10 @@ export function Settings({ tools, onClose }: SettingsProps) {
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>设置</h2>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" onClick={onClose}><IconX size={16} /></button>
         </div>
+
+        {error && <div className="error-banner">{error}</div>}
 
         <div className="modal-body">
           <h3>工具状态</h3>
@@ -70,7 +79,7 @@ export function Settings({ tools, onClose }: SettingsProps) {
             {settings.scan_directories.map(dir => (
               <div key={dir} className="scan-dir-row">
                 <span>{dir}</span>
-                <button onClick={() => removeScanDir(dir)}>✕</button>
+                <button onClick={() => removeScanDir(dir)}><IconX size={14} /></button>
               </div>
             ))}
             <div className="input-row">

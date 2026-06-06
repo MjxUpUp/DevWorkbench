@@ -6,12 +6,26 @@
   "permissions": [
     "core:default",
     "opener:allow-reveal-item-in-dir",
-    "opener:allow-open-path",
-    "fs:allow-exists",
-    "fs:allow-read-dir",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
-    "fs:allow-mkdir",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [{ "path": "$HOME/.dev-workbench/**" }]
+    },
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "$HOME/.dev-workbench/**" }]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [{ "path": "$HOME/.dev-workbench/**" }]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$HOME/.dev-workbench/**" }]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$HOME/.dev-workbench/**" }]
+    }
   ]
 }

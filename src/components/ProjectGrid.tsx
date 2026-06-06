@@ -1,5 +1,6 @@
 import type { Project } from '../types';
 import { ProjectCard } from './ProjectCard';
+import { IconInbox } from './Icons';
 
 interface ProjectGridProps {
   projects: Project[];
@@ -15,6 +16,7 @@ export function ProjectGrid({ projects, isInstalled, onOpen, onEdit, onRemove, o
   if (projects.length === 0) {
     return (
       <div className="project-grid-empty">
+        <IconInbox className="project-grid-empty-icon" />
         <p>{emptyText || '暂无项目，点击右下角按钮添加'}</p>
       </div>
     );

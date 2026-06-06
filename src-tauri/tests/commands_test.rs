@@ -220,7 +220,7 @@ fn test_scan_git_repos() {
         .max_depth(Some(3));
 
     for entry in builder.build().filter_map(|e| e.ok()) {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
             continue;
         }
         let path = entry.path();
@@ -240,6 +240,45 @@ fn test_scan_git_repos() {
     let names: Vec<&str> = repos.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"project-a"));
     assert!(names.contains(&"project-b"));
+}
+
+// === Command Validation Tests ===
+
+fn validate_command(cmd: &str) -> Result<(), String> {
+    if cmd.is_empty() {
+        return Ok(());
+    }
+    for ch in cmd.chars() {
+        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' {
+            return Err(format!("命令包含非法字符: '{}'", ch));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_validate_command_accepts_safe_names() {
+    assert!(validate_command("claude").is_ok());
+    assert!(validate_command("cursor").is_ok());
+    assert!(validate_command("code").is_ok());
+    assert!(validate_command("git").is_ok());
+    assert!(validate_command("").is_ok());
+    assert!(validate_command("my-tool.v2").is_ok());
+    assert!(validate_command("some command").is_ok());
+}
+
+#[test]
+fn test_validate_command_rejects_shell_metacharacters() {
+    // Shell injection attempts
+    assert!(validate_command("claude; rm -rf /").is_err());
+    assert!(validate_command("claude && evil").is_err());
+    assert!(validate_command("$(whoami)").is_err());
+    assert!(validate_command("`cat /etc/passwd`").is_err());
+    assert!(validate_command("claude | tee /tmp/log").is_err());
+    assert!(validate_command("claude > /dev/null").is_err());
+    assert!(validate_command("claude$(evil)").is_err());
+    // AppleScript injection
+    assert!(validate_command("claude\" && evil").is_err());
 }
 
 // === Path Validation Tests ===
@@ -318,4 +357,45 @@ fn test_search_filter() {
 
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "DevWorkbench");
+}
+
+// === Editor Whitelist Tests ===
+
+const ALLOWED_EDITORS: &[&str] = &[
+    "code", "cursor", "windsurf", "zed", "subl",
+    "vim", "nvim", "emacs", "idea", "webstorm",
+    "clion", "goland", "pycharm", "rustrover",
+];
+
+fn is_allowed_editor(editor: &str) -> bool {
+    let name = std::path::Path::new(editor)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(editor);
+    ALLOWED_EDITORS.iter().any(|&allowed| {
+        name.eq_ignore_ascii_case(allowed)
+            || name.eq_ignore_ascii_case(&format!("{}.exe", allowed))
+    })
+}
+
+#[test]
+fn test_editor_whitelist_allows_known_editors() {
+    assert!(is_allowed_editor("code"));
+    assert!(is_allowed_editor("cursor"));
+    assert!(is_allowed_editor("zed"));
+    assert!(is_allowed_editor("vim"));
+    assert!(is_allowed_editor("nvim"));
+    assert!(is_allowed_editor("Code.exe"));
+    assert!(is_allowed_editor("C:\\Program Files\\Microsoft VS Code\\Code.exe"));
+    assert!(is_allowed_editor("/usr/local/bin/code"));
+}
+
+#[test]
+fn test_editor_whitelist_rejects_arbitrary_binaries() {
+    assert!(!is_allowed_editor("evil-program"));
+    assert!(!is_allowed_editor("/usr/bin/rm"));
+    assert!(!is_allowed_editor("cmd.exe"));
+    assert!(!is_allowed_editor("powershell"));
+    assert!(!is_allowed_editor("bash"));
+    assert!(!is_allowed_editor("C:\\Windows\\System32\\cmd.exe"));
 }
