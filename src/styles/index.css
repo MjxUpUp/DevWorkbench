@@ -1287,3 +1287,68 @@ body::before {
 .tool-checkbox input[type="checkbox"] {
   display: none;
 }
+
+/* === About / Update Section === */
+.settings-about {
+  padding: 12px 0;
+}
+
+.about-version {
+  display: block;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 13px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.65));
+  margin-bottom: 12px;
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-1, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary, #E8E8ED);
+  font-family: var(--font-sans, 'Outfit', sans-serif);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--duration-fast, 150ms) var(--ease-out, ease);
+}
+
+.update-btn:hover:not(:disabled) {
+  border-color: var(--accent, #00D4AA);
+  color: var(--accent, #00D4AA);
+}
+
+.update-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.update-btn.update-restart {
+  border-color: var(--accent, #00D4AA);
+  background: var(--accent, #00D4AA);
+  color: var(--bg-canvas, #08080C);
+  font-weight: 600;
+}
+
+.update-btn.update-restart:hover {
+  background: var(--accent-hover, #00F0C0);
+}
+
+.update-status {
+  font-size: 12px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.4));
+}
+
+.update-status.success {
+  color: var(--accent, #00D4AA);
+}
+
+.update-status.error {
+  color: var(--danger, #F47067);
+}
