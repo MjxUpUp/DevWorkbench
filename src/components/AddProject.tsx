@@ -5,7 +5,7 @@ import { IconX } from './Icons';
 import type { GitRepo, Project } from '../types';
 
 interface AddProjectProps {
-  onAdd: (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred'>) => Promise<Project | void>;
+  onAdd: (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred' | 'last_opened_tools' | 'workspace_tools'>) => Promise<Project | void>;
   onClose: () => void;
   existingProjects: Project[];
 }

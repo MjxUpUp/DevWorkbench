@@ -28,6 +28,7 @@ const mockProject: Project = {
 
 const defaultProps = {
   project: mockProject,
+  gitStatus: null,
   isInstalled: vi.fn().mockReturnValue(false),
   onToolOpen: vi.fn(),
   onEdit: vi.fn(),

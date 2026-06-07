@@ -160,7 +160,7 @@ export function Settings({ tools, onClose }: SettingsProps) {
             <span className="about-version">一目了然 v{appVersion}</span>
             <div className="update-row">
               {updateStatus === 'idle' || updateStatus === 'up-to-date' || updateStatus === 'error' ? (
-                <button className="update-btn" onClick={handleCheckUpdate} disabled={updateStatus === 'checking'}>
+                <button className="update-btn" onClick={handleCheckUpdate}>
                   检查更新
                 </button>
               ) : updateStatus === 'ready' ? (
