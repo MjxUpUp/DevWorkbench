@@ -14,6 +14,20 @@ pub fn scan_git_repos(root_path: String, max_depth: Option<usize>) -> Result<Vec
     }
 
     let mut repos = Vec::new();
+
+    // 检查 root 自身是否就是 git 仓库
+    if root.join(".git").exists() {
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        repos.push(GitRepo {
+            path: root.to_string_lossy().to_string(),
+            name,
+        });
+    }
+
+    // 遍历子目录查找 git 仓库
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)

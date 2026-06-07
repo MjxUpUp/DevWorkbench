@@ -74,9 +74,26 @@ describe('useProjects', () => {
     expect(result.current.projects).toEqual([]);
   });
 
-  it('should add a project', async () => {
-    mockedInvoke.mockResolvedValueOnce(mockProjects);
-    mockedInvoke.mockResolvedValueOnce(undefined);
+  it('should add a project via backend atomic command', async () => {
+    mockedInvoke.mockResolvedValueOnce(mockProjects); // load
+    // add_project returns the full array with the new project appended
+    mockedInvoke.mockResolvedValueOnce([
+      ...mockProjects,
+      {
+        id: expect.any(String),
+        name: 'New Project',
+        description: 'A new one',
+        path: '/path/new',
+        tags: ['typescript'],
+        cover_image: null,
+        open_count: 0,
+        last_opened_at: null,
+        starred: false,
+        created_at: expect.any(String),
+        last_opened_tools: [],
+        workspace_tools: [],
+      },
+    ]);
 
     const { result } = renderHook(() => useProjects());
 
@@ -103,12 +120,16 @@ describe('useProjects', () => {
     expect(added!.starred).toBe(false);
     expect(added!.open_count).toBe(0);
 
-    expect(mockedInvoke).toHaveBeenCalledWith('save_projects', expect.anything());
+    expect(mockedInvoke).toHaveBeenCalledWith('add_project', expect.objectContaining({
+      project: expect.objectContaining({ name: 'New Project' }),
+    }));
   });
 
-  it('should remove a project', async () => {
-    mockedInvoke.mockResolvedValueOnce(mockProjects);
-    mockedInvoke.mockResolvedValueOnce(undefined);
+  it('should remove a project via backend atomic command', async () => {
+    mockedInvoke.mockResolvedValueOnce(mockProjects); // load
+    // remove_project returns the array without the removed project
+    const afterRemove = mockProjects.filter(p => p.id !== '1');
+    mockedInvoke.mockResolvedValueOnce(afterRemove);
 
     const { result } = renderHook(() => useProjects());
 
@@ -122,12 +143,16 @@ describe('useProjects', () => {
 
     expect(result.current.projects).toHaveLength(1);
     expect(result.current.projects[0].id).toBe('2');
-    expect(mockedInvoke).toHaveBeenCalledWith('save_projects', expect.anything());
+    expect(mockedInvoke).toHaveBeenCalledWith('remove_project', { id: '1' });
   });
 
-  it('should update a project', async () => {
-    mockedInvoke.mockResolvedValueOnce(mockProjects);
-    mockedInvoke.mockResolvedValueOnce(undefined);
+  it('should update a project via backend atomic command', async () => {
+    mockedInvoke.mockResolvedValueOnce(mockProjects); // load
+    // update_project returns the array with the patched project
+    const afterUpdate = mockProjects.map(p =>
+      p.id === '1' ? { ...p, name: 'Updated A' } : p
+    );
+    mockedInvoke.mockResolvedValueOnce(afterUpdate);
 
     const { result } = renderHook(() => useProjects());
 
@@ -141,12 +166,18 @@ describe('useProjects', () => {
 
     const updated = result.current.projects.find(p => p.id === '1');
     expect(updated!.name).toBe('Updated A');
-    expect(mockedInvoke).toHaveBeenCalledWith('save_projects', expect.anything());
+    expect(mockedInvoke).toHaveBeenCalledWith('update_project', {
+      id: '1',
+      patch: { name: 'Updated A' },
+    });
   });
 
   it('should toggle star via updateProject', async () => {
-    mockedInvoke.mockResolvedValueOnce(mockProjects);
-    mockedInvoke.mockResolvedValueOnce(undefined);
+    mockedInvoke.mockResolvedValueOnce(mockProjects); // load
+    const afterStar = mockProjects.map(p =>
+      p.id === '1' ? { ...p, starred: true } : p
+    );
+    mockedInvoke.mockResolvedValueOnce(afterStar);
 
     const { result } = renderHook(() => useProjects());
 

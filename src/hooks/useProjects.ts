@@ -33,43 +33,34 @@ export function useProjects() {
       last_opened_tools: [],
       workspace_tools: [],
     };
-    // 使用函数式更新避免陈旧闭包
-    let saved: Project[] = [];
-    setProjects(prev => {
-      saved = [...prev, newProject];
-      return saved;
-    });
-    await invoke('save_projects', { projects: saved });
+    // 后端原子操作：load → push → save → 返回完整数组
+    const updated = await invoke<Project[]>('add_project', { project: newProject });
+    setProjects(updated);
     return newProject;
   }, []);
 
   const removeProject = useCallback(async (id: string) => {
-    let saved: Project[] = [];
-    setProjects(prev => {
-      saved = prev.filter(p => p.id !== id);
-      return saved;
-    });
-    await invoke('save_projects', { projects: saved });
+    // 后端原子操作：load → retain → save → 返回完整数组
+    const updated = await invoke<Project[]>('remove_project', { id });
+    setProjects(updated);
   }, []);
 
   const updateProject = useCallback(async (id: string, patch: Partial<Project>) => {
-    let saved: Project[] = [];
-    setProjects(prev => {
-      saved = prev.map(p => p.id === id ? { ...p, ...patch } : p);
-      return saved;
-    });
-    await invoke('save_projects', { projects: saved });
+    // 后端原子操作：load → patch → save → 返回完整数组
+    // 前端 camelCase 字段名转 snake_case 由 Tauri 自动处理
+    const patchJson = Object.fromEntries(
+      Object.entries(patch).filter(([_, v]) => v !== undefined)
+    );
+    const updated = await invoke<Project[]>('update_project', { id, patch: patchJson });
+    setProjects(updated);
   }, []);
 
   const recordOpen = useCallback(async (id: string) => {
-    // 后端自行加载/修改/保存，前端只发 ID
     const updated = await invoke<Project[]>('update_project_open', { id });
     setProjects(updated);
   }, []);
 
   const recordToolOpen = useCallback(async (id: string, toolName: string) => {
-    // 后端自行加载/修改/保存，前端只发 ID + 工具名
-    // 追踪失败不影响项目打开，但记录到控制台便于排查
     try {
       const updated = await invoke<Project[]>('record_tool_open', { id, toolName });
       setProjects(updated);

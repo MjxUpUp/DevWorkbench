@@ -61,6 +61,66 @@ pub fn save_projects(projects: Vec<Project>) -> Result<(), String> {
         .map_err(|e| format!("写入项目文件失败: {}", e))
 }
 
+/// 原子添加项目：load → push → save → 返回完整数组
+#[tauri::command]
+pub fn add_project(project: Project) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects()?;
+    projects.push(project);
+    save_projects(projects.clone())?;
+    Ok(projects)
+}
+
+/// 原子删除项目：load → retain → save → 返回完整数组
+#[tauri::command]
+pub fn remove_project(id: String) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects()?;
+    let before = projects.len();
+    projects.retain(|p| p.id != id);
+    if projects.len() == before {
+        return Err(format!("项目 {} 不存在", id));
+    }
+    save_projects(projects.clone())?;
+    Ok(projects)
+}
+
+/// 原子更新项目：load → patch → save → 返回完整数组
+#[tauri::command]
+pub fn update_project(id: String, patch: serde_json::Value) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects()?;
+    let found = projects.iter_mut().find(|p| p.id == id)
+        .ok_or_else(|| format!("项目 {} 不存在", id))?;
+
+    // 逐字段 patch，只更新提供的字段
+    if let Some(v) = patch.get("name").and_then(|v| v.as_str()) {
+        found.name = v.to_string();
+    }
+    if let Some(v) = patch.get("description").and_then(|v| v.as_str()) {
+        found.description = v.to_string();
+    }
+    if let Some(v) = patch.get("path").and_then(|v| v.as_str()) {
+        found.path = v.to_string();
+    }
+    if let Some(arr) = patch.get("tags").and_then(|v| v.as_array()) {
+        found.tags = arr.iter()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(v) = patch.get("coverImage").or_else(|| patch.get("cover_image")) {
+        found.cover_image = v.as_str().map(String::from);
+    }
+    if let Some(v) = patch.get("starred").and_then(|v| v.as_bool()) {
+        found.starred = v;
+    }
+    if let Some(arr) = patch.get("workspaceTools").or_else(|| patch.get("workspace_tools")).and_then(serde_json::Value::as_array) {
+        found.workspace_tools = arr.iter()
+            .filter_map(|t: &serde_json::Value| t.as_str().map(String::from))
+            .collect();
+    }
+
+    save_projects(projects.clone())?;
+    Ok(projects)
+}
+
 #[tauri::command]
 pub fn load_settings() -> Result<AppSettings, String> {
     let path = settings_file()?;

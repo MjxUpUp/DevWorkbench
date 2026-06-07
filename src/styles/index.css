@@ -325,11 +325,13 @@ body::before {
 /* === Project Grid === */
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 380px));
   gap: 18px;
   padding: 24px 28px;
   overflow-y: auto;
   flex: 1;
+  justify-content: center;
+  align-items: start;
 }
 
 .project-grid-empty {
