@@ -23,6 +23,14 @@ export interface AppSettings {
   scan_directories: string[];
   tool_paths: Record<string, string>;
   theme: string;
+  preferred_terminal: string;
+  cli_flags: Record<string, string>;
+}
+
+export interface TerminalInfo {
+  id: string;
+  label: string;
+  available: boolean;
 }
 
 export interface GitRepo {

@@ -22,6 +22,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,
+            commands::terminal::detect_terminals,
             commands::editor::open_in_editor,
             commands::finder::open_in_finder,
             commands::scanner::scan_git_repos,

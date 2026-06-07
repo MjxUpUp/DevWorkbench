@@ -3,8 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { open } from '@tauri-apps/plugin-dialog';
 import { IconX } from './Icons';
-import type { AppSettings, ToolStatus } from '../types';
+import type { AppSettings, ToolStatus, TerminalInfo } from '../types';
 
 type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error';
 
@@ -21,6 +22,15 @@ const THEMES = [
   { key: 'ember', label: '琥珀', dot: 'ember' },
   { key: 'rose', label: '玫瑰', dot: 'rose' },
   { key: 'nord', label: '极光', dot: 'nord' },
+  { key: 'daylight', label: '日光', dot: 'daylight' },
+  { key: 'paper', label: '纸白', dot: 'paper' },
+  { key: 'mint', label: '薄荷', dot: 'mint' },
+] as const;
+
+const CLI_TOOLS = [
+  { key: 'claude', label: 'Claude Code', hint: '--dangerously-skip-permissions' },
+  { key: 'codex', label: 'Codex', hint: '--full-auto' },
+  { key: 'pi', label: 'Pi', hint: '' },
 ] as const;
 
 export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps) {
@@ -28,7 +38,10 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
     scan_directories: [],
     tool_paths: {},
     theme: 'obsidian',
+    preferred_terminal: '',
+    cli_flags: {},
   });
+  const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [newScanDir, setNewScanDir] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
@@ -44,6 +57,12 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
     invoke<AppSettings>('load_settings')
       .then(data => { setSettings(data); setError(null); })
       .catch(e => setError(`加载设置失败: ${e}`));
+  }, []);
+
+  useEffect(() => {
+    invoke<TerminalInfo[]>('detect_terminals')
+      .then(setTerminals)
+      .catch(() => {});
   }, []);
 
   const save = async (updated: AppSettings) => {
@@ -104,12 +123,27 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
     setNewScanDir('');
   };
 
+  const pickScanDir = async () => {
+    const selected = await open({ directory: true, multiple: false });
+    if (selected && typeof selected === 'string') {
+      setNewScanDir(selected);
+    }
+  };
+
   const removeScanDir = (dir: string) => {
     save({ ...settings, scan_directories: settings.scan_directories.filter(d => d !== dir) });
   };
 
   const setToolPath = (tool: string, path: string) => {
     save({ ...settings, tool_paths: { ...settings.tool_paths, [tool]: path } });
+  };
+
+  const setCliFlag = (tool: string, flag: string) => {
+    save({ ...settings, cli_flags: { ...settings.cli_flags, [tool]: flag } });
+  };
+
+  const setPreferredTerminal = (id: string) => {
+    save({ ...settings, preferred_terminal: id });
   };
 
   const getUpdateText = () => {
@@ -152,6 +186,49 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
             ))}
           </div>
 
+          <h3>终端偏好</h3>
+          <div className="settings-terminal">
+            {terminals.length === 0 && <span className="terminal-hint">检测中...</span>}
+            {terminals.map(t => (
+              <button
+                key={t.id}
+                className={`terminal-option ${settings.preferred_terminal === t.id ? 'active' : ''} ${!t.available ? 'unavailable' : ''}`}
+                onClick={() => t.available && setPreferredTerminal(t.id)}
+                disabled={!t.available}
+                title={t.available ? `使用 ${t.label}` : `${t.label} 未安装`}
+              >
+                <span className={`status-dot ${t.available ? 'installed' : ''}`} />
+                <span className="terminal-name">{t.label}</span>
+                {!t.available && <span className="terminal-unavail">未安装</span>}
+              </button>
+            ))}
+            {settings.preferred_terminal && (
+              <button
+                className="terminal-option reset"
+                onClick={() => setPreferredTerminal('')}
+                title="恢复自动检测"
+              >
+                自动检测
+              </button>
+            )}
+          </div>
+
+          <h3>CLI 启动参数</h3>
+          <div className="settings-cli-flags">
+            {CLI_TOOLS.map(t => (
+              <div key={t.key} className="cli-flag-row">
+                <span className="cli-tool-name">{t.label}</span>
+                <input
+                  className="cli-flag-input"
+                  value={settings.cli_flags[t.key] || ''}
+                  onChange={e => setCliFlag(t.key, e.target.value)}
+                  placeholder={t.hint || '自定义启动参数'}
+                />
+              </div>
+            ))}
+            <span className="cli-flags-hint">如 Claude Code 的 --dangerously-skip-permissions、Codex 的 --full-auto 等</span>
+          </div>
+
           <h3>扫描目录</h3>
           <div className="settings-scan-dirs">
             {settings.scan_directories.map(dir => (
@@ -162,6 +239,7 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
             ))}
             <div className="input-row">
               <input value={newScanDir} onChange={e => setNewScanDir(e.target.value)} placeholder="添加扫描目录路径" />
+              <button onClick={pickScanDir}>选择</button>
               <button onClick={addScanDir}>添加</button>
             </div>
           </div>

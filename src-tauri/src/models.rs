@@ -33,6 +33,10 @@ pub struct AppSettings {
     pub tool_paths: std::collections::HashMap<String, String>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
+    pub preferred_terminal: String,
+    #[serde(default)]
+    pub cli_flags: std::collections::HashMap<String, String>,
 }
 
 fn default_theme() -> String {
