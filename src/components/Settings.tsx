@@ -78,7 +78,10 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
   const handleCheckUpdate = async () => {
     try {
       setUpdateStatus('checking');
-      const update = await check();
+      const update = await Promise.race([
+        check(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('检查更新超时')), 15000)),
+      ]);
 
       if (!update) {
         setUpdateStatus('up-to-date');

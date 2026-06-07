@@ -257,7 +257,7 @@ fn validate_command(cmd: &str) -> Result<(), String> {
         return Ok(());
     }
     for ch in cmd.chars() {
-        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' {
+        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' && ch != '/' && ch != '\\' && ch != ':' {
             return Err(format!("命令包含非法字符: '{}'", ch));
         }
     }
@@ -273,6 +273,10 @@ fn test_validate_command_accepts_safe_names() {
     assert!(validate_command("").is_ok());
     assert!(validate_command("my-tool.v2").is_ok());
     assert!(validate_command("some command").is_ok());
+    // 绝对路径（自定义工具路径）
+    assert!(validate_command("/opt/homebrew/bin/claude").is_ok());
+    assert!(validate_command("C:\\Users\\test\\claude.exe").is_ok());
+    assert!(validate_command("/usr/local/bin/codex --full-auto").is_ok());
 }
 
 #[test]

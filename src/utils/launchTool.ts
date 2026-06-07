@@ -6,10 +6,12 @@ import type { AppSettings } from '../types';
  * 从 ToolButton 提取的通用逻辑，供 ToolButton、恢复工作区、一键启动等复用。
  */
 export async function launchTool(tool: string, projectPath: string): Promise<void> {
-  // 读取 CLI flags 设置
+  // 读取设置（自定义路径 + CLI flags）
+  let customPath = '';
   let flags = '';
   try {
     const settings = await invoke<AppSettings>('load_settings');
+    customPath = settings.tool_paths[tool] || '';
     flags = settings.cli_flags[tool] || '';
   } catch {
     // 读取失败不影响启动
@@ -19,7 +21,8 @@ export async function launchTool(tool: string, projectPath: string): Promise<voi
     case 'claude':
     case 'pi':
     case 'codex': {
-      const command = flags ? `${tool} ${flags}` : tool;
+      const executable = customPath || tool;
+      const command = flags ? `${executable} ${flags}` : executable;
       return invoke('open_terminal', { workingDir: projectPath, command });
     }
     case 'cursor':

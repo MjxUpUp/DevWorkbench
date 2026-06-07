@@ -1,14 +1,14 @@
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 
-/// 校验命令字符串只包含安全字符（字母、数字、横杠、下划线、点、空格）
+/// 校验命令字符串只包含安全字符（字母、数字、横杠、下划线、点、空格、路径分隔符）
 /// 阻止 shell 元字符（; | $ ` & > < ( ) 等）注入
 fn validate_command(cmd: &str) -> Result<(), String> {
     if cmd.is_empty() {
         return Ok(());
     }
     for ch in cmd.chars() {
-        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' {
+        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' && ch != '/' && ch != '\\' && ch != ':' {
             return Err(format!("命令包含非法字符: '{}'", ch));
         }
     }
