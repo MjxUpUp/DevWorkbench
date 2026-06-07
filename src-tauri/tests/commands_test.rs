@@ -394,7 +394,9 @@ fn test_editor_whitelist_allows_known_editors() {
     assert!(is_allowed_editor("vim"));
     assert!(is_allowed_editor("nvim"));
     assert!(is_allowed_editor("Code.exe"));
+    #[cfg(target_os = "windows")]
     assert!(is_allowed_editor("C:\\Program Files\\Microsoft VS Code\\Code.exe"));
+    #[cfg(not(target_os = "windows"))]
     assert!(is_allowed_editor("/usr/local/bin/code"));
 }
 
