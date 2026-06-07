@@ -1,5 +1,5 @@
 /* ============================================
-   DEV WORKBENCH — "Obsidian Terminal" Design
+   DEV WORKBENCH — Multi-Theme Design System
    ============================================ */
 
 /* === Google Fonts === */
@@ -12,68 +12,201 @@
   box-sizing: border-box;
 }
 
-/* === Design Tokens === */
+/* === Structural Tokens (theme-independent) === */
 :root {
-  /* Canvas */
+  --sidebar-width: 220px;
+  --header-height: 60px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --font-sans: 'Outfit', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+}
+
+/* =============================================
+   THEME: Obsidian (default — teal on deep dark)
+   ============================================= */
+:root,
+[data-theme="obsidian"] {
   --bg-canvas: #08080C;
   --bg-dot: rgba(255, 255, 255, 0.018);
-
-  /* Surfaces */
   --surface-0: #0E0E14;
   --surface-1: #13131B;
   --surface-2: #191922;
   --surface-3: #1F1F2B;
-
-  /* Borders */
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-default: rgba(255, 255, 255, 0.08);
   --border-hover: rgba(255, 255, 255, 0.12);
-
-  /* Text */
   --text-primary: #E2E2EA;
   --text-secondary: #8E8EA8;
   --text-muted: #55556A;
   --text-accent: #00D4AA;
-
-  /* Accent */
   --accent: #00D4AA;
   --accent-hover: #00F0C0;
   --accent-muted: rgba(0, 212, 170, 0.12);
   --accent-glow: rgba(0, 212, 170, 0.06);
-
-  /* Semantic */
   --star: #FFB547;
   --star-muted: rgba(255, 181, 71, 0.15);
   --danger: #FF5F5F;
   --danger-muted: rgba(255, 95, 95, 0.12);
   --success: #00D4AA;
   --warning: #FFB547;
-
-  /* Cover gradients — cycled via nth-child */
   --cover-1: linear-gradient(135deg, #0D1117 0%, #111D2C 50%, #0A1F2E 100%);
   --cover-2: linear-gradient(135deg, #100E1A 0%, #1A1430 50%, #14102A 100%);
   --cover-3: linear-gradient(135deg, #0C1A18 0%, #0F2A26 50%, #082420 100%);
   --cover-4: linear-gradient(135deg, #1A0E14 0%, #2A1424 50%, #20102A 100%);
   --cover-5: linear-gradient(135deg, #0E141A 0%, #142430 50%, #0A1E2E 100%);
   --cover-6: linear-gradient(135deg, #141008 0%, #242010 50%, #1E1A0A 100%);
+  --dot-overlay-alpha: 0.018;
+}
 
-  /* Layout */
-  --sidebar-width: 220px;
-  --header-height: 60px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+/* =============================================
+   THEME: Midnight (frost blue on dark navy)
+   ============================================= */
+[data-theme="midnight"] {
+  --bg-canvas: #0A0E1A;
+  --bg-dot: rgba(100, 160, 255, 0.02);
+  --surface-0: #0E1324;
+  --surface-1: #131A30;
+  --surface-2: #182240;
+  --surface-3: #1E2A4E;
+  --border-subtle: rgba(100, 160, 255, 0.06);
+  --border-default: rgba(100, 160, 255, 0.08);
+  --border-hover: rgba(100, 160, 255, 0.14);
+  --text-primary: #D8E4F8;
+  --text-secondary: #7B8FB8;
+  --text-muted: #4A5878;
+  --text-accent: #6CB6FF;
+  --accent: #6CB6FF;
+  --accent-hover: #8ECAFF;
+  --accent-muted: rgba(108, 182, 255, 0.1);
+  --accent-glow: rgba(108, 182, 255, 0.06);
+  --star: #FFB547;
+  --star-muted: rgba(255, 181, 71, 0.15);
+  --danger: #FF7B72;
+  --danger-muted: rgba(255, 123, 114, 0.1);
+  --success: #6CB6FF;
+  --warning: #FFB547;
+  --cover-1: linear-gradient(135deg, #0A1628 0%, #0F2240 50%, #081830 100%);
+  --cover-2: linear-gradient(135deg, #0C0E20 0%, #161C3A 50%, #101430 100%);
+  --cover-3: linear-gradient(135deg, #081420 0%, #0C2438 50%, #061A2C 100%);
+  --cover-4: linear-gradient(135deg, #140A20 0%, #221438 50%, #1A0E30 100%);
+  --cover-5: linear-gradient(135deg, #0A1018 0%, #121C34 50%, #081428 100%);
+  --cover-6: linear-gradient(135deg, #10140A 0%, #1C2410 50%, #161C0C 100%);
+  --dot-overlay-alpha: 0.02;
+}
 
-  /* Typography */
-  --font-sans: 'Outfit', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+/* =============================================
+   THEME: Ember (warm amber on dark charcoal)
+   ============================================= */
+[data-theme="ember"] {
+  --bg-canvas: #0C0A08;
+  --bg-dot: rgba(255, 180, 80, 0.02);
+  --surface-0: #141008;
+  --surface-1: #1A1408;
+  --surface-2: #221A0C;
+  --surface-3: #2C2212;
+  --border-subtle: rgba(255, 180, 80, 0.06);
+  --border-default: rgba(255, 180, 80, 0.08);
+  --border-hover: rgba(255, 180, 80, 0.14);
+  --text-primary: #F0E4D4;
+  --text-secondary: #A89478;
+  --text-muted: #6A5842;
+  --text-accent: #F0A030;
+  --accent: #F0A030;
+  --accent-hover: #FFB848;
+  --accent-muted: rgba(240, 160, 48, 0.12);
+  --accent-glow: rgba(240, 160, 48, 0.06);
+  --star: #FFD060;
+  --star-muted: rgba(255, 208, 96, 0.15);
+  --danger: #FF6B4A;
+  --danger-muted: rgba(255, 107, 74, 0.12);
+  --success: #F0A030;
+  --warning: #FFD060;
+  --cover-1: linear-gradient(135deg, #14100A 0%, #20180C 50%, #181008 100%);
+  --cover-2: linear-gradient(135deg, #140E0A 0%, #241810 50%, #1C120C 100%);
+  --cover-3: linear-gradient(135deg, #0C140A 0%, #142410 50%, #0E1C0A 100%);
+  --cover-4: linear-gradient(135deg, #140A0E 0%, #241014 50%, #1C0C10 100%);
+  --cover-5: linear-gradient(135deg, #0A0E14 0%, #101824 50%, #0C141C 100%);
+  --cover-6: linear-gradient(135deg, #14120A 0%, #242010 50%, #1C1A0C 100%);
+  --dot-overlay-alpha: 0.02;
+}
 
-  /* Animation */
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --duration-fast: 150ms;
-  --duration-normal: 250ms;
-  --duration-slow: 400ms;
+/* =============================================
+   THEME: Rose (soft pink on dark plum)
+   ============================================= */
+[data-theme="rose"] {
+  --bg-canvas: #0C080C;
+  --bg-dot: rgba(255, 120, 160, 0.02);
+  --surface-0: #120E14;
+  --surface-1: #18121C;
+  --surface-2: #201828;
+  --surface-3: #2A1E34;
+  --border-subtle: rgba(255, 140, 180, 0.06);
+  --border-default: rgba(255, 140, 180, 0.08);
+  --border-hover: rgba(255, 140, 180, 0.14);
+  --text-primary: #F0E0EC;
+  --text-secondary: #A888A0;
+  --text-muted: #6A5068;
+  --text-accent: #F4789A;
+  --accent: #F4789A;
+  --accent-hover: #FF90B0;
+  --accent-muted: rgba(244, 120, 154, 0.12);
+  --accent-glow: rgba(244, 120, 154, 0.06);
+  --star: #FFD06A;
+  --star-muted: rgba(255, 208, 106, 0.15);
+  --danger: #FF6B8A;
+  --danger-muted: rgba(255, 107, 138, 0.12);
+  --success: #F4789A;
+  --warning: #FFD06A;
+  --cover-1: linear-gradient(135deg, #140A14 0%, #24102C 50%, #1C0C24 100%);
+  --cover-2: linear-gradient(135deg, #10081A 0%, #1C102C 50%, #160C24 100%);
+  --cover-3: linear-gradient(135deg, #0A140E 0%, #102418 50%, #0C1C14 100%);
+  --cover-4: linear-gradient(135deg, #180A12 0%, #2C1020 50%, #240C1A 100%);
+  --cover-5: linear-gradient(135deg, #0A1014 0%, #101C28 50%, #0C1620 100%);
+  --cover-6: linear-gradient(135deg, #14120A 0%, #242010 50%, #1C1A0C 100%);
+  --dot-overlay-alpha: 0.02;
+}
+
+/* =============================================
+   THEME: Nord (arctic frost on slate blue)
+   ============================================= */
+[data-theme="nord"] {
+  --bg-canvas: #0C0F16;
+  --bg-dot: rgba(136, 192, 208, 0.02);
+  --surface-0: #10141E;
+  --surface-1: #161C2A;
+  --surface-2: #1C2436;
+  --surface-3: #242E42;
+  --border-subtle: rgba(136, 192, 208, 0.06);
+  --border-default: rgba(136, 192, 208, 0.08);
+  --border-hover: rgba(136, 192, 208, 0.14);
+  --text-primary: #D8E0EC;
+  --text-secondary: #8094B0;
+  --text-muted: #506080;
+  --text-accent: #88C0D0;
+  --accent: #88C0D0;
+  --accent-hover: #9CD0E0;
+  --accent-muted: rgba(136, 192, 208, 0.1);
+  --accent-glow: rgba(136, 192, 208, 0.06);
+  --star: #EBCB8B;
+  --star-muted: rgba(235, 203, 139, 0.15);
+  --danger: #BF616A;
+  --danger-muted: rgba(191, 97, 106, 0.12);
+  --success: #A3BE8C;
+  --warning: #EBCB8B;
+  --cover-1: linear-gradient(135deg, #0E1420 0%, #141E34 50%, #10182A 100%);
+  --cover-2: linear-gradient(135deg, #0E1018 0%, #18182C 50%, #121224 100%);
+  --cover-3: linear-gradient(135deg, #0C1410 0%, #14221A 50%, #0E1A14 100%);
+  --cover-4: linear-gradient(135deg, #140E14 0%, #241824 50%, #1C101C 100%);
+  --cover-5: linear-gradient(135deg, #0C1218 0%, #141E2C 50%, #0E1822 100%);
+  --cover-6: linear-gradient(135deg, #12100C 0%, #201C10 50%, #1A180E 100%);
+  --dot-overlay-alpha: 0.02;
 }
 
 /* === Base === */
@@ -91,7 +224,7 @@ body::before {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(circle at 1px 1px, var(--bg-dot) 1px, transparent 0);
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, var(--dot-overlay-alpha)) 1px, transparent 0);
   background-size: 24px 24px;
   pointer-events: none;
   z-index: 0;
@@ -325,9 +458,9 @@ body::before {
 /* === Project Grid === */
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 380px));
-  gap: 18px;
-  padding: 24px 28px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 360px));
+  gap: 10px;
+  padding: 16px 24px;
   overflow-y: auto;
   flex: 1;
   justify-content: center;
@@ -402,7 +535,7 @@ body::before {
 
 /* === Card Cover === */
 .card-cover {
-  height: 96px;
+  height: 72px;
   position: relative;
   overflow: hidden;
 }
@@ -443,7 +576,7 @@ body::before {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 40px;
+  height: 28px;
   background: linear-gradient(to top, var(--surface-1), transparent);
   pointer-events: none;
 }
@@ -503,12 +636,12 @@ body::before {
 
 /* === Card Body === */
 .card-body {
-  padding: 14px 18px 12px;
+  padding: 10px 14px 8px;
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-height: 88px;
+  gap: 4px;
+  min-height: 60px;
 }
 
 .card-title {
@@ -580,8 +713,8 @@ body::before {
 .card-tools {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 5px;
-  padding: 10px 14px;
+  gap: 4px;
+  padding: 6px 12px;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -589,8 +722,8 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 8px 6px;
+  gap: 4px;
+  padding: 6px 4px;
   background: var(--surface-2);
   color: var(--text-secondary);
   border: 1px solid transparent;
@@ -639,7 +772,7 @@ body::before {
 .card-actions {
   display: flex;
   gap: 2px;
-  padding: 4px 14px 10px;
+  padding: 2px 12px 6px;
 }
 
 .action-btn {
@@ -1303,3 +1436,52 @@ body::before {
 .update-status.error {
   color: var(--danger, #F47067);
 }
+
+/* === Theme Picker === */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.theme-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.theme-swatch:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-3);
+}
+
+.theme-swatch.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow), inset 0 0 0 1px var(--accent-muted);
+  color: var(--text-primary);
+}
+
+.theme-swatch-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.08);
+}
+
+.theme-swatch-dot.obsidian { background: #00D4AA; }
+.theme-swatch-dot.midnight { background: #6CB6FF; }
+.theme-swatch-dot.ember { background: #F0A030; }
+.theme-swatch-dot.rose { background: #F4789A; }
+.theme-swatch-dot.nord { background: #88C0D0; }

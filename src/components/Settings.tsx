@@ -10,13 +10,24 @@ type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'download
 
 interface SettingsProps {
   tools: ToolStatus[];
+  theme: string;
+  onThemeChange: (theme: string) => void;
   onClose: () => void;
 }
 
-export function Settings({ tools, onClose }: SettingsProps) {
+const THEMES = [
+  { key: 'obsidian', label: '黑曜石', dot: 'obsidian' },
+  { key: 'midnight', label: '午夜蓝', dot: 'midnight' },
+  { key: 'ember', label: '琥珀', dot: 'ember' },
+  { key: 'rose', label: '玫瑰', dot: 'rose' },
+  { key: 'nord', label: '极光', dot: 'nord' },
+] as const;
+
+export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings>({
     scan_directories: [],
     tool_paths: {},
+    theme: 'obsidian',
   });
   const [newScanDir, setNewScanDir] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -153,6 +164,20 @@ export function Settings({ tools, onClose }: SettingsProps) {
               <input value={newScanDir} onChange={e => setNewScanDir(e.target.value)} placeholder="添加扫描目录路径" />
               <button onClick={addScanDir}>添加</button>
             </div>
+          </div>
+
+          <h3>主题</h3>
+          <div className="theme-picker">
+            {THEMES.map(t => (
+              <button
+                key={t.key}
+                className={`theme-swatch ${theme === t.key ? 'active' : ''}`}
+                onClick={() => onThemeChange(t.key)}
+              >
+                <span className={`theme-swatch-dot ${t.dot}`} />
+                {t.label}
+              </button>
+            ))}
           </div>
 
           <h3>关于</h3>

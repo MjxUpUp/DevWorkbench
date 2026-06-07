@@ -27,8 +27,16 @@ pub struct ToolStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
     pub scan_directories: Vec<String>,
+    #[serde(default)]
     pub tool_paths: std::collections::HashMap<String, String>,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "obsidian".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

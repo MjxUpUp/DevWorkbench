@@ -22,6 +22,7 @@ export interface ToolStatus {
 export interface AppSettings {
   scan_directories: string[];
   tool_paths: Record<string, string>;
+  theme: string;
 }
 
 export interface GitRepo {

@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from './components/Sidebar';
 import { ProjectGrid } from './components/ProjectGrid';
 import { AddProject } from './components/AddProject';
@@ -9,7 +10,7 @@ import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
 import { useGitStatus } from './hooks/useGitStatus';
 import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
-import type { Project } from './types';
+import type { Project, AppSettings } from './types';
 import './styles/index.css';
 
 const SIDEBAR_ITEMS = [
@@ -24,10 +25,36 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [theme, setThemeState] = useState('obsidian');
 
   const { projects, addProject, removeProject, updateProject, recordOpen, recordToolOpen, error: projectError } = useProjects();
   const { tools, isInstalled, error: toolsError } = useTools();
   const { gitStatusMap } = useGitStatus(projects);
+
+  // 启动时加载主题设置
+  useEffect(() => {
+    invoke<AppSettings>('load_settings')
+      .then(s => {
+        if (s.theme) {
+          setThemeState(s.theme);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 主题变化时应用到 DOM
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  const setTheme = async (newTheme: string) => {
+    setThemeState(newTheme);
+    try {
+      const settings = await invoke<AppSettings>('load_settings');
+      settings.theme = newTheme;
+      await invoke('save_settings', { settings });
+    } catch {}
+  };
 
   const filteredProjects = useMemo(() => {
     let list = projects;
@@ -132,7 +159,7 @@ function App() {
       )}
 
       {showSettings && (
-        <Settings tools={tools} onClose={() => setShowSettings(false)} />
+        <Settings tools={tools} theme={theme} onThemeChange={setTheme} onClose={() => setShowSettings(false)} />
       )}
 
       {editingProject && (

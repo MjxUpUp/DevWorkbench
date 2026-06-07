@@ -128,6 +128,7 @@ pub fn load_settings() -> Result<AppSettings, String> {
         return Ok(AppSettings {
             scan_directories: Vec::new(),
             tool_paths: std::collections::HashMap::new(),
+            theme: "obsidian".to_string(),
         });
     }
     let content = fs::read_to_string(&path)
