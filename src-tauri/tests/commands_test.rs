@@ -35,6 +35,10 @@ struct Project {
     last_opened_at: Option<String>,
     starred: bool,
     created_at: String,
+    #[serde(default)]
+    last_opened_tools: Vec<String>,
+    #[serde(default)]
+    workspace_tools: Vec<String>,
 }
 
 fn create_test_project(id: &str, name: &str, path: &str, starred: bool) -> Project {
@@ -49,6 +53,8 @@ fn create_test_project(id: &str, name: &str, path: &str, starred: bool) -> Proje
         last_opened_at: None,
         starred,
         created_at: "2026-06-06T00:00:00Z".to_string(),
+        last_opened_tools: vec![],
+        workspace_tools: vec![],
     }
 }
 
@@ -147,6 +153,8 @@ fn test_json_roundtrip_with_windows_paths() {
         last_opened_at: None,
         starred: false,
         created_at: "2026-06-06T00:00:00Z".to_string(),
+        last_opened_tools: vec![],
+        workspace_tools: vec![],
     }];
 
     let json = serde_json::to_string_pretty(&projects).unwrap();
@@ -398,4 +406,97 @@ fn test_editor_whitelist_rejects_arbitrary_binaries() {
     assert!(!is_allowed_editor("powershell"));
     assert!(!is_allowed_editor("bash"));
     assert!(!is_allowed_editor("C:\\Windows\\System32\\cmd.exe"));
+}
+
+// === record_tool_open Logic Tests ===
+
+fn record_tool_open(projects: &mut [Project], id: &str, tool_name: &str) {
+    for p in projects.iter_mut() {
+        if p.id == id {
+            p.last_opened_tools.retain(|t| t != tool_name);
+            p.last_opened_tools.insert(0, tool_name.to_string());
+            p.last_opened_tools.truncate(5);
+            break;
+        }
+    }
+}
+
+#[test]
+fn test_record_tool_open_adds_tool() {
+    let mut projects = vec![create_test_project("p1", "Test", "/tmp/test", false)];
+    record_tool_open(&mut projects, "p1", "claude");
+
+    assert_eq!(projects[0].last_opened_tools, vec!["claude"]);
+}
+
+#[test]
+fn test_record_tool_open_deduplicates() {
+    let mut projects = vec![create_test_project("p1", "Test", "/tmp/test", false)];
+    record_tool_open(&mut projects, "p1", "claude");
+    record_tool_open(&mut projects, "p1", "cursor");
+    record_tool_open(&mut projects, "p1", "claude"); // duplicate
+
+    // claude should be moved to front, no duplicate
+    assert_eq!(projects[0].last_opened_tools, vec!["claude", "cursor"]);
+}
+
+#[test]
+fn test_record_tool_open_truncates_at_five() {
+    let mut projects = vec![create_test_project("p1", "Test", "/tmp/test", false)];
+    for tool in ["claude", "cursor", "code", "terminal", "finder", "windsurf"] {
+        record_tool_open(&mut projects, "p1", tool);
+    }
+
+    assert_eq!(projects[0].last_opened_tools.len(), 5);
+    // Most recent should be at front
+    assert_eq!(projects[0].last_opened_tools[0], "windsurf");
+    // Oldest (claude) should be dropped
+    assert!(!projects[0].last_opened_tools.contains(&"claude".to_string()));
+}
+
+#[test]
+fn test_record_tool_open_moves_to_front_on_reuse() {
+    let mut projects = vec![create_test_project("p1", "Test", "/tmp/test", false)];
+    record_tool_open(&mut projects, "p1", "claude");
+    record_tool_open(&mut projects, "p1", "cursor");
+    record_tool_open(&mut projects, "p1", "code");
+    record_tool_open(&mut projects, "p1", "claude"); // reuse
+
+    assert_eq!(projects[0].last_opened_tools[0], "claude");
+    assert_eq!(projects[0].last_opened_tools.len(), 3);
+}
+
+// === Backward Compatibility Tests ===
+
+#[test]
+fn test_backward_compat_missing_new_fields() {
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("projects.json");
+
+    // Simulate old JSON without last_opened_tools and workspace_tools
+    let old_json = r#"[{
+        "id": "old-project",
+        "name": "OldProject",
+        "description": "Created before v0.3.0",
+        "path": "/tmp/old",
+        "tags": [],
+        "cover_image": null,
+        "open_count": 10,
+        "last_opened_at": "2026-01-01T00:00:00Z",
+        "starred": false,
+        "created_at": "2025-01-01T00:00:00Z"
+    }]"#;
+
+    fs::write(&file_path, old_json).unwrap();
+
+    let loaded: Vec<Project> = {
+        let content = fs::read_to_string(&file_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    };
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].name, "OldProject");
+    // New fields should default to empty vectors
+    assert!(loaded[0].last_opened_tools.is_empty());
+    assert!(loaded[0].workspace_tools.is_empty());
 }

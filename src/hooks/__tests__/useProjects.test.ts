@@ -21,6 +21,8 @@ const mockProjects = [
     last_opened_at: '2025-01-01T00:00:00.000Z',
     starred: false,
     created_at: '2024-01-01T00:00:00.000Z',
+    last_opened_tools: ['claude', 'cursor'],
+    workspace_tools: [],
   },
   {
     id: '2',
@@ -33,6 +35,8 @@ const mockProjects = [
     last_opened_at: null,
     starred: true,
     created_at: '2024-06-01T00:00:00.000Z',
+    last_opened_tools: [],
+    workspace_tools: ['terminal', 'finder'],
   },
 ];
 

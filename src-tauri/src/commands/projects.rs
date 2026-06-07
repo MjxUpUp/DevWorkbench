@@ -100,3 +100,21 @@ pub fn update_project_open(id: String) -> Result<Vec<Project>, String> {
     save_projects(projects.clone())?;
     Ok(projects)
 }
+
+#[tauri::command]
+pub fn record_tool_open(id: String, tool_name: String) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects()?;
+    for p in &mut projects {
+        if p.id == id {
+            // 去重：先移除已有的同名工具
+            p.last_opened_tools.retain(|t| t != &tool_name);
+            // 插入到最前面（最近使用的在前）
+            p.last_opened_tools.insert(0, tool_name);
+            // 保留最多 5 个
+            p.last_opened_tools.truncate(5);
+            break;
+        }
+    }
+    save_projects(projects.clone())?;
+    Ok(projects)
+}

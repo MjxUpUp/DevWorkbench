@@ -28,6 +28,7 @@ pub fn run() {
             commands::projects::load_settings,
             commands::projects::save_settings,
             commands::projects::update_project_open,
+            commands::projects::record_tool_open,
             commands::git::get_git_status,
             commands::git::batch_get_git_status,
         ])

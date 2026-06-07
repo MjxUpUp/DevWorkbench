@@ -6,14 +6,14 @@ interface ProjectGridProps {
   projects: Project[];
   gitStatusMap: Record<string, GitStatus | null>;
   isInstalled: (name: string) => boolean;
-  onOpen: (id: string) => void;
+  onToolOpen: (id: string, toolName: string) => void;
   onEdit: (project: Project) => void;
   onRemove: (id: string) => void;
   onToggleStar: (id: string) => void;
   emptyText?: string;
 }
 
-export function ProjectGrid({ projects, gitStatusMap, isInstalled, onOpen, onEdit, onRemove, onToggleStar, emptyText }: ProjectGridProps) {
+export function ProjectGrid({ projects, gitStatusMap, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, emptyText }: ProjectGridProps) {
   if (projects.length === 0) {
     return (
       <div className="project-grid-empty">
@@ -31,7 +31,7 @@ export function ProjectGrid({ projects, gitStatusMap, isInstalled, onOpen, onEdi
           project={project}
           gitStatus={gitStatusMap[project.path] ?? null}
           isInstalled={isInstalled}
-          onOpen={onOpen}
+          onToolOpen={onToolOpen}
           onEdit={onEdit}
           onRemove={onRemove}
           onToggleStar={onToggleStar}

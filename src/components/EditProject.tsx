@@ -2,9 +2,17 @@ import { useState } from 'react';
 import { IconX } from './Icons';
 import type { Project } from '../types';
 
+const WORKSPACE_TOOLS = [
+  { key: 'claude', label: 'Claude' },
+  { key: 'cursor', label: 'Cursor' },
+  { key: 'code', label: 'VS Code' },
+  { key: 'terminal', label: 'Terminal' },
+  { key: 'finder', label: 'Files' },
+] as const;
+
 interface EditProjectProps {
   project: Project;
-  onSave: (id: string, updates: Partial<Pick<Project, 'name' | 'description' | 'tags'>>) => Promise<void>;
+  onSave: (id: string, updates: Partial<Project>) => Promise<void>;
   onClose: () => void;
 }
 
@@ -12,8 +20,17 @@ export function EditProject({ project, onSave, onClose }: EditProjectProps) {
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [tags, setTags] = useState(project.tags.join(', '));
+  const [workspaceTools, setWorkspaceTools] = useState<string[]>(project.workspace_tools);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const toggleTool = (toolKey: string) => {
+    setWorkspaceTools(prev =>
+      prev.includes(toolKey)
+        ? prev.filter(t => t !== toolKey)
+        : [...prev, toolKey]
+    );
+  };
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -28,6 +45,7 @@ export function EditProject({ project, onSave, onClose }: EditProjectProps) {
         name: name.trim(),
         description: description.trim(),
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+        workspace_tools: workspaceTools,
       });
       onClose();
     } catch (e) {
@@ -59,6 +77,21 @@ export function EditProject({ project, onSave, onClose }: EditProjectProps) {
 
           <label>标签（逗号分隔）</label>
           <input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
+
+          <label>工作区工具</label>
+          <p className="workspace-tools-hint">选择该项目常用工具，将显示为一键启动按钮</p>
+          <div className="tool-checkbox-group">
+            {WORKSPACE_TOOLS.map(({ key, label }) => (
+              <label key={key} className={`tool-checkbox ${workspaceTools.includes(key) ? 'checked' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={workspaceTools.includes(key)}
+                  onChange={() => toggleTool(key)}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
 
           <button className="primary-btn" onClick={handleSave} disabled={!name.trim() || saving}>
             {saving ? '保存中...' : '保存'}

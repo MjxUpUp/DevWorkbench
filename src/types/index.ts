@@ -9,6 +9,8 @@ export interface Project {
   last_opened_at: string | null;
   starred: boolean;
   created_at: string;
+  last_opened_tools: string[];
+  workspace_tools: string[];
 }
 
 export interface ToolStatus {

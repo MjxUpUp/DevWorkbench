@@ -77,7 +77,7 @@ describe('ToolButton', () => {
       workingDir: '/my/project',
       command: 'claude',
     });
-    expect(onClick).toHaveBeenCalled();
+    expect(onClick).toHaveBeenCalledWith('claude');
   });
 
   it('invokes open_terminal without command for terminal tool', async () => {

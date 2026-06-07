@@ -12,6 +12,10 @@ pub struct Project {
     pub last_opened_at: Option<String>,
     pub starred: bool,
     pub created_at: String,
+    #[serde(default)]
+    pub last_opened_tools: Vec<String>,
+    #[serde(default)]
+    pub workspace_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

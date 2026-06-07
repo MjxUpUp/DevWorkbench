@@ -21,7 +21,7 @@ export function useProjects() {
 
   useEffect(() => { load(); }, [load]);
 
-  const addProject = useCallback(async (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred'>) => {
+  const addProject = useCallback(async (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred' | 'last_opened_tools' | 'workspace_tools'>) => {
     const now = new Date().toISOString();
     const newProject: Project = {
       ...project,
@@ -30,6 +30,8 @@ export function useProjects() {
       last_opened_at: null,
       starred: false,
       created_at: now,
+      last_opened_tools: [],
+      workspace_tools: [],
     };
     // 使用函数式更新避免陈旧闭包
     let saved: Project[] = [];
@@ -65,5 +67,16 @@ export function useProjects() {
     setProjects(updated);
   }, []);
 
-  return { projects, loading, error, addProject, removeProject, updateProject, recordOpen, reload: load };
+  const recordToolOpen = useCallback(async (id: string, toolName: string) => {
+    // 后端自行加载/修改/保存，前端只发 ID + 工具名
+    // 追踪失败不影响项目打开，但记录到控制台便于排查
+    try {
+      const updated = await invoke<Project[]>('record_tool_open', { id, toolName });
+      setProjects(updated);
+    } catch (e) {
+      console.warn('record_tool_open failed:', e);
+    }
+  }, []);
+
+  return { projects, loading, error, addProject, removeProject, updateProject, recordOpen, recordToolOpen, reload: load };
 }

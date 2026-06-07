@@ -22,12 +22,14 @@ const mockProject: Project = {
   last_opened_at: '2025-06-01T10:00:00.000Z',
   starred: false,
   created_at: '2024-01-01T00:00:00.000Z',
+  last_opened_tools: [],
+  workspace_tools: [],
 };
 
 const defaultProps = {
   project: mockProject,
   isInstalled: vi.fn().mockReturnValue(false),
-  onOpen: vi.fn(),
+  onToolOpen: vi.fn(),
   onEdit: vi.fn(),
   onRemove: vi.fn(),
   onToggleStar: vi.fn(),
@@ -152,5 +154,69 @@ describe('ProjectCard', () => {
     // Terminal and Finder are always installed
     expect(screen.getByTitle('用 Term 打开')).toBeEnabled();
     expect(screen.getByTitle('用 Files 打开')).toBeEnabled();
+  });
+
+  it('does not show restore button when last_opened_tools has fewer than 2 entries', () => {
+    renderWithToast(<ProjectCard {...defaultProps} />);
+
+    expect(screen.queryByText('恢复')).not.toBeInTheDocument();
+  });
+
+  it('shows restore button when last_opened_tools has 2+ entries', () => {
+    const project = { ...mockProject, last_opened_tools: ['claude', 'cursor'] };
+    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
+
+    expect(screen.getByText('恢复')).toBeInTheDocument();
+    expect(screen.getByTitle('恢复工作区: Claude + Cursor')).toBeInTheDocument();
+  });
+
+  it('does not show launch-all button when workspace_tools has fewer than 2 entries', () => {
+    renderWithToast(<ProjectCard {...defaultProps} />);
+
+    expect(screen.queryByText('全部')).not.toBeInTheDocument();
+  });
+
+  it('shows launch-all button when workspace_tools has 2+ entries', () => {
+    const project = { ...mockProject, workspace_tools: ['claude', 'terminal', 'finder'] };
+    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
+
+    expect(screen.getByText('全部')).toBeInTheDocument();
+    expect(screen.getByTitle('一键启动: Claude + Term + Files')).toBeInTheDocument();
+  });
+
+  it('launch-all button takes priority over restore button', () => {
+    const project = {
+      ...mockProject,
+      last_opened_tools: ['claude', 'cursor'],
+      workspace_tools: ['claude', 'terminal'],
+    };
+    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
+
+    // Should show launch-all but NOT restore
+    expect(screen.getByText('全部')).toBeInTheDocument();
+    expect(screen.queryByText('恢复')).not.toBeInTheDocument();
+  });
+
+  it('shows only configured tools when workspace_tools is set', () => {
+    const project = { ...mockProject, workspace_tools: ['claude', 'terminal'] };
+    const isInstalled = vi.fn().mockReturnValue(true);
+    renderWithToast(<ProjectCard {...defaultProps} project={project} isInstalled={isInstalled} />);
+
+    // Should show Claude and Terminal only (plus the launch-all button)
+    expect(screen.getByTitle('用 Claude 打开')).toBeInTheDocument();
+    expect(screen.getByTitle('用 Term 打开')).toBeInTheDocument();
+    // Should NOT show Cursor, VSCode, Files
+    expect(screen.queryByTitle('用 Cursor 打开')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('用 VSCode 打开')).not.toBeInTheDocument();
+  });
+
+  it('calls onToolOpen with tool name when tool button is clicked', async () => {
+    const user = userEvent.setup();
+    renderWithToast(<ProjectCard {...defaultProps} />);
+
+    const terminalBtn = screen.getByTitle('用 Term 打开');
+    await user.click(terminalBtn);
+
+    expect(defaultProps.onToolOpen).toHaveBeenCalledWith('test-id', 'terminal');
   });
 });

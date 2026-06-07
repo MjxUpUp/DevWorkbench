@@ -25,7 +25,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [editingProject, setEditingProject] = useState<Project | null>(null);
 
-  const { projects, addProject, removeProject, updateProject, recordOpen, error: projectError } = useProjects();
+  const { projects, addProject, removeProject, updateProject, recordOpen, recordToolOpen, error: projectError } = useProjects();
   const { tools, isInstalled, error: toolsError } = useTools();
   const { gitStatusMap } = useGitStatus(projects);
 
@@ -53,8 +53,9 @@ function App() {
     return list;
   }, [projects, activeView, searchQuery]);
 
-  const handleOpen = async (id: string) => {
+  const handleToolOpen = async (id: string, toolName: string) => {
     await recordOpen(id);
+    await recordToolOpen(id, toolName);
   };
 
   const handleToggleStar = async (id: string) => {
@@ -118,7 +119,7 @@ function App() {
           projects={filteredProjects}
           gitStatusMap={gitStatusMap}
           isInstalled={isInstalled}
-          onOpen={handleOpen}
+          onToolOpen={handleToolOpen}
           onEdit={handleEdit}
           onRemove={handleRemove}
           onToggleStar={handleToggleStar}
