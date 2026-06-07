@@ -2,13 +2,14 @@ use crate::models::ToolStatus;
 
 /// macOS GUI 应用 PATH 不包含 brew 等路径，需要手动扩展
 #[cfg(target_os = "macos")]
-fn expanded_paths() -> Vec<&'static str> {
+fn expanded_paths() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
     vec![
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        &format!("{}/.cargo/bin", std::env::var("HOME").unwrap_or_default()),
-        &format!("{}/.npm-global/bin", std::env::var("HOME").unwrap_or_default()),
-        &format!("{}/.local/bin", std::env::var("HOME").unwrap_or_default()),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{}/.cargo/bin", home),
+        format!("{}/.npm-global/bin", home),
+        format!("{}/.local/bin", home),
     ]
 }
 
@@ -21,7 +22,7 @@ fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
     }
     // 再搜索扩展路径
     for dir in expanded_paths() {
-        let candidate = std::path::Path::new(dir).join(name);
+        let candidate = std::path::Path::new(&dir).join(name);
         if candidate.exists() {
             return Some(candidate);
         }
