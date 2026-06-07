@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { IconX } from './Icons';
 import type { Project } from '../types';
 
@@ -7,6 +8,8 @@ const WORKSPACE_TOOLS = [
   { key: 'cursor', label: 'Cursor' },
   { key: 'code', label: 'VS Code' },
   { key: 'finder', label: 'Files' },
+  { key: 'pi', label: 'Pi' },
+  { key: 'codex', label: 'Codex' },
 ] as const;
 
 interface EditProjectProps {
@@ -29,6 +32,17 @@ export function EditProject({ project, onSave, onClose }: EditProjectProps) {
         ? prev.filter(t => t !== toolKey)
         : [...prev, toolKey]
     );
+  };
+
+  const detectTags = async () => {
+    try {
+      const detected = await invoke<string[]>('detect_project_tags', { projectPath: project.path });
+      if (detected.length > 0) {
+        setTags(detected.join(', '));
+      }
+    } catch {
+      // 检测失败不影响
+    }
   };
 
   const handleSave = async () => {
@@ -75,10 +89,13 @@ export function EditProject({ project, onSave, onClose }: EditProjectProps) {
           <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="项目简介..." rows={2} />
 
           <label>标签（逗号分隔）</label>
-          <input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
+          <div className="input-row">
+            <input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
+            <button onClick={detectTags}>检测</button>
+          </div>
 
           <label>工作区工具</label>
-          <p className="workspace-tools-hint">选择该项目常用工具，将显示为一键启动按钮</p>
+          <p className="workspace-tools-hint">选择该项目常用工具，将显示为快捷启动按钮</p>
           <div className="tool-checkbox-group">
             {WORKSPACE_TOOLS.map(({ key, label }) => (
               <label key={key} className={`tool-checkbox ${workspaceTools.includes(key) ? 'checked' : ''}`}>

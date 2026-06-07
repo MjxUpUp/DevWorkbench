@@ -1,4 +1,4 @@
-import { IconTerminal, IconCode, IconFolderOpen, IconSparkles } from './Icons';
+import { IconTerminal, IconCode, IconFolderOpen, IconSparkles, IconBrain, IconCpu } from './Icons';
 import { useToast } from './Toast';
 import { launchTool } from '../utils/launchTool';
 
@@ -14,6 +14,8 @@ const TOOL_LABELS: Record<string, string> = {
   cursor: 'Cursor',
   code: 'VSCode',
   finder: 'Files',
+  pi: 'Pi',
+  codex: 'Codex',
 };
 
 const TOOL_ICONS: Record<string, typeof IconTerminal> = {
@@ -21,6 +23,8 @@ const TOOL_ICONS: Record<string, typeof IconTerminal> = {
   cursor: IconCode,
   code: IconCode,
   finder: IconFolderOpen,
+  pi: IconBrain,
+  codex: IconCpu,
 };
 
 export function ToolButton({ tool, projectPath, installed, onClick }: ToolButtonProps) {

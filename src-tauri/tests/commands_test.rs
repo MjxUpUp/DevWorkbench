@@ -373,6 +373,7 @@ const ALLOWED_EDITORS: &[&str] = &[
     "code", "cursor", "windsurf", "zed", "subl",
     "vim", "nvim", "emacs", "idea", "webstorm",
     "clion", "goland", "pycharm", "rustrover",
+    "pi", "codex",
 ];
 
 fn is_allowed_editor(editor: &str) -> bool {
@@ -501,4 +502,101 @@ fn test_backward_compat_missing_new_fields() {
     // New fields should default to empty vectors
     assert!(loaded[0].last_opened_tools.is_empty());
     assert!(loaded[0].workspace_tools.is_empty());
+}
+
+// === Tech Stack Detection Tests ===
+
+/// 直接测试 detect_project_tags 的检测逻辑（不通过 Tauri command 层）
+fn detect_tags(dir: &std::path::Path) -> Vec<String> {
+    let mut tags = Vec::new();
+
+    // Node.js
+    if dir.join("package.json").exists() {
+        tags.push("Node.js".to_string());
+        if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
+            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                let mut all_deps: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                if let Some(obj) = pkg.get("dependencies").and_then(|v| v.as_object()) {
+                    for k in obj.keys() { all_deps.insert(k.as_str()); }
+                }
+                if let Some(obj) = pkg.get("devDependencies").and_then(|v| v.as_object()) {
+                    for k in obj.keys() { all_deps.insert(k.as_str()); }
+                }
+                if all_deps.contains("react") { tags.push("React".to_string()); }
+                if all_deps.contains("next") { tags.push("Next.js".to_string()); }
+                if all_deps.contains("vue") { tags.push("Vue".to_string()); }
+                if all_deps.contains("express") { tags.push("Express".to_string()); }
+            }
+        }
+    }
+    if dir.join("tsconfig.json").exists() {
+        tags.push("TypeScript".to_string());
+    }
+    if dir.join("Cargo.toml").exists() {
+        tags.push("Rust".to_string());
+    }
+    if dir.join("go.mod").exists() {
+        tags.push("Go".to_string());
+    }
+    if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
+        tags.push("Python".to_string());
+    }
+
+    tags
+}
+
+#[test]
+fn test_detect_nodejs_react_typescript() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // package.json with react dependency
+    let pkg = serde_json::json!({
+        "dependencies": { "react": "^18.0.0" },
+        "devDependencies": { "@types/react": "^18.0.0" }
+    });
+    std::fs::write(dir.path().join("package.json"), serde_json::to_string(&pkg).unwrap()).unwrap();
+    std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+
+    let tags = detect_tags(dir.path());
+    assert!(tags.contains(&"Node.js".to_string()));
+    assert!(tags.contains(&"React".to_string()));
+    assert!(tags.contains(&"TypeScript".to_string()));
+}
+
+#[test]
+fn test_detect_rust() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+
+    let tags = detect_tags(dir.path());
+    assert!(tags.contains(&"Rust".to_string()));
+    assert!(!tags.contains(&"Node.js".to_string()));
+}
+
+#[test]
+fn test_detect_python() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("requirements.txt"), "flask==2.0\n").unwrap();
+
+    let tags = detect_tags(dir.path());
+    assert!(tags.contains(&"Python".to_string()));
+}
+
+#[test]
+fn test_detect_multiple_stacks() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Full-stack project: Rust backend + TS frontend
+    let pkg = serde_json::json!({
+        "dependencies": { "next": "^14.0.0", "react": "^18.0.0" }
+    });
+    std::fs::write(dir.path().join("package.json"), serde_json::to_string(&pkg).unwrap()).unwrap();
+    std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+
+    let tags = detect_tags(dir.path());
+    assert!(tags.contains(&"Node.js".to_string()));
+    assert!(tags.contains(&"Next.js".to_string()));
+    assert!(tags.contains(&"TypeScript".to_string()));
+    assert!(tags.contains(&"Rust".to_string()));
 }

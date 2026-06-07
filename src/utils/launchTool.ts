@@ -7,7 +7,9 @@ import { invoke } from '@tauri-apps/api/core';
 export async function launchTool(tool: string, projectPath: string): Promise<void> {
   switch (tool) {
     case 'claude':
-      return invoke('open_terminal', { workingDir: projectPath, command: 'claude' });
+    case 'pi':
+    case 'codex':
+      return invoke('open_terminal', { workingDir: projectPath, command: tool });
     case 'cursor':
     case 'code':
       return invoke('open_in_editor', { editor: tool, projectPath });

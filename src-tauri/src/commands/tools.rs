@@ -2,7 +2,7 @@ use crate::models::ToolStatus;
 
 #[tauri::command]
 pub fn detect_tools() -> Vec<ToolStatus> {
-    let tools = ["claude", "cursor", "code", "git"];
+    let tools = ["claude", "cursor", "code", "git", "pi", "codex"];
     tools
         .iter()
         .map(|name| match which::which(name) {

@@ -141,3 +141,31 @@ export function IconCheck({ size = defaults.size, className }: IconProps) {
     </svg>
   );
 }
+
+export function IconBrain({ size = defaults.size, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 2C9.5 2 7.5 3.5 7 5.5 5 6 3.5 7.5 3.5 9.5c0 1.5.8 2.8 2 3.5C4.5 14 4 15.5 4 17c0 2.5 2 4.5 4.5 5h7c2.5-.5 4.5-2.5 4.5-5 0-1.5-.5-3-1.5-4 1.2-.7 2-2 2-3.5 0-2-1.5-3.5-3.5-4C16.5 3.5 14.5 2 12 2z" />
+      <line x1="12" y1="2" x2="12" y2="22" />
+      <path d="M7 5.5c1.5 1 3 1.5 5 1.5s3.5-.5 5-1.5" />
+      <path d="M5 13c1.5-.5 4-1 7-1s5.5.5 7 1" />
+    </svg>
+  );
+}
+
+export function IconCpu({ size = defaults.size, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <line x1="9" y1="1" x2="9" y2="4" />
+      <line x1="15" y1="1" x2="15" y2="4" />
+      <line x1="9" y1="20" x2="9" y2="23" />
+      <line x1="15" y1="20" x2="15" y2="23" />
+      <line x1="20" y1="9" x2="23" y2="9" />
+      <line x1="20" y1="14" x2="23" y2="14" />
+      <line x1="1" y1="9" x2="4" y2="9" />
+      <line x1="1" y1="14" x2="4" y2="14" />
+    </svg>
+  );
+}

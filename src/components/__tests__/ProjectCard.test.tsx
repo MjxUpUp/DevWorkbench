@@ -156,53 +156,12 @@ describe('ProjectCard', () => {
     expect(screen.getByTitle('用 Files 打开')).toBeEnabled();
   });
 
-  it('does not show restore button when last_opened_tools has fewer than 2 entries', () => {
-    renderWithToast(<ProjectCard {...defaultProps} />);
-
-    expect(screen.queryByText('恢复')).not.toBeInTheDocument();
-  });
-
-  it('shows restore button when last_opened_tools has 2+ entries', () => {
-    const project = { ...mockProject, last_opened_tools: ['claude', 'cursor'] };
-    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
-
-    expect(screen.getByText('恢复')).toBeInTheDocument();
-    expect(screen.getByTitle('恢复工作区: Claude + Cursor')).toBeInTheDocument();
-  });
-
-  it('does not show launch-all button when workspace_tools has fewer than 2 entries', () => {
-    renderWithToast(<ProjectCard {...defaultProps} />);
-
-    expect(screen.queryByText('全部')).not.toBeInTheDocument();
-  });
-
-  it('shows launch-all button when workspace_tools has 2+ entries', () => {
-    const project = { ...mockProject, workspace_tools: ['claude', 'cursor', 'finder'] };
-    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
-
-    expect(screen.getByText('全部')).toBeInTheDocument();
-    expect(screen.getByTitle('一键启动: Claude + Cursor + Files')).toBeInTheDocument();
-  });
-
-  it('launch-all button takes priority over restore button', () => {
-    const project = {
-      ...mockProject,
-      last_opened_tools: ['claude', 'cursor'],
-      workspace_tools: ['claude', 'finder'],
-    };
-    renderWithToast(<ProjectCard {...defaultProps} project={project} />);
-
-    // Should show launch-all but NOT restore
-    expect(screen.getByText('全部')).toBeInTheDocument();
-    expect(screen.queryByText('恢复')).not.toBeInTheDocument();
-  });
-
   it('shows only configured tools when workspace_tools is set', () => {
     const project = { ...mockProject, workspace_tools: ['claude', 'finder'] };
     const isInstalled = vi.fn().mockReturnValue(true);
     renderWithToast(<ProjectCard {...defaultProps} project={project} isInstalled={isInstalled} />);
 
-    // Should show Claude and Finder only (plus the launch-all button)
+    // Should show Claude and Finder only
     expect(screen.getByTitle('用 Claude 打开')).toBeInTheDocument();
     expect(screen.getByTitle('用 Files 打开')).toBeInTheDocument();
     // Should NOT show Cursor, VSCode

@@ -25,6 +25,7 @@ pub fn run() {
             commands::editor::open_in_editor,
             commands::finder::open_in_finder,
             commands::scanner::scan_git_repos,
+            commands::scanner::detect_project_tags,
             commands::projects::load_projects,
             commands::projects::save_projects,
             commands::projects::add_project,

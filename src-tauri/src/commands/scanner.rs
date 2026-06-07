@@ -1,4 +1,6 @@
 use ignore::WalkBuilder;
+use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(serde::Serialize)]
 pub struct GitRepo {
@@ -8,7 +10,7 @@ pub struct GitRepo {
 
 #[tauri::command]
 pub fn scan_git_repos(root_path: String, max_depth: Option<usize>) -> Result<Vec<GitRepo>, String> {
-    let root = std::path::Path::new(&root_path);
+    let root = Path::new(&root_path);
     if !root.exists() {
         return Err(format!("路径不存在: {}", root_path));
     }
@@ -66,4 +68,148 @@ pub fn scan_git_repos(root_path: String, max_depth: Option<usize>) -> Result<Vec
     }
 
     Ok(repos)
+}
+
+/// 检测项目技术栈标签
+#[tauri::command]
+pub fn detect_project_tags(project_path: String) -> Result<Vec<String>, String> {
+    let root = Path::new(&project_path);
+    if !root.exists() {
+        return Err(format!("路径不存在: {}", project_path));
+    }
+
+    let mut tags = Vec::new();
+
+    // === Node.js / JavaScript 生态 ===
+    if root.join("package.json").exists() {
+        tags.push("Node.js".to_string());
+        if let Ok(content) = std::fs::read_to_string(root.join("package.json")) {
+            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                // 收集所有依赖名到 HashSet<&str>，便于 O(1) 查找
+                let mut all_deps: HashSet<&str> = HashSet::new();
+                if let Some(obj) = pkg.get("dependencies").and_then(|v| v.as_object()) {
+                    for k in obj.keys() {
+                        all_deps.insert(k.as_str());
+                    }
+                }
+                if let Some(obj) = pkg.get("devDependencies").and_then(|v| v.as_object()) {
+                    for k in obj.keys() {
+                        all_deps.insert(k.as_str());
+                    }
+                }
+
+                // 框架检测（按优先级，互斥）
+                if all_deps.contains("next") {
+                    tags.push("Next.js".to_string());
+                } else if all_deps.contains("nuxt") {
+                    tags.push("Nuxt".to_string());
+                } else if all_deps.contains("svelte") || all_deps.contains("@sveltejs/kit") {
+                    tags.push("Svelte".to_string());
+                } else if all_deps.contains("vue") || has_prefix(&all_deps, "@vue/") {
+                    tags.push("Vue".to_string());
+                } else if all_deps.contains("react") || has_prefix(&all_deps, "@react") {
+                    tags.push("React".to_string());
+                } else if all_deps.contains("angular") || has_prefix(&all_deps, "@angular/") {
+                    tags.push("Angular".to_string());
+                }
+
+                // 构建工具（互斥）
+                if all_deps.contains("vite") || has_prefix(&all_deps, "@vitejs/") {
+                    tags.push("Vite".to_string());
+                } else if all_deps.contains("webpack") || has_prefix(&all_deps, "webpack-") {
+                    tags.push("Webpack".to_string());
+                }
+
+                // 后端框架（互斥）
+                if all_deps.contains("express") {
+                    tags.push("Express".to_string());
+                } else if all_deps.contains("fastify") {
+                    tags.push("Fastify".to_string());
+                } else if all_deps.contains("koa") {
+                    tags.push("Koa".to_string());
+                }
+
+                // 桌面框架
+                if has_prefix(&all_deps, "@tauri-apps/") {
+                    tags.push("Tauri".to_string());
+                }
+                if all_deps.contains("electron") {
+                    tags.push("Electron".to_string());
+                }
+            }
+        }
+    }
+
+    // TypeScript（独立检测，可能有 tsconfig 但没有 package.json）
+    if root.join("tsconfig.json").exists() {
+        tags.push("TypeScript".to_string());
+    }
+
+    // === Rust ===
+    if root.join("Cargo.toml").exists() {
+        tags.push("Rust".to_string());
+    }
+
+    // === Go ===
+    if root.join("go.mod").exists() {
+        tags.push("Go".to_string());
+    }
+
+    // === Python ===
+    if root.join("pyproject.toml").exists()
+        || root.join("requirements.txt").exists()
+        || root.join("setup.py").exists()
+        || root.join("Pipfile").exists()
+    {
+        tags.push("Python".to_string());
+    }
+
+    // === .NET ===
+    if has_ext_in_dir(root, ".sln") || has_ext_in_dir(root, ".csproj") {
+        tags.push(".NET".to_string());
+    }
+
+    // === Java / Kotlin ===
+    if root.join("pom.xml").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
+    {
+        tags.push("Java".to_string());
+    }
+
+    // === Ruby ===
+    if root.join("Gemfile").exists() {
+        tags.push("Ruby".to_string());
+    }
+
+    // === PHP ===
+    if root.join("composer.json").exists() {
+        tags.push("PHP".to_string());
+    }
+
+    // === Flutter / Dart ===
+    if root.join("pubspec.yaml").exists() {
+        tags.push("Flutter".to_string());
+    }
+
+    Ok(tags)
+}
+
+/// 检查 HashSet 中是否有任何元素以指定前缀开头
+fn has_prefix<'a>(set: &HashSet<&'a str>, prefix: &str) -> bool {
+    set.iter().any(|k| k.starts_with(prefix))
+}
+
+/// 检查目录中是否有指定后缀的文件
+fn has_ext_in_dir(dir: &Path, ext: &str) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|mut entries| {
+            entries.any(|e| {
+                e.ok()
+                    .and_then(|e| e.file_name().to_str().map(|n| n.ends_with(ext)))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }

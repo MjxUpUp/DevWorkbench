@@ -1,10 +1,8 @@
 import type { Project, GitStatus } from '../types';
-import { ToolButton, TOOL_LABELS } from './ToolButton';
-import { IconStar, IconEdit, IconTrash, IconSparkles, IconTerminal } from './Icons';
-import { useToast } from './Toast';
-import { launchTool } from '../utils/launchTool';
+import { ToolButton } from './ToolButton';
+import { IconStar, IconEdit, IconTrash } from './Icons';
 
-const ALL_TOOLS = ['claude', 'cursor', 'code', 'finder'] as const;
+const ALL_TOOLS = ['claude', 'cursor', 'code', 'finder', 'pi', 'codex'] as const;
 
 interface ProjectCardProps {
   project: Project;
@@ -30,7 +28,6 @@ function formatRelativeTime(isoTime: string): string {
 }
 
 export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar }: ProjectCardProps) {
-  const toast = useToast();
   const lastOpened = project.last_opened_at
     ? new Date(project.last_opened_at).toLocaleString('zh-CN')
     : '尚未打开';
@@ -39,45 +36,6 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
   const displayTools = project.workspace_tools.length > 0
     ? project.workspace_tools
     : ALL_TOOLS;
-
-  const canRestore = project.last_opened_tools.length >= 2;
-  const canLaunchAll = project.workspace_tools.length >= 2;
-
-  const handleRestoreWorkspace = async () => {
-    let successCount = 0;
-    let lastError = '';
-    for (const tool of project.last_opened_tools) {
-      try {
-        await launchTool(tool, project.path);
-        successCount++;
-      } catch (e) {
-        lastError = String(e);
-      }
-    }
-    if (successCount > 0) {
-      toast.info(`已恢复工作区，启动 ${successCount} 个工具`);
-    } else if (lastError) {
-      toast.error(`恢复工作区失败: ${lastError}`);
-    }
-  };
-
-  const handleLaunchAll = async () => {
-    let successCount = 0;
-    let lastError = '';
-    for (const tool of project.workspace_tools) {
-      try {
-        await launchTool(tool, project.path);
-        successCount++;
-      } catch (e) {
-        lastError = String(e);
-      }
-    }
-    if (successCount > 0) {
-      toast.info(`一键启动完成，启动 ${successCount} 个工具`);
-    } else if (lastError) {
-      toast.error(`一键启动失败: ${lastError}`);
-    }
-  };
 
   return (
     <div className="project-card">
@@ -151,26 +109,6 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
             onClick={() => onToolOpen(project.id, tool)}
           />
         ))}
-        {canLaunchAll && (
-          <button
-            className="launch-all-btn"
-            onClick={handleLaunchAll}
-            title={`一键启动: ${project.workspace_tools.map(t => TOOL_LABELS[t] || t).join(' + ')}`}
-          >
-            <span className="tool-btn-icon"><IconTerminal size={14} /></span>
-            <span className="tool-btn-label">全部</span>
-          </button>
-        )}
-        {!canLaunchAll && canRestore && (
-          <button
-            className="workspace-restore-btn"
-            onClick={handleRestoreWorkspace}
-            title={`恢复工作区: ${project.last_opened_tools.map(t => TOOL_LABELS[t] || t).join(' + ')}`}
-          >
-            <span className="tool-btn-icon"><IconSparkles size={14} /></span>
-            <span className="tool-btn-label">恢复</span>
-          </button>
-        )}
       </div>
 
       <div className="card-actions">

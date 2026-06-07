@@ -1,5 +1,12 @@
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// CREATE_NO_WINDOW — 阻止子进程创建控制台窗口
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// 已知编辑器白名单，只允许启动这些可执行文件
 const ALLOWED_EDITORS: &[&str] = &[
     "code",       // VS Code
@@ -16,6 +23,8 @@ const ALLOWED_EDITORS: &[&str] = &[
     "goland",     // GoLand
     "pycharm",    // PyCharm
     "rustrover",  // RustRover
+    "pi",         // Pi Coding Agent
+    "codex",      // OpenAI Codex
 ];
 
 /// 校验编辑器名称是否在白名单中
@@ -75,9 +84,14 @@ pub fn open_in_editor(editor: String, project_path: String) -> Result<(), String
 
     let resolved = resolve_editor_path(&editor, custom_path.as_deref());
 
-    Command::new(&resolved)
-        .arg(&project_path)
-        .spawn()
+    let mut cmd = Command::new(&resolved);
+    cmd.arg(&project_path);
+
+    // Windows: 阻止子进程弹出控制台窗口
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("启动 {} ({}) 失败: {}", editor, resolved, e))
 }

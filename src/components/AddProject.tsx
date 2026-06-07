@@ -32,6 +32,15 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
         setName(selected.split(/[/\\]/).filter(Boolean).pop() || '');
       }
       setError('');
+      // 自动检测技术栈
+      try {
+        const detected = await invoke<string[]>('detect_project_tags', { projectPath: selected });
+        if (detected.length > 0) {
+          setTags(detected.join(', '));
+        }
+      } catch {
+        // 检测失败不影响流程
+      }
     }
   };
 
@@ -102,12 +111,20 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
     }
 
     try {
-      for (const repo of newRepos) {
+      // 并行检测所有仓库的技术栈
+      const tagsResults = await Promise.all(
+        newRepos.map(repo =>
+          invoke<string[]>('detect_project_tags', { projectPath: repo.path })
+            .catch(() => [] as string[])
+        )
+      );
+
+      for (let i = 0; i < newRepos.length; i++) {
         await onAdd({
-          name: repo.name,
+          name: newRepos[i].name,
           description: '',
-          path: repo.path,
-          tags: [],
+          path: newRepos[i].path,
+          tags: tagsResults[i],
           cover_image: null,
         });
       }
