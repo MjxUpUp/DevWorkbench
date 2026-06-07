@@ -31,9 +31,6 @@ describe('ToolButton', () => {
     renderWithToast(<ToolButton tool="code" projectPath="/test" installed={true} />);
     expect(screen.getByText('VSCode')).toBeInTheDocument();
 
-    renderWithToast(<ToolButton tool="terminal" projectPath="/test" installed={true} />);
-    expect(screen.getByText('Term')).toBeInTheDocument();
-
     renderWithToast(<ToolButton tool="finder" projectPath="/test" installed={true} />);
     expect(screen.getByText('Files')).toBeInTheDocument();
   });
@@ -78,19 +75,6 @@ describe('ToolButton', () => {
       command: 'claude',
     });
     expect(onClick).toHaveBeenCalledWith('claude');
-  });
-
-  it('invokes open_terminal without command for terminal tool', async () => {
-    mockedInvoke.mockResolvedValueOnce(undefined);
-    const user = userEvent.setup();
-
-    renderWithToast(<ToolButton tool="terminal" projectPath="/my/project" installed={true} />);
-
-    await user.click(screen.getByRole('button'));
-
-    expect(mockedInvoke).toHaveBeenCalledWith('open_terminal', {
-      workingDir: '/my/project',
-    });
   });
 
   it('invokes open_in_editor for cursor tool', async () => {

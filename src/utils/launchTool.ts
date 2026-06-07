@@ -8,8 +8,6 @@ export async function launchTool(tool: string, projectPath: string): Promise<voi
   switch (tool) {
     case 'claude':
       return invoke('open_terminal', { workingDir: projectPath, command: 'claude' });
-    case 'terminal':
-      return invoke('open_terminal', { workingDir: projectPath });
     case 'cursor':
     case 'code':
       return invoke('open_in_editor', { editor: tool, projectPath });

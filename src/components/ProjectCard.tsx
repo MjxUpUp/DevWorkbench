@@ -4,7 +4,7 @@ import { IconStar, IconEdit, IconTrash, IconSparkles, IconTerminal } from './Ico
 import { useToast } from './Toast';
 import { launchTool } from '../utils/launchTool';
 
-const ALL_TOOLS = ['claude', 'cursor', 'code', 'terminal', 'finder'] as const;
+const ALL_TOOLS = ['claude', 'cursor', 'code', 'finder'] as const;
 
 interface ProjectCardProps {
   project: Project;
@@ -147,7 +147,7 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
             key={tool}
             tool={tool}
             projectPath={project.path}
-            installed={tool === 'terminal' || tool === 'finder' ? true : isInstalled(tool)}
+            installed={tool === 'finder' ? true : isInstalled(tool)}
             onClick={() => onToolOpen(project.id, tool)}
           />
         ))}

@@ -6,7 +6,6 @@ const WORKSPACE_TOOLS = [
   { key: 'claude', label: 'Claude' },
   { key: 'cursor', label: 'Cursor' },
   { key: 'code', label: 'VS Code' },
-  { key: 'terminal', label: 'Terminal' },
   { key: 'finder', label: 'Files' },
 ] as const;
 

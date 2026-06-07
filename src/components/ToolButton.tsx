@@ -13,7 +13,6 @@ const TOOL_LABELS: Record<string, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   code: 'VSCode',
-  terminal: 'Term',
   finder: 'Files',
 };
 
@@ -21,7 +20,6 @@ const TOOL_ICONS: Record<string, typeof IconTerminal> = {
   claude: IconSparkles,
   cursor: IconCode,
   code: IconCode,
-  terminal: IconTerminal,
   finder: IconFolderOpen,
 };
 

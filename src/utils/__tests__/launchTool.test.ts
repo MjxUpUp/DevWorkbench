@@ -23,15 +23,6 @@ describe('launchTool', () => {
     });
   });
 
-  it('launches terminal via open_terminal without command', async () => {
-    mockedInvoke.mockResolvedValueOnce(undefined);
-    await launchTool('terminal', '/my/project');
-
-    expect(mockedInvoke).toHaveBeenCalledWith('open_terminal', {
-      workingDir: '/my/project',
-    });
-  });
-
   it('launches cursor via open_in_editor', async () => {
     mockedInvoke.mockResolvedValueOnce(undefined);
     await launchTool('cursor', '/my/project');
