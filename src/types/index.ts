@@ -45,3 +45,58 @@ export interface GitStatus {
   behind: number;
   lastCommitTime: string | null;
 }
+
+// ---- Agent Hub types ----
+
+export type AgentType =
+  | 'claude_code'
+  | 'codex'
+  | 'cursor_agent'
+  | 'gemini_cli'
+  | 'copilot'
+  | 'qwen_code';
+
+export type SessionStatus = 'running' | 'completed' | 'failed';
+
+export type RequirementStatus = 'todo' | 'in_progress' | 'done';
+
+export interface AgentInfo {
+  agentType: AgentType;
+  installed: boolean;
+  path: string | null;
+  supportsResume: boolean;
+}
+
+export interface ContextSnapshot {
+  filesChanged: string[];
+  keyOutput: string;
+}
+
+export interface Session {
+  id: string;
+  projectPath: string;
+  agentType: AgentType;
+  status: SessionStatus;
+  prompt: string;
+  model: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  outputSummary: string | null;
+  contextSnapshot: ContextSnapshot | null;
+  linkedRequirementId: string | null;
+  parentSessionId: string | null;
+}
+
+export interface Requirement {
+  id: string;
+  projectPath: string;
+  title: string;
+  description: string | null;
+  status: RequirementStatus;
+  priority: string | null;
+  linkedSessionId: string | null;
+  artifacts: string[];
+  createdAt: string;
+  updatedAt: string;
+}
