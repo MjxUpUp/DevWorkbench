@@ -5,10 +5,12 @@ import { ProjectGrid } from './components/ProjectGrid';
 import { AddProject } from './components/AddProject';
 import { EditProject } from './components/EditProject';
 import { Settings } from './components/Settings';
+import { AgentPanel } from './components/AgentPanel';
 import { ToastProvider } from './components/Toast';
 import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
 import { useGitStatus } from './hooks/useGitStatus';
+import { useAgents } from './hooks/useAgents';
 import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
 import type { Project, AppSettings } from './types';
 import './styles/index.css';
@@ -26,10 +28,12 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [theme, setThemeState] = useState('obsidian');
+  const [activeAgentProject, setActiveAgentProject] = useState<Project | null>(null);
 
   const { projects, addProject, removeProject, updateProject, recordOpen, recordToolOpen, error: projectError } = useProjects();
   const { tools, isInstalled, error: toolsError } = useTools();
   const { gitStatusMap } = useGitStatus(projects);
+  const agentHook = useAgents();
 
   // 启动时加载主题设置
   useEffect(() => {
@@ -151,6 +155,10 @@ function App() {
           onRemove={handleRemove}
           onToggleStar={handleToggleStar}
           emptyText={emptyTexts[activeView]}
+          sessions={agentHook.sessions}
+          agents={agentHook.agents}
+          requirements={agentHook.requirements}
+          onOpenAgent={setActiveAgentProject}
         />
       </main>
 
@@ -167,6 +175,23 @@ function App() {
           project={editingProject}
           onSave={updateProject}
           onClose={() => setEditingProject(null)}
+        />
+      )}
+
+      {activeAgentProject && (
+        <AgentPanel
+          project={activeAgentProject}
+          sessions={agentHook.sessions}
+          requirements={agentHook.requirements}
+          agents={agentHook.agents}
+          onClose={() => setActiveAgentProject(null)}
+          spawnAgent={agentHook.spawnAgent}
+          stopAgent={agentHook.stopAgent}
+          addRequirement={agentHook.addRequirement}
+          updateRequirement={agentHook.updateRequirement}
+          getSessionsForProject={agentHook.getSessionsForProject}
+          getRequirementsForProject={agentHook.getRequirementsForProject}
+          recommendAgent={agentHook.recommendAgent}
         />
       )}
     </div>

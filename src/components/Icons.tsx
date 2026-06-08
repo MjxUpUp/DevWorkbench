@@ -153,6 +153,32 @@ export function IconBrain({ size = defaults.size, className }: IconProps) {
   );
 }
 
+export function IconPlay({ size = defaults.size, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none" className={className}>
+      <polygon points="6,4 20,12 6,20" />
+    </svg>
+  );
+}
+
+export function IconStop({ size = defaults.size, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none" className={className}>
+      <rect x="5" y="5" width="14" height="14" rx="2" />
+    </svg>
+  );
+}
+
+export function IconHistory({ size = defaults.size, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="1,4 1,10 7,10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+      <polyline points="12,7 12,12 15.5,13.5" />
+    </svg>
+  );
+}
+
 export function IconCpu({ size = defaults.size, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>

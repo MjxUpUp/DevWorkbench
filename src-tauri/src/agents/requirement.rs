@@ -26,7 +26,12 @@ pub fn save_requirements(requirements: &[Requirement]) -> Result<(), String> {
 
 pub fn add_requirement(mut req: Requirement) -> Result<Vec<Requirement>, String> {
     let mut reqs = load_requirements()?;
-    req.updated_at = chrono::Local::now().to_rfc3339();
+    if req.id.is_empty() {
+        req.id = uuid::Uuid::new_v4().to_string();
+    }
+    let now = chrono::Local::now().to_rfc3339();
+    req.created_at = now.clone();
+    req.updated_at = now;
     reqs.push(req);
     save_requirements(&reqs)?;
     Ok(reqs)

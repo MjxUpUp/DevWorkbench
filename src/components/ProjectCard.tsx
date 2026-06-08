@@ -1,6 +1,7 @@
-import type { Project, GitStatus } from '../types';
+import type { Project, GitStatus, Session, AgentInfo, Requirement } from '../types';
 import { ToolButton } from './ToolButton';
-import { IconStar, IconEdit, IconTrash } from './Icons';
+import { AgentStatus } from './AgentStatus';
+import { IconStar, IconEdit, IconTrash, IconSparkles } from './Icons';
 
 const ALL_TOOLS = ['claude', 'cursor', 'code', 'finder', 'pi', 'codex'] as const;
 
@@ -12,6 +13,10 @@ interface ProjectCardProps {
   onEdit: (project: Project) => void;
   onRemove: (id: string) => void;
   onToggleStar: (id: string) => void;
+  sessions?: Session[];
+  agents?: AgentInfo[];
+  requirements?: Requirement[];
+  onOpenAgent?: (project: Project) => void;
 }
 
 function formatRelativeTime(isoTime: string): string {
@@ -27,7 +32,7 @@ function formatRelativeTime(isoTime: string): string {
   return `${Math.floor(diffSec / 31536000)} 年前`;
 }
 
-export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar }: ProjectCardProps) {
+export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
   const lastOpened = project.last_opened_at
     ? new Date(project.last_opened_at).toLocaleString('zh-CN')
     : '尚未打开';
@@ -91,6 +96,9 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
             {project.tags.map(tag => (
               <span key={tag} className="tag">{tag}</span>
             ))}
+            {requirements.length > 0 && (
+              <span className="agent-badge">{requirements.length} 需求</span>
+            )}
           </div>
         )}
 
@@ -111,7 +119,14 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
         ))}
       </div>
 
+      <AgentStatus sessions={sessions} agents={agents} />
+
       <div className="card-actions">
+        {onOpenAgent && (
+          <button className="action-btn agent-action" onClick={() => onOpenAgent(project)} title="Agent Hub">
+            <IconSparkles size={15} />
+          </button>
+        )}
         <button className="action-btn" onClick={() => onEdit(project)} title="编辑">
           <IconEdit size={15} />
         </button>

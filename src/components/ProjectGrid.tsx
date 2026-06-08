@@ -1,4 +1,4 @@
-import type { Project, GitStatus } from '../types';
+import type { Project, GitStatus, Session, AgentInfo, Requirement } from '../types';
 import { ProjectCard } from './ProjectCard';
 import { IconInbox } from './Icons';
 
@@ -11,9 +11,13 @@ interface ProjectGridProps {
   onRemove: (id: string) => void;
   onToggleStar: (id: string) => void;
   emptyText?: string;
+  sessions?: Session[];
+  agents?: AgentInfo[];
+  requirements?: Requirement[];
+  onOpenAgent?: (project: Project) => void;
 }
 
-export function ProjectGrid({ projects, gitStatusMap, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, emptyText }: ProjectGridProps) {
+export function ProjectGrid({ projects, gitStatusMap, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, emptyText, sessions = [], agents = [], requirements = [], onOpenAgent }: ProjectGridProps) {
   if (projects.length === 0) {
     return (
       <div className="project-grid-empty">
@@ -35,6 +39,10 @@ export function ProjectGrid({ projects, gitStatusMap, isInstalled, onToolOpen, o
           onEdit={onEdit}
           onRemove={onRemove}
           onToggleStar={onToggleStar}
+          sessions={sessions.filter(s => s.projectPath === project.path)}
+          agents={agents}
+          requirements={requirements.filter(r => r.projectPath === project.path)}
+          onOpenAgent={onOpenAgent}
         />
       ))}
     </div>
