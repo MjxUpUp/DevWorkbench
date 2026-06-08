@@ -1,4 +1,16 @@
-use crate::models::{Requirement, Session};
+use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
+use crate::models::{AgentType, Requirement, Session};
+
+// Agent discovery commands
+#[tauri::command]
+pub fn discover_agents_cmd() -> Result<Vec<AgentInfo>, String> {
+    Ok(discover_agents())
+}
+
+#[tauri::command]
+pub fn recommend_agent_for_project(tags: Vec<String>) -> Result<Option<AgentType>, String> {
+    Ok(recommend_agent(&tags))
+}
 
 // Session commands
 #[tauri::command]

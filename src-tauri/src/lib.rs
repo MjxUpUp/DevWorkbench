@@ -39,6 +39,8 @@ pub fn run() {
             commands::projects::record_tool_open,
             commands::git::get_git_status,
             commands::git::batch_get_git_status,
+            commands::agents::discover_agents_cmd,
+            commands::agents::recommend_agent_for_project,
             commands::agents::load_sessions,
             commands::agents::get_sessions_for_project,
             commands::agents::update_session,

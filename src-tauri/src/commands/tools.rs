@@ -15,7 +15,7 @@ fn expanded_paths() -> Vec<String> {
 
 /// 在扩展 PATH 中查找可执行文件
 #[cfg(target_os = "macos")]
-fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
     // 先尝试默认 which
     if let Ok(p) = which::which(name) {
         return Some(p);
@@ -31,7 +31,7 @@ fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
     which::which(name).ok()
 }
 
