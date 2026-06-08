@@ -5,3 +5,4 @@ pub mod finder;
 pub mod scanner;
 pub mod projects;
 pub mod git;
+pub mod agents;

@@ -1,5 +1,6 @@
 mod commands;
 mod models;
+mod agents;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,6 +39,14 @@ pub fn run() {
             commands::projects::record_tool_open,
             commands::git::get_git_status,
             commands::git::batch_get_git_status,
+            commands::agents::load_sessions,
+            commands::agents::get_sessions_for_project,
+            commands::agents::update_session,
+            commands::agents::load_requirements,
+            commands::agents::add_requirement,
+            commands::agents::update_requirement,
+            commands::agents::remove_requirement,
+            commands::agents::get_requirements_for_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

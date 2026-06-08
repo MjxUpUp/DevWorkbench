@@ -12,7 +12,7 @@ fn data_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn dirs_home() -> PathBuf {
+pub fn dirs_home() -> PathBuf {
     // Windows 上 USERPROFILE 始终是原生路径（C:\Users\xxx），
     // 而 HOME 可能是 Git Bash 设置的 Unix 风格路径（/c/Users/xxx），
     // PathBuf 无法正确解析后者。所以 Windows 上优先用 USERPROFILE。
