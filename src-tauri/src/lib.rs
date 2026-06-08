@@ -20,6 +20,9 @@ pub fn run() {
             }
             Ok(())
         })
+        .manage(commands::agents::AgentState(std::sync::Arc::new(
+            agents::process::AgentProcesses::new(),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,
@@ -41,6 +44,8 @@ pub fn run() {
             commands::git::batch_get_git_status,
             commands::agents::discover_agents_cmd,
             commands::agents::recommend_agent_for_project,
+            commands::agents::spawn_agent_session,
+            commands::agents::stop_agent_session,
             commands::agents::load_sessions,
             commands::agents::get_sessions_for_project,
             commands::agents::update_session,

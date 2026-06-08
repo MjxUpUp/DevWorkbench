@@ -1,5 +1,11 @@
 use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
+use crate::agents::process::{spawn_agent, stop_agent, AgentProcesses};
 use crate::models::{AgentType, Requirement, Session};
+use std::sync::Arc;
+use tauri::State;
+
+/// Tauri managed state wrapping AgentProcesses
+pub struct AgentState(pub Arc<AgentProcesses>);
 
 // Agent discovery commands
 #[tauri::command]
@@ -52,4 +58,34 @@ pub fn remove_requirement(id: String) -> Result<Vec<Requirement>, String> {
 #[tauri::command]
 pub fn get_requirements_for_project(project_path: String) -> Result<Vec<Requirement>, String> {
     crate::agents::requirement::get_requirements_for_project(&project_path)
+}
+
+// Agent process lifecycle commands
+#[tauri::command]
+pub fn spawn_agent_session(
+    app: tauri::AppHandle,
+    state: State<'_, AgentState>,
+    project_path: String,
+    agent_type: AgentType,
+    prompt: String,
+    model: Option<String>,
+    linked_requirement_id: Option<String>,
+) -> Result<Session, String> {
+    spawn_agent(
+        &app,
+        state.0.clone(),
+        &project_path,
+        agent_type,
+        &prompt,
+        model.as_deref(),
+        linked_requirement_id.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn stop_agent_session(
+    state: State<'_, AgentState>,
+    session_id: String,
+) -> Result<(), String> {
+    stop_agent(&state.0, &session_id)
 }
