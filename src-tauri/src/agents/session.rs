@@ -2,7 +2,24 @@ use crate::models::Session;
 use std::fs;
 use std::path::PathBuf;
 
+// Thread-local override for agents_dir (test only).
+// Each test thread gets its own isolated directory.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static TEST_AGENTS_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn agents_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        let override_path = TEST_AGENTS_DIR_OVERRIDE.with(|cell| cell.borrow().clone());
+        if let Some(dir) = override_path {
+            if !dir.exists() {
+                fs::create_dir_all(&dir).map_err(|e| format!("创建 agents 目录失败: {}", e))?;
+            }
+            return Ok(dir);
+        }
+    }
     let home = crate::commands::projects::dirs_home();
     let dir = home.join(".dev-workbench").join("agents");
     if !dir.exists() {
@@ -78,4 +95,110 @@ pub fn get_sessions_for_project(project_path: &str) -> Result<Vec<Session>, Stri
 pub fn get_running_sessions() -> Result<Vec<Session>, String> {
     let sessions = load_sessions()?;
     Ok(sessions.into_iter().filter(|s| s.status == crate::models::SessionStatus::Running).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{AgentType, SessionStatus};
+
+    /// RAII guard: sets thread-local agents_dir override, clears on drop.
+    struct TempAgentsDir {
+        _tmp: tempfile::TempDir,
+    }
+
+    impl TempAgentsDir {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = tmp.path().to_path_buf();
+            TEST_AGENTS_DIR_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(dir));
+            Self { _tmp: tmp }
+        }
+    }
+
+    impl Drop for TempAgentsDir {
+        fn drop(&mut self) {
+            TEST_AGENTS_DIR_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    fn make_session(id: &str, project: &str, status: SessionStatus) -> Session {
+        Session {
+            id: id.to_string(),
+            project_path: project.to_string(),
+            agent_type: AgentType::ClaudeCode,
+            status,
+            prompt: "test prompt".to_string(),
+            model: None,
+            started_at: chrono::Local::now().to_rfc3339(),
+            finished_at: None,
+            exit_code: None,
+            output_summary: None,
+            context_snapshot: None,
+            linked_requirement_id: None,
+            parent_session_id: None,
+        }
+    }
+
+    #[test]
+    fn test_add_and_load_sessions() {
+        let _guard = TempAgentsDir::new();
+
+        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+        add_session(make_session("s2", "/proj/b", SessionStatus::Completed)).unwrap();
+
+        let loaded = load_sessions().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "s1");
+        assert_eq!(loaded[1].id, "s2");
+    }
+
+    #[test]
+    fn test_update_session_status() {
+        let _guard = TempAgentsDir::new();
+
+        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+
+        let patch = serde_json::json!({ "status": "completed", "exitCode": 0 });
+        let result = update_session("s1", patch).unwrap();
+        assert_eq!(result[0].status, SessionStatus::Completed);
+        assert_eq!(result[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_get_sessions_for_project() {
+        let _guard = TempAgentsDir::new();
+
+        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+        add_session(make_session("s2", "/proj/b", SessionStatus::Completed)).unwrap();
+        add_session(make_session("s3", "/proj/a", SessionStatus::Completed)).unwrap();
+
+        let proj_a = get_sessions_for_project("/proj/a").unwrap();
+        assert_eq!(proj_a.len(), 2);
+        assert!(proj_a.iter().all(|s| s.project_path == "/proj/a"));
+    }
+
+    #[test]
+    fn test_get_running_sessions() {
+        let _guard = TempAgentsDir::new();
+
+        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+        add_session(make_session("s2", "/proj/b", SessionStatus::Completed)).unwrap();
+        add_session(make_session("s3", "/proj/c", SessionStatus::Running)).unwrap();
+
+        let running = get_running_sessions().unwrap();
+        assert_eq!(running.len(), 2);
+    }
+
+    #[test]
+    fn test_update_session_invalid_status() {
+        let _guard = TempAgentsDir::new();
+
+        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+
+        let patch = serde_json::json!({ "status": "invalid_status" });
+        let result = update_session("s1", patch);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("无效 status"));
+    }
 }

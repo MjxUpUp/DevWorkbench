@@ -59,3 +59,57 @@ pub fn recommend_agent(tags: &[String]) -> Option<AgentType> {
     }
     Some(AgentType::ClaudeCode)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recommend_rust_project() {
+        let tags = vec!["Rust".to_string(), "Tauri".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::ClaudeCode));
+    }
+
+    #[test]
+    fn test_recommend_python_project() {
+        let tags = vec!["Python".to_string(), "Django".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::Codex));
+    }
+
+    #[test]
+    fn test_recommend_frontend_project() {
+        let tags = vec!["React".to_string(), "TypeScript".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::CursorAgent));
+    }
+
+    #[test]
+    fn test_recommend_vue_project() {
+        let tags = vec!["Vue".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::CursorAgent));
+    }
+
+    #[test]
+    fn test_recommend_nextjs_project() {
+        let tags = vec!["Next.js".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::CursorAgent));
+    }
+
+    #[test]
+    fn test_recommend_default_unknown() {
+        let tags = vec!["Go".to_string(), "Docker".to_string()];
+        // No specific rule → defaults to Claude Code
+        assert_eq!(recommend_agent(&tags), Some(AgentType::ClaudeCode));
+    }
+
+    #[test]
+    fn test_recommend_empty_tags() {
+        assert_eq!(recommend_agent(&[]), Some(AgentType::ClaudeCode));
+    }
+
+    #[test]
+    fn test_recommend_rust_priority_over_frontend() {
+        // If both Rust and React tags present, Rust rule wins (checked first)
+        let tags = vec!["React".to_string(), "Rust".to_string()];
+        assert_eq!(recommend_agent(&tags), Some(AgentType::ClaudeCode));
+    }
+}
