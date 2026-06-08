@@ -21,7 +21,7 @@ const FILTER_TABS: { key: FilterKey; label: string }[] = [
   { key: 'done', label: 'Done' },
 ];
 
-export function RequirementList({ requirements, sessions, projectPath, onAdd, onStart, onMarkDone }: RequirementListProps) {
+export function RequirementList({ requirements, sessions, projectPath: _projectPath, onAdd, onStart, onMarkDone }: RequirementListProps) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [newTitle, setNewTitle] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);

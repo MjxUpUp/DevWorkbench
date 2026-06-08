@@ -1,8 +1,7 @@
-import type { Session, AgentInfo } from '../types';
+import type { Session } from '../types';
 
 interface AgentStatusProps {
   sessions: Session[];
-  agents: AgentInfo[];
 }
 
 const AGENT_LABELS: Record<string, string> = {
@@ -25,7 +24,7 @@ function formatRelativeTime(isoTime: string): string {
   return `${Math.floor(diffSec / 86400)} 天前`;
 }
 
-export function AgentStatus({ sessions, agents }: AgentStatusProps) {
+export function AgentStatus({ sessions }: AgentStatusProps) {
   if (sessions.length === 0) return null;
 
   const runningSession = sessions.find(s => s.status === 'running');

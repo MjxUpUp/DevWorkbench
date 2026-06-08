@@ -4,7 +4,7 @@ interface AgentSelectorProps {
   agents: AgentInfo[];
   value: AgentType | null;
   onChange: (agent: AgentType) => void;
-  recommended?: AgentType;
+  recommended?: AgentType | null;
 }
 
 const AGENT_LABELS: Record<AgentType, string> = {

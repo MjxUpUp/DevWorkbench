@@ -32,7 +32,7 @@ function formatRelativeTime(isoTime: string): string {
   return `${Math.floor(diffSec / 31536000)} 年前`;
 }
 
-export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
+export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents: _agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
   const lastOpened = project.last_opened_at
     ? new Date(project.last_opened_at).toLocaleString('zh-CN')
     : '尚未打开';
@@ -119,7 +119,7 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
         ))}
       </div>
 
-      <AgentStatus sessions={sessions} agents={agents} />
+      <AgentStatus sessions={sessions} />
 
       <div className="card-actions">
         {onOpenAgent && (
