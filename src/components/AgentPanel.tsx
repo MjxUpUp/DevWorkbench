@@ -5,6 +5,7 @@ import { TerminalView } from './TerminalView';
 import { RequirementList } from './RequirementList';
 import { SessionTimeline } from './SessionTimeline';
 import { IconX, IconPlay, IconStop, IconHistory, IconSparkles } from './Icons';
+import { useToast } from './Toast';
 
 interface AgentPanelProps {
   project: Project;
@@ -42,6 +43,7 @@ export function AgentPanel({
   const [prompt, setPrompt] = useState('');
   const [continueFromId, setContinueFromId] = useState<string | null>(null);
   const [recommended, setRecommended] = useState<AgentType | null>(null);
+  const toast = useToast();
   const [splitRatio, setSplitRatio] = useState(() => {
     try {
       const saved = localStorage.getItem(`agent-panel-split:${project.path}`);
@@ -123,8 +125,57 @@ export function AgentPanel({
   }, [project.path, addRequirement]);
 
   const handleStartRequirement = useCallback(async (id: string) => {
-    await updateRequirement(id, { status: 'in_progress' });
-  }, [updateRequirement]);
+    const req = projectRequirements.find(r => r.id === id);
+    if (!req) {
+      toast.error('需求未找到');
+      return;
+    }
+
+    // Already running for this project?
+    if (runningSession) {
+      toast.info('已有 agent 在运行中');
+      return;
+    }
+
+    // Resolve agent BEFORE updating status — avoids needing to revert on no-agent
+    const agent = selectedAgent
+      ?? recommended
+      ?? (installedAgents.length > 0 ? installedAgents[0].agentType : null);
+
+    if (!agent) {
+      toast.error('请先安装 AI 工具');
+      return;
+    }
+
+    // Now safe to update status
+    try {
+      await updateRequirement(id, { status: 'in_progress' });
+    } catch (e) {
+      toast.error('更新需求状态失败');
+      return;
+    }
+
+    // Spawn agent session
+    try {
+      const session = await spawnAgent(
+        project.path,
+        agent,
+        req.title,
+        undefined,
+        req.id,   // linkedRequirementId
+      );
+
+      // Link session back to requirement
+      await updateRequirement(id, { linkedSessionId: session.id });
+
+      // Switch to Active tab to show terminal output
+      setActiveTab('active');
+    } catch (e) {
+      // Revert status on failure
+      await updateRequirement(id, { status: 'todo' }).catch(() => {});
+      toast.error(`启动 agent 失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [projectRequirements, runningSession, selectedAgent, recommended, installedAgents, project.path, spawnAgent, updateRequirement, toast]);
 
   const handleMarkDone = useCallback(async (id: string) => {
     await updateRequirement(id, { status: 'done' });
