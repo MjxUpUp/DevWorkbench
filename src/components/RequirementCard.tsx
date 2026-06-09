@@ -51,9 +51,16 @@ export function RequirementCard({ requirement, sessions, agents = [], onStart, o
           </button>
         )}
         {requirement.status === 'in_progress' && (
-          <button className="requirement-action-btn done" onClick={() => onMarkDone(requirement.id)}>
-            Mark Done
-          </button>
+          <>
+            <button className="requirement-action-btn done" onClick={() => onMarkDone(requirement.id)}>
+              Mark Done
+            </button>
+            {linkedSession && linkedSession.status !== 'running' && (
+              <button className="requirement-action-btn continue" onClick={() => onContinue(requirement.id)}>
+                Continue
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>
