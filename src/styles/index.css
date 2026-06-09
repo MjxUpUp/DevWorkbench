@@ -2300,6 +2300,18 @@ body::before {
   background: var(--accent-muted);
 }
 
+.requirement-action-btn.continue {
+  border-color: var(--accent-muted);
+  color: var(--text-accent);
+  background: var(--accent-muted);
+}
+
+.requirement-action-btn.continue:hover {
+  border-color: var(--accent);
+  color: var(--text-accent);
+  background: var(--accent-muted);
+}
+
 /* =============================================
    Requirement List
    ============================================= */

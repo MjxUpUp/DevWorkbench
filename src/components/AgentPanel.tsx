@@ -194,6 +194,19 @@ export function AgentPanel({
     setPrompt(`基于上次对话的上下文继续：\n${summary}\n\n`);
   }, []);
 
+  const handleContinueRequirement = useCallback((reqId: string) => {
+    const req = projectRequirements.find(r => r.id === reqId);
+    if (!req || !req.linkedSessionId) return;
+
+    const session = projectSessions.find(s => s.id === req.linkedSessionId);
+    if (!session) {
+      toast.error('关联的会话未找到');
+      return;
+    }
+
+    handleContinueWith(session, session.agentType);
+  }, [projectRequirements, projectSessions, handleContinueWith, toast]);
+
   const canSend = selectedAgent && prompt.trim() && !runningSession;
 
   // Toggle overflow on .agent-panel-content when Active tab is selected
@@ -345,6 +358,7 @@ export function AgentPanel({
               onAdd={handleAddRequirement}
               onStart={handleStartRequirement}
               onMarkDone={handleMarkDone}
+              onContinue={handleContinueRequirement}
             />
           )}
 

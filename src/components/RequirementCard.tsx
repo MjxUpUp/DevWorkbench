@@ -1,34 +1,37 @@
-import type { Requirement, Session } from '../types';
+import type { Requirement, Session, AgentInfo } from '../types';
+import { REQUIREMENT_STATUS_LABELS, REQUIREMENT_STATUS_CLASSES, SESSION_STATUS_LABELS } from '../utils/sessionStatus';
 
 interface RequirementCardProps {
   requirement: Requirement;
   sessions: Session[];
+  agents?: AgentInfo[];
   onStart: (id: string) => void;
   onMarkDone: (id: string) => void;
+  onContinue: (id: string) => void;
 }
 
-const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
-  todo: { label: 'Todo', className: 'req-status-todo' },
-  in_progress: { label: 'In Progress', className: 'req-status-in-progress' },
-  done: { label: 'Done', className: 'req-status-done' },
-};
-
-export function RequirementCard({ requirement, sessions, onStart, onMarkDone }: RequirementCardProps) {
-  const config = STATUS_CONFIG[requirement.status] ?? STATUS_CONFIG.todo;
+export function RequirementCard({ requirement, sessions, agents = [], onStart, onMarkDone, onContinue }: RequirementCardProps) {
+  const statusLabel = REQUIREMENT_STATUS_LABELS[requirement.status] || requirement.status;
+  const statusClass = REQUIREMENT_STATUS_CLASSES[requirement.status] || 'req-status-todo';
 
   const linkedSession = requirement.linkedSessionId
     ? sessions.find(s => s.id === requirement.linkedSessionId)
     : null;
 
+  const getAgentLabel = (agentType: string): string => {
+    const found = agents.find(a => a.agentType === agentType);
+    return found?.displayName || agentType;
+  };
+
   return (
-    <div className={`requirement-card ${config.className}`}>
+    <div className={`requirement-card ${statusClass}`}>
       <div className="requirement-card-header">
-        <span className={`requirement-status-badge ${config.className}`}>
-          {config.label}
+        <span className={`requirement-status-badge ${statusClass}`}>
+          {statusLabel}
         </span>
         {linkedSession && (
           <span className="requirement-session-link">
-            {linkedSession.agentType} · {linkedSession.status === 'running' ? '运行中' : linkedSession.status === 'completed' ? '完成' : '失败'}
+            {getAgentLabel(linkedSession.agentType)} · {SESSION_STATUS_LABELS[linkedSession.status] || linkedSession.status}
           </span>
         )}
       </div>
@@ -37,9 +40,14 @@ export function RequirementCard({ requirement, sessions, onStart, onMarkDone }: 
         <div className="requirement-card-desc">{requirement.description}</div>
       )}
       <div className="requirement-card-actions">
-        {requirement.status === 'todo' && (
+        {requirement.status === 'todo' && !requirement.linkedSessionId && (
           <button className="requirement-action-btn start" onClick={() => onStart(requirement.id)}>
             Start
+          </button>
+        )}
+        {requirement.status === 'todo' && requirement.linkedSessionId && (
+          <button className="requirement-action-btn continue" onClick={() => onContinue(requirement.id)}>
+            Continue
           </button>
         )}
         {requirement.status === 'in_progress' && (

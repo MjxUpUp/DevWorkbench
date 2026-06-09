@@ -1,15 +1,17 @@
 import { useState } from 'react';
-import type { Requirement, Session } from '../types';
+import type { Requirement, Session, AgentInfo } from '../types';
 import { RequirementCard } from './RequirementCard';
 import { IconPlus } from './Icons';
 
 interface RequirementListProps {
   requirements: Requirement[];
   sessions: Session[];
+  agents: AgentInfo[];
   projectPath: string;
   onAdd: (title: string) => void;
   onStart: (id: string) => void;
   onMarkDone: (id: string) => void;
+  onContinue: (id: string) => void;
 }
 
 type FilterKey = 'all' | 'todo' | 'in_progress' | 'done';
@@ -21,7 +23,7 @@ const FILTER_TABS: { key: FilterKey; label: string }[] = [
   { key: 'done', label: 'Done' },
 ];
 
-export function RequirementList({ requirements, sessions, projectPath: _projectPath, onAdd, onStart, onMarkDone }: RequirementListProps) {
+export function RequirementList({ requirements, sessions, agents, projectPath: _projectPath, onAdd, onStart, onMarkDone, onContinue }: RequirementListProps) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [newTitle, setNewTitle] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
@@ -85,8 +87,10 @@ export function RequirementList({ requirements, sessions, projectPath: _projectP
               key={req.id}
               requirement={req}
               sessions={sessions}
+              agents={agents}
               onStart={onStart}
               onMarkDone={onMarkDone}
+              onContinue={onContinue}
             />
           ))
         )}
