@@ -92,11 +92,6 @@ pub fn get_sessions_for_project(project_path: &str) -> Result<Vec<Session>, Stri
     Ok(sessions.into_iter().filter(|s| s.project_path == project_path).collect())
 }
 
-pub fn get_running_sessions() -> Result<Vec<Session>, String> {
-    let sessions = load_sessions()?;
-    Ok(sessions.into_iter().filter(|s| s.status == crate::models::SessionStatus::Running).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,18 +171,6 @@ mod tests {
         let proj_a = get_sessions_for_project("/proj/a").unwrap();
         assert_eq!(proj_a.len(), 2);
         assert!(proj_a.iter().all(|s| s.project_path == "/proj/a"));
-    }
-
-    #[test]
-    fn test_get_running_sessions() {
-        let _guard = TempAgentsDir::new();
-
-        add_session(make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
-        add_session(make_session("s2", "/proj/b", SessionStatus::Completed)).unwrap();
-        add_session(make_session("s3", "/proj/c", SessionStatus::Running)).unwrap();
-
-        let running = get_running_sessions().unwrap();
-        assert_eq!(running.len(), 2);
     }
 
     #[test]
