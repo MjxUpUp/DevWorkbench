@@ -1,7 +1,7 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import type { Project, Session, Requirement, AgentInfo, AgentType } from '../types';
 import { AgentSelector } from './AgentSelector';
-import { AgentOutput } from './AgentOutput';
+import { TerminalView } from './TerminalView';
 import { RequirementList } from './RequirementList';
 import { SessionTimeline } from './SessionTimeline';
 import { IconX, IconPlay, IconStop, IconHistory, IconSparkles } from './Icons';
@@ -12,7 +12,7 @@ interface AgentPanelProps {
   requirements: Requirement[];
   agents: AgentInfo[];
   onClose: () => void;
-  spawnAgent: (projectPath: string, agentType: AgentType, prompt: string, model?: string, linkedRequirementId?: string) => Promise<Session>;
+  spawnAgent: (projectPath: string, agentType: AgentType, prompt: string, model?: string, linkedRequirementId?: string, parentSessionId?: string) => Promise<Session>;
   stopAgent: (sessionId: string) => Promise<void>;
   addRequirement: (req: Requirement) => Promise<Requirement[]>;
   updateRequirement: (id: string, patch: Record<string, unknown>) => Promise<Requirement[]>;
@@ -40,7 +40,19 @@ export function AgentPanel({
   const [activeTab, setActiveTab] = useState<PanelTab>('active');
   const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null);
   const [prompt, setPrompt] = useState('');
+  const [continueFromId, setContinueFromId] = useState<string | null>(null);
   const [recommended, setRecommended] = useState<AgentType | null>(null);
+  const [splitRatio, setSplitRatio] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`agent-panel-split:${project.path}`);
+      return saved ? parseFloat(saved) : 0.35;
+    } catch { return 0.35; }
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef({ startY: 0, startRatio: 0 });
+  const splitRatioRef = useRef(splitRatio);
+  splitRatioRef.current = splitRatio;
 
   const projectSessions = useMemo(
     () => getSessionsForProject(project.path),
@@ -77,12 +89,13 @@ export function AgentPanel({
   const handleSend = useCallback(async () => {
     if (!selectedAgent || !prompt.trim() || runningSession) return;
     try {
-      await spawnAgent(project.path, selectedAgent, prompt.trim());
+      await spawnAgent(project.path, selectedAgent, prompt.trim(), undefined, undefined, continueFromId ?? undefined);
       setPrompt('');
+      setContinueFromId(null);
     } catch (e) {
       console.error('Failed to spawn agent:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project.path, spawnAgent]);
+  }, [selectedAgent, prompt, runningSession, project.path, spawnAgent, continueFromId]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
@@ -117,13 +130,69 @@ export function AgentPanel({
     await updateRequirement(id, { status: 'done' });
   }, [updateRequirement]);
 
-  const handleContinueWith = useCallback(async (session: Session, targetAgent: AgentType) => {
-    const truncated = session.prompt.length > 5000 ? session.prompt.slice(0, 5000) + '...' : session.prompt;
-    const newPrompt = `[继续 session ${session.id}]\n${truncated}`;
-    await spawnAgent(project.path, targetAgent, newPrompt);
-  }, [project.path, spawnAgent]);
+  const handleContinueWith = useCallback((session: Session, targetAgent: AgentType) => {
+    // Pre-fill prompt with context, switch to Active tab, let user edit and send
+    setSelectedAgent(targetAgent);
+    setContinueFromId(session.id);
+    setActiveTab('active');
+    const summary = session.outputSummary
+      ? session.outputSummary.length > 200
+        ? session.outputSummary.slice(0, 200) + '...'
+        : session.outputSummary
+      : session.prompt;
+    setPrompt(`基于上次对话的上下文继续：\n${summary}\n\n`);
+  }, []);
 
   const canSend = selectedAgent && prompt.trim() && !runningSession;
+
+  // Toggle overflow on .agent-panel-content when Active tab is selected
+  useEffect(() => {
+    const el = contentRef.current;
+    if (el) el.classList.toggle('active-tab', activeTab === 'active');
+  }, [activeTab]);
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+    dragRef.current = { startY: e.clientY, startRatio: splitRatioRef.current };
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    let rafId: number | null = null;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const contentEl = contentRef.current;
+        if (!contentEl) return;
+        const contentHeight = contentEl.getBoundingClientRect().height;
+        if (contentHeight <= 0) return;
+
+        const deltaY = e.clientY - dragRef.current.startY;
+        const deltaRatio = deltaY / contentHeight;
+        const newRatio = Math.min(0.8, Math.max(0.2, dragRef.current.startRatio + deltaRatio));
+        setSplitRatio(newRatio);
+      });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      try {
+        localStorage.setItem(`agent-panel-split:${project.path}`, splitRatioRef.current.toString());
+      } catch { /* ignore */ }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [isDragging, project.path]);
 
   return (
     <div className="agent-panel-backdrop" onClick={onClose}>
@@ -160,48 +229,59 @@ export function AgentPanel({
           </button>
         </div>
 
-        <div className="agent-panel-content">
+        <div className="agent-panel-content" ref={contentRef}>
           {activeTab === 'active' && (
             <div className="agent-panel-active">
-              <AgentSelector
-                agents={agents}
-                value={selectedAgent}
-                onChange={setSelectedAgent}
-                recommended={recommended}
-              />
+              <div className="agent-split-pane">
+                <div className="agent-split-control" style={{ height: `${splitRatio * 100}%` }}>
+                  <AgentSelector
+                    agents={agents}
+                    value={selectedAgent}
+                    onChange={setSelectedAgent}
+                    recommended={recommended}
+                  />
 
-              <div className="agent-prompt-area">
-                <textarea
-                  className="agent-prompt-input"
-                  placeholder="描述你想让 agent 做什么..."
-                  value={prompt}
-                  onChange={e => setPrompt(e.target.value)}
-                  maxLength={10000}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSend) {
-                      handleSend();
-                    }
-                  }}
-                  disabled={!!runningSession}
-                  rows={3}
+                  <div className="agent-prompt-area">
+                    <textarea
+                      className="agent-prompt-input"
+                      placeholder="描述你想让 agent 做什么..."
+                      value={prompt}
+                      onChange={e => setPrompt(e.target.value)}
+                      maxLength={10000}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSend) {
+                          handleSend();
+                        }
+                      }}
+                      disabled={!!runningSession}
+                      rows={3}
+                    />
+                    <div className="agent-prompt-actions">
+                      {runningSession ? (
+                        <button className="agent-prompt-btn stop" onClick={handleStop}>
+                          <IconStop size={14} />
+                          停止
+                        </button>
+                      ) : (
+                        <button className="agent-prompt-btn send" onClick={handleSend} disabled={!canSend}>
+                          <IconPlay size={14} />
+                          发送
+                        </button>
+                      )}
+                      <span className="agent-prompt-hint">Ctrl+Enter 发送</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className={`agent-split-divider ${isDragging ? 'dragging' : ''}`}
+                  onMouseDown={handleDividerMouseDown}
                 />
-                <div className="agent-prompt-actions">
-                  {runningSession ? (
-                    <button className="agent-prompt-btn stop" onClick={handleStop}>
-                      <IconStop size={14} />
-                      停止
-                    </button>
-                  ) : (
-                    <button className="agent-prompt-btn send" onClick={handleSend} disabled={!canSend}>
-                      <IconPlay size={14} />
-                      发送
-                    </button>
-                  )}
-                  <span className="agent-prompt-hint">Ctrl+Enter 发送</span>
+
+                <div className="agent-split-terminal" style={{ height: `${(1 - splitRatio) * 100}%` }}>
+                  <TerminalView sessionId={runningSession?.id ?? null} />
                 </div>
               </div>
-
-              <AgentOutput sessionId={runningSession?.id ?? null} />
             </div>
           )}
 
@@ -209,6 +289,7 @@ export function AgentPanel({
             <RequirementList
               requirements={projectRequirements}
               sessions={projectSessions}
+              agents={agents}
               projectPath={project.path}
               onAdd={handleAddRequirement}
               onStart={handleStartRequirement}
@@ -219,6 +300,7 @@ export function AgentPanel({
           {activeTab === 'history' && (
             <SessionTimeline
               sessions={projectSessions}
+              agents={agents}
               onContinueWith={handleContinueWith}
             />
           )}
