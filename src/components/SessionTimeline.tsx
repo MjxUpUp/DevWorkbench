@@ -1,21 +1,12 @@
 import { useState } from 'react';
-import type { Session, AgentType } from '../types';
+import type { Session, AgentType, AgentInfo } from '../types';
+import { SESSION_STATUS_LABELS, SESSION_STATUS_CLASSES } from '../utils/sessionStatus';
 
 interface SessionTimelineProps {
   sessions: Session[];
+  agents: AgentInfo[];
   onContinueWith: (session: Session, targetAgent: AgentType) => void;
 }
-
-const AGENT_LABELS: Record<string, string> = {
-  claude_code: 'Claude Code',
-  codex: 'Codex',
-  cursor_agent: 'Cursor Agent',
-  gemini_cli: 'Gemini CLI',
-  copilot: 'Copilot',
-  qwen_code: 'Qwen Code',
-};
-
-const AGENT_TYPES: AgentType[] = ['claude_code', 'codex', 'cursor_agent', 'gemini_cli', 'copilot', 'qwen_code'];
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -32,13 +23,7 @@ function formatRelativeDate(iso: string): 'today' | 'yesterday' | 'earlier' {
   return 'earlier';
 }
 
-const STATUS_BADGE: Record<string, { label: string; className: string }> = {
-  running: { label: '运行中', className: 'session-badge-running' },
-  completed: { label: '完成', className: 'session-badge-completed' },
-  failed: { label: '失败', className: 'session-badge-failed' },
-};
-
-export function SessionTimeline({ sessions, onContinueWith }: SessionTimelineProps) {
+export function SessionTimeline({ sessions, agents, onContinueWith }: SessionTimelineProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [continueFor, setContinueFor] = useState<string | null>(null);
 
@@ -55,6 +40,15 @@ export function SessionTimeline({ sessions, onContinueWith }: SessionTimelinePro
   if (yesterday.length) groups.push({ label: 'Yesterday', sessions: yesterday });
   if (earlier.length) groups.push({ label: 'Earlier', sessions: earlier });
 
+  // Derive agent label from discovery data
+  const getLabel = (agentType: AgentType): string => {
+    const found = agents.find(a => a.agentType === agentType);
+    return found?.displayName || agentType;
+  };
+
+  // Only show installed agents in the continue picker
+  const installedAgents = agents.filter(a => a.installed);
+
   if (sessions.length === 0) {
     return (
       <div className="session-timeline">
@@ -69,7 +63,8 @@ export function SessionTimeline({ sessions, onContinueWith }: SessionTimelinePro
         <div key={group.label} className="session-timeline-group">
           <div className="session-timeline-group-label">{group.label}</div>
           {group.sessions.map(session => {
-            const badge = STATUS_BADGE[session.status] ?? STATUS_BADGE.completed;
+            const statusLabel = SESSION_STATUS_LABELS[session.status] || session.status;
+            const statusClass = SESSION_STATUS_CLASSES[session.status] || 'session-badge-completed';
             const isExpanded = expandedId === session.id;
             const isContinueOpen = continueFor === session.id;
 
@@ -80,10 +75,10 @@ export function SessionTimeline({ sessions, onContinueWith }: SessionTimelinePro
                   onClick={() => setExpandedId(isExpanded ? null : session.id)}
                 >
                   <span className="session-timeline-agent">
-                    {AGENT_LABELS[session.agentType] ?? session.agentType}
+                    {getLabel(session.agentType)}
                   </span>
                   <span className="session-timeline-time">{formatTime(session.startedAt)}</span>
-                  <span className={`session-timeline-badge ${badge.className}`}>{badge.label}</span>
+                  <span className={`session-timeline-badge ${statusClass}`}>{statusLabel}</span>
                 </div>
                 <div className="session-timeline-prompt">
                   {session.prompt.length > 60
@@ -100,16 +95,16 @@ export function SessionTimeline({ sessions, onContinueWith }: SessionTimelinePro
                       <div className="session-timeline-continue">
                         {isContinueOpen ? (
                           <div className="session-continue-agents">
-                            {AGENT_TYPES.map(at => (
+                            {installedAgents.map(agent => (
                               <button
-                                key={at}
+                                key={agent.agentType}
                                 className="session-continue-agent-btn"
                                 onClick={() => {
-                                  onContinueWith(session, at);
+                                  onContinueWith(session, agent.agentType);
                                   setContinueFor(null);
                                 }}
                               >
-                                {AGENT_LABELS[at]}
+                                {agent.displayName}
                               </button>
                             ))}
                           </div>

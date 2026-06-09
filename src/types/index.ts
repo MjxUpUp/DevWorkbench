@@ -54,7 +54,8 @@ export type AgentType =
   | 'cursor_agent'
   | 'gemini_cli'
   | 'copilot'
-  | 'qwen_code';
+  | 'qwen_code'
+  | 'pi';
 
 export type SessionStatus = 'running' | 'completed' | 'failed';
 
@@ -62,6 +63,8 @@ export type RequirementStatus = 'todo' | 'in_progress' | 'done';
 
 export interface AgentInfo {
   agentType: AgentType;
+  displayName: string;
+  commandName: string;
   installed: boolean;
   path: string | null;
   supportsResume: boolean;

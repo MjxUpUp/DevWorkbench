@@ -7,15 +7,6 @@ interface AgentSelectorProps {
   recommended?: AgentType | null;
 }
 
-const AGENT_LABELS: Record<AgentType, string> = {
-  claude_code: 'Claude Code',
-  codex: 'Codex',
-  cursor_agent: 'Cursor Agent',
-  gemini_cli: 'Gemini CLI',
-  copilot: 'Copilot',
-  qwen_code: 'Qwen Code',
-};
-
 export function AgentSelector({ agents, value, onChange, recommended }: AgentSelectorProps) {
   return (
     <div className="agent-selector">
@@ -29,9 +20,9 @@ export function AgentSelector({ agents, value, onChange, recommended }: AgentSel
             className={`agent-selector-item ${isSelected ? 'selected' : ''} ${!agent.installed ? 'uninstalled' : ''}`}
             onClick={() => agent.installed && onChange(agent.agentType)}
             disabled={!agent.installed}
-            title={!agent.installed ? `${AGENT_LABELS[agent.agentType]} 未安装` : undefined}
+            title={!agent.installed ? `${agent.displayName} 未安装` : undefined}
           >
-            <span className="agent-selector-name">{AGENT_LABELS[agent.agentType]}</span>
+            <span className="agent-selector-name">{agent.displayName}</span>
             {!agent.installed && <span className="agent-selector-unavail">未安装</span>}
             {agent.installed && isRecommended && <span className="agent-selector-badge">推荐</span>}
           </button>

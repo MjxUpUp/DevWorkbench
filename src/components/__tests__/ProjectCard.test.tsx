@@ -139,34 +139,34 @@ describe('ProjectCard', () => {
     expect(img).toHaveAttribute('src', 'test-cover.png');
   });
 
-  it('disables tool buttons when tool is not installed', () => {
+  it('shows agent tools from discovery data and non-agent tools', () => {
     const isInstalled = vi.fn().mockImplementation((name: string) => name === 'finder');
-    renderWithToast(<ProjectCard {...defaultProps} isInstalled={isInstalled} />);
+    const agents = [
+      { agentType: 'claude_code' as const, displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/bin/claude', supportsResume: true },
+      { agentType: 'codex' as const, displayName: 'Codex', commandName: 'codex', installed: false, path: null, supportsResume: true },
+    ];
+    renderWithToast(<ProjectCard {...defaultProps} isInstalled={isInstalled} agents={agents} />);
 
-    // Claude, Cursor, VSCode buttons should be disabled
-    const claudeBtn = screen.getByTitle('Claude 未安装');
-    const cursorBtn = screen.getByTitle('Cursor 未安装');
-    const vscodeBtn = screen.getByTitle('VSCode 未安装');
-
-    expect(claudeBtn).toBeDisabled();
-    expect(cursorBtn).toBeDisabled();
-    expect(vscodeBtn).toBeDisabled();
-
-    // Finder is always installed
+    // Installed agent shows as enabled
+    expect(screen.getByTitle('用 Claude Code 打开')).toBeEnabled();
+    // Uninstalled agent is NOT shown (only installed agents render)
+    expect(screen.queryByTitle(/Codex/)).not.toBeInTheDocument();
+    // Non-agent tools: finder is always installed
     expect(screen.getByTitle('用 Files 打开')).toBeEnabled();
   });
 
-  it('shows only configured tools when workspace_tools is set', () => {
-    const project = { ...mockProject, workspace_tools: ['claude', 'finder'] };
+  it('shows only installed agents when agents prop is provided', () => {
     const isInstalled = vi.fn().mockReturnValue(true);
-    renderWithToast(<ProjectCard {...defaultProps} project={project} isInstalled={isInstalled} />);
+    const agents = [
+      { agentType: 'claude_code' as const, displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/bin/claude', supportsResume: true },
+    ];
+    renderWithToast(<ProjectCard {...defaultProps} isInstalled={isInstalled} agents={agents} />);
 
-    // Should show Claude and Finder only
-    expect(screen.getByTitle('用 Claude 打开')).toBeInTheDocument();
+    // Should show Claude Code (installed agent) and non-agent tools (VSCode, Files)
+    expect(screen.getByTitle('用 Claude Code 打开')).toBeInTheDocument();
     expect(screen.getByTitle('用 Files 打开')).toBeInTheDocument();
-    // Should NOT show Cursor, VSCode
-    expect(screen.queryByTitle('用 Cursor 打开')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('用 VSCode 打开')).not.toBeInTheDocument();
+    // Codex is not in agents list, should not appear
+    expect(screen.queryByTitle(/Codex/)).not.toBeInTheDocument();
   });
 
   it('calls onToolOpen with tool name when tool button is clicked', async () => {

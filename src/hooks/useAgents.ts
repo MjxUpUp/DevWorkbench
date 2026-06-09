@@ -65,6 +65,7 @@ export function useAgents() {
     prompt: string,
     model?: string,
     linkedRequirementId?: string,
+    parentSessionId?: string,
   ) => {
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
@@ -72,6 +73,7 @@ export function useAgents() {
       prompt,
       model: model || null,
       linkedRequirementId: linkedRequirementId || null,
+      parentSessionId: parentSessionId || null,
     });
     setSessions(prev => [...prev, session]);
     return session;

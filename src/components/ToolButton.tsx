@@ -6,29 +6,39 @@ interface ToolButtonProps {
   tool: string;
   projectPath: string;
   installed: boolean;
+  label?: string;
   onClick?: (toolName: string) => void;
 }
 
-const TOOL_LABELS: Record<string, string> = {
+const DEFAULT_LABELS: Record<string, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   code: 'VSCode',
   finder: 'Files',
   pi: 'Pi',
   codex: 'Codex',
+  gemini: 'Gemini',
+  'github-copilot-cli': 'Copilot',
+  'cursor-agent': 'Cursor',
+  'qwen-code': 'Qwen',
 };
 
 const TOOL_ICONS: Record<string, typeof IconTerminal> = {
   claude: IconSparkles,
   cursor: IconCode,
+  'cursor-agent': IconCode,
   code: IconCode,
   finder: IconFolderOpen,
   pi: IconBrain,
   codex: IconCpu,
+  gemini: IconSparkles,
+  'github-copilot-cli': IconBrain,
+  'qwen-code': IconCpu,
 };
 
-export function ToolButton({ tool, projectPath, installed, onClick }: ToolButtonProps) {
+export function ToolButton({ tool, projectPath, installed, label, onClick }: ToolButtonProps) {
   const IconComponent = TOOL_ICONS[tool] || IconTerminal;
+  const displayLabel = label || DEFAULT_LABELS[tool] || tool;
   const toast = useToast();
 
   const handleClick = async () => {
@@ -38,7 +48,7 @@ export function ToolButton({ tool, projectPath, installed, onClick }: ToolButton
       await launchTool(tool, projectPath);
       onClick?.(tool);
     } catch (e) {
-      toast.error(`启动 ${TOOL_LABELS[tool]} 失败: ${e}`);
+      toast.error(`启动 ${displayLabel} 失败: ${e}`);
     }
   };
 
@@ -47,12 +57,10 @@ export function ToolButton({ tool, projectPath, installed, onClick }: ToolButton
       className={`tool-btn ${installed ? '' : 'disabled'}`}
       onClick={handleClick}
       disabled={!installed}
-      title={installed ? `用 ${TOOL_LABELS[tool]} 打开` : `${TOOL_LABELS[tool]} 未安装`}
+      title={installed ? `用 ${displayLabel} 打开` : `${displayLabel} 未安装`}
     >
       <span className="tool-btn-icon"><IconComponent size={14} /></span>
-      <span className="tool-btn-label">{TOOL_LABELS[tool]}</span>
+      <span className="tool-btn-label">{displayLabel}</span>
     </button>
   );
 }
-
-export { TOOL_LABELS, TOOL_ICONS };

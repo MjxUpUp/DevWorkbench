@@ -167,7 +167,7 @@ function App() {
       )}
 
       {showSettings && (
-        <Settings tools={tools} theme={theme} onThemeChange={setTheme} onClose={() => setShowSettings(false)} />
+        <Settings tools={tools} agents={agentHook.agents} theme={theme} onThemeChange={setTheme} onClose={() => setShowSettings(false)} />
       )}
 
       {editingProject && (

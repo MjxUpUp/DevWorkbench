@@ -5,12 +5,13 @@ import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { open } from '@tauri-apps/plugin-dialog';
 import { IconX } from './Icons';
-import type { AppSettings, ToolStatus, TerminalInfo } from '../types';
+import type { AppSettings, ToolStatus, TerminalInfo, AgentInfo } from '../types';
 
 type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'ready' | 'error';
 
 interface SettingsProps {
   tools: ToolStatus[];
+  agents: AgentInfo[];
   theme: string;
   onThemeChange: (theme: string) => void;
   onClose: () => void;
@@ -27,13 +28,10 @@ const THEMES = [
   { key: 'mint', label: '薄荷', dot: 'mint' },
 ] as const;
 
-const CLI_TOOLS = [
-  { key: 'claude', label: 'Claude Code', hint: '--dangerously-skip-permissions' },
-  { key: 'codex', label: 'Codex', hint: '--full-auto' },
-  { key: 'pi', label: 'Pi', hint: '' },
-] as const;
+// Non-agent tools that are shown in settings (IDE, git)
+const NON_AGENT_TOOLS = ['code', 'git'];
 
-export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps) {
+export function Settings({ tools, agents, theme, onThemeChange, onClose }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings>({
     scan_directories: [],
     tool_paths: {},
@@ -161,6 +159,34 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
     }
   };
 
+  // Build unified tool list: agents (from discovery) + non-agent tools (from detect_tools)
+  const agentEntries = agents.map(a => ({
+    key: a.commandName,
+    label: a.displayName,
+    installed: a.installed,
+    path: a.path,
+    isAgent: true,
+  }));
+
+  const nonAgentEntries = tools
+    .filter(t => NON_AGENT_TOOLS.includes(t.name))
+    .map(t => ({
+      key: t.name,
+      label: t.name === 'code' ? 'VS Code' : t.name,
+      installed: t.installed,
+      path: t.path,
+      isAgent: false,
+    }));
+
+  const allToolEntries = [...agentEntries, ...nonAgentEntries];
+
+  // CLI flags: show all agents that have a command name
+  const cliEntries = agents.map(a => ({
+    key: a.commandName,
+    label: a.displayName,
+    hint: a.agentType === 'claude_code' ? '--dangerously-skip-permissions' : '',
+  }));
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
@@ -174,15 +200,15 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
         <div className="modal-body">
           <h3>工具状态</h3>
           <div className="settings-tools">
-            {tools.map(tool => (
-              <div key={tool.name} className="settings-tool-row">
-                <span className={`status-dot ${tool.installed ? 'installed' : ''}`} />
-                <span className="tool-name">{tool.name}</span>
-                <span className="tool-status">{tool.installed ? `✓ ${tool.path}` : '未安装'}</span>
+            {allToolEntries.map(entry => (
+              <div key={entry.key} className="settings-tool-row">
+                <span className={`status-dot ${entry.installed ? 'installed' : ''}`} />
+                <span className="tool-name">{entry.label}</span>
+                <span className="tool-status">{entry.installed ? `✓ ${entry.path ?? ''}` : '未安装'}</span>
                 <input
                   className="tool-path-input"
-                  value={settings.tool_paths[tool.name] || ''}
-                  onChange={e => setToolPath(tool.name, e.target.value)}
+                  value={settings.tool_paths[entry.key] || ''}
+                  onChange={e => setToolPath(entry.key, e.target.value)}
                   placeholder="自定义路径（可选）"
                 />
               </div>
@@ -218,7 +244,7 @@ export function Settings({ tools, theme, onThemeChange, onClose }: SettingsProps
 
           <h3>CLI 启动参数</h3>
           <div className="settings-cli-flags">
-            {CLI_TOOLS.map(t => (
+            {cliEntries.map(t => (
               <div key={t.key} className="cli-flag-row">
                 <span className="cli-tool-name">{t.label}</span>
                 <input

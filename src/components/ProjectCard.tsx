@@ -2,8 +2,13 @@ import type { Project, GitStatus, Session, AgentInfo, Requirement } from '../typ
 import { ToolButton } from './ToolButton';
 import { AgentStatus } from './AgentStatus';
 import { IconStar, IconEdit, IconTrash, IconSparkles } from './Icons';
+import { formatRelativeTime } from '../utils/formatRelativeTime';
 
-const ALL_TOOLS = ['claude', 'cursor', 'code', 'finder', 'pi', 'codex'] as const;
+// Non-agent tools that are always shown on cards (IDE, file explorer)
+const NON_AGENT_TOOLS = [
+  { name: 'code', label: 'VSCode' },
+  { name: 'finder', label: 'Files' },
+];
 
 interface ProjectCardProps {
   project: Project;
@@ -19,28 +24,28 @@ interface ProjectCardProps {
   onOpenAgent?: (project: Project) => void;
 }
 
-function formatRelativeTime(isoTime: string): string {
-  const now = Date.now();
-  const then = new Date(isoTime).getTime();
-  const diffSec = Math.floor((now - then) / 1000);
-
-  if (diffSec < 60) return '刚刚';
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
-  if (diffSec < 2592000) return `${Math.floor(diffSec / 86400)} 天前`;
-  if (diffSec < 31536000) return `${Math.floor(diffSec / 2592000)} 个月前`;
-  return `${Math.floor(diffSec / 31536000)} 年前`;
-}
-
-export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents: _agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
+export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
   const lastOpened = project.last_opened_at
     ? new Date(project.last_opened_at).toLocaleString('zh-CN')
     : '尚未打开';
 
-  // 用户配置的工具组合（优先），否则全量显示
-  const displayTools = project.workspace_tools.length > 0
-    ? project.workspace_tools
-    : ALL_TOOLS;
+  // Merge agent tools (from discovery) + non-agent tools (IDE, Files)
+  // Agent tools use displayName and installed status from discover_agents
+  const agentTools = agents
+    .filter(a => a.installed)
+    .map(a => ({
+      name: a.commandName,
+      label: a.displayName,
+      installed: true,
+    }));
+
+  const nonAgentTools = NON_AGENT_TOOLS.map(t => ({
+    name: t.name,
+    label: t.label,
+    installed: t.name === 'finder' ? true : isInstalled(t.name),
+  }));
+
+  const displayTools = [...agentTools, ...nonAgentTools];
 
   return (
     <div className="project-card">
@@ -110,16 +115,17 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
       <div className="card-tools">
         {displayTools.map(tool => (
           <ToolButton
-            key={tool}
-            tool={tool}
+            key={tool.name}
+            tool={tool.name}
             projectPath={project.path}
-            installed={tool === 'finder' ? true : isInstalled(tool)}
-            onClick={() => onToolOpen(project.id, tool)}
+            installed={tool.installed}
+            label={tool.label}
+            onClick={() => onToolOpen(project.id, tool.name)}
           />
         ))}
       </div>
 
-      <AgentStatus sessions={sessions} />
+      <AgentStatus sessions={sessions} agents={agents} />
 
       <div className="card-actions">
         {onOpenAgent && (
