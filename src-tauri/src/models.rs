@@ -57,13 +57,14 @@ pub struct GitStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentType {
+pub enum AgentType { // NOTE: do NOT derive Copy — contains variants without trivial copy
     ClaudeCode,
     Codex,
     CursorAgent,
     GeminiCli,
     Copilot,
     QwenCode,
+    Pi,
 }
 
 impl AgentType {
@@ -75,6 +76,7 @@ impl AgentType {
             Self::GeminiCli => "gemini",
             Self::Copilot => "github-copilot-cli",
             Self::QwenCode => "qwen-code",
+            Self::Pi => "pi",
         }
     }
 
@@ -86,6 +88,7 @@ impl AgentType {
             Self::GeminiCli => "Gemini CLI",
             Self::Copilot => "GitHub Copilot",
             Self::QwenCode => "Qwen Code",
+            Self::Pi => "Pi",
         }
     }
 
@@ -97,6 +100,7 @@ impl AgentType {
             Self::GeminiCli,
             Self::Copilot,
             Self::QwenCode,
+            Self::Pi,
         ]
     }
 }
@@ -107,6 +111,16 @@ pub enum SessionStatus {
     Running,
     Completed,
     Failed,
+}
+
+impl SessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

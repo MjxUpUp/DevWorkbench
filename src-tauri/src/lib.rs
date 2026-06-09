@@ -21,7 +21,7 @@ pub fn run() {
             Ok(())
         })
         .manage(commands::agents::AgentState(std::sync::Arc::new(
-            agents::process::AgentProcesses::new(),
+            agents::pty::AgentProcesses::new(),
         )))
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
@@ -54,6 +54,8 @@ pub fn run() {
             commands::agents::update_requirement,
             commands::agents::remove_requirement,
             commands::agents::get_requirements_for_project,
+            commands::agents::pty_write_cmd,
+            commands::agents::pty_resize_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

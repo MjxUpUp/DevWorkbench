@@ -5,6 +5,8 @@ use crate::models::AgentType;
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
     pub agent_type: AgentType,
+    pub display_name: String,
+    pub command_name: String,
     pub installed: bool,
     pub path: Option<String>,
     pub supports_resume: bool,
@@ -37,7 +39,9 @@ pub fn discover_agents() -> Vec<AgentInfo> {
                 matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex);
 
             AgentInfo {
-                agent_type,
+                agent_type: agent_type.clone(),
+                display_name: agent_type.display_name().to_string(),
+                command_name: agent_type.command_name().to_string(),
                 installed,
                 path,
                 supports_resume,
