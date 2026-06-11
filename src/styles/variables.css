@@ -1,0 +1,125 @@
+/* ============================================
+   DEV WORKBENCH — Obsidian Forge Theme Tokens
+   ============================================ */
+
+:root {
+  /* Layout tokens */
+  --sidebar-width: 220px;
+  --header-height: 60px;
+  --session-sidebar-width: 240px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Typography */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --lh-xs: 16px;
+  --lh-sm: 20px;
+  --lh-base: 22px;
+  --lh-lg: 24px;
+  --lh-xl: 28px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Timing */
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── Obsidian Forge dark theme (default) ── */
+  --bg-canvas: #0D0D14;
+  --surface-0: #12121A;
+  --surface-1: #16161E;
+  --surface-2: #1C1C26;
+  --surface-3: #242430;
+  --border: rgba(255, 255, 255, 0.08);
+  --text-primary: #E8E8F0;
+  --text-secondary: #8888A0;
+  --text-tertiary: #555570;
+  --accent: #00D4AA;
+  --text-on-accent: #FFFFFF;
+  --status-running: #00D4AA;
+  --status-success: #34C759;
+  --status-error: #FF5F5F;
+  --status-warning: #FFB547;
+
+  /* Aliases & legacy tokens */
+  --surface-elevated: var(--surface-1);
+  --surface-sunken: #0A0A10;
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --text-muted: var(--text-tertiary);
+  --text-accent: var(--accent);
+  --accent-hover: #00E4BA;
+  --accent-muted: rgba(0, 212, 170, 0.1);
+  --accent-glow: rgba(0, 212, 170, 0.3);
+  --star: #FFD700;
+  --star-muted: rgba(255, 215, 0, 0.15);
+  --cover-1: linear-gradient(135deg, #1a3a2a, #0D0D14);
+  --cover-2: linear-gradient(135deg, #2a1a3a, #0D0D14);
+  --cover-3: linear-gradient(135deg, #3a2a1a, #0D0D14);
+  --cover-4: linear-gradient(135deg, #1a2a3a, #0D0D14);
+  --cover-5: linear-gradient(135deg, #2a3a1a, #0D0D14);
+  --cover-6: linear-gradient(135deg, #3a1a2a, #0D0D14);
+  --danger: var(--status-error);
+  --danger-muted: rgba(255, 95, 95, 0.1);
+  --success: var(--status-success);
+  --warning: var(--status-warning);
+  --cover-badge-bg: rgba(18, 18, 26, 0.75);
+}
+
+/* ── Light theme override ── */
+[data-theme="light"] {
+  --bg-canvas: #FFFFFF;
+  --surface-0: #FFFFFF;
+  --surface-1: #FFFFFF;
+  --surface-2: #F7F7F8;
+  --surface-3: #EEEEF0;
+  --border: #E5E5E7;
+  --text-primary: #1A1A1E;
+  --text-secondary: #6B6B76;
+  --text-tertiary: #A0A0AC;
+  --accent: #0A9E80;
+  --text-on-accent: #FFFFFF;
+  --status-running: #0A9E80;
+  --status-success: #1A8C3A;
+  --status-error: #D03030;
+  --status-warning: #B87000;
+
+  --surface-elevated: #FFFFFF;
+  --surface-sunken: #F7F7F8;
+  --border-subtle: #E5E5E7;
+  --border-default: #E5E5E7;
+  --border-hover: #D0D0D4;
+  --text-muted: #A0A0AC;
+  --text-accent: #0A9E80;
+  --accent-hover: #0CB090;
+  --accent-muted: rgba(10, 158, 128, 0.08);
+  --accent-glow: rgba(10, 158, 128, 0.2);
+  --star: #B87000;
+  --star-muted: rgba(184, 112, 0, 0.1);
+  --cover-1: linear-gradient(135deg, #d4f0e8, #FFFFFF);
+  --cover-2: linear-gradient(135deg, #e8d4f0, #FFFFFF);
+  --cover-3: linear-gradient(135deg, #f0e8d4, #FFFFFF);
+  --cover-4: linear-gradient(135deg, #d4e0f0, #FFFFFF);
+  --cover-5: linear-gradient(135deg, #e0f0d4, #FFFFFF);
+  --cover-6: linear-gradient(135deg, #f0d4e0, #FFFFFF);
+  --danger: #D03030;
+  --danger-muted: rgba(208, 48, 48, 0.08);
+  --success: #1A8C3A;
+  --warning: #B87000;
+  --cover-badge-bg: rgba(255, 255, 255, 0.75);
+}

@@ -1,0 +1,397 @@
+use crate::error::AppError;
+use crate::models::{AgentType, KnowledgeEntry};
+use rusqlite::params;
+
+/// Add a knowledge entry to the database. Skips if a near-duplicate already exists
+/// (same project_hash and matching first 200 chars of content).
+pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<(), AppError> {
+    // Dedup check: match on project_hash + first 200 chars of content
+    let content_prefix = &entry.content[..entry.content.len().min(200)];
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM knowledge_entries WHERE project_hash = ?1 AND SUBSTR(content, 1, 200) = ?2",
+            params![entry.project_hash, content_prefix],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if exists {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO knowledge_entries
+            (id, project_hash, category, title, content, source_agent,
+             source_session_id, source_type, confidence, created_at, updated_at, access_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            entry.id,
+            entry.project_hash,
+            entry.category,
+            entry.title,
+            entry.content,
+            serde_json::to_string(&entry.source_agent)?.trim_matches('"'),
+            entry.source_session_id,
+            entry.source_type,
+            entry.confidence,
+            entry.created_at,
+            entry.updated_at,
+            entry.access_count,
+        ],
+    )?;
+    // Keep FTS index in sync
+    conn.execute(
+        "INSERT INTO knowledge_fts (rowid, title, content) VALUES ((SELECT rowid FROM knowledge_entries WHERE id = ?1), ?2, ?3)",
+        params![entry.id, entry.title, entry.content],
+    )?;
+    Ok(())
+}
+
+/// Search knowledge entries using FTS5 full-text search.
+pub fn search_entries(
+    conn: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<KnowledgeEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT ke.* FROM knowledge_entries ke
+         WHERE ke.rowid IN (
+            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
+         )
+         ORDER BY ke.updated_at DESC
+         LIMIT ?2",
+    )?;
+
+    let entries = stmt.query_map(params![query, limit as i64], |row| row_to_entry(row))?;
+    let mut result = Vec::new();
+    for e in entries {
+        result.push(e?);
+    }
+    Ok(result)
+}
+
+/// FTS5 search scoped to a single project, filtered by confidence, ranked by bm25 relevance.
+pub fn search_entries_for_project(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+    fts_query: &str,
+    confidence_min: f64,
+    limit: usize,
+) -> Result<Vec<KnowledgeEntry>, AppError> {
+    // Use subquery to avoid JOIN column ambiguity with FTS virtual table
+    let mut stmt = conn.prepare(
+        "SELECT * FROM knowledge_entries
+         WHERE rowid IN (
+            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
+         )
+         AND project_hash = ?2
+         AND confidence >= ?3
+         ORDER BY updated_at DESC
+         LIMIT ?4",
+    )?;
+
+    let entries = stmt.query_map(
+        params![fts_query, project_hash, confidence_min, limit as i64],
+        |row| row_to_entry(row),
+    )?;
+    let mut result = Vec::new();
+    for e in entries {
+        result.push(e?);
+    }
+    Ok(result)
+}
+
+/// FTS5 search across all projects except the given one. Used for cross-project knowledge sharing.
+pub fn search_entries_cross_project(
+    conn: &rusqlite::Connection,
+    exclude_project_hash: &str,
+    fts_query: &str,
+    confidence_min: f64,
+    limit: usize,
+) -> Result<Vec<KnowledgeEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM knowledge_entries
+         WHERE rowid IN (
+            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
+         )
+         AND project_hash != ?2
+         AND confidence >= ?3
+         ORDER BY updated_at DESC
+         LIMIT ?4",
+    )?;
+
+    let entries = stmt.query_map(
+        params![fts_query, exclude_project_hash, confidence_min, limit as i64],
+        |row| row_to_entry(row),
+    )?;
+    let mut result = Vec::new();
+    for e in entries {
+        result.push(e?);
+    }
+    Ok(result)
+}
+
+/// Delete knowledge entries older than `max_age_days`. Also cleans up FTS rows.
+/// Returns the number of deleted entries.
+pub fn prune_old_entries(
+    conn: &rusqlite::Connection,
+    max_age_days: i64,
+) -> Result<usize, AppError> {
+    let cutoff = chrono::Local::now() - chrono::Duration::days(max_age_days);
+    let cutoff_str = cutoff.to_rfc3339();
+
+    // Wrap in transaction to keep FTS and main table consistent
+    conn.execute_batch("BEGIN")?;
+
+    let result = (|| -> Result<usize, AppError> {
+        // Collect IDs to delete
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM knowledge_entries WHERE updated_at < ?1",
+            )?;
+            let rows = stmt.query_map(params![cutoff_str], |row| row.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            v
+        };
+
+        let count = ids.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Delete FTS rows first (by rowid)
+        for id in &ids {
+            let rowid: Result<i64, _> = conn.query_row(
+                "SELECT rowid FROM knowledge_entries WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            );
+            if let Ok(rid) = rowid {
+                conn.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rid])?;
+            }
+        }
+
+        // Delete main entries
+        for id in &ids {
+            conn.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
+        }
+
+        log::info!("Knowledge prune: deleted {} entries older than {} days", count, max_age_days);
+        Ok(count)
+    })();
+
+    match &result {
+        Ok(_) => { let _ = conn.execute_batch("COMMIT"); }
+        Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+    }
+    result
+}
+
+/// Get all knowledge entries for a project.
+pub fn get_entries_for_project(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+) -> Result<Vec<KnowledgeEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM knowledge_entries WHERE project_hash = ?1 ORDER BY updated_at DESC",
+    )?;
+
+    let entries = stmt.query_map(params![project_hash], |row| row_to_entry(row))?;
+    let mut result = Vec::new();
+    for e in entries {
+        result.push(e?);
+    }
+    Ok(result)
+}
+
+/// Delete a knowledge entry by ID.
+pub fn delete_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppError> {
+    // Get rowid for FTS cleanup
+    let rowid: i64 = conn.query_row(
+        "SELECT rowid FROM knowledge_entries WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    ).map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", id)))?;
+
+    conn.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rowid])?;
+    Ok(())
+}
+
+/// Increment access count and return the entry.
+pub fn touch_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE knowledge_entries SET access_count = access_count + 1, updated_at = ?1 WHERE id = ?2",
+        params![chrono::Local::now().to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Error> {
+    let agent_type_str: String = row.get(5)?;
+    let agent_type: AgentType =
+        serde_json::from_value(serde_json::Value::String(agent_type_str))
+            .unwrap_or(AgentType::ClaudeCode);
+
+    Ok(KnowledgeEntry {
+        id: row.get(0)?,
+        project_hash: row.get(1)?,
+        category: row.get(2)?,
+        title: row.get(3)?,
+        content: row.get(4)?,
+        source_agent: agent_type,
+        source_session_id: row.get(6)?,
+        source_type: row.get(7)?,
+        confidence: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        access_count: row.get(11)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::models::AgentType;
+
+    struct TempDb {
+        _tmp: tempfile::TempDir,
+        conn: rusqlite::Connection,
+    }
+
+    impl TempDb {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db_path = tmp.path().join("test.db");
+            let conn = db::init_db(&db_path).expect("init_db failed");
+            Self { _tmp: tmp, conn }
+        }
+    }
+
+    fn make_entry(id: &str, project_hash: &str, title: &str, content: &str) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: id.to_string(),
+            project_hash: project_hash.to_string(),
+            category: "insight".to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: None,
+            source_type: "auto_collect".to_string(),
+            confidence: 0.8,
+            created_at: chrono::Local::now().to_rfc3339(),
+            updated_at: chrono::Local::now().to_rfc3339(),
+            access_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_add_and_search() {
+        let db = TempDb::new();
+        let e1 = make_entry("k1", "proj_a", "Rust error handling", "Use thiserror for error types in Rust");
+        let e2 = make_entry("k2", "proj_a", "CSS variables", "Define CSS custom properties for theming");
+        let e3 = make_entry("k3", "proj_b", "Tauri commands", "Use State for dependency injection");
+
+        add_entry(&db.conn, &e1).unwrap();
+        add_entry(&db.conn, &e2).unwrap();
+        add_entry(&db.conn, &e3).unwrap();
+
+        let results = search_entries(&db.conn, "Rust error", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "k1");
+    }
+
+    #[test]
+    fn test_get_entries_for_project() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Title 1", "Content 1")).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj_b", "Title 2", "Content 2")).unwrap();
+        add_entry(&db.conn, &make_entry("k3", "proj_a", "Title 3", "Content 3")).unwrap();
+
+        let proj_a = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(proj_a.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_entry() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Title", "Content")).unwrap();
+        delete_entry(&db.conn, "k1").unwrap();
+        assert!(delete_entry(&db.conn, "k1").is_err());
+    }
+
+    #[test]
+    fn test_dedup_same_content_skipped() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Title", "Same content here that is long enough")).unwrap();
+        // Same project + same content prefix → should be silently skipped
+        add_entry(&db.conn, &make_entry("k2", "proj_a", "Title 2", "Same content here that is long enough")).unwrap();
+        let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(entries.len(), 1); // dedup: only first inserted
+        assert_eq!(entries[0].id, "k1");
+    }
+
+    #[test]
+    fn test_dedup_different_content_allowed() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Title", "Content about Rust")).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj_a", "Title 2", "Content about Python")).unwrap();
+        let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_search_entries_for_project() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Rust error handling", "Use thiserror for error types in Rust")).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj_a", "CSS theming", "Define CSS custom properties for dark mode")).unwrap();
+        add_entry(&db.conn, &make_entry("k3", "proj_b", "Rust async", "Use tokio for async runtime in Rust")).unwrap();
+
+        // Scoped to proj_a, search for "Rust" → should only get k1
+        let results = search_entries_for_project(&db.conn, "proj_a", "Rust", 0.5, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "k1");
+    }
+
+    #[test]
+    fn test_search_entries_cross_project() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "Rust error handling", "Use thiserror for error types in Rust")).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj_b", "Rust async runtime", "Use tokio for async Rust applications")).unwrap();
+        add_entry(&db.conn, &make_entry("k3", "proj_b", "CSS theming", "Define CSS custom properties")).unwrap();
+
+        // Exclude proj_a, search for "Rust" → should get k2 from proj_b only
+        let results = search_entries_cross_project(&db.conn, "proj_a", "Rust", 0.5, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "k2");
+    }
+
+    #[test]
+    fn test_prune_old_entries() {
+        let db = TempDb::new();
+        // Recent entry
+        let mut recent = make_entry("k1", "proj_a", "Recent", "Fresh content here");
+        recent.updated_at = chrono::Local::now().to_rfc3339();
+        add_entry(&db.conn, &recent).unwrap();
+
+        // Old entry (200 days ago)
+        let mut old = make_entry("k2", "proj_a", "Old", "Stale content from long ago");
+        old.updated_at = (chrono::Local::now() - chrono::Duration::days(200)).to_rfc3339();
+        add_entry(&db.conn, &old).unwrap();
+
+        let before = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(before.len(), 2);
+
+        let pruned = prune_old_entries(&db.conn, 180).unwrap();
+        assert_eq!(pruned, 1);
+
+        let after = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "k1");
+    }
+}

@@ -33,21 +33,12 @@ export function useProjects() {
       last_opened_tools: [],
       workspace_tools: [],
     };
-    // 后端原子操作：load → push → save → 返回完整数组
     const updated = await invoke<Project[]>('add_project', { project: newProject });
     setProjects(updated);
     return newProject;
   }, []);
 
-  const removeProject = useCallback(async (id: string) => {
-    // 后端原子操作：load → retain → save → 返回完整数组
-    const updated = await invoke<Project[]>('remove_project', { id });
-    setProjects(updated);
-  }, []);
-
   const updateProject = useCallback(async (id: string, patch: Partial<Project>) => {
-    // 后端原子操作：load → patch → save → 返回完整数组
-    // 前端 camelCase 字段名转 snake_case 由 Tauri 自动处理
     const patchJson = Object.fromEntries(
       Object.entries(patch).filter(([_, v]) => v !== undefined)
     );
@@ -55,19 +46,5 @@ export function useProjects() {
     setProjects(updated);
   }, []);
 
-  const recordOpen = useCallback(async (id: string) => {
-    const updated = await invoke<Project[]>('update_project_open', { id });
-    setProjects(updated);
-  }, []);
-
-  const recordToolOpen = useCallback(async (id: string, toolName: string) => {
-    try {
-      const updated = await invoke<Project[]>('record_tool_open', { id, toolName });
-      setProjects(updated);
-    } catch (e) {
-      console.warn('record_tool_open failed:', e);
-    }
-  }, []);
-
-  return { projects, loading, error, addProject, removeProject, updateProject, recordOpen, recordToolOpen, reload: load };
+  return { projects, loading, error, addProject, updateProject };
 }

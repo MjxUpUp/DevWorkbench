@@ -1,0 +1,93 @@
+/* =============================================
+   Timeline Tab
+   ============================================= */
+
+.timeline-tab {
+  padding: var(--space-4);
+  overflow-y: auto;
+  height: 100%;
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-2);
+}
+
+.activity-item:hover {
+  background: var(--surface-2);
+}
+
+.activity-item-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+  margin-top: 2px;
+}
+
+.activity-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.activity-item-title {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.activity-item-desc {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+.activity-item-time {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.activity-item-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 2px;
+}
+
+.activity-item-session-link {
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.activity-item-session-link:hover {
+  color: var(--text-primary);
+}
+
+.activity-item-agent {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.activity-item.session_completed .activity-item-icon {
+  color: var(--status-success);
+}
+
+.activity-item.session_failed .activity-item-icon {
+  color: var(--status-error);
+}
+
+.activity-item.session_started .activity-item-icon {
+  color: var(--accent);
+}

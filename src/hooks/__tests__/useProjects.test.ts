@@ -125,27 +125,6 @@ describe('useProjects', () => {
     }));
   });
 
-  it('should remove a project via backend atomic command', async () => {
-    mockedInvoke.mockResolvedValueOnce(mockProjects); // load
-    // remove_project returns the array without the removed project
-    const afterRemove = mockProjects.filter(p => p.id !== '1');
-    mockedInvoke.mockResolvedValueOnce(afterRemove);
-
-    const { result } = renderHook(() => useProjects());
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-
-    await act(async () => {
-      await result.current.removeProject('1');
-    });
-
-    expect(result.current.projects).toHaveLength(1);
-    expect(result.current.projects[0].id).toBe('2');
-    expect(mockedInvoke).toHaveBeenCalledWith('remove_project', { id: '1' });
-  });
-
   it('should update a project via backend atomic command', async () => {
     mockedInvoke.mockResolvedValueOnce(mockProjects); // load
     // update_project returns the array with the patched project
@@ -191,26 +170,5 @@ describe('useProjects', () => {
 
     const updated = result.current.projects.find(p => p.id === '1');
     expect(updated!.starred).toBe(true);
-  });
-
-  it('should record open and update projects from backend', async () => {
-    const updatedProjects = mockProjects.map(p =>
-      p.id === '1' ? { ...p, open_count: 6, last_opened_at: '2025-06-06T00:00:00.000Z' } : p
-    );
-    mockedInvoke.mockResolvedValueOnce(mockProjects);
-    mockedInvoke.mockResolvedValueOnce(updatedProjects);
-
-    const { result } = renderHook(() => useProjects());
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-
-    await act(async () => {
-      await result.current.recordOpen('1');
-    });
-
-    expect(mockedInvoke).toHaveBeenCalledWith('update_project_open', { id: '1' });
-    expect(result.current.projects.find(p => p.id === '1')!.open_count).toBe(6);
   });
 });

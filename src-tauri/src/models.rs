@@ -156,6 +156,16 @@ pub enum RequirementStatus {
     Done,
 }
 
+impl RequirementStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Requirement {
@@ -169,4 +179,83 @@ pub struct Requirement {
     pub artifacts: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+// ---- Activity types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEvent {
+    pub id: String,
+    pub project_hash: String,
+    pub agent_type: AgentType,
+    pub event_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub files_changed: Option<Vec<String>>,
+    pub session_id: Option<String>,
+    pub timestamp: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
+// ---- Knowledge types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeEntry {
+    pub id: String,
+    pub project_hash: String,
+    pub category: String,
+    pub title: String,
+    pub content: String,
+    pub source_agent: AgentType,
+    pub source_session_id: Option<String>,
+    pub source_type: String,
+    pub confidence: f64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub access_count: i64,
+}
+
+// ---- Quality types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityReport {
+    pub id: String,
+    pub session_id: String,
+    pub checks: Vec<QualityCheck>,
+    pub overall_status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityCheck {
+    pub name: String,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+// ---- Config types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub target_agents: Vec<AgentType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConfigFile {
+    pub servers: Vec<McpServerConfig>,
 }
