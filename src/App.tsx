@@ -1,201 +1,89 @@
-import { useState, useMemo, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { Sidebar } from './components/Sidebar';
-import { ProjectGrid } from './components/ProjectGrid';
+import { useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
 import { AddProject } from './components/AddProject';
-import { EditProject } from './components/EditProject';
 import { Settings } from './components/Settings';
-import { AgentPanel } from './components/AgentPanel';
+import { Sidebar } from './components/Sidebar';
+import { MainPanel } from './components/MainPanel';
+import { CommandPalette } from './components/CommandPalette';
+import { ConfigCenter } from './components/ConfigCenter';
 import { ToastProvider } from './components/Toast';
-import { useProjects } from './hooks/useProjects';
 import { useTools } from './hooks/useTools';
-import { useGitStatus } from './hooks/useGitStatus';
-import { useAgents } from './hooks/useAgents';
-import { IconSearch, IconPlus, IconFolder, IconClock, IconStar, IconSettings } from './components/Icons';
-import type { Project, AppSettings } from './types';
+import { useAgentStore } from './stores/agentStore';
+import { useNavigationStore } from './stores/navigationStore';
+import { useProjectStore } from './stores/projectStore';
 import './styles/index.css';
 
-const SIDEBAR_ITEMS = [
-  { key: 'all', label: '全部项目', IconComponent: IconFolder },
-  { key: 'recent', label: '最近打开', IconComponent: IconClock },
-  { key: 'starred', label: '收藏', IconComponent: IconStar },
-];
-
-function App() {
-  const [activeView, setActiveView] = useState('all');
-  const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [editingProject, setEditingProject] = useState<Project | null>(null);
-  const [theme, setThemeState] = useState('obsidian');
-  const [activeAgentProject, setActiveAgentProject] = useState<Project | null>(null);
-
-  const { projects, addProject, removeProject, updateProject, recordOpen, recordToolOpen, error: projectError } = useProjects();
-  const { tools, isInstalled, error: toolsError } = useTools();
-  const { gitStatusMap } = useGitStatus(projects);
-  const agentHook = useAgents();
-
-  // 启动时加载主题设置
-  useEffect(() => {
-    invoke<AppSettings>('load_settings')
-      .then(s => {
-        if (s.theme) {
-          setThemeState(s.theme);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  // 主题变化时应用到 DOM
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
-
-  const setTheme = async (newTheme: string) => {
-    setThemeState(newTheme);
-    try {
-      const settings = await invoke<AppSettings>('load_settings');
-      settings.theme = newTheme;
-      await invoke('save_settings', { settings });
-    } catch {}
-  };
-
-  const filteredProjects = useMemo(() => {
-    let list = projects;
-
-    if (activeView === 'recent') {
-      list = [...list]
-        .filter(p => p.last_opened_at)
-        .sort((a, b) => (b.last_opened_at || '').localeCompare(a.last_opened_at || ''));
-    } else if (activeView === 'starred') {
-      list = list.filter(p => p.starred);
-    }
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter(p =>
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        p.tags.some(t => t.toLowerCase().includes(q)) ||
-        p.path.toLowerCase().includes(q)
+// Error boundary to catch React render crashes
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null; componentStack: string | null }> {
+  state = { error: null as Error | null, componentStack: null as string | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ErrorBoundary]', error, info.componentStack);
+    this.setState({ componentStack: info.componentStack ?? null });
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 32, color: '#ff6b6b', background: '#1a1a2e', minHeight: '100vh', fontFamily: 'monospace', whiteSpace: 'pre-wrap', fontSize: 13 }}>
+          <h2>React Render Error</h2>
+          <p><b>{this.state.error.message}</b></p>
+          <p>{this.state.error.stack}</p>
+          {this.state.componentStack && (
+            <>
+              <h3 style={{ marginTop: 16 }}>Component Stack:</h3>
+              <p style={{ color: '#aaa' }}>{this.state.componentStack}</p>
+            </>
+          )}
+        </div>
       );
     }
+    return this.props.children;
+  }
+}
 
-    return list;
-  }, [projects, activeView, searchQuery]);
+function App() {
+  const { tools, error: toolsError } = useTools();
 
-  const handleToolOpen = async (id: string, toolName: string) => {
-    await recordOpen(id);
-    await recordToolOpen(id, toolName);
-  };
+  // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
+  const agents = useAgentStore((s) => s.agents);
+  const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
+  const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
+  const settingsOpen = useNavigationStore((s) => s.settingsOpen);
+  const setSettingsOpen = useNavigationStore((s) => s.setSettingsOpen);
 
-  const handleToggleStar = async (id: string) => {
-    const project = projects.find(p => p.id === id);
-    if (project) {
-      await updateProject(id, { starred: !project.starred });
-    }
-  };
+  // Project store — load projects on mount
+  const projects = useProjectStore((s) => s.projects);
+  const projectError = useProjectStore((s) => s.error);
+  const addProject = useProjectStore((s) => s.addProject);
+  const loadProjects = useProjectStore((s) => s.loadProjects);
 
-  const handleEdit = async (project: Project) => {
-    setEditingProject(project);
-  };
+  useEffect(() => { loadProjects(); }, [loadProjects]);
 
-  const handleRemove = async (id: string) => {
-    if (confirm('确定要移除此项目吗？（不会删除本地文件）')) {
-      await removeProject(id);
-    }
-  };
-
-  const emptyTexts: Record<string, string> = {
-    all: '暂无项目，点击下方按钮添加你的第一个项目',
-    recent: '还没有打开过任何项目',
-    starred: '还没有收藏任何项目',
-  };
+  // Initialize agent store event listeners once (use getState to avoid re-render)
+  useEffect(() => {
+    return useAgentStore.getState().initEventListeners();
+  }, []);
 
   return (
+    <ErrorBoundary>
     <ToastProvider>
     <div className="app">
-      <Sidebar
-        items={SIDEBAR_ITEMS}
-        activeKey={activeView}
-        onSelect={setActiveView}
-        footer={
-          <button className="sidebar-item" onClick={() => setShowSettings(true)}>
-            <span className="sidebar-item-icon"><IconSettings /></span>
-            <span className="sidebar-item-label">设置</span>
-          </button>
-        }
-      />
+      <Sidebar />
+      <MainPanel />
+      <CommandPalette />
+      <ConfigCenter />
 
-      <main className="main-content">
-        {(projectError || toolsError) && <div className="error-banner">{projectError || toolsError}</div>}
-        <div className="main-header">
-          <div className="search-wrap">
-            <IconSearch size={16} />
-            <input
-              className="search-input"
-              type="text"
-              placeholder="搜索项目..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-            />
-          </div>
-          <button className="add-btn" onClick={() => setShowAdd(true)}>
-            <IconPlus size={16} />
-            新建项目
-          </button>
-        </div>
+      {(projectError || toolsError) && <div className="error-banner" style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',zIndex:300}}>{projectError || toolsError}</div>}
 
-        <ProjectGrid
-          projects={filteredProjects}
-          gitStatusMap={gitStatusMap}
-          isInstalled={isInstalled}
-          onToolOpen={handleToolOpen}
-          onEdit={handleEdit}
-          onRemove={handleRemove}
-          onToggleStar={handleToggleStar}
-          emptyText={emptyTexts[activeView]}
-          sessions={agentHook.sessions}
-          agents={agentHook.agents}
-          requirements={agentHook.requirements}
-          onOpenAgent={setActiveAgentProject}
-        />
-      </main>
-
-      {showAdd && (
-        <AddProject onAdd={addProject} onClose={() => setShowAdd(false)} existingProjects={projects} />
+      {addProjectOpen && (
+        <AddProject onAdd={async (p) => { await addProject(p); setAddProjectOpen(false); }} onClose={() => setAddProjectOpen(false)} existingProjects={projects} />
       )}
 
-      {showSettings && (
-        <Settings tools={tools} agents={agentHook.agents} theme={theme} onThemeChange={setTheme} onClose={() => setShowSettings(false)} />
-      )}
-
-      {editingProject && (
-        <EditProject
-          project={editingProject}
-          onSave={updateProject}
-          onClose={() => setEditingProject(null)}
-        />
-      )}
-
-      {activeAgentProject && (
-        <AgentPanel
-          project={activeAgentProject}
-          sessions={agentHook.sessions}
-          requirements={agentHook.requirements}
-          agents={agentHook.agents}
-          onClose={() => setActiveAgentProject(null)}
-          spawnAgent={agentHook.spawnAgent}
-          stopAgent={agentHook.stopAgent}
-          addRequirement={agentHook.addRequirement}
-          updateRequirement={agentHook.updateRequirement}
-          getSessionsForProject={agentHook.getSessionsForProject}
-          getRequirementsForProject={agentHook.getRequirementsForProject}
-          recommendAgent={agentHook.recommendAgent}
-        />
+      {settingsOpen && (
+        <Settings tools={tools} agents={agents} onClose={() => setSettingsOpen(false)} />
       )}
     </div>
     </ToastProvider>
+    </ErrorBoundary>
   );
 }
 

@@ -1,4 +1,6 @@
+use crate::db::DbState;
 use crate::models::{AgentType, ToolStatus};
+use tauri::State;
 
 /// macOS GUI 应用 PATH 不包含 brew 等路径，需要手动扩展
 #[cfg(target_os = "macos")]
@@ -39,12 +41,14 @@ pub(crate) fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
 const NON_AGENT_TOOLS: &[&str] = &["code", "git"];
 
 #[tauri::command]
-pub fn detect_tools() -> Vec<ToolStatus> {
+pub fn detect_tools(db: State<'_, DbState>) -> Vec<ToolStatus> {
+    let conn = db.0.lock().expect("db lock");
     // 读取用户自定义路径
-    let custom_paths = crate::commands::projects::load_settings()
+    let custom_paths = crate::commands::projects::load_settings_from_db(&conn)
         .ok()
         .map(|s| s.tool_paths)
         .unwrap_or_default();
+    drop(conn);
 
     let mut results = Vec::new();
 

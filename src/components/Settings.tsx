@@ -12,26 +12,13 @@ type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'download
 interface SettingsProps {
   tools: ToolStatus[];
   agents: AgentInfo[];
-  theme: string;
-  onThemeChange: (theme: string) => void;
   onClose: () => void;
 }
-
-const THEMES = [
-  { key: 'obsidian', label: '黑曜石', dot: 'obsidian' },
-  { key: 'midnight', label: '午夜蓝', dot: 'midnight' },
-  { key: 'ember', label: '琥珀', dot: 'ember' },
-  { key: 'rose', label: '玫瑰', dot: 'rose' },
-  { key: 'nord', label: '极光', dot: 'nord' },
-  { key: 'daylight', label: '日光', dot: 'daylight' },
-  { key: 'paper', label: '纸白', dot: 'paper' },
-  { key: 'mint', label: '薄荷', dot: 'mint' },
-] as const;
 
 // Non-agent tools that are shown in settings (IDE, git)
 const NON_AGENT_TOOLS = ['code', 'git'];
 
-export function Settings({ tools, agents, theme, onThemeChange, onClose }: SettingsProps) {
+export function Settings({ tools, agents, onClose }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings>({
     scan_directories: [],
     tool_paths: {},
@@ -271,20 +258,6 @@ export function Settings({ tools, agents, theme, onThemeChange, onClose }: Setti
               <button onClick={pickScanDir}>选择</button>
               <button onClick={addScanDir}>添加</button>
             </div>
-          </div>
-
-          <h3>主题</h3>
-          <div className="theme-picker">
-            {THEMES.map(t => (
-              <button
-                key={t.key}
-                className={`theme-swatch ${theme === t.key ? 'active' : ''}`}
-                onClick={() => onThemeChange(t.key)}
-              >
-                <span className={`theme-swatch-dot ${t.dot}`} />
-                {t.label}
-              </button>
-            ))}
           </div>
 
           <h3>关于</h3>

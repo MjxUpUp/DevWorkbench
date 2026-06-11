@@ -1,4 +1,6 @@
+use crate::db::DbState;
 use std::process::Command;
+use tauri::State;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -62,7 +64,7 @@ fn resolve_editor_path(editor: &str, custom_path: Option<&str>) -> String {
 }
 
 #[tauri::command]
-pub fn open_in_editor(editor: String, project_path: String) -> Result<(), String> {
+pub fn open_in_editor(editor: String, project_path: String, db: State<'_, DbState>) -> Result<(), String> {
     let path = std::path::Path::new(&project_path);
     if !path.exists() {
         return Err(format!("目录不存在: {}", project_path));
@@ -77,10 +79,12 @@ pub fn open_in_editor(editor: String, project_path: String) -> Result<(), String
     }
 
     // 优先读取用户设置中的自定义路径
-    let custom_path = crate::commands::projects::load_settings()
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let custom_path = crate::commands::projects::load_settings_from_db(&conn)
         .ok()
         .and_then(|s| s.tool_paths.get(&editor).cloned())
         .filter(|p| !p.is_empty());
+    drop(conn);
 
     let resolved = resolve_editor_path(&editor, custom_path.as_deref());
 

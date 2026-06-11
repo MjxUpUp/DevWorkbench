@@ -1,68 +1,44 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
-import type { Project, Session, Requirement, AgentInfo, AgentType } from '../types';
-import { AgentSelector } from './AgentSelector';
+import type { AgentType } from '../types';
 import { TerminalView } from './TerminalView';
-import { RequirementList } from './RequirementList';
-import { SessionTimeline } from './SessionTimeline';
-import { IconX, IconPlay, IconStop, IconHistory, IconSparkles } from './Icons';
-import { useToast } from './Toast';
+import { QualityReportPanel } from './QualityReportPanel';
+import { QualityBadge } from './QualityBadge';
+import { IconPlay, IconStop } from './Icons';
+import { useAgentStore } from '../stores/agentStore';
+import { useNavigationStore } from '../stores/navigationStore';
 
-interface AgentPanelProps {
-  project: Project;
-  sessions: Session[];
-  requirements: Requirement[];
-  agents: AgentInfo[];
-  onClose: () => void;
-  spawnAgent: (projectPath: string, agentType: AgentType, prompt: string, model?: string, linkedRequirementId?: string, parentSessionId?: string) => Promise<Session>;
-  stopAgent: (sessionId: string) => Promise<void>;
-  addRequirement: (req: Requirement) => Promise<Requirement[]>;
-  updateRequirement: (id: string, patch: Record<string, unknown>) => Promise<Requirement[]>;
-  getSessionsForProject: (projectPath: string) => Session[];
-  getRequirementsForProject: (projectPath: string) => Requirement[];
-  recommendAgent: (tags: string[]) => Promise<AgentType | null>;
-}
-
-type PanelTab = 'active' | 'requirements' | 'history';
-
-export function AgentPanel({
-  project,
-  sessions: allSessions,
-  requirements: allRequirements,
-  agents,
-  onClose,
-  spawnAgent,
-  stopAgent,
-  addRequirement,
-  updateRequirement,
-  getSessionsForProject,
-  getRequirementsForProject,
-  recommendAgent,
-}: AgentPanelProps) {
-  const [activeTab, setActiveTab] = useState<PanelTab>('active');
+export function AgentPanel() {
+  const project = useNavigationStore((s) => s.activeProject);
+  const activeSessionId = useNavigationStore((s) => s.selectedSessionId);
+  const selectSession = useNavigationStore((s) => s.selectSession);
   const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null);
   const [prompt, setPrompt] = useState('');
-  const [continueFromId, setContinueFromId] = useState<string | null>(null);
   const [recommended, setRecommended] = useState<AgentType | null>(null);
-  const toast = useToast();
-  const [splitRatio, setSplitRatio] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`agent-panel-split:${project.path}`);
-      return saved ? parseFloat(saved) : 0.35;
-    } catch { return 0.35; }
-  });
-  const [isDragging, setIsDragging] = useState(false);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef({ startY: 0, startRatio: 0 });
-  const splitRatioRef = useRef(splitRatio);
-  splitRatioRef.current = splitRatio;
+  const [showAgentDropdown, setShowAgentDropdown] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Zustand stores
+  const allSessions = useAgentStore((s) => s.sessions);
+  const agents = useAgentStore((s) => s.agents);
+  const spawnAgent = useAgentStore((s) => s.spawnAgent);
+  const stopAgent = useAgentStore((s) => s.stopAgent);
+  const getSessionsForProject = useAgentStore((s) => s.getSessionsForProject);
+  const recommendAgent = useAgentStore((s) => s.recommendAgent);
+  const newConversation = useAgentStore((s) => s.newConversation);
+  const launchForRequirement = useAgentStore((s) => s.launchForRequirement);
+  const deleteRequirement = useAgentStore((s) => s.removeRequirement);
+  const updateRequirement = useAgentStore((s) => s.updateRequirement);
+  const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
+
+  const allRequirements = useAgentStore((s) => s.requirements);
+  const requirements = useMemo(
+    () => project ? allRequirements.filter(r => r.projectPath === project.path) : [],
+    [allRequirements, project?.path]
+  );
 
   const projectSessions = useMemo(
-    () => getSessionsForProject(project.path),
-    [getSessionsForProject, project.path, allSessions]
-  );
-  const projectRequirements = useMemo(
-    () => getRequirementsForProject(project.path),
-    [getRequirementsForProject, project.path, allRequirements]
+    () => project ? getSessionsForProject(project.path) : [],
+    [getSessionsForProject, project?.path, allSessions]
   );
 
   const runningSession = useMemo(
@@ -70,15 +46,43 @@ export function AgentPanel({
     [projectSessions]
   );
 
+  // Find the active requirement linked to session
+  const activeRequirement = useMemo(() => {
+    if (activeSessionId) {
+      return requirements.find(r => r.linkedSessionId === activeSessionId) ?? null;
+    }
+    return null;
+  }, [requirements, activeSessionId]);
+
+  // The session to display
+  const displaySession = runningSession ?? (
+    activeSessionId ? allSessions.find(s => s.id === activeSessionId) ?? null : null
+  );
+
   const installedAgents = useMemo(
     () => agents.filter(a => a.installed),
     [agents]
   );
 
+  // Fetch quality report when a session completes
+  const qualityReports = useAgentStore((s) => s.qualityReports);
+  const fetchQualityReport = useAgentStore((s) => s.fetchQualityReport);
+  const qualityReport = useMemo(() => {
+    if (!displaySession || displaySession.status === 'running') return null;
+    return qualityReports.get(displaySession.id) ?? null;
+  }, [displaySession, qualityReports]);
+
+  useEffect(() => {
+    if (displaySession && displaySession.status !== 'running' && !qualityReport) {
+      fetchQualityReport(displaySession.id);
+    }
+  }, [displaySession?.id, displaySession?.status, qualityReport, fetchQualityReport]);
+
   // Auto-select first installed agent or recommended
-  useMemo(() => {
+  useEffect(() => {
     if (selectedAgent) return;
-    recommendAgent(project.tags).then(rec => {
+    const tags = project?.tags ?? [];
+    recommendAgent(tags).then(rec => {
       setRecommended(rec);
       if (rec && agents.find(a => a.agentType === rec)?.installed) {
         setSelectedAgent(rec);
@@ -86,18 +90,42 @@ export function AgentPanel({
         setSelectedAgent(installedAgents[0].agentType);
       }
     });
-  }, []);
+  }, [project]);
+
+  const isContinuing = !!displaySession && displaySession.status !== 'running';
 
   const handleSend = useCallback(async () => {
-    if (!selectedAgent || !prompt.trim() || runningSession) return;
+    if (!selectedAgent || !prompt.trim() || runningSession || !project) return;
+    const text = prompt.trim();
     try {
-      await spawnAgent(project.path, selectedAgent, prompt.trim(), undefined, undefined, continueFromId ?? undefined);
+      if (activeSessionId && displaySession && displaySession.status !== 'running') {
+        // Continue: link new session to same requirement + switch view
+        const linkedReq = requirements.find(r => r.linkedSessionId === activeSessionId);
+        const session = await spawnAgent(
+          project.path, selectedAgent, text,
+          undefined,
+          linkedReq?.id,
+          activeSessionId
+        );
+        if (linkedReq) {
+          await updateRequirement(linkedReq.id, {
+            linkedSessionId: session.id,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        selectSession(session.id);
+      } else {
+        const agent = selectedAgent || getDefaultAgent();
+        if (agent) {
+          const session = await newConversation(project.path, text, agent);
+          selectSession(session.id);
+        }
+      }
       setPrompt('');
-      setContinueFromId(null);
     } catch (e) {
-      console.error('Failed to spawn agent:', e);
+      console.error('Failed to send:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project.path, spawnAgent, continueFromId]);
+  }, [selectedAgent, prompt, runningSession, project, spawnAgent, activeSessionId, displaySession, requirements, newConversation, getDefaultAgent, selectSession, updateRequirement]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
@@ -108,266 +136,190 @@ export function AgentPanel({
     }
   }, [runningSession, stopAgent]);
 
-  const handleAddRequirement = useCallback(async (title: string) => {
-    const req: Requirement = {
-      id: '',
-      projectPath: project.path,
-      title,
-      description: null,
-      status: 'todo',
-      priority: null,
-      linkedSessionId: null,
-      artifacts: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await addRequirement(req);
-  }, [project.path, addRequirement]);
+  const canSend = !!project && !!selectedAgent && prompt.trim() && !runningSession;
 
-  const handleStartRequirement = useCallback(async (id: string) => {
-    const req = projectRequirements.find(r => r.id === id);
-    if (!req) {
-      toast.error('需求未找到');
-      return;
-    }
+  const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setPrompt(e.target.value);
+    const el = e.target;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+  };
 
-    // Already running for this project?
-    if (runningSession) {
-      toast.info('已有 agent 在运行中');
-      return;
-    }
-
-    // Resolve agent BEFORE updating status — avoids needing to revert on no-agent
-    const agent = selectedAgent
-      ?? recommended
-      ?? (installedAgents.length > 0 ? installedAgents[0].agentType : null);
-
-    if (!agent) {
-      toast.error('请先安装 AI 工具');
-      return;
-    }
-
-    // Now safe to update status
-    try {
-      await updateRequirement(id, { status: 'in_progress' });
-    } catch (e) {
-      toast.error('更新需求状态失败');
-      return;
-    }
-
-    // Spawn agent session
-    try {
-      const session = await spawnAgent(
-        project.path,
-        agent,
-        req.title,
-        undefined,
-        req.id,   // linkedRequirementId
-      );
-
-      // Link session back to requirement
-      await updateRequirement(id, { linkedSessionId: session.id });
-
-      // Switch to Active tab to show terminal output
-      setActiveTab('active');
-    } catch (e) {
-      // Revert status on failure
-      await updateRequirement(id, { status: 'todo' }).catch(() => {});
-      toast.error(`启动 agent 失败: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [projectRequirements, runningSession, selectedAgent, recommended, installedAgents, project.path, spawnAgent, updateRequirement, toast]);
-
-  const handleMarkDone = useCallback(async (id: string) => {
-    await updateRequirement(id, { status: 'done' });
-  }, [updateRequirement]);
-
-  const handleContinueWith = useCallback((session: Session, targetAgent: AgentType) => {
-    // Pre-fill prompt with context, switch to Active tab, let user edit and send
-    setSelectedAgent(targetAgent);
-    setContinueFromId(session.id);
-    setActiveTab('active');
-    const summary = session.outputSummary
-      ? session.outputSummary.length > 200
-        ? session.outputSummary.slice(0, 200) + '...'
-        : session.outputSummary
-      : session.prompt;
-    setPrompt(`基于上次对话的上下文继续：\n${summary}\n\n`);
-  }, []);
-
-  const handleContinueRequirement = useCallback((reqId: string) => {
-    const req = projectRequirements.find(r => r.id === reqId);
-    if (!req || !req.linkedSessionId) return;
-
-    const session = projectSessions.find(s => s.id === req.linkedSessionId);
-    if (!session) {
-      toast.error('关联的会话未找到');
-      return;
-    }
-
-    handleContinueWith(session, session.agentType);
-  }, [projectRequirements, projectSessions, handleContinueWith, toast]);
-
-  const canSend = selectedAgent && prompt.trim() && !runningSession;
-
-  // Toggle overflow on .agent-panel-content when Active tab is selected
+  const [elapsed, setElapsed] = useState('');
   useEffect(() => {
-    const el = contentRef.current;
-    if (el) el.classList.toggle('active-tab', activeTab === 'active');
-  }, [activeTab]);
-
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-    dragRef.current = { startY: e.clientY, startRatio: splitRatioRef.current };
-  }, []);
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    let rafId: number | null = null;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        const contentEl = contentRef.current;
-        if (!contentEl) return;
-        const contentHeight = contentEl.getBoundingClientRect().height;
-        if (contentHeight <= 0) return;
-
-        const deltaY = e.clientY - dragRef.current.startY;
-        const deltaRatio = deltaY / contentHeight;
-        const newRatio = Math.min(0.8, Math.max(0.2, dragRef.current.startRatio + deltaRatio));
-        setSplitRatio(newRatio);
-      });
+    if (!runningSession) { setElapsed(''); return; }
+    const start = new Date(runningSession.startedAt).getTime();
+    const update = () => {
+      const sec = Math.floor((Date.now() - start) / 1000);
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      setElapsed(m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`);
     };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [runningSession]);
 
-    const handleMouseUp = () => {
-      setIsDragging(false);
-      try {
-        localStorage.setItem(`agent-panel-split:${project.path}`, splitRatioRef.current.toString());
-      } catch { /* ignore */ }
-    };
+  const selectedAgentInfo = agents.find(a => a.agentType === selectedAgent);
+  const selectedAgentLabel = selectedAgentInfo?.displayName || (selectedAgent ? String(selectedAgent) : '选择 Agent');
 
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      if (rafId !== null) cancelAnimationFrame(rafId);
-    };
-  }, [isDragging, project.path]);
+  const hasConversation = !!(activeSessionId || runningSession);
+
+  if (!project) {
+    return (
+      <div className="agent-panel">
+        <div className="agent-panel-landing">
+          <div className="agent-panel-landing-icon">DW</div>
+          <h2 className="agent-panel-landing-title">Dev Workbench</h2>
+          <p className="agent-panel-landing-desc">从左侧选择项目开始工作</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="agent-panel-backdrop" onClick={onClose}>
-      <div className="agent-panel" onClick={e => e.stopPropagation()}>
-        <div className="agent-panel-header">
-          <div className="agent-panel-title">
-            <IconSparkles size={16} />
-            <span>{project.name}</span>
+    <div className="agent-panel">
+      {/* Header */}
+      <div className="agent-panel-header">
+        <div className="agent-panel-header-left">
+          <span className="agent-panel-header-project">{project.name}</span>
+          {hasConversation && (
+            <>
+              <span className="agent-panel-header-sep">›</span>
+              <span className="agent-panel-header-title">
+                {activeRequirement?.title
+                  || displaySession?.prompt?.slice(0, 40)
+                  || '新对话'}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="agent-panel-header-right">
+          {runningSession ? (
+            <>
+              <span className="agent-workspace-running">
+                <span className="agent-workspace-running-dot" />
+                {elapsed}
+              </span>
+              <button className="agent-workspace-stop-btn" onClick={handleStop}>
+                <IconStop size={12} /> 停止
+              </button>
+            </>
+          ) : hasConversation ? (
+            <>
+              <QualityBadge report={qualityReport} />
+              <span className="agent-workspace-idle">
+                {displaySession?.status === 'completed' ? '已完成' : displaySession?.status === 'failed' ? '失败' : '就绪'}
+              </span>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="agent-panel-body">
+        {!hasConversation && !runningSession ? (
+          <div className="agent-panel-empty">
+            <div className="agent-panel-empty-icon">💬</div>
+            <h2>开始对话</h2>
+            <p>在下方输入指令开始，或从左侧选择已有对话</p>
           </div>
-          <button className="agent-panel-close" onClick={onClose}>
-            <IconX size={16} />
-          </button>
-        </div>
-
-        <div className="agent-panel-tabs">
-          <button
-            className={`agent-panel-tab ${activeTab === 'active' ? 'active' : ''}`}
-            onClick={() => setActiveTab('active')}
-          >
-            Active
-          </button>
-          <button
-            className={`agent-panel-tab ${activeTab === 'requirements' ? 'active' : ''}`}
-            onClick={() => setActiveTab('requirements')}
-          >
-            Requirements {projectRequirements.length > 0 && <span className="agent-panel-tab-count">{projectRequirements.length}</span>}
-          </button>
-          <button
-            className={`agent-panel-tab ${activeTab === 'history' ? 'active' : ''}`}
-            onClick={() => setActiveTab('history')}
-          >
-            <IconHistory size={14} />
-            History
-          </button>
-        </div>
-
-        <div className="agent-panel-content" ref={contentRef}>
-          {activeTab === 'active' && (
-            <div className="agent-panel-active">
-              <div className="agent-split-pane">
-                <div className="agent-split-control" style={{ height: `${splitRatio * 100}%` }}>
-                  <AgentSelector
-                    agents={agents}
-                    value={selectedAgent}
-                    onChange={setSelectedAgent}
-                    recommended={recommended}
-                  />
-
-                  <div className="agent-prompt-area">
-                    <textarea
-                      className="agent-prompt-input"
-                      placeholder="描述你想让 agent 做什么..."
-                      value={prompt}
-                      onChange={e => setPrompt(e.target.value)}
-                      maxLength={10000}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSend) {
-                          handleSend();
-                        }
-                      }}
-                      disabled={!!runningSession}
-                      rows={3}
-                    />
-                    <div className="agent-prompt-actions">
-                      {runningSession ? (
-                        <button className="agent-prompt-btn stop" onClick={handleStop}>
-                          <IconStop size={14} />
-                          停止
-                        </button>
-                      ) : (
-                        <button className="agent-prompt-btn send" onClick={handleSend} disabled={!canSend}>
-                          <IconPlay size={14} />
-                          发送
-                        </button>
-                      )}
-                      <span className="agent-prompt-hint">Ctrl+Enter 发送</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  className={`agent-split-divider ${isDragging ? 'dragging' : ''}`}
-                  onMouseDown={handleDividerMouseDown}
-                />
-
-                <div className="agent-split-terminal" style={{ height: `${(1 - splitRatio) * 100}%` }}>
-                  <TerminalView sessionId={runningSession?.id ?? null} />
+        ) : (
+          <>
+            {activeRequirement && !displaySession && (
+              <div className="agent-panel-spec">
+                <div className="agent-panel-spec-title">{activeRequirement.title}</div>
+                {activeRequirement.description && (
+                  <div className="agent-panel-spec-desc">{activeRequirement.description}</div>
+                )}
+                <div className="agent-panel-spec-actions">
+                  <button
+                    className="spec-item-launch-btn"
+                    onClick={async () => {
+                      const agent = selectedAgent || installedAgents[0]?.agentType;
+                      if (agent && project) {
+                        const session = await launchForRequirement(project.path, activeRequirement.id, agent);
+                        if (session) selectSession(session.id);
+                      }
+                    }}
+                    disabled={installedAgents.length === 0}
+                  >
+                    ▶ 启动 Agent
+                  </button>
+                  <button
+                    className="spec-item-delete-btn"
+                    onClick={() => deleteRequirement(activeRequirement.id)}
+                  >
+                    删除
+                  </button>
                 </div>
               </div>
+            )}
+            <div className="agent-workspace-output">
+              <TerminalView
+                sessionId={runningSession?.id ?? (displaySession?.status === 'running' ? displaySession.id : null)}
+                completedSession={!runningSession && displaySession ? displaySession : null}
+              />
+            </div>
+            {qualityReport && (
+              <QualityReportPanel report={qualityReport} />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Composer */}
+      <div className="agent-workspace-composer">
+        <div className="agent-workspace-composer-agent">
+          <div className="agent-workspace-selector" onClick={() => setShowAgentDropdown(!showAgentDropdown)}>
+            <span>{selectedAgentLabel}</span>
+            {recommended === selectedAgent && <span className="agent-workspace-rec-badge">推荐</span>}
+            <span className="agent-workspace-selector-arrow">▾</span>
+          </div>
+          {showAgentDropdown && (
+            <div className="agent-workspace-dropdown">
+              {installedAgents.map(agent => (
+                <button
+                  key={agent.agentType}
+                  className={`agent-workspace-dropdown-item ${selectedAgent === agent.agentType ? 'active' : ''}`}
+                  onClick={() => { setSelectedAgent(agent.agentType); setShowAgentDropdown(false); }}
+                >
+                  {agent.displayName}
+                  {recommended === agent.agentType && <span className="agent-workspace-rec-badge">推荐</span>}
+                </button>
+              ))}
             </div>
           )}
-
-          {activeTab === 'requirements' && (
-            <RequirementList
-              requirements={projectRequirements}
-              sessions={projectSessions}
-              agents={agents}
-              projectPath={project.path}
-              onAdd={handleAddRequirement}
-              onStart={handleStartRequirement}
-              onMarkDone={handleMarkDone}
-              onContinue={handleContinueRequirement}
-            />
-          )}
-
-          {activeTab === 'history' && (
-            <SessionTimeline
-              sessions={projectSessions}
-              agents={agents}
-              onContinueWith={handleContinueWith}
-            />
+        </div>
+        <textarea
+          ref={textareaRef}
+          className="agent-workspace-composer-input"
+          placeholder={isContinuing ? '继续对话...' : hasConversation ? '输入指令...' : '输入需求或指令开始新对话...'}
+          value={prompt}
+          onChange={handlePromptChange}
+          maxLength={10000}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSend) {
+              handleSend();
+            }
+          }}
+          disabled={!!runningSession}
+          rows={1}
+        />
+        <div className="agent-workspace-composer-bar">
+          <span className="agent-workspace-composer-hint">Ctrl+Enter</span>
+          {runningSession ? (
+            <button className="agent-workspace-composer-btn stop" onClick={handleStop}>
+              <IconStop size={14} /> 停止
+            </button>
+          ) : (
+            <button
+              className="agent-workspace-composer-btn send"
+              onClick={handleSend}
+              disabled={!canSend}
+            >
+              <IconPlay size={14} /> {isContinuing ? '继续' : '发送'}
+            </button>
           )}
         </div>
       </div>

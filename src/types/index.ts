@@ -103,3 +103,66 @@ export interface Requirement {
   createdAt: string;
   updatedAt: string;
 }
+
+// ---- Activity types ----
+
+export interface ActivityEvent {
+  id: string;
+  projectHash: string;
+  agentType: AgentType;
+  eventType: string;
+  title: string;
+  description: string | null;
+  filesChanged: string[] | null;
+  sessionId: string | null;
+  timestamp: string;
+  metadata: unknown;
+}
+
+// ---- Knowledge types ----
+
+export interface KnowledgeEntry {
+  id: string;
+  projectHash: string;
+  category: string;
+  title: string;
+  content: string;
+  sourceAgent: AgentType;
+  sourceSessionId: string | null;
+  sourceType: string;
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+  accessCount: number;
+}
+
+// ---- Quality types ----
+
+export interface QualityCheck {
+  name: string;
+  status: string;
+  message: string | null;
+}
+
+export interface QualityReport {
+  id: string;
+  sessionId: string;
+  checks: QualityCheck[];
+  overallStatus: string;
+  createdAt: string;
+}
+
+// ---- Config types ----
+
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  targetAgents: AgentType[];
+}
+
+export interface McpConfigFile {
+  servers: McpServerConfig[];
+}

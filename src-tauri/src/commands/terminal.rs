@@ -1,5 +1,7 @@
+use crate::db::DbState;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
 /// 校验命令字符串只包含安全字符（字母、数字、横杠、下划线、点、空格、路径分隔符）
 /// 阻止 shell 元字符（; | $ ` & > < ( ) 等）注入
@@ -135,7 +137,7 @@ pub fn detect_terminals() -> Result<Vec<TerminalInfo>, String> {
 }
 
 #[tauri::command]
-pub fn open_terminal(working_dir: String, command: Option<String>) -> Result<(), String> {
+pub fn open_terminal(working_dir: String, command: Option<String>, db: State<'_, DbState>) -> Result<(), String> {
     let dir = std::path::Path::new(&working_dir);
     if !dir.exists() {
         return Err(format!("目录不存在: {}", working_dir));
@@ -145,7 +147,8 @@ pub fn open_terminal(working_dir: String, command: Option<String>) -> Result<(),
     validate_command(&cmd)?;
 
     // 读取用户设置的偏好终端
-    let preferred = crate::commands::projects::load_settings()
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let preferred = crate::commands::projects::load_settings_from_db(&conn)
         .ok()
         .map(|s| s.preferred_terminal)
         .filter(|p| !p.is_empty())
@@ -159,14 +162,15 @@ pub fn open_terminal(working_dir: String, command: Option<String>) -> Result<(),
             .map(|t| t.id.clone())
             .unwrap_or_else(|| "cmd".to_string());
         // 自动保存，下次不再重新检测
-        if let Ok(mut settings) = crate::commands::projects::load_settings() {
+        if let Ok(mut settings) = crate::commands::projects::load_settings_from_db(&conn) {
             settings.preferred_terminal = first_available.clone();
-            let _ = crate::commands::projects::save_settings(settings);
+            let _ = crate::commands::projects::save_settings_to_db(&conn, &settings);
         }
         first_available
     } else {
         preferred
     };
+    drop(conn);
 
     // 根据终端 ID 分发到对应启动器
     #[cfg(target_os = "windows")]
@@ -488,22 +492,4 @@ fn launch_linux_terminator(working_dir: &str, cmd: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("启动 Terminator 失败: {}", e))
-}
-
-#[cfg(target_os = "linux")]
-fn launch_linux_auto(working_dir: &str, cmd: &str) -> Result<(), String> {
-    let terminals = ["gnome-terminal", "konsole", "alacritty", "kitty", "terminator"];
-    for term in &terminals {
-        if which_exists(term) {
-            return match *term {
-                "gnome-terminal" => launch_linux_gnome(working_dir, cmd),
-                "konsole" => launch_linux_konsole(working_dir, cmd),
-                "alacritty" => launch_linux_alacritty(working_dir, cmd),
-                "kitty" => launch_linux_kitty(working_dir, cmd),
-                "terminator" => launch_linux_terminator(working_dir, cmd),
-                _ => continue,
-            };
-        }
-    }
-    Err("未找到可用的终端模拟器".to_string())
 }

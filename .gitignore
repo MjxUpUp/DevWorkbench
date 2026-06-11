@@ -24,3 +24,12 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Forge quality framework (project-local config, not source)
+.forge/
+
+# Agent workspace files
+.agents/
+
+# Snapshot files
+.snapshot/

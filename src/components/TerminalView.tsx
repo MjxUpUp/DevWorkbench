@@ -1,44 +1,45 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import type { Session } from '../types';
+import { useAgentStore } from '../stores/agentStore';
 import '@xterm/xterm/css/xterm.css';
 
 interface TerminalViewProps {
   sessionId: string | null;
+  completedSession?: Session | null;
 }
 
 // xterm.js renders via canvas — CSS variables don't work.
-// Group 7 app themes into 2 terminal theme buckets.
+// Detect system preference directly.
 const TERMINAL_THEMES: Record<string, { background: string; foreground: string; cursor: string; selectionBackground: string }> = {
   dark: {
-    background: '#1e1e2e',
-    foreground: '#d4d4d4',
-    cursor: '#e0e0e0',
-    selectionBackground: '#444466',
+    background: '#12121A',
+    foreground: '#E4E4EA',
+    cursor: '#E4E4EA',
+    selectionBackground: 'rgba(255,255,255,0.12)',
   },
   light: {
-    background: '#fafafa',
-    foreground: '#1e1e1e',
-    cursor: '#333333',
-    selectionBackground: '#add6ff',
+    background: '#F7F7F8',
+    foreground: '#1A1A1E',
+    cursor: '#1A1A1E',
+    selectionBackground: 'rgba(0,0,0,0.1)',
   },
 };
 
-const DARK_THEMES = new Set(['obsidian', 'midnight', 'ember', 'rose', 'nord']);
-
-function getTerminalTheme(appTheme?: string): typeof TERMINAL_THEMES.dark {
-  const bucket = DARK_THEMES.has(appTheme || 'obsidian') ? 'dark' : 'light';
-  return TERMINAL_THEMES[bucket];
+function getTerminalTheme(): typeof TERMINAL_THEMES.dark {
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return TERMINAL_THEMES[isDark ? 'dark' : 'light'];
 }
 
-export function TerminalView({ sessionId }: TerminalViewProps) {
+export function TerminalView({ sessionId, completedSession }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const [hasOutput, setHasOutput] = useState(false);
+  const hasOutputRef = useRef(false);
 
   // Create terminal once
   useEffect(() => {
@@ -49,7 +50,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       convertEol: true,
       fontSize: 14,
       fontFamily: 'Cascadia Code, Fira Code, Consolas, monospace',
-      theme: getTerminalTheme(document.documentElement.dataset.theme),
+      theme: getTerminalTheme(),
       scrollback: 5000,
       disableStdin: true,
     });
@@ -81,49 +82,100 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
     };
   }, []);
 
-  // React to theme changes via MutationObserver on <html data-theme>
-  // Single mechanism — no prop needed.
+  // React to system color scheme changes
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
 
     const applyTheme = () => {
-      const appTheme = document.documentElement.dataset.theme || 'obsidian';
-      term.options.theme = getTerminalTheme(appTheme);
+      term.options.theme = getTerminalTheme();
     };
 
-    // Apply initial
     applyTheme();
 
-    const observer = new MutationObserver(applyTheme);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    });
-
-    return () => observer.disconnect();
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    mql.addEventListener('change', applyTheme);
+    return () => mql.removeEventListener('change', applyTheme);
   }, []);
 
   // Wire up session-specific event listeners
   useEffect(() => {
     const term = termRef.current;
-    if (!term || !sessionId) {
-      setHasOutput(false);
+    if (!term) {
       return;
     }
 
-    setHasOutput(false);
+    // If we have a completed session, write its summary directly
+    if (completedSession) {
+      term.clear();
+      term.options.disableStdin = true;
+
+      // Header
+      term.writeln(`\x1b[1m── Session: ${completedSession.prompt.slice(0, 80)} ──\x1b[0m`);
+      term.writeln(`\x1b[90mAgent: ${completedSession.agentType}  Status: ${completedSession.status}  ` +
+        `Exit: ${completedSession.exitCode ?? 'N/A'}\x1b[0m`);
+      term.writeln('');
+
+      // Output summary
+      if (completedSession.outputSummary) {
+        const lines = completedSession.outputSummary.split('\n');
+        for (const line of lines) {
+          term.writeln(line);
+        }
+      } else {
+        term.writeln('\x1b[90m(无输出记录)\x1b[0m');
+      }
+
+      // Context snapshot
+      if (completedSession.contextSnapshot?.filesChanged?.length) {
+        term.writeln('');
+        term.writeln('\x1b[1m── Files Changed ──\x1b[0m');
+        for (const f of completedSession.contextSnapshot.filesChanged) {
+          term.writeln(`  \x1b[33m${f}\x1b[0m`);
+        }
+      }
+
+      term.writeln('');
+      term.writeln('\x1b[90m— 会话结束 —\x1b[0m');
+      if (completedSession.status === 'completed' || completedSession.status === 'failed') {
+        term.writeln('');
+        term.writeln('\x1b[36m↩ 在下方输入框中输入指令继续此对话\x1b[0m');
+      }
+      return;
+    }
+
+    if (!sessionId) {
+      return;
+    }
+
+    hasOutputRef.current = false;
     term.clear();
     term.options.disableStdin = false;
 
-    // Listen for PTY output
+    // Replay cached PTY output from store (survives tab switches)
+    const cachedChunks = useAgentStore.getState().ptyOutput.get(sessionId);
+    if (cachedChunks && cachedChunks.length > 0) {
+      hasOutputRef.current = true;
+      for (const chunk of cachedChunks) {
+        term.write(chunk);
+      }
+    } else {
+      // Show waiting message only if no cached output
+      term.writeln('\x1b[90m⏳ Agent 运行中，等待输出...\x1b[0m');
+    }
+
+    // Listen for PTY output (new chunks after replay)
     const unlisten = listen<{ sessionId: string; data: number[] }>(
       'pty:output',
       (event) => {
         if (event.payload.sessionId === sessionId) {
+          // Clear the waiting message on first real output
+          if (!hasOutputRef.current) {
+            term.clear();
+            hasOutputRef.current = true;
+          }
           const bytes = new Uint8Array(event.payload.data);
           term.write(bytes);
-          setHasOutput(true);
         }
       }
     );
@@ -155,21 +207,11 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       dataDisposable.dispose();
       resizeDisposable.dispose();
     };
-  }, [sessionId]);
+  }, [sessionId, completedSession?.id, completedSession?.outputSummary]);
 
   return (
     <div className="terminal-view">
       <div ref={containerRef} className="terminal-container" />
-      {!sessionId && (
-        <div className="terminal-overlay">
-          <span className="terminal-placeholder">等待输出...</span>
-        </div>
-      )}
-      {sessionId && !hasOutput && (
-        <div className="terminal-overlay">
-          <span className="terminal-placeholder">Agent 运行中，等待输出...</span>
-        </div>
-      )}
     </div>
   );
 }

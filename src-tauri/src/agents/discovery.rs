@@ -14,9 +14,9 @@ pub struct AgentInfo {
 
 /// Auto-discover installed agents. Extends the existing tool detection
 /// with agent-specific capability information.
-pub fn discover_agents() -> Vec<AgentInfo> {
-    let custom_paths = crate::commands::projects::load_settings()
-        .ok()
+pub fn discover_agents(conn: Option<&rusqlite::Connection>) -> Vec<AgentInfo> {
+    let custom_paths = conn
+        .and_then(|c| crate::commands::projects::load_settings_from_db(c).ok())
         .map(|s| s.tool_paths)
         .unwrap_or_default();
 

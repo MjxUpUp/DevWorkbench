@@ -1,6 +1,6 @@
 [package]
 name = "dev-workbench"
-version = "0.6.0"
+version = "0.7.0"
 description = "一目了然 — 本地开发工作台"
 authors = ["you"]
 license = "MIT"
@@ -30,6 +30,12 @@ log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 git2 = { version = "0.20", features = ["vendored-openssl"] }
 uuid = { version = "1", features = ["v4"] }
+portable-pty = "0.8"
+rusqlite = { version = "0.34", features = ["bundled"] }
+toml = "0.8"
+thiserror = "2"
+sha2 = "0.10"
+notify = { version = "7", features = ["macos_kqueue"] }
 
 [dev-dependencies]
 tempfile = "3"
