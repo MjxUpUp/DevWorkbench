@@ -1,5 +1,5 @@
 /* =============================================
-   Animations & Keyframes
+   Animations & Keyframes — snappy 120ms transitions
    ============================================= */
 
 @keyframes modalOverlayIn {
@@ -10,11 +10,22 @@
 @keyframes modalSlideIn {
   from {
     opacity: 0;
-    transform: translateY(12px) scale(0.97);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
+  }
+}
+
+@keyframes drawerSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
   }
 }
 

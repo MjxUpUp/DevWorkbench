@@ -1,7 +1,7 @@
 /* === Tab Bar === */
 .tab-bar {
   display: flex;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-1);
   height: 40px;
   align-items: center;
@@ -21,6 +21,7 @@
   cursor: pointer;
   font-size: var(--text-sm);
   font-family: var(--font-sans);
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
 .tab-bar-item:hover {

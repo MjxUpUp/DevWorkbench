@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import type { Session, Requirement, Project } from '../types';
-import { IconStop, IconSettings } from './Icons';
+import { IconStop, IconSettings, IconPlus, IconFolderOpen, IconSparkles } from './Icons';
 import { useAgentStore } from '../stores/agentStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
@@ -54,6 +54,7 @@ export function Sidebar() {
   const newConversation = useAgentStore((s) => s.newConversation);
   const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
   const toggleConfigCenter = useNavigationStore((s) => s.toggleConfigCenter);
+  const toggleCommandPalette = useNavigationStore((s) => s.toggleCommandPalette);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
   const setSettingsOpen = useNavigationStore((s) => s.setSettingsOpen);
 
@@ -71,7 +72,14 @@ export function Sidebar() {
     toggleProjectExpand(project.id);
   };
 
-  const handleNewConversation = (projectPath: string, title: string) => {
+  const handleNewConversation = () => {
+    const agent = getDefaultAgent();
+    if (agent && activeProject) {
+      newConversation(activeProject.path, '新对话', agent);
+    }
+  };
+
+  const handleSidebarNewConversation = (projectPath: string, title: string) => {
     const agent = getDefaultAgent();
     if (agent) newConversation(projectPath, title, agent);
   };
@@ -89,7 +97,24 @@ export function Sidebar() {
       <div className="sidebar-header">
         <div className="sidebar-brand">
           <div className="sidebar-logo">DW</div>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Dev Workbench</span>
         </div>
+      </div>
+
+      {/* Quick action buttons */}
+      <div className="sidebar-quick-actions">
+        <button className="sidebar-quick-btn" onClick={handleNewConversation} title="新建对话 (Ctrl+N)">
+          <IconPlus size={14} />
+          <span>新建</span>
+        </button>
+        <button className="sidebar-quick-btn" onClick={toggleCommandPalette} title="搜索 (Ctrl+K)">
+          <span style={{ fontSize: 13 }}>⌕</span>
+          <span>搜索</span>
+        </button>
+        <button className="sidebar-quick-btn" onClick={() => setAddProjectOpen(true)} title="打开项目">
+          <IconFolderOpen size={14} />
+          <span>项目</span>
+        </button>
       </div>
 
       <div className="sidebar-scroll">
@@ -106,7 +131,7 @@ export function Sidebar() {
             activeSessionId={activeSessionId}
             onSelectSession={handleSelectSession}
             onSelectRequirement={handleSelectRequirement}
-            onNewConversation={handleNewConversation}
+            onNewConversation={handleSidebarNewConversation}
             onDeleteRequirement={deleteRequirement}
             onStopSession={stopAgent}
           />
@@ -116,13 +141,15 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <div className="sidebar-footer-actions">
           <button className="sidebar-footer-settings" onClick={() => setAddProjectOpen(true)}>
+            <IconPlus size={14} />
             <span>添加项目</span>
           </button>
           <button className="sidebar-footer-settings" onClick={toggleConfigCenter}>
-            <span>配置中心</span>
+            <IconSparkles size={14} />
+            <span>配置</span>
           </button>
           <button className="sidebar-footer-settings" onClick={() => setSettingsOpen(true)}>
-            <IconSettings size={16} />
+            <IconSettings size={14} />
             <span>设置</span>
           </button>
         </div>

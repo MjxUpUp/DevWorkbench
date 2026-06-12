@@ -1,4 +1,4 @@
-/* Dev Workbench — Obsidian Forge Theme */
+/* Dev Workbench — Clean Professional Light */
 @import './variables.css';
 @import './base.css';
 @import './sidebar.css';
@@ -10,4 +10,5 @@
 @import './knowledge-tab.css';
 @import './command-palette.css';
 @import './config-center.css';
+@import './settings.css';
 @import './animations.css';
