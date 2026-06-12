@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { GeneralSection } from './GeneralSection';
 import { AppearanceSection } from './AppearanceSection';
 import { AgentSection } from './AgentSection';
@@ -6,40 +6,30 @@ import { ProvidersSection } from './ProvidersSection';
 import { McpSection } from './McpSection';
 import { BudgetSection } from './BudgetSection';
 import { SkillsSection } from './SkillsSection';
+import { useSettingsStore } from '../../stores/settingsStore';
+import {
+  IconSettings, IconSun, IconTerminal, IconCpu, IconCode, IconFolderOpen,
+  IconSparkles, IconBrain, IconStar,
+} from '../Icons';
 
 export type SettingsSection = 'general' | 'appearance' | 'agent' | 'providers' | 'mcp' | 'budget' | 'skills';
 
-const SECTIONS: { id: SettingsSection; label: string; icon: string }[] = [
-  { id: 'general', label: '通用', icon: '⚙️' },
-  { id: 'appearance', label: '外观', icon: '🎨' },
-  { id: 'agent', label: 'Agent 管理', icon: '🤖' },
-  { id: 'providers', label: '模型供应商', icon: '🧠' },
-  { id: 'mcp', label: 'MCP 服务器', icon: '🔌' },
-  { id: 'budget', label: '预算', icon: '💰' },
-  { id: 'skills', label: '技能', icon: '⚡' },
+const SECTIONS: { id: SettingsSection; label: string; Icon: React.FC<{ size?: number; className?: string }> }[] = [
+  { id: 'general', label: '通用', Icon: IconSettings },
+  { id: 'appearance', label: '外观', Icon: IconSun },
+  { id: 'agent', label: 'Agent 管理', Icon: IconTerminal },
+  { id: 'providers', label: '模型供应商', Icon: IconCpu },
+  { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain },
+  { id: 'budget', label: '预算', Icon: IconStar },
+  { id: 'skills', label: '技能', Icon: IconSparkles },
 ];
 
 export function SettingsView() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('general');
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
 
-  const renderSection = () => {
-    switch (activeSection) {
-      case 'general':
-        return <GeneralSection />;
-      case 'appearance':
-        return <AppearanceSection />;
-      case 'agent':
-        return <AgentSection />;
-      case 'providers':
-        return <ProvidersSection />;
-      case 'mcp':
-        return <McpSection />;
-      case 'budget':
-        return <BudgetSection />;
-      case 'skills':
-        return <SkillsSection />;
-    }
-  };
+  // Load settings once on mount — shared store eliminates per-section loading
+  useEffect(() => { loadSettings(); }, [loadSettings]);
 
   return (
     <div className="settings-view">
@@ -53,13 +43,20 @@ export function SettingsView() {
             className={`settings-nav-item ${activeSection === section.id ? 'active' : ''}`}
             onClick={() => setActiveSection(section.id)}
           >
-            <span className="settings-nav-icon">{section.icon}</span>
+            <span className="settings-nav-icon"><section.Icon size={16} /></span>
             {section.label}
           </button>
         ))}
       </div>
       <div className="settings-view-content">
-        {renderSection()}
+        {/* Use key to preserve local state within each section when switching */}
+        {activeSection === 'general' && <GeneralSection key="general" />}
+        {activeSection === 'appearance' && <AppearanceSection key="appearance" />}
+        {activeSection === 'agent' && <AgentSection key="agent" />}
+        {activeSection === 'providers' && <ProvidersSection key="providers" />}
+        {activeSection === 'mcp' && <McpSection key="mcp" />}
+        {activeSection === 'budget' && <BudgetSection key="budget" />}
+        {activeSection === 'skills' && <SkillsSection key="skills" />}
       </div>
     </div>
   );

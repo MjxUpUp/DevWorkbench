@@ -1,28 +1,19 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentStore } from '../../stores/agentStore';
-import type { AppSettings, ToolStatus, TerminalInfo } from '../../types';
+import { useSettingsStore } from '../../stores/settingsStore';
+import type { ToolStatus, TerminalInfo } from '../../types';
 
 const NON_AGENT_TOOLS = ['code', 'git'];
 
 export function AgentSection() {
   const agents = useAgentStore(s => s.agents);
-  const [settings, setSettings] = useState<AppSettings>({
-    scan_directories: [],
-    tool_paths: {},
-    theme: 'light',
-    preferred_terminal: '',
-    cli_flags: {},
-  });
+  const settings = useSettingsStore((s) => s.settings);
+  const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const error = useSettingsStore((s) => s.error);
+
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [tools, setTools] = useState<ToolStatus[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    invoke<AppSettings>('load_settings')
-      .then(data => { setSettings(data); setError(null); })
-      .catch(e => setError(`加载设置失败: ${e}`));
-  }, []);
 
   useEffect(() => {
     invoke<ToolStatus[]>('detect_tools')
@@ -36,26 +27,16 @@ export function AgentSection() {
       .catch(() => {});
   }, []);
 
-  const save = async (updated: AppSettings) => {
-    try {
-      await invoke('save_settings', { settings: updated });
-      setSettings(updated);
-      setError(null);
-    } catch (e) {
-      setError(`保存设置失败: ${e}`);
-    }
-  };
-
   const setToolPath = (tool: string, path: string) => {
-    save({ ...settings, tool_paths: { ...settings.tool_paths, [tool]: path } });
+    saveSettings({ tool_paths: { ...settings.tool_paths, [tool]: path } });
   };
 
   const setCliFlag = (tool: string, flag: string) => {
-    save({ ...settings, cli_flags: { ...settings.cli_flags, [tool]: flag } });
+    saveSettings({ cli_flags: { ...settings.cli_flags, [tool]: flag } });
   };
 
   const setPreferredTerminal = (id: string) => {
-    save({ ...settings, preferred_terminal: id });
+    saveSettings({ preferred_terminal: id });
   };
 
   // Build unified tool list
@@ -90,70 +71,99 @@ export function AgentSection() {
     <>
       {error && <div className="error-banner" style={{ margin: 0, marginBottom: 16 }}>{error}</div>}
 
+      {/* Tool status — zcode card list */}
       <div className="settings-section">
         <h3 className="settings-section-title">工具状态</h3>
-        <div className="settings-tools">
+        <p className="settings-section-desc">检测系统中已安装的 Agent 和工具。</p>
+        <div className="settings-card-list">
           {allToolEntries.map(entry => (
-            <div key={entry.key} className="settings-tool-row">
-              <span className={`status-dot ${entry.installed ? 'installed' : ''}`} />
-              <span className="tool-name">{entry.label}</span>
-              <span className="tool-status">{entry.installed ? `✓ ${entry.path ?? ''}` : '未安装'}</span>
-              <input
-                className="tool-path-input"
-                value={settings.tool_paths[entry.key] || ''}
-                onChange={e => setToolPath(entry.key, e.target.value)}
-                placeholder="自定义路径（可选）"
-              />
+            <div key={entry.key} className="settings-tool-card">
+              <div className="settings-tool-card-header">
+                <div className="settings-tool-card-info">
+                  <span className="settings-tool-card-name">{entry.label}</span>
+                  <span className={`settings-tool-card-status ${entry.installed ? 'installed' : 'not-installed'}`}>
+                    {entry.installed ? '已安装' : '未安装'}
+                  </span>
+                </div>
+                {entry.installed && entry.path && (
+                  <span className="settings-tool-card-path">{entry.path}</span>
+                )}
+              </div>
+              <div className="settings-tool-card-actions">
+                <input
+                  className="settings-row-input settings-row-input-sm"
+                  value={settings.tool_paths[entry.key] || ''}
+                  onChange={e => setToolPath(entry.key, e.target.value)}
+                  placeholder="自定义路径（可选）"
+                />
+              </div>
             </div>
           ))}
         </div>
       </div>
 
+      {/* Terminal preference — zcode settings rows */}
       <div className="settings-section">
         <h3 className="settings-section-title">终端偏好</h3>
-        <div className="settings-terminal">
-          {terminals.length === 0 && <span className="terminal-hint">检测中...</span>}
+        <p className="settings-section-desc">选择 Agent 任务使用的终端。</p>
+
+        <div className="settings-card-list">
+          {terminals.length === 0 && (
+            <div className="settings-tool-card">
+              <span className="settings-tool-card-name" style={{ color: 'var(--text-tertiary)' }}>检测中...</span>
+            </div>
+          )}
           {terminals.map(t => (
-            <button
+            <div
               key={t.id}
-              className={`terminal-option ${settings.preferred_terminal === t.id ? 'active' : ''} ${!t.available ? 'unavailable' : ''}`}
+              className={`settings-tool-card selectable ${settings.preferred_terminal === t.id ? 'selected' : ''} ${!t.available ? 'disabled' : ''}`}
               onClick={() => t.available && setPreferredTerminal(t.id)}
-              disabled={!t.available}
-              title={t.available ? `使用 ${t.label}` : `${t.label} 未安装`}
             >
-              <span className={`status-dot ${t.available ? 'installed' : ''}`} />
-              <span className="terminal-name">{t.label}</span>
-              {!t.available && <span className="terminal-unavail">未安装</span>}
-            </button>
+              <div className="settings-tool-card-header">
+                <div className="settings-tool-card-info">
+                  <span className="settings-tool-card-name">{t.label}</span>
+                  {!t.available && <span className="settings-tool-card-status not-installed">未安装</span>}
+                  {t.available && <span className="settings-tool-card-status installed">可用</span>}
+                </div>
+                {settings.preferred_terminal === t.id && (
+                  <span className="settings-tool-card-badge">默认</span>
+                )}
+              </div>
+            </div>
           ))}
           {settings.preferred_terminal && (
             <button
-              className="terminal-option reset"
+              className="settings-tool-card selectable"
               onClick={() => setPreferredTerminal('')}
-              title="恢复自动检测"
+              style={{ borderStyle: 'dashed', justifyContent: 'center' }}
             >
-              自动检测
+              <span className="settings-tool-card-name" style={{ color: 'var(--text-tertiary)' }}>自动检测</span>
             </button>
           )}
         </div>
       </div>
 
+      {/* CLI flags — zcode settings rows */}
       <div className="settings-section">
         <h3 className="settings-section-title">CLI 启动参数</h3>
-        <div className="settings-cli-flags">
-          {cliEntries.map(t => (
-            <div key={t.key} className="cli-flag-row">
-              <span className="cli-tool-name">{t.label}</span>
+        <p className="settings-section-desc">为每个 Agent 配置自定义启动参数。</p>
+
+        {cliEntries.map(t => (
+          <div key={t.key} className="settings-row">
+            <div className="settings-row-info">
+              <span className="settings-row-label">{t.label}</span>
+              <span className="settings-row-desc">{t.hint || '自定义启动参数'}</span>
+            </div>
+            <div className="settings-row-control">
               <input
-                className="cli-flag-input"
+                className="settings-row-input settings-row-input-sm"
                 value={settings.cli_flags[t.key] || ''}
                 onChange={e => setCliFlag(t.key, e.target.value)}
                 placeholder={t.hint || '自定义启动参数'}
               />
             </div>
-          ))}
-          <span className="cli-flags-hint">如 Claude Code 的 --dangerously-skip-permissions、Codex 的 --full-auto 等</span>
-        </div>
+          </div>
+        ))}
       </div>
     </>
   );

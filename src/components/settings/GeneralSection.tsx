@@ -1,39 +1,18 @@
-import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { IconX } from '../Icons';
-import type { AppSettings } from '../../types';
+import { IconX, IconFolderOpen } from '../Icons';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 export function GeneralSection() {
-  const [settings, setSettings] = useState<AppSettings>({
-    scan_directories: [],
-    tool_paths: {},
-    theme: 'light',
-    preferred_terminal: '',
-    cli_flags: {},
-  });
+  const settings = useSettingsStore((s) => s.settings);
+  const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const error = useSettingsStore((s) => s.error);
+
   const [newScanDir, setNewScanDir] = useState('');
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    invoke<AppSettings>('load_settings')
-      .then(data => { setSettings(data); setError(null); })
-      .catch(e => setError(`加载设置失败: ${e}`));
-  }, []);
-
-  const save = async (updated: AppSettings) => {
-    try {
-      await invoke('save_settings', { settings: updated });
-      setSettings(updated);
-      setError(null);
-    } catch (e) {
-      setError(`保存设置失败: ${e}`);
-    }
-  };
 
   const addScanDir = () => {
     if (!newScanDir || settings.scan_directories.includes(newScanDir)) return;
-    save({ ...settings, scan_directories: [...settings.scan_directories, newScanDir] });
+    saveSettings({ scan_directories: [...settings.scan_directories, newScanDir] });
     setNewScanDir('');
   };
 
@@ -45,25 +24,59 @@ export function GeneralSection() {
   };
 
   const removeScanDir = (dir: string) => {
-    save({ ...settings, scan_directories: settings.scan_directories.filter(d => d !== dir) });
+    saveSettings({ scan_directories: settings.scan_directories.filter(d => d !== dir) });
   };
 
   return (
     <>
       {error && <div className="error-banner" style={{ margin: 0, marginBottom: 16 }}>{error}</div>}
+
+      {/* Scan directories — zcode-style setting rows */}
       <div className="settings-section">
-        <h3 className="settings-section-title">扫描目录</h3>
-        <div className="settings-scan-dirs">
-          {settings.scan_directories.map(dir => (
-            <div key={dir} className="scan-dir-row">
-              <span>{dir}</span>
-              <button onClick={() => removeScanDir(dir)}><IconX size={14} /></button>
+        <h3 className="settings-section-title">项目扫描目录</h3>
+        <p className="settings-section-desc">Dev Workbench 会在以下目录中扫描 Git 仓库并显示在项目列表中。</p>
+
+        {/* Existing directories */}
+        {settings.scan_directories.map(dir => (
+          <div key={dir} className="settings-row">
+            <div className="settings-row-info">
+              <span className="settings-row-label settings-row-label-mono">{dir}</span>
             </div>
-          ))}
-          <div className="input-row">
-            <input value={newScanDir} onChange={e => setNewScanDir(e.target.value)} placeholder="添加扫描目录路径" />
-            <button onClick={pickScanDir}>选择</button>
-            <button onClick={addScanDir}>添加</button>
+            <div className="settings-row-control">
+              <button className="settings-row-btn-icon" onClick={() => removeScanDir(dir)} title="移除">
+                <IconX size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {settings.scan_directories.length === 0 && (
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <span className="settings-row-label" style={{ color: 'var(--text-tertiary)' }}>暂未添加扫描目录</span>
+            </div>
+          </div>
+        )}
+
+        {/* Add directory input */}
+        <div className="settings-row" style={{ marginTop: 8 }}>
+          <div className="settings-row-info" style={{ flex: 1 }}>
+            <input
+              className="settings-row-input"
+              value={newScanDir}
+              onChange={e => setNewScanDir(e.target.value)}
+              placeholder="输入目录路径或点击右侧选择..."
+              onKeyDown={e => { if (e.key === 'Enter') addScanDir(); }}
+            />
+          </div>
+          <div className="settings-row-control">
+            <button className="settings-row-btn-secondary" onClick={pickScanDir}>
+              <IconFolderOpen size={14} />
+              选择
+            </button>
+            <button className="settings-row-btn-primary" onClick={addScanDir} disabled={!newScanDir.trim()}>
+              添加
+            </button>
           </div>
         </div>
       </div>

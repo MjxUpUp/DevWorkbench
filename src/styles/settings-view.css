@@ -1,5 +1,6 @@
 /* =============================================
    Settings View — Full-screen layout inside MainStage
+   zcode aesthetic: clean nav + spacious content
    ============================================= */
 
 .settings-view {
@@ -9,7 +10,7 @@
   background: var(--bg-canvas);
 }
 
-/* Left navigation */
+/* Left navigation — zcode: light background, icon+text items */
 .settings-view-nav {
   width: 200px;
   min-width: 200px;
@@ -17,13 +18,13 @@
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  padding: var(--space-4) 0;
+  padding: var(--space-3) 0;
 }
 
 .settings-view-nav-header {
-  padding: 0 var(--space-4) var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
 }
 
 .settings-view-nav-header h2 {
@@ -32,12 +33,15 @@
   color: var(--text-primary);
 }
 
-/* Right content area */
+/* Right content area — zcode: white background, centered max-width */
 .settings-view-content {
   flex: 1;
   overflow-y: auto;
   padding: var(--space-6) var(--space-7);
-  max-width: 720px;
+}
+
+.settings-view-content > .settings-section {
+  max-width: 680px;
 }
 
 /* Coming soon placeholder */
