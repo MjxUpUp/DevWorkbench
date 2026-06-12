@@ -166,3 +166,33 @@ export interface McpServerConfig {
 export interface McpConfigFile {
   servers: McpServerConfig[];
 }
+
+// ---- Provider types ----
+
+export interface ModelEntry {
+  id: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  endpoint: string;
+  apiKey: string;
+  enabled: boolean;
+  models: ModelEntry[];
+}
+
+export interface ProvidersConfig {
+  providers: ProviderConfig[];
+  modelMapping: Record<string, string>;
+}
+
+// ---- File listing types ----
+
+export interface FileEntry {
+  path: string;
+  name: string;
+  isDir: boolean;
+}

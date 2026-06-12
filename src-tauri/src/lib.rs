@@ -19,6 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             {
                 #[cfg(debug_assertions)]
@@ -124,6 +125,7 @@ pub fn run() {
             commands::agents::get_quality_reports,
             commands::agents::get_quality_report_for_session,
             commands::agents::run_quality_gate,
+            commands::files::list_project_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

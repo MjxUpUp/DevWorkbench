@@ -57,7 +57,6 @@ export function ConfigCenter() {
     if (!activeProject) return;
     setError(null);
     try {
-      // Save first, then apply
       await saveConfig(activeProject.path, { servers });
       const result = await applyConfig(activeProject.path, { servers });
       setApplyResult(result);
@@ -102,97 +101,86 @@ export function ConfigCenter() {
 
   if (!open) return null;
 
-  if (!activeProject) {
-    return (
-      <div className="config-center-overlay" onClick={() => setOpen(false)}>
-        <div className="config-center" onClick={(e) => e.stopPropagation()}>
-          <div className="config-center-header">
-            <h2>配置中心</h2>
-            <button className="config-center-close" onClick={() => setOpen(false)}>×</button>
-          </div>
-          <div className="config-center-body">
-            <p className="config-center-placeholder">请先从左侧选择一个项目</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="config-center-overlay" onClick={() => setOpen(false)}>
       <div className="config-center" onClick={(e) => e.stopPropagation()}>
         <div className="config-center-header">
-          <h2>MCP Server 配置</h2>
+          <h2>{activeProject ? 'MCP Server 配置' : '配置中心'}</h2>
           <button className="config-center-close" onClick={() => setOpen(false)}>×</button>
         </div>
         <div className="config-center-body">
-          {loading && <div className="config-center-loading">加载中...</div>}
+          {!activeProject ? (
+            <p className="config-center-placeholder">请先从左侧选择一个项目</p>
+          ) : (
+            <>
+              {loading && <div className="config-center-loading">加载中...</div>}
+              {error && <div className="config-center-error">{error}</div>}
 
-          {error && <div className="config-center-error">{error}</div>}
+              {/* Server list */}
+              <McpServerList
+                servers={servers}
+                editIdx={editIdx}
+                onToggle={toggleServer}
+                onRemove={removeServer}
+                onEdit={(idx) => setEditIdx(editIdx === idx ? null : idx)}
+                onUpdateTarget={updateServerTarget}
+              />
 
-          {/* Server list */}
-          <McpServerList
-            servers={servers}
-            editIdx={editIdx}
-            onToggle={toggleServer}
-            onRemove={removeServer}
-            onEdit={(idx) => setEditIdx(editIdx === idx ? null : idx)}
-            onUpdateTarget={updateServerTarget}
-          />
+              {/* Add server form */}
+              <div className="config-server-add">
+                <input
+                  type="text"
+                  placeholder="Server 名称 (如 filesystem)"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') addServer(); }}
+                  className="config-server-input"
+                />
+                <input
+                  type="text"
+                  placeholder="命令 (如 npx -y @mcp/server-filesystem /tmp)"
+                  value={newCommand}
+                  onChange={(e) => setNewCommand(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') addServer(); }}
+                  className="config-server-input config-server-input-wide"
+                />
+                <button className="config-server-add-btn" onClick={addServer} disabled={!newName.trim() || !newCommand.trim()}>
+                  添加
+                </button>
+              </div>
 
-          {/* Add server form */}
-          <div className="config-server-add">
-            <input
-              type="text"
-              placeholder="Server 名称 (如 filesystem)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addServer(); }}
-              className="config-server-input"
-            />
-            <input
-              type="text"
-              placeholder="命令 (如 npx -y @mcp/server-filesystem /tmp)"
-              value={newCommand}
-              onChange={(e) => setNewCommand(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addServer(); }}
-              className="config-server-input config-server-input-wide"
-            />
-            <button className="config-server-add-btn" onClick={addServer} disabled={!newName.trim() || !newCommand.trim()}>
-              添加
-            </button>
-          </div>
+              {/* Actions */}
+              <div className="config-server-actions">
+                <button className="config-server-save-btn" onClick={handleSave}>
+                  保存配置
+                </button>
+                <button className="config-server-apply-btn" onClick={handleApply}>
+                  应用到项目
+                </button>
+              </div>
 
-          {/* Actions */}
-          <div className="config-server-actions">
-            <button className="config-server-save-btn" onClick={handleSave}>
-              保存配置
-            </button>
-            <button className="config-server-apply-btn" onClick={handleApply}>
-              应用到项目
-            </button>
-          </div>
+              {/* Apply result */}
+              {applyResult && (
+                <div className="config-apply-result">
+                  <p>已生成以下配置文件：</p>
+                  <ul>
+                    {applyResult.map((r, i) => (
+                      <li key={i}><code>{r}</code></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
-          {/* Apply result */}
-          {applyResult && (
-            <div className="config-apply-result">
-              <p>已生成以下配置文件：</p>
-              <ul>
-                {applyResult.map((r, i) => (
-                  <li key={i}><code>{r}</code></li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Installed agents info */}
-          {installedAgents.length > 0 && (
-            <div className="config-agents-info">
-              <span className="config-agents-label">已安装的 Agent：</span>
-              {installedAgents.map((a) => (
-                <span key={a.agentType} className="config-agent-badge">{a.displayName}</span>
-              ))}
-            </div>
+              {/* Installed agents info */}
+              {installedAgents.length > 0 && (
+                <div className="config-agents-info">
+                  <span className="config-agents-label">已安装的 Agent：</span>
+                  {installedAgents.map((a) => (
+                    <span key={a.agentType} className="config-agent-badge">{a.displayName}</span>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

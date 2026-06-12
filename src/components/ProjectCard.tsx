@@ -30,7 +30,6 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
     : '尚未打开';
 
   // Merge agent tools (from discovery) + non-agent tools (IDE, Files)
-  // Agent tools use displayName and installed status from discover_agents
   const agentTools = agents
     .filter(a => a.installed)
     .map(a => ({
@@ -49,38 +48,18 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
 
   return (
     <div className="project-card">
-      <div className="card-cover">
-        {project.cover_image ? (
-          <img src={project.cover_image} alt={project.name} />
-        ) : (
-          <div className="card-cover-placeholder">
-            <span className="cover-text">{project.name.slice(0, 2).toUpperCase()}</span>
-          </div>
-        )}
-        <button
-          className={`star-btn ${project.starred ? 'starred' : ''}`}
-          onClick={() => onToggleStar(project.id)}
-          title={project.starred ? '取消收藏' : '收藏'}
-        >
-          <IconStar size={14} filled={project.starred} />
-        </button>
-        {/* Git 状态 badge 覆盖在封面左下角 */}
-        {gitStatus && (
-          <div className="git-badge">
-            <span className="git-branch">{gitStatus.branch}</span>
-            {gitStatus.isDirty && <span className="git-dirty" title="有未提交变更" />}
-            {gitStatus.ahead > 0 && (
-              <span className="git-ahead" title={`${gitStatus.ahead} 个 commit 未推送`}>↑{gitStatus.ahead}</span>
-            )}
-            {gitStatus.behind > 0 && (
-              <span className="git-behind" title={`${gitStatus.behind} 个 commit 未拉取`}>↓{gitStatus.behind}</span>
-            )}
-          </div>
-        )}
-      </div>
-
       <div className="card-body">
-        <h3 className="card-title">{project.name}</h3>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <h3 className="card-title">{project.name}</h3>
+          <button
+            className={`star-btn`}
+            style={{ position: 'static', flexShrink: 0 }}
+            onClick={() => onToggleStar(project.id)}
+            title={project.starred ? '取消收藏' : '收藏'}
+          >
+            <IconStar size={14} filled={project.starred} />
+          </button>
+        </div>
         {project.description && <p className="card-desc">{project.description}</p>}
 
         <div className="card-meta">
@@ -95,6 +74,22 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
             <span className="card-count">打开 {project.open_count} 次</span>
           )}
         </div>
+
+        {/* Git status row */}
+        {gitStatus && (
+          <div className="card-meta" style={{ marginTop: 2 }}>
+            <span className="git-branch" style={{ fontSize: 11, maxWidth: 200 }}>
+              {gitStatus.branch}
+            </span>
+            {gitStatus.isDirty && <span className="git-dirty" title="有未提交变更" />}
+            {gitStatus.ahead > 0 && (
+              <span className="git-ahead" title={`${gitStatus.ahead} 个 commit 未推送`}>↑{gitStatus.ahead}</span>
+            )}
+            {gitStatus.behind > 0 && (
+              <span className="git-behind" title={`${gitStatus.behind} 个 commit 未拉取`}>↓{gitStatus.behind}</span>
+            )}
+          </div>
+        )}
 
         {project.tags.length > 0 && (
           <div className="card-tags">

@@ -23,14 +23,14 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 32, color: '#ff6b6b', background: '#1a1a2e', minHeight: '100vh', fontFamily: 'monospace', whiteSpace: 'pre-wrap', fontSize: 13 }}>
+        <div style={{ padding: 32, color: '#ff6b6b', background: '#F7F8FA', minHeight: '100vh', fontFamily: 'monospace', whiteSpace: 'pre-wrap', fontSize: 13 }}>
           <h2>React Render Error</h2>
           <p><b>{this.state.error.message}</b></p>
           <p>{this.state.error.stack}</p>
           {this.state.componentStack && (
             <>
               <h3 style={{ marginTop: 16 }}>Component Stack:</h3>
-              <p style={{ color: '#aaa' }}>{this.state.componentStack}</p>
+              <p style={{ color: '#888' }}>{this.state.componentStack}</p>
             </>
           )}
         </div>
@@ -61,6 +61,77 @@ function App() {
   // Initialize agent store event listeners once (use getState to avoid re-render)
   useEffect(() => {
     return useAgentStore.getState().initEventListeners();
+  }, []);
+
+  // Session completion notification
+  useEffect(() => {
+    let permissionRequested = false;
+    let unlisten: (() => void) | null = null;
+
+    const requestPermission = async () => {
+      if (permissionRequested) return false;
+      permissionRequested = true;
+      try {
+        const { isPermissionGranted, requestPermission: reqPerm } = await import('@tauri-apps/plugin-notification');
+        let permitted = await isPermissionGranted();
+        if (!permitted) {
+          const permission = await reqPerm();
+          permitted = permission === 'granted';
+        }
+        return permitted;
+      } catch {
+        return false;
+      }
+    };
+
+    (async () => {
+      const { listen: listenFn } = await import('@tauri-apps/api/event');
+      unlisten = await listenFn<{ sessionId: string; status: string; exitCode: number | null }>('agent:completed', async (event) => {
+        const { status } = event.payload;
+        const sessions = useAgentStore.getState().sessions;
+        const session = sessions.find(s => s.id === event.payload.sessionId);
+
+        if (!session) return;
+
+        const agentName = session.agentType;
+        const title = status === 'completed' ? 'Agent 任务完成' : 'Agent 任务失败';
+        const body = `${agentName}: ${session.prompt.slice(0, 80)}${session.prompt.length > 80 ? '...' : ''}`;
+
+        const permitted = await requestPermission();
+        if (permitted) {
+          try {
+            const { sendNotification } = await import('@tauri-apps/plugin-notification');
+            sendNotification({ title, body });
+          } catch {
+            // Notification failed silently
+          }
+        }
+      });
+    })();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+N: New conversation
+      if (e.key === 'n' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const activeProject = useNavigationStore.getState().activeProject;
+        if (activeProject) {
+          const agent = useAgentStore.getState().getDefaultAgent();
+          if (agent) {
+            useAgentStore.getState().newConversation(activeProject.path, '新对话', agent);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   return (

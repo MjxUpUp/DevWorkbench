@@ -125,18 +125,22 @@ describe('ProjectCard', () => {
     expect(defaultProps.onRemove).toHaveBeenCalledWith('test-id');
   });
 
-  it('renders cover placeholder with first 2 characters of name', () => {
+  it('renders project name as card title without cover image', () => {
     renderWithToast(<ProjectCard {...defaultProps} />);
 
-    expect(screen.getByText('MY')).toBeInTheDocument();
+    // v0.8.0: cards are flat white with accent bar, no cover images
+    expect(screen.getByText('My Project')).toBeInTheDocument();
+    // No img elements in the new card design
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 
-  it('renders cover image when available', () => {
+  it('renders without cover image even when cover_image is set', () => {
     const project = { ...mockProject, cover_image: 'test-cover.png' };
     renderWithToast(<ProjectCard {...defaultProps} project={project} />);
 
-    const img = screen.getByRole('img');
-    expect(img).toHaveAttribute('src', 'test-cover.png');
+    // v0.8.0: cover images are no longer rendered in the flat card design
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByText('My Project')).toBeInTheDocument();
   });
 
   it('shows agent tools from discovery data and non-agent tools', () => {

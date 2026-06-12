@@ -6,3 +6,4 @@ pub mod scanner;
 pub mod projects;
 pub mod git;
 pub mod agents;
+pub mod files;

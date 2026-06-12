@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import type { Project } from '../../types';
 import { useAgentStore } from '../../stores/agentStore';
 import { QualityBadge } from '../QualityBadge';
+import { TaskTemplates, TEMPLATES } from '../TaskTemplates';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 interface OverviewTabProps {
   project: Project | null;
@@ -11,6 +13,9 @@ export function OverviewTab({ project }: OverviewTabProps) {
   const sessions = useAgentStore((s) => s.sessions);
   const requirements = useAgentStore((s) => s.requirements);
   const qualityReports = useAgentStore((s) => s.qualityReports);
+  const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
+  const newConversation = useAgentStore((s) => s.newConversation);
+  const selectSession = useNavigationStore((s) => s.selectSession);
 
   // ALL hooks must run before any conditional return
   const latestReport = useMemo(() => {
@@ -25,6 +30,15 @@ export function OverviewTab({ project }: OverviewTabProps) {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return reports[0] ?? null;
   }, [project, sessions, qualityReports]);
+
+  const handleTemplateSelect = async (template: typeof TEMPLATES[0]) => {
+    if (!project) return;
+    const agent = getDefaultAgent();
+    if (agent) {
+      const session = await newConversation(project.path, `${template.prompt}`, agent);
+      selectSession(session.id);
+    }
+  };
 
   if (!project) {
     return (
@@ -78,6 +92,14 @@ export function OverviewTab({ project }: OverviewTabProps) {
           <span key={tag} className="overview-tag">{tag}</span>
         ))}
       </div>
+
+      {/* Task Templates */}
+      <div style={{ padding: '0 24px' }}>
+        <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8, marginTop: 16 }}>
+          快速开始
+        </h3>
+      </div>
+      <TaskTemplates onSelect={handleTemplateSelect} />
     </div>
   );
 }
