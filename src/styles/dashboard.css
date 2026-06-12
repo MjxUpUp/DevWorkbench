@@ -1,0 +1,237 @@
+/* ============================================
+   Dashboard — Cost & Quality
+   ============================================ */
+
+.dashboard-view {
+  padding: var(--space-6);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+}
+
+.dashboard-header {
+  margin-bottom: var(--space-6);
+}
+
+.dashboard-title {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-1) 0;
+}
+
+.dashboard-subtitle {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* ── Stat Cards ── */
+
+.stat-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.stat-card {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  transition: box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.stat-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.stat-card-value {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: var(--lh-xl);
+}
+
+.stat-card-label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: var(--lh-xs);
+}
+
+.stat-card-trend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  margin-top: 2px;
+}
+
+.trend-up {
+  color: var(--status-error);
+}
+
+.trend-down {
+  color: var(--status-success);
+}
+
+.trend-arrow {
+  font-size: var(--text-sm);
+}
+
+/* ── Charts Row ── */
+
+.dashboard-charts-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.dashboard-chart-panel {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  min-height: 280px;
+}
+
+.dashboard-budget-panel {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Cost Trend Chart ── */
+
+.cost-trend-chart {
+  position: relative;
+  height: 240px;
+}
+
+/* ── Budget Bar ── */
+
+.budget-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1;
+}
+
+.budget-bar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.budget-bar-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.budget-bar-amount {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-bar-track {
+  height: 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.budget-bar-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width var(--duration-normal) var(--ease-out);
+}
+
+.budget-bar-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.budget-bar-percentage {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+/* ── Quality History ── */
+
+.quality-history {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+}
+
+.quality-history-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-3) 0;
+}
+
+.quality-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.quality-history-row {
+  display: grid;
+  grid-template-columns: 28px 56px 52px 1fr 60px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.quality-history-row:hover {
+  background: var(--surface-2);
+}
+
+.quality-history-status {
+  font-size: var(--text-base);
+  text-align: center;
+}
+
+.quality-history-session {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.quality-history-score {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.quality-history-agent {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-history-tokens {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

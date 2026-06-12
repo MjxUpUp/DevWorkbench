@@ -16,4 +16,8 @@
 @import './config-center.css';
 @import './settings.css';
 @import './settings-view.css';
+@import './dashboard.css';
+@import './skill-market.css';
+@import './orchestrate.css';
+@import './dag-nodes.css';
 @import './animations.css';
