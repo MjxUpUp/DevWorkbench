@@ -1,6 +1,7 @@
 import { useNavigationStore } from '../stores/navigationStore';
-import { SessionsTab } from './tabs/SessionsTab';
+import { ChatView } from './chat/ChatView';
 import { OverviewTab } from './tabs/OverviewTab';
+import { SettingsView } from './settings/SettingsView';
 
 export function MainStage() {
   const activeView = useNavigationStore((s) => s.activeView);
@@ -8,7 +9,7 @@ export function MainStage() {
 
   return (
     <main className="main-stage">
-      {activeView === 'chat' && <SessionsTab />}
+      {activeView === 'chat' && <ChatView />}
       {activeView === 'orchestrate' && <PlaceholderView title="Orchestrate" icon="⬡" description="DAG workflow editor — coming soon" />}
       {activeView === 'skill-market' && <PlaceholderView title="Skill Market" icon="◆" description="Skill marketplace — coming soon" />}
       {activeView === 'dashboard' && (
@@ -16,7 +17,7 @@ export function MainStage() {
           <OverviewTab project={project} />
         </div>
       )}
-      {activeView === 'settings' && <PlaceholderView title="Settings" icon="⚙" description="Settings view — coming soon" />}
+      {activeView === 'settings' && <SettingsView />}
     </main>
   );
 }

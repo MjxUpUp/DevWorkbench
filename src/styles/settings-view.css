@@ -1,0 +1,69 @@
+/* =============================================
+   Settings View — Full-screen layout inside MainStage
+   ============================================= */
+
+.settings-view {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  background: var(--bg-canvas);
+}
+
+/* Left navigation */
+.settings-view-nav {
+  width: 200px;
+  min-width: 200px;
+  background: var(--surface-0);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) 0;
+}
+
+.settings-view-nav-header {
+  padding: 0 var(--space-4) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--space-2);
+}
+
+.settings-view-nav-header h2 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Right content area */
+.settings-view-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-7);
+  max-width: 720px;
+}
+
+/* Coming soon placeholder */
+.settings-coming-soon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.settings-coming-soon-icon {
+  font-size: 32px;
+  margin-bottom: var(--space-3);
+}
+
+.settings-coming-soon p {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.settings-coming-soon span {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
