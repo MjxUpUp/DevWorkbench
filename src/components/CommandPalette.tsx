@@ -5,7 +5,7 @@ import { useAgentStore } from '../stores/agentStore';
 export function CommandPalette() {
   const open = useNavigationStore((s) => s.commandPaletteOpen);
   const setOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
-  const setActiveTab = useNavigationStore((s) => s.setActiveTab);
+  const setActiveView = useNavigationStore((s) => s.setActiveView);
   const sessions = useAgentStore((s) => s.sessions);
 
   const [query, setQuery] = useState('');
@@ -35,10 +35,11 @@ export function CommandPalette() {
   if (!open) return null;
 
   const commands = [
-    { label: '概览', action: () => { setActiveTab('overview'); setOpen(false); } },
-    { label: '对话', action: () => { setActiveTab('sessions'); setOpen(false); } },
-    { label: '时间线', action: () => { setActiveTab('timeline'); setOpen(false); } },
-    { label: '知识库', action: () => { setActiveTab('knowledge'); setOpen(false); } },
+    { label: 'Chat', action: () => { setActiveView('chat'); setOpen(false); } },
+    { label: 'Orchestrate', action: () => { setActiveView('orchestrate'); setOpen(false); } },
+    { label: 'Skill Market', action: () => { setActiveView('skill-market'); setOpen(false); } },
+    { label: 'Dashboard', action: () => { setActiveView('dashboard'); setOpen(false); } },
+    { label: 'Settings', action: () => { setActiveView('settings'); setOpen(false); } },
   ];
 
   // Add recent sessions as quick-access items
@@ -48,7 +49,7 @@ export function CommandPalette() {
     .map((s) => ({
       label: `对话: ${s.prompt.slice(0, 40)}`,
       action: () => {
-        setActiveTab('sessions');
+        setActiveView('chat');
         useNavigationStore.getState().selectSession(s.id);
         setOpen(false);
       },

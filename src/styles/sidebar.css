@@ -198,13 +198,16 @@
 
 /* === Sidebar === */
 .sidebar {
+  grid-area: sidebar;
   width: var(--sidebar-width);
-  min-width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: var(--sidebar-max);
   background: var(--surface-0);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   color: var(--text-secondary);
+  overflow: hidden;
 }
 
 .sidebar-header {

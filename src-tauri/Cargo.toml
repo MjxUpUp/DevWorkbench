@@ -37,6 +37,8 @@ toml = "0.8"
 thiserror = "2"
 sha2 = "0.10"
 notify = { version = "7", features = ["macos_kqueue"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"

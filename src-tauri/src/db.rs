@@ -119,6 +119,77 @@ CREATE TABLE IF NOT EXISTS settings (
     preferred_terminal TEXT NOT NULL DEFAULT '',
     cli_flags TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    yaml_content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT,
+    finished_at TEXT,
+    result TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id);
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT,
+    finished_at TEXT,
+    output TEXT,
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(run_id);
+
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    org TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT,
+    installed_at TEXT,
+    path TEXT,
+    quality_score REAL,
+    metadata TEXT
+);
+
+CREATE TABLE IF NOT EXISTS skill_reports (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL,
+    scan_result TEXT NOT NULL,
+    scanned_at TEXT NOT NULL,
+    FOREIGN KEY (skill_id) REFERENCES skills(id)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_reports_skill ON skill_reports(skill_id);
+
+CREATE TABLE IF NOT EXISTS cost_records (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    agent_type TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_records_agent ON cost_records(agent_type);
+CREATE INDEX IF NOT EXISTS idx_cost_records_recorded ON cost_records(recorded_at);
+
+CREATE TABLE IF NOT EXISTS budget_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    monthly_budget_usd REAL,
+    alert_threshold REAL DEFAULT 0.8,
+    updated_at TEXT NOT NULL
+);
 ";
 
 /// Open (or create) the SQLite database at `db_path`, create all tables.

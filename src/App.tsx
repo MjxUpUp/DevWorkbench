@@ -1,14 +1,14 @@
 import { useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
 import { AddProject } from './components/AddProject';
-import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
-import { MainPanel } from './components/MainPanel';
+import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
-import { ConfigCenter } from './components/ConfigCenter';
+import { ActivityBar } from './components/layout/ActivityBar';
+import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
 import { useTools } from './hooks/useTools';
 import { useAgentStore } from './stores/agentStore';
-import { useNavigationStore } from './stores/navigationStore';
+import { useNavigationStore, type ViewId } from './stores/navigationStore';
 import { useProjectStore } from './stores/projectStore';
 import './styles/index.css';
 
@@ -41,14 +41,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 function App() {
-  const { tools, error: toolsError } = useTools();
+  const { error: toolsError } = useTools();
 
   // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
-  const agents = useAgentStore((s) => s.agents);
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
-  const settingsOpen = useNavigationStore((s) => s.settingsOpen);
-  const setSettingsOpen = useNavigationStore((s) => s.setSettingsOpen);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -128,6 +125,16 @@ function App() {
           }
         }
       }
+
+      // Ctrl+1~5: Switch views
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '5') {
+        e.preventDefault();
+        const views: ViewId[] = ['chat', 'orchestrate', 'skill-market', 'dashboard', 'settings'];
+        const idx = parseInt(e.key) - 1;
+        if (idx < views.length) {
+          useNavigationStore.getState().setActiveView(views[idx]);
+        }
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -138,10 +145,10 @@ function App() {
     <ErrorBoundary>
     <ToastProvider>
     <div className="app">
+      <ActivityBar />
       <Sidebar />
-      <MainPanel />
+      <MainStage />
       <CommandPalette />
-      <ConfigCenter />
 
       {(projectError || toolsError) && <div className="error-banner" style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',zIndex:300}}>{projectError || toolsError}</div>}
 
@@ -149,9 +156,7 @@ function App() {
         <AddProject onAdd={async (p) => { await addProject(p); setAddProjectOpen(false); }} onClose={() => setAddProjectOpen(false)} existingProjects={projects} />
       )}
 
-      {settingsOpen && (
-        <Settings tools={tools} agents={agents} onClose={() => setSettingsOpen(false)} />
-      )}
+      <StatusBar />
     </div>
     </ToastProvider>
     </ErrorBoundary>

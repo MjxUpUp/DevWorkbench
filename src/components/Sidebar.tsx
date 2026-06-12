@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import type { Session, Requirement, Project } from '../types';
-import { IconStop, IconSettings, IconPlus, IconFolderOpen, IconSparkles } from './Icons';
+import { IconStop, IconPlus, IconFolderOpen } from './Icons';
 import { useAgentStore } from '../stores/agentStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
@@ -53,10 +53,8 @@ export function Sidebar() {
   const deleteRequirement = useAgentStore((s) => s.removeRequirement);
   const newConversation = useAgentStore((s) => s.newConversation);
   const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
-  const toggleConfigCenter = useNavigationStore((s) => s.toggleConfigCenter);
   const toggleCommandPalette = useNavigationStore((s) => s.toggleCommandPalette);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
-  const setSettingsOpen = useNavigationStore((s) => s.setSettingsOpen);
 
   const handleToggleProject = (project: typeof projects[0]) => {
     toggleProjectExpand(project.id);
@@ -143,14 +141,6 @@ export function Sidebar() {
           <button className="sidebar-footer-settings" onClick={() => setAddProjectOpen(true)}>
             <IconPlus size={14} />
             <span>添加项目</span>
-          </button>
-          <button className="sidebar-footer-settings" onClick={toggleConfigCenter}>
-            <IconSparkles size={14} />
-            <span>配置</span>
-          </button>
-          <button className="sidebar-footer-settings" onClick={() => setSettingsOpen(true)}>
-            <IconSettings size={14} />
-            <span>设置</span>
           </button>
         </div>
       </div>

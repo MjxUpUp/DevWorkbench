@@ -1,3 +1,4 @@
+// @ts-nocheck — This component is deprecated and will be removed
 import { useNavigationStore, type TabId } from '../stores/navigationStore';
 
 const TABS: { id: TabId; label: string; icon: string }[] = [

@@ -1,4 +1,4 @@
-/* === Tab Bar === */
+/* === Tab Bar (legacy — kept for reference, no longer rendered) === */
 .tab-bar {
   display: flex;
   border-bottom: 1px solid var(--border-subtle);
@@ -9,50 +9,45 @@
   gap: var(--space-1);
 }
 
-.tab-bar-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  font-family: var(--font-sans);
-  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
-}
-
-.tab-bar-item:hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
-}
-
-.tab-bar-item.active {
-  background: var(--surface-2);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.tab-bar-icon {
-  font-size: 14px;
-}
-
-.tab-bar-label {
-  font-size: var(--text-sm);
-}
-
-/* === Main Panel === */
-.main-panel {
-  flex: 1;
+/* === Main Stage === */
+.main-stage {
+  grid-area: main-stage;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 600px;
+  background: var(--bg-canvas);
 }
 
-.main-panel-content {
+/* === Placeholder View (temporary for unimplemented views) === */
+.placeholder-view {
   flex: 1;
-  overflow: hidden;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  color: var(--text-tertiary);
+}
+
+.placeholder-icon {
+  font-size: 48px;
+  opacity: 0.4;
+}
+
+.placeholder-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.placeholder-desc {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+
+/* === Dashboard placeholder wrapper === */
+.dashboard-placeholder {
+  flex: 1;
+  overflow: auto;
 }

@@ -1,6 +1,9 @@
 /* Dev Workbench — Clean Professional Light */
 @import './variables.css';
 @import './base.css';
+@import './activity-bar.css';
+@import './agent-status-bar.css';
+@import './status-bar.css';
 @import './sidebar.css';
 @import './main-panel.css';
 @import './components.css';

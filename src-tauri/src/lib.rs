@@ -8,6 +8,10 @@ pub mod activity;
 pub mod knowledge;
 pub mod config;
 pub mod quality;
+pub mod mcp;
+pub mod orchestra;
+pub mod skills;
+pub mod cost;
 
 use tauri::Manager;
 
@@ -48,6 +52,10 @@ pub fn run() {
             migrate::migrate_v7_to_v8(&conn, &data_dir)
                 .expect("Failed to run projects/settings migration");
 
+            // Run v0.8 → v1.0 migration (workflows, skills, cost tables)
+            migrate::migrate_v8_to_v9(&conn)
+                .expect("Failed to run v8→v9 schema migration");
+
             // Prune knowledge entries older than 180 days
             match knowledge::store::prune_old_entries(&conn, 180) {
                 Ok(count) => {
@@ -81,6 +89,8 @@ pub fn run() {
         .manage(commands::agents::AgentState(std::sync::Arc::new(
             agents::pty::AgentProcesses::new(),
         )))
+        .manage(mcp::registry::McpRegistry::new())
+        .manage(orchestra::sidecar::OwnAgentSidecar::new(8080))
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,
@@ -126,6 +136,23 @@ pub fn run() {
             commands::agents::get_quality_report_for_session,
             commands::agents::run_quality_gate,
             commands::files::list_project_files,
+            commands::workflows::list_workflows,
+            commands::workflows::create_workflow,
+            commands::workflows::run_workflow,
+            commands::mcp_cmds::mcp_connect,
+            commands::mcp_cmds::mcp_disconnect,
+            commands::mcp_cmds::mcp_list_tools,
+            commands::orchestra_cmds::orchestra_start,
+            commands::orchestra_cmds::orchestra_stop,
+            commands::orchestra_cmds::orchestra_status,
+            commands::skills_cmds::list_skills,
+            commands::skills_cmds::install_skill,
+            commands::skills_cmds::uninstall_skill,
+            commands::cost_cmds::get_cost_summary,
+            commands::cost_cmds::get_cost_trend,
+            commands::cost_cmds::load_budget,
+            commands::cost_cmds::save_budget,
+            commands::cost_cmds::check_budget_alert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

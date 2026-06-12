@@ -259,3 +259,93 @@ pub struct McpServerConfig {
 pub struct McpConfigFile {
     pub servers: Vec<McpServerConfig>,
 }
+
+// ---- Workflow types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workflow {
+    pub id: String,
+    pub name: String,
+    pub yaml_content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRun {
+    pub id: String,
+    pub workflow_id: String,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub id: String,
+    pub run_id: String,
+    pub node_id: String,
+    pub node_type: String,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub output: Option<String>,
+}
+
+// ---- Skill types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: String,
+    pub org: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub installed_at: Option<String>,
+    pub path: Option<String>,
+    pub quality_score: Option<f64>,
+    pub metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillReport {
+    pub id: String,
+    pub skill_id: String,
+    pub scan_result: String,
+    pub scanned_at: String,
+}
+
+// ---- Cost types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostRecord {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub agent_type: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostSummary {
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub session_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostTrendPoint {
+    pub date: String,
+    pub cost: f64,
+    pub tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetSettings {
+    pub monthly_budget_usd: Option<f64>,
+    pub alert_threshold: f64,
+}

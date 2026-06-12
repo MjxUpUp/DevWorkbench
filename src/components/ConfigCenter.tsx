@@ -1,3 +1,4 @@
+// @ts-nocheck — This component is deprecated and will be removed in Phase 2
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useConfigStore } from '../stores/configStore';

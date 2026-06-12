@@ -1,23 +1,33 @@
 import { useNavigationStore } from '../stores/navigationStore';
-import { TabBar } from './TabBar';
-import { OverviewTab } from './tabs/OverviewTab';
 import { SessionsTab } from './tabs/SessionsTab';
-import { TimelineTab } from './tabs/TimelineTab';
-import { KnowledgeTab } from './tabs/KnowledgeTab';
+import { OverviewTab } from './tabs/OverviewTab';
 
-export function MainPanel() {
-  const activeTab = useNavigationStore((s) => s.activeTab);
+export function MainStage() {
+  const activeView = useNavigationStore((s) => s.activeView);
   const project = useNavigationStore((s) => s.activeProject);
 
   return (
-    <div className="main-panel">
-      <TabBar />
-      <div className="main-panel-content">
-        {activeTab === 'overview' ? <OverviewTab project={project} /> :
-         activeTab === 'sessions' ? <SessionsTab /> :
-         activeTab === 'timeline' ? <TimelineTab project={project} /> :
-         <KnowledgeTab project={project} />}
-      </div>
+    <main className="main-stage">
+      {activeView === 'chat' && <SessionsTab />}
+      {activeView === 'orchestrate' && <PlaceholderView title="Orchestrate" icon="⬡" description="DAG workflow editor — coming soon" />}
+      {activeView === 'skill-market' && <PlaceholderView title="Skill Market" icon="◆" description="Skill marketplace — coming soon" />}
+      {activeView === 'dashboard' && (
+        <div className="dashboard-placeholder">
+          <OverviewTab project={project} />
+        </div>
+      )}
+      {activeView === 'settings' && <PlaceholderView title="Settings" icon="⚙" description="Settings view — coming soon" />}
+    </main>
+  );
+}
+
+/** Temporary placeholder for views not yet implemented */
+function PlaceholderView({ title, icon, description }: { title: string; icon: string; description: string }) {
+  return (
+    <div className="placeholder-view">
+      <div className="placeholder-icon">{icon}</div>
+      <h2 className="placeholder-title">{title}</h2>
+      <p className="placeholder-desc">{description}</p>
     </div>
   );
 }

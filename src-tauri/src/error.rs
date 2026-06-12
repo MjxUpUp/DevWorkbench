@@ -33,6 +33,18 @@ pub enum AppError {
 
     #[error("Forge CLI 未安装")]
     ForgeNotInstalled,
+
+    #[error("MCP error: {0}")]
+    Mcp(String),
+
+    #[error("Orchestra error: {0}")]
+    Orchestra(String),
+
+    #[error("Skill error: {0}")]
+    Skill(String),
+
+    #[error("Cost error: {0}")]
+    Cost(String),
 }
 
 // Tauri commands require errors to implement Serialize.

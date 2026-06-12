@@ -216,3 +216,27 @@ fn insert_settings(conn: &Connection, s: &AppSettings) -> Result<(), AppError> {
     )?;
     Ok(())
 }
+
+/// Migrate v0.8 to v1.0 schema (v9).
+///
+/// v1.0 adds workflows, skills, cost_records, and budget_settings tables.
+/// These tables are created by CREATE TABLE IF NOT EXISTS in db.rs SCHEMA,
+/// so this function only records the migration version.
+pub fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if version < 9 {
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (9, ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        log::info!("Migrated schema from v8 to v9");
+    }
+    Ok(())
+}

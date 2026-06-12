@@ -18,11 +18,21 @@ html, body, #root {
 
 /* === App Layout === */
 .app {
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr;
+  grid-template-rows: 1fr var(--status-bar-height);
+  grid-template-areas:
+    "activity-bar sidebar main-stage"
+    "activity-bar sidebar status-bar";
   height: 100vh;
   overflow: hidden;
   position: relative;
   z-index: 1;
+}
+
+/* Agent status bar spans across sidebar + main stage */
+.app .agent-status-bar {
+  grid-area: agent-status-bar;
 }
 
 /* === Scrollbar === */
