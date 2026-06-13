@@ -47,6 +47,22 @@
   box-shadow: var(--focus-ring);
 }
 
+.orchestrate-toolbar__select {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  outline: none;
+  cursor: pointer;
+}
+
+.orchestrate-toolbar__select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
 .orchestrate-toolbar__actions {
   display: flex;
   align-items: center;

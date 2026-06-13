@@ -1,3 +1,4 @@
+import { useState, useCallback, useEffect } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { useOrchestrateStore } from '../../stores/orchestrateStore';
 import { NodePalette } from './NodePalette';
@@ -41,12 +42,42 @@ function OrchestrateLayout() {
   const selectedNodeId = useOrchestrateStore((s) => s.selectedNodeId);
   const isRunning = useOrchestrateStore((s) => s.isRunning);
   const workflowName = useOrchestrateStore((s) => s.workflowName);
+  const workflowId = useOrchestrateStore((s) => s.workflowId);
+  const workflowList = useOrchestrateStore((s) => s.workflowList);
   const setRunning = useOrchestrateStore((s) => s.setRunning);
   const setWorkflowName = useOrchestrateStore((s) => s.setWorkflowName);
   const clearCanvas = useOrchestrateStore((s) => s.clearCanvas);
   const exportToYaml = useOrchestrateStore((s) => s.exportToYaml);
+  const saveWorkflow = useOrchestrateStore((s) => s.saveWorkflow);
+  const listWorkflows = useOrchestrateStore((s) => s.listWorkflows);
+  const loadWorkflow = useOrchestrateStore((s) => s.loadWorkflow);
+  const deleteWorkflow = useOrchestrateStore((s) => s.deleteWorkflow);
 
   const isEmpty = nodes.length === 0;
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'copied'>('idle');
+
+  // Load workflow list on mount
+  useEffect(() => { listWorkflows(); }, [listWorkflows]);
+
+  const handleSave = useCallback(async () => {
+    try {
+      await saveWorkflow();
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    } catch {
+      console.warn('Failed to save workflow');
+    }
+  }, [saveWorkflow]);
+
+  const handleExportYaml = useCallback(() => {
+    const yaml = exportToYaml();
+    navigator.clipboard.writeText(yaml).then(() => {
+      setSaveStatus('copied');
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    }).catch(() => {
+      console.warn('Failed to copy YAML to clipboard');
+    });
+  }, [exportToYaml]);
 
   return (
     <div className="orchestrate-view">
@@ -57,17 +88,28 @@ function OrchestrateLayout() {
             value={workflowName}
             onChange={(e) => setWorkflowName(e.target.value)}
           />
+          {workflowList.length > 0 && (
+            <select
+              className="orchestrate-toolbar__select"
+              value={workflowId ?? ''}
+              onChange={(e) => {
+                if (e.target.value) loadWorkflow(e.target.value);
+              }}
+            >
+              <option value="">— 加载工作流 —</option>
+              {workflowList.map((wf) => (
+                <option key={wf.id} value={wf.id}>{wf.name}</option>
+              ))}
+            </select>
+          )}
         </div>
         <div className="orchestrate-toolbar__actions">
           <button
             className="orchestrate-toolbar__btn"
-            title="Save workflow"
-            onClick={() => {
-              const yaml = exportToYaml();
-              console.log('Saved workflow:', yaml);
-            }}
+            title="Save workflow to database"
+            onClick={handleSave}
           >
-            💾 Save
+            💾 {saveStatus === 'saved' ? '✓ Saved' : 'Save'}
           </button>
           <button
             className="orchestrate-toolbar__btn orchestrate-toolbar__btn--run"
@@ -87,20 +129,25 @@ function OrchestrateLayout() {
           </button>
           <button
             className="orchestrate-toolbar__btn"
-            title="Export YAML"
-            onClick={() => {
-              const yaml = exportToYaml();
-              navigator.clipboard.writeText(yaml);
-            }}
+            title="Export YAML to clipboard"
+            onClick={handleExportYaml}
           >
-            📋 YAML
+            📋 {saveStatus === 'copied' ? '✓ Copied' : 'YAML'}
+          </button>
+          <button
+            className="orchestrate-toolbar__btn"
+            title="Delete saved workflow"
+            disabled={!workflowId}
+            onClick={() => { if (workflowId) deleteWorkflow(workflowId); }}
+          >
+            🗑️
           </button>
           <button
             className="orchestrate-toolbar__btn orchestrate-toolbar__btn--danger"
             title="Clear canvas"
             onClick={clearCanvas}
           >
-            🗑️
+            ✕
           </button>
         </div>
       </div>

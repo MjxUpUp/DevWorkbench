@@ -243,3 +243,33 @@ export interface QualityEntry {
   tokens: number;
   status: 'pass' | 'warn' | 'fail';
 }
+
+// ---- Workflow types ----
+
+export interface Workflow {
+  id: string;
+  name: string;
+  yamlContent: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  workflowId: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  result: string | null;
+}
+
+export interface WorkflowStep {
+  id: string;
+  runId: string;
+  nodeId: string;
+  nodeType: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  output: string | null;
+}
