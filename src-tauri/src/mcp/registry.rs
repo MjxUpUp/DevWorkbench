@@ -36,11 +36,19 @@ impl McpRegistry {
 
     /// List all tools from all connected servers.
     pub fn get_tools(&self) -> Result<Vec<(String, serde_json::Value)>, AppError> {
-        let clients = self.clients.lock().map_err(|e| AppError::Mcp(format!("Lock error: {}", e)))?;
-        let results = Vec::new();
-        // Note: This cannot mutate clients (McpClient::list_tools takes &mut self).
-        // For now, return empty — full implementation requires interior mutability refactoring.
-        drop(clients);
+        let mut clients = self.clients.lock().map_err(|e| AppError::Mcp(format!("Lock error: {}", e)))?;
+        let mut results = Vec::new();
+        // list_tools needs &mut self (sequential stdin/stdout I/O), so use get_mut
+        // on each entry within the MutexGuard we already hold.
+        for (name, client) in clients.iter_mut() {
+            match client.list_tools() {
+                Ok(tools) => results.push((name.clone(), tools)),
+                Err(e) => {
+                    // One failing server must not poison the whole listing.
+                    log::warn!("MCP server '{}' list_tools failed: {}", name, e);
+                }
+            }
+        }
         Ok(results)
     }
 

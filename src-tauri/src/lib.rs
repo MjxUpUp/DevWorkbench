@@ -143,6 +143,7 @@ pub fn run() {
             commands::mcp_cmds::mcp_connect,
             commands::mcp_cmds::mcp_disconnect,
             commands::mcp_cmds::mcp_list_tools,
+            commands::mcp_cmds::mcp_call_tool,
             commands::skills_cmds::list_skills,
             commands::skills_cmds::install_skill,
             commands::skills_cmds::uninstall_skill,

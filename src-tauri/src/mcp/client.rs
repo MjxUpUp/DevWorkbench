@@ -12,9 +12,15 @@ pub struct McpClient {
 
 impl McpClient {
     /// Create a new client by spawning the MCP server process.
+    ///
+    /// Performs the MCP `initialize` handshake as part of connection so the
+    /// server is ready to accept `tools/list` and `tools/call` immediately.
+    /// Servers that skip handshake will reject subsequent requests.
     pub fn connect(command: &str, args: &[String], env: &[(String, String)]) -> Result<Self, AppError> {
         let transport = McpTransport::spawn(command, args, env)?;
-        Ok(Self { transport })
+        let mut client = Self { transport };
+        client.initialize()?;
+        Ok(client)
     }
 
     /// Send the `initialize` handshake.
