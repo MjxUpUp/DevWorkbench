@@ -89,6 +89,8 @@ export interface Session {
   contextSnapshot: ContextSnapshot | null;
   linkedRequirementId: string | null;
   parentSessionId: string | null;
+  tokenUsage?: number;
+  estimatedCost?: number;
 }
 
 export interface Requirement {
@@ -140,7 +142,7 @@ export interface KnowledgeEntry {
 
 export interface QualityCheck {
   name: string;
-  status: string;
+  status: 'passed' | 'failed' | 'warning' | 'skipped';
   message: string | null;
 }
 
@@ -195,4 +197,49 @@ export interface FileEntry {
   path: string;
   name: string;
   isDir: boolean;
+}
+
+// ---- Dashboard types ----
+
+export interface CostSummary {
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  sessionCount: number;
+}
+
+export interface CostTrendPoint {
+  date: string;
+  cost: number;
+  tokens: number;
+}
+
+export interface BudgetSettings {
+  monthlyBudgetUsd: number | null;
+  alertThreshold: number;
+}
+
+export interface DashboardStats {
+  todayCost: number;
+  costTrend: number;
+  totalTokens: number;
+  tokenTrend: number;
+  activeSessions: number;
+  qualityRate: number;
+}
+
+export interface BudgetInfo {
+  spent: number;
+  total: number;
+  percentage: number;
+}
+
+export interface QualityEntry {
+  sessionId: string;
+  sessionNumber: number;
+  score: number;
+  total: number;
+  agent: string;
+  tokens: number;
+  status: 'pass' | 'warn' | 'fail';
 }

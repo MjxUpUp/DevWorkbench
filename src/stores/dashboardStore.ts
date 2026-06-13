@@ -1,35 +1,6 @@
 import { create } from 'zustand';
-
-export interface DashboardStats {
-  todayCost: number;
-  costTrend: number;       // percentage
-  totalTokens: number;
-  tokenTrend: number;
-  activeSessions: number;
-  qualityRate: number;
-}
-
-export interface CostTrendPoint {
-  date: string;
-  cost: number;
-  tokens: number;
-}
-
-export interface BudgetInfo {
-  spent: number;
-  total: number;
-  percentage: number;
-}
-
-export interface QualityEntry {
-  sessionId: string;
-  sessionNumber: number;
-  score: number;       // X/9
-  total: number;       // always 9
-  agent: string;
-  tokens: number;
-  status: 'pass' | 'warn' | 'fail';
-}
+import { invoke } from '@tauri-apps/api/core';
+import type { CostSummary, CostTrendPoint, BudgetSettings, QualityReport, DashboardStats, BudgetInfo, QualityEntry } from '../types';
 
 interface DashboardState {
   stats: DashboardStats;
@@ -39,60 +10,106 @@ interface DashboardState {
   loading: boolean;
 
   fetchDashboard: () => Promise<void>;
+  saveBudget: (settings: BudgetSettings) => Promise<void>;
 }
 
-const MOCK_STATS: DashboardStats = {
-  todayCost: 12.40,
-  costTrend: 15,
-  totalTokens: 245600,
-  tokenTrend: 8,
-  activeSessions: 18,
-  qualityRate: 92,
+const EMPTY_STATS: DashboardStats = {
+  todayCost: 0,
+  costTrend: 0,
+  totalTokens: 0,
+  tokenTrend: 0,
+  activeSessions: 0,
+  qualityRate: 0,
 };
 
-const MOCK_COST_TREND: CostTrendPoint[] = [
-  { date: 'Mon', cost: 8.20, tokens: 162000 },
-  { date: 'Tue', cost: 11.50, tokens: 198000 },
-  { date: 'Wed', cost: 9.80, tokens: 175000 },
-  { date: 'Thu', cost: 14.30, tokens: 256000 },
-  { date: 'Fri', cost: 10.60, tokens: 190000 },
-  { date: 'Sat', cost: 7.40, tokens: 130000 },
-  { date: 'Sun', cost: 12.40, tokens: 245600 },
-];
-
-const MOCK_BUDGET: BudgetInfo = {
-  spent: 62,
-  total: 80,
-  percentage: 77.5,
+const EMPTY_BUDGET: BudgetInfo = {
+  spent: 0,
+  total: 0,
+  percentage: 0,
 };
-
-const MOCK_QUALITY_HISTORY: QualityEntry[] = [
-  { sessionId: 's-042', sessionNumber: 42, score: 9, total: 9, agent: 'claude-opus', tokens: 48200, status: 'pass' },
-  { sessionId: 's-041', sessionNumber: 41, score: 7, total: 9, agent: 'claude-sonnet', tokens: 31500, status: 'warn' },
-  { sessionId: 's-040', sessionNumber: 40, score: 9, total: 9, agent: 'claude-opus', tokens: 52100, status: 'pass' },
-  { sessionId: 's-039', sessionNumber: 39, score: 4, total: 9, agent: 'gpt-4o', tokens: 28800, status: 'fail' },
-  { sessionId: 's-038', sessionNumber: 38, score: 8, total: 9, agent: 'claude-sonnet', tokens: 35600, status: 'pass' },
-  { sessionId: 's-037', sessionNumber: 37, score: 9, total: 9, agent: 'claude-opus', tokens: 44300, status: 'pass' },
-  { sessionId: 's-036', sessionNumber: 36, score: 6, total: 9, agent: 'claude-sonnet', tokens: 22100, status: 'warn' },
-  { sessionId: 's-035', sessionNumber: 35, score: 9, total: 9, agent: 'claude-opus', tokens: 51200, status: 'pass' },
-];
 
 export const useDashboardStore = create<DashboardState>((set) => ({
-  stats: MOCK_STATS,
-  costTrend: MOCK_COST_TREND,
-  budget: MOCK_BUDGET,
-  qualityHistory: MOCK_QUALITY_HISTORY,
+  stats: EMPTY_STATS,
+  costTrend: [],
+  budget: EMPTY_BUDGET,
+  qualityHistory: [],
   loading: false,
 
   fetchDashboard: async () => {
     set({ loading: true });
-    // TODO: replace with real API calls when backend cost module is ready
-    set({
-      stats: MOCK_STATS,
-      costTrend: MOCK_COST_TREND,
-      budget: MOCK_BUDGET,
-      qualityHistory: MOCK_QUALITY_HISTORY,
-      loading: false,
-    });
+    try {
+      const [summary, trend, budgetSettings, reports] = await Promise.all([
+        invoke<CostSummary>('get_cost_summary'),
+        invoke<CostTrendPoint[]>('get_cost_trend', { days: 7 }),
+        invoke<BudgetSettings>('load_budget'),
+        invoke<QualityReport[]>('get_quality_reports'),
+      ]);
+
+      // Map CostSummary → DashboardStats
+      const totalTokens = summary.totalInputTokens + summary.totalOutputTokens;
+      const stats: DashboardStats = {
+        todayCost: summary.totalCost,
+        costTrend: 0,       // trend requires period comparison; default to 0
+        totalTokens,
+        tokenTrend: 0,
+        activeSessions: 0,  // derived from agentStore, not available here
+        qualityRate: 0,     // computed below
+      };
+
+      // Map QualityReport[] → QualityEntry[]
+      const qualityHistory: QualityEntry[] = reports
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 20)
+        .map((report, idx) => {
+          const passed = report.checks.filter(c => c.status === 'passed').length;
+          const total = report.checks.length;
+          const overall = report.overallStatus;
+          const status: QualityEntry['status'] =
+            overall === 'passed' ? 'pass' : overall === 'failed' ? 'fail' : 'warn';
+          return {
+            sessionId: report.sessionId,
+            sessionNumber: reports.length - idx,
+            score: passed,
+            total,
+            agent: report.sessionId.split('-')[0] || 'unknown',
+            tokens: 0,
+            status,
+          };
+        });
+
+      // Compute quality rate from reports
+      if (reports.length > 0) {
+        const passedCount = reports.filter(r => r.overallStatus === 'passed').length;
+        stats.qualityRate = Math.round((passedCount / reports.length) * 100);
+      }
+
+      // Map BudgetSettings → BudgetInfo
+      const budgetTotal = budgetSettings.monthlyBudgetUsd ?? 0;
+      const monthCost = summary.totalCost; // approximation; ideally query current month only
+      const budget: BudgetInfo = {
+        spent: monthCost,
+        total: budgetTotal,
+        percentage: budgetTotal > 0 ? (monthCost / budgetTotal) * 100 : 0,
+      };
+
+      set({
+        stats,
+        costTrend: trend,
+        budget,
+        qualityHistory,
+        loading: false,
+      });
+    } catch (e) {
+      console.error('Failed to fetch dashboard data:', e);
+      set({ loading: false });
+    }
+  },
+
+  saveBudget: async (settings: BudgetSettings) => {
+    try {
+      await invoke('save_budget', { settings });
+    } catch (e) {
+      console.error('Failed to save budget settings:', e);
+    }
   },
 }));

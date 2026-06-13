@@ -1,5 +1,5 @@
 import { useDashboardStore } from '../../stores/dashboardStore';
-import type { QualityEntry } from '../../stores/dashboardStore';
+import type { QualityEntry } from '../../types';
 
 const STATUS_ICONS: Record<QualityEntry['status'], { icon: string; className: string }> = {
   pass: { icon: '✅', className: 'quality-status-pass' },
