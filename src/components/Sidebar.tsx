@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import type { Session, Requirement, Project } from '../types';
-import { IconStop, IconPlus, IconFolderOpen } from './Icons';
+import { IconStop, IconPlus, IconFolderOpen, IconSearch } from './Icons';
 import { useAgentStore } from '../stores/agentStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
@@ -92,26 +92,21 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-header">
-        <div className="sidebar-brand">
-          <div className="sidebar-logo">DW</div>
-          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Dev Workbench</span>
-        </div>
-      </div>
-
-      {/* Quick action buttons */}
+      {/* Quick actions — zcode-style vertical menu (icon + label + shortcut) */}
       <div className="sidebar-quick-actions">
         <button className="sidebar-quick-btn" onClick={handleNewConversation} title="新建对话 (Ctrl+N)">
-          <IconPlus size={14} />
-          <span>新建</span>
+          <IconPlus size={15} className="sidebar-quick-icon" />
+          <span className="sidebar-quick-label">新建</span>
+          <span className="sidebar-quick-shortcut">Ctrl+N</span>
         </button>
         <button className="sidebar-quick-btn" onClick={toggleCommandPalette} title="搜索 (Ctrl+K)">
-          <span style={{ fontSize: 13 }}>⌕</span>
-          <span>搜索</span>
+          <IconSearch size={15} className="sidebar-quick-icon" />
+          <span className="sidebar-quick-label">搜索</span>
+          <span className="sidebar-quick-shortcut">Ctrl+K</span>
         </button>
         <button className="sidebar-quick-btn" onClick={() => setAddProjectOpen(true)} title="打开项目">
-          <IconFolderOpen size={14} />
-          <span>项目</span>
+          <IconFolderOpen size={15} className="sidebar-quick-icon" />
+          <span className="sidebar-quick-label">打开项目</span>
         </button>
       </div>
 
@@ -134,15 +129,6 @@ export function Sidebar() {
             onStopSession={stopAgent}
           />
         ))}
-      </div>
-
-      <div className="sidebar-footer">
-        <div className="sidebar-footer-actions">
-          <button className="sidebar-footer-settings" onClick={() => setAddProjectOpen(true)}>
-            <IconPlus size={14} />
-            <span>添加项目</span>
-          </button>
-        </div>
       </div>
     </aside>
   );
