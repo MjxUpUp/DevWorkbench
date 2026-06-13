@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { ActivityBar } from './components/layout/ActivityBar';
+import { TitleBar } from './components/layout/TitleBar';
 import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
 import { useTools } from './hooks/useTools';
@@ -146,6 +147,7 @@ function App() {
     <ErrorBoundary>
     <ToastProvider>
     <div className={`app${activeView !== 'chat' ? ' sidebar-hidden' : ''}`}>
+      <TitleBar />
       <ActivityBar />
       {activeView === 'chat' && <Sidebar />}
       <MainStage />

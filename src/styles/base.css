@@ -16,12 +16,13 @@ html, body, #root {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* === App Layout === */
+/* === App Layout — TitleBar on top, then 3 cols: ActivityBar | Sidebar | MainStage === */
 .app {
   display: grid;
-  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr;
-  grid-template-rows: 1fr var(--status-bar-height);
+  grid-template-columns: var(--activity-bar-width) auto 1fr;
+  grid-template-rows: var(--title-bar-height) 1fr var(--status-bar-height);
   grid-template-areas:
+    "title-bar title-bar title-bar"
     "activity-bar sidebar main-stage"
     "activity-bar sidebar status-bar";
   height: 100vh;
@@ -30,9 +31,39 @@ html, body, #root {
   z-index: 1;
 }
 
-/* Agent status bar spans across sidebar + main stage */
-.app .agent-status-bar {
-  grid-area: agent-status-bar;
+/* Sidebar hidden state (Ctrl+B toggle) */
+.app.sidebar-hidden {
+  grid-template-columns: var(--activity-bar-width) 0px 1fr;
+}
+.app.sidebar-hidden .sidebar {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  overflow: hidden;
+  border: none;
+  padding: 0;
+}
+
+/* Responsive breakpoints */
+@media (max-width: 1199px) {
+  .app {
+    grid-template-columns: var(--activity-bar-width) 0px 1fr;
+  }
+  .sidebar {
+    display: none;
+  }
+}
+@media (max-width: 899px) {
+  .app {
+    grid-template-columns: 0px 1fr;
+    grid-template-areas:
+      "title-bar title-bar"
+      "main-stage main-stage"
+      "status-bar status-bar";
+  }
+  .activity-bar {
+    display: none;
+  }
 }
 
 /* === Scrollbar === */

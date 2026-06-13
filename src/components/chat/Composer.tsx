@@ -86,17 +86,15 @@ export function Composer({
     textareaRef.current?.focus();
   };
 
+  // Explicit trigger buttons (@ file / / command / $ skill) — mirrors zcode's
+  // composer which surfaces these as visible glyphs left of the input rather
+  // than relying on the user typing the trigger character.
+  const openTrigger = (type: '@' | '/' | '$') => {
+    setTriggerMenu((prev) => (prev?.type === type ? null : { type, position: { top: 0, left: 0 } }));
+  };
+
   return (
     <div className="chat-composer">
-      {triggerMenu && (
-        <TriggerMenu
-          type={triggerMenu.type}
-          position={triggerMenu.position}
-          onSelect={handleTriggerSelect}
-          onClose={() => setTriggerMenu(null)}
-        />
-      )}
-
       {attachedFiles.length > 0 && (
         <div className="file-chips">
           {attachedFiles.map((file) => (
@@ -109,6 +107,41 @@ export function Composer({
       )}
 
       <div className="chat-composer-input-wrap">
+        {triggerMenu && (
+          <div className="composer-trigger-popover">
+            <TriggerMenu
+              type={triggerMenu.type}
+              position={triggerMenu.position}
+              onSelect={handleTriggerSelect}
+              onClose={() => setTriggerMenu(null)}
+            />
+          </div>
+        )}
+
+        <div className="composer-triggers">
+          <button
+            type="button"
+            className="composer-trigger-btn"
+            data-active={triggerMenu?.type === '@' || undefined}
+            onClick={() => openTrigger('@')}
+            title="附加文件 (@)"
+          >@</button>
+          <button
+            type="button"
+            className="composer-trigger-btn"
+            data-active={triggerMenu?.type === '/' || undefined}
+            onClick={() => openTrigger('/')}
+            title="命令 (/)"
+          >/</button>
+          <button
+            type="button"
+            className="composer-trigger-btn"
+            data-active={triggerMenu?.type === '$' || undefined}
+            onClick={() => openTrigger('$')}
+            title="技能 ($)"
+          >$</button>
+        </div>
+
         <textarea
           ref={textareaRef}
           className="chat-composer-input"
@@ -123,7 +156,7 @@ export function Composer({
         <button
           className="composer-attach-btn"
           title="附加文件"
-          onClick={() => setTriggerMenu({ type: '@', position: { top: 0, left: 0 } })}
+          onClick={() => openTrigger('@')}
         >
           ⊕
         </button>

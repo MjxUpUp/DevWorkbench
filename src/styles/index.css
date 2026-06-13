@@ -1,19 +1,15 @@
 /* Dev Workbench — Clean Professional Light */
 @import './variables.css';
 @import './base.css';
+@import './titlebar.css';
 @import './activity-bar.css';
-@import './agent-status-bar.css';
 @import './status-bar.css';
 @import './sidebar.css';
 @import './main-panel.css';
 @import './chat-view.css';
 @import './components.css';
 @import './terminal.css';
-@import './overview-tab.css';
-@import './timeline-tab.css';
-@import './knowledge-tab.css';
 @import './command-palette.css';
-@import './config-center.css';
 @import './settings.css';
 @import './settings-view.css';
 @import './dashboard.css';

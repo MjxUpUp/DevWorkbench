@@ -9,6 +9,7 @@
   --sidebar-max: 400px;
   --header-height: 48px;
   --activity-bar-width: 48px;
+  --title-bar-height: 40px;
   --agent-status-bar-height: 28px;
   --status-bar-height: 28px;
   --session-sidebar-width: 260px;
@@ -42,6 +43,7 @@
   --gate-fail: #ef4444;
   --gate-warn: #eab308;
   --gate-skip: #9ca3af;
+  --gate-warn-bg: #fef9c3;
 
   /* Skill Types */
   --skill-orchestration: #8b5cf6;
