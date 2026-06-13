@@ -122,55 +122,47 @@ fn get_last_commit_time(repo: &git2::Repository) -> Option<String> {
     Some(dt.to_rfc3339())
 }
 
-/// 统计工作区相对 HEAD 的增删行数。
+/// 统计工作区相对 HEAD 的增删行数（含未跟踪文件，遵守 .gitignore）。
 ///
-/// 返回 `(insertions, deletions)`：
-/// - 已跟踪文件用 `git2` 的 `DiffStats` 统计 HEAD→worktree 的行差异；
-/// - 未跟踪文件按其内容行数计入 insertions（与 `git diff --stat` 的语义一致）。
-/// - 空 HEAD 仓库只统计未跟踪文件。
+/// 早期实现用 `git2` 逐个 `read_to_string` 未跟踪文件并递归目录，对一个含
+/// `node_modules`/`target` 的项目会读取成千上万个文件，阻塞命令数十秒，导致
+/// 前端 IPC 卡死、界面白屏。改为直接调用 `git diff --shortstat` —— 命令行 git
+/// 原生遵守 .gitignore、单次扫描完成，且自带 --untracked-files，既快又安全。
 fn count_line_changes(repo: &git2::Repository) -> (u64, u64) {
-    let mut insertions: u64 = 0;
-    let mut deletions: u64 = 0;
+    let workdir = match repo.workdir() {
+        Some(p) => p,
+        None => return (0, 0),
+    };
 
-    // HEAD→worktree 的已跟踪文件行差异
-    if let Ok(head_tree) = repo.head() {
-        if let Ok(head_commit) = head_tree.peel_to_commit() {
-            if let Ok(head_tree) = head_commit.tree() {
-                // diff_tree_to_tree with old=None compares against the worktree
-                // (the diff Tree-to-workdir variant in this git2 version).
-                if let Ok(diff) = repo.diff_tree_to_workdir(Some(&head_tree), None) {
-                    if let Ok(stats) = diff.stats() {
-                        insertions += stats.insertions() as u64;
-                        deletions += stats.deletions() as u64;
+    // `git diff --shortstat HEAD --untracked-files=normal`
+    // 输出形如：" 2 files changed, 42 insertions(+), 7 deletions(-)\n"
+    let output = std::process::Command::new("git")
+        .args(["diff", "--shortstat", "--untracked-files=normal", "HEAD"])
+        .current_dir(workdir)
+        .output();
+
+    let stdout = match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(_) => return (0, 0),
+    };
+
+    let parse = |key: &str| -> u64 {
+        stdout.lines().next().and_then(|line| {
+            let mut tokens = line.split_whitespace();
+            let mut prev: Option<&str> = None;
+            for tok in tokens.by_ref() {
+                if tok.starts_with(key) {
+                    if let Some(n) = prev {
+                        if let Ok(v) = n.parse::<u64>() {
+                            return Some(v);
+                        }
                     }
                 }
+                prev = Some(tok);
             }
-        }
-    }
+            None
+        }).unwrap_or(0)
+    };
 
-    // 未跟踪文件：整份内容计入 insertions
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .exclude_submodules(true);
-
-    if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        let workdir = repo.workdir();
-        for entry in statuses.iter() {
-            if !entry.status().is_wt_new() {
-                continue;
-            }
-            let Some(path) = entry.path() else { continue };
-            let Some(root) = workdir else { continue };
-            let file = root.join(path);
-            if let Ok(text) = std::fs::read_to_string(&file) {
-                // 末尾换行不额外计一行；空文件计 0 行
-                if !text.is_empty() {
-                    insertions += text.lines().count() as u64;
-                }
-            }
-        }
-    }
-
-    (insertions, deletions)
+    (parse("insertion"), parse("deletion"))
 }

@@ -279,29 +279,10 @@ pub struct Workflow {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowRun {
-    pub id: String,
-    pub workflow_id: String,
-    pub status: String,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub result: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowStep {
-    pub id: String,
-    pub run_id: String,
-    pub node_id: String,
-    pub node_type: String,
-    pub status: String,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub output: Option<String>,
-}
+// Note: WorkflowRun / WorkflowStep are intentionally removed.
+// The previous run-tracking model was never written to — run_workflow was a stub.
+// Execution state will be reintroduced in Phase 1 via the kernel-compose Graph engine,
+// modeled as AgentEvent streams + checkpoint persistence (not these static rows).
 
 // ---- Skill types ----
 

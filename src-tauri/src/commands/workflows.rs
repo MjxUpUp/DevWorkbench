@@ -106,8 +106,7 @@ pub async fn delete_workflow(db: State<'_, DbState>, id: String) -> Result<(), A
     Ok(())
 }
 
-#[tauri::command]
-pub async fn run_workflow(_db: State<'_, DbState>, _workflow_id: String) -> Result<String, AppError> {
-    // Stub — workflow execution engine will be implemented in Phase 3B
-    Err(AppError::NotFound("run_workflow not yet implemented".into()))
-}
+// Note: run_workflow was a stub returning "not yet implemented".
+// It has been removed — the real execution engine will land in Phase 1 as
+// kernel-compose::Graph, exposed via a new command surface that streams
+// AgentEvent rather than returning a single String.

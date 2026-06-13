@@ -9,6 +9,5 @@ pub mod agents;
 pub mod files;
 pub mod workflows;
 pub mod mcp_cmds;
-pub mod orchestra_cmds;
 pub mod skills_cmds;
 pub mod cost_cmds;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, Component, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../Toast';
 import { IconBranch } from '../Icons';
@@ -12,30 +12,65 @@ import type { GitStatus } from '../../types';
  * current branch, and a "提交" button that opens a terminal in the project
  * directory so the user can stage and commit. Refreshes on an interval while
  * visible and whenever the active project changes.
+ *
+ * Wrapped in a local ErrorBoundary so a backend/git hiccup degrades to a small
+ * panel message instead of blanking the whole app (whitepage).
  */
 export function GitPanel({ projectPath }: { projectPath: string | null }) {
+  return (
+    <ErrorBoundary fallback={<aside className="git-panel git-panel-empty"><div className="git-panel-header">Git 工具</div><div className="git-panel-placeholder">Git 状态读取失败</div></aside>}>
+      <GitPanelInner projectPath={projectPath} />
+    </ErrorBoundary>
+  );
+}
+
+class ErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error: Error) { console.error('[GitPanel] render error:', error); }
+  componentDidUpdate(prev: { children: ReactNode }) {
+    // Reset when the project changes so a transient error doesn't stick.
+    if (prev.children !== this.props.children && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+  render() { return this.state.hasError ? this.props.fallback : this.props.children; }
+}
+
+function GitPanelInner({ projectPath }: { projectPath: string | null }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const { info, error } = useToast();
+  // Guards so a stale async result can't overwrite a newer one, and so the
+  // interval is skipped while a fetch is already in flight (avoids pile-up if
+  // the backend is slow on a large repo).
+  const reqIdRef = useRef(0);
+  const inFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!projectPath || !isTauri()) { setStatus(null); return; }
+    if (inFlightRef.current) return; // don't pile up concurrent fetches
+    inFlightRef.current = true;
+    const myId = ++reqIdRef.current;
     setLoading(true);
     try {
       const s = await invoke<GitStatus>('get_git_status', { projectPath });
-      setStatus(s);
+      // Only apply if this is still the latest request.
+      if (myId === reqIdRef.current) setStatus(s);
     } catch {
-      setStatus(null);
+      if (myId === reqIdRef.current) setStatus(null);
     } finally {
-      setLoading(false);
+      if (myId === reqIdRef.current) setLoading(false);
+      inFlightRef.current = false;
     }
   }, [projectPath]);
 
-  // Load on project change, then poll every 10s for fresh diff counts.
+  // Load on project change, then poll every 15s for fresh diff counts.
   useEffect(() => {
+    reqIdRef.current++; // invalidate any in-flight request from the previous project
     refresh();
     if (!projectPath) return;
-    const id = setInterval(refresh, 10000);
+    const id = setInterval(refresh, 15000);
     return () => clearInterval(id);
   }, [projectPath, refresh]);
 
@@ -77,7 +112,10 @@ export function GitPanel({ projectPath }: { projectPath: string | null }) {
     );
   }
 
-  const dirty = status.isDirty || status.insertions > 0 || status.deletions > 0;
+  // Defensive: tolerate a backend payload missing the new numeric fields.
+  const insertions = Number(status.insertions ?? 0);
+  const deletions = Number(status.deletions ?? 0);
+  const dirty = status.isDirty || insertions > 0 || deletions > 0;
 
   return (
     <aside className="git-panel">
@@ -91,8 +129,8 @@ export function GitPanel({ projectPath }: { projectPath: string | null }) {
           <span className="git-status-dot" aria-hidden />
           <span className="git-status-label">{dirty ? '更改' : '干净'}</span>
           <span className="git-status-counts">
-            <span className="git-count ins">+{status.insertions}</span>
-            <span className="git-count del">-{status.deletions}</span>
+            <span className="git-count ins">+{insertions}</span>
+            <span className="git-count del">-{deletions}</span>
           </span>
         </div>
 

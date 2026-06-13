@@ -37,9 +37,6 @@ pub enum AppError {
     #[error("MCP error: {0}")]
     Mcp(String),
 
-    #[error("Orchestra error: {0}")]
-    Orchestra(String),
-
     #[error("Skill error: {0}")]
     Skill(String),
 

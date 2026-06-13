@@ -9,7 +9,6 @@ pub mod knowledge;
 pub mod config;
 pub mod quality;
 pub mod mcp;
-pub mod orchestra;
 pub mod skills;
 pub mod cost;
 
@@ -90,7 +89,6 @@ pub fn run() {
             agents::pty::AgentProcesses::new(),
         )))
         .manage(mcp::registry::McpRegistry::new())
-        .manage(orchestra::sidecar::OwnAgentSidecar::new(8080))
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,
@@ -142,13 +140,9 @@ pub fn run() {
             commands::workflows::get_workflow,
             commands::workflows::update_workflow,
             commands::workflows::delete_workflow,
-            commands::workflows::run_workflow,
             commands::mcp_cmds::mcp_connect,
             commands::mcp_cmds::mcp_disconnect,
             commands::mcp_cmds::mcp_list_tools,
-            commands::orchestra_cmds::orchestra_start,
-            commands::orchestra_cmds::orchestra_stop,
-            commands::orchestra_cmds::orchestra_status,
             commands::skills_cmds::list_skills,
             commands::skills_cmds::install_skill,
             commands::skills_cmds::uninstall_skill,

@@ -259,22 +259,5 @@ export interface Workflow {
   updatedAt: string;
 }
 
-export interface WorkflowRun {
-  id: string;
-  workflowId: string;
-  status: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  result: string | null;
-}
-
-export interface WorkflowStep {
-  id: string;
-  runId: string;
-  nodeId: string;
-  nodeType: string;
-  status: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  output: string | null;
-}
+// Note: WorkflowRun / WorkflowStep removed — see models.rs comment.
+// Execution state will be reintroduced in Phase 1 via the Graph engine.
