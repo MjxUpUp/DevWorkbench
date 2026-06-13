@@ -110,7 +110,7 @@ export function ChatView() {
   const hasConversation = !!(activeSessionId || runningSession);
   const canSend = !!project && !!selectedAgent && !!prompt.trim() && !runningSession;
 
-  // Build full prompt with attached files
+  // Build full prompt with attached files — use absolute paths so backend can read them
   const buildFullPrompt = useCallback(() => {
     let fullPrompt = prompt.trim();
     if (attachedFiles.length > 0) {

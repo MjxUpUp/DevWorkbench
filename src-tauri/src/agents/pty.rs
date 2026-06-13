@@ -1025,15 +1025,14 @@ const FILE_INJECT_MAX_BYTES: usize = 50 * 1024;
 /// Maximum total bytes across all file injections.
 const FILE_INJECT_TOTAL_MAX_BYTES: usize = 200 * 1024;
 
-/// Parse `@/path/to/file` references from the prompt and replace them with
-/// the actual file content wrapped in markers. Paths may be absolute or
-/// relative to `project_path`.
+/// Parse `@/path/to/file`, `@X:\path`, or `@filename.ext` references from the
+/// prompt and replace them with the actual file content wrapped in markers.
 fn inject_file_references(project_path: &str, prompt: &str) -> String {
     let mut result = prompt.to_string();
     let mut total_injected: usize = 0;
     let mut replacements: Vec<(String, String)> = Vec::new();
 
-    // Manual scan for @/path or @X:\path patterns
+    // Manual scan for @-prefixed file paths
     let chars: Vec<char> = prompt.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -1042,22 +1041,14 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
             continue;
         }
 
-        // Look ahead: must be '/' or '\' or a Windows drive letter like 'C:\'
-        let path_start = if i + 1 < chars.len() && (chars[i + 1] == '/' || chars[i + 1] == '\\') {
-            i + 1
-        } else if i + 3 < chars.len()
-            && chars[i + 1].is_ascii_alphabetic()
-            && chars[i + 2] == ':'
-            && (chars[i + 3] == '\\' || chars[i + 3] == '/')
-        {
-            i + 1
-        } else {
+        // @ must be preceded by whitespace or start-of-string (avoid matching emails)
+        if i > 0 && !chars[i - 1].is_whitespace() && chars[i - 1] != '\n' {
             i += 1;
             continue;
-        };
+        }
 
-        // Collect path chars until whitespace or end
-        let mut path_end = path_start;
+        // Collect candidate path chars until whitespace or end
+        let mut path_end = i + 1;
         while path_end < chars.len()
             && !chars[path_end].is_whitespace()
             && chars[path_end] != '@'
@@ -1065,7 +1056,33 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
             path_end += 1;
         }
 
-        let file_path: String = chars[path_start..path_end].iter().collect();
+        if path_end <= i + 1 {
+            i += 1;
+            continue;
+        }
+
+        let candidate: String = chars[i + 1..path_end].iter().collect();
+
+        // Check if candidate looks like a file path:
+        // - Starts with / or \ (absolute Unix-style)
+        // - Starts with X:\ (Windows absolute)
+        // - Contains a '.' (likely a filename like Cargo.toml, src/main.rs)
+        // - Contains '/' or '\' (path separator)
+        let looks_like_path = candidate.starts_with('/')
+            || candidate.starts_with('\\')
+            || (candidate.len() >= 3
+                && candidate.as_bytes()[0].is_ascii_alphabetic()
+                && candidate.as_bytes()[1] == b':'
+                && (candidate.as_bytes()[2] == b'\\' || candidate.as_bytes()[2] == b'/'))
+            || candidate.contains('.')
+            || candidate.contains('/')
+            || candidate.contains('\\');
+
+        if !looks_like_path {
+            i = path_end;
+            continue;
+        }
+
         let full_match: String = chars[i..path_end].iter().collect();
 
         // Skip if already processed
@@ -1074,11 +1091,11 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
             continue;
         }
 
-        let path = if std::path::Path::new(&file_path).is_absolute() {
-            std::path::PathBuf::from(&file_path)
+        let path = if std::path::Path::new(&candidate).is_absolute() {
+            std::path::PathBuf::from(&candidate)
         } else {
-            // Relative path like /src/main.rs → project_path/src/main.rs
-            let relative = file_path.trim_start_matches('/').trim_start_matches('\\');
+            // Relative path like Cargo.toml or /src/main.rs → project_path/...
+            let relative = candidate.trim_start_matches('/').trim_start_matches('\\');
             std::path::PathBuf::from(project_path).join(relative)
         };
 
