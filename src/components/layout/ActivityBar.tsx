@@ -1,11 +1,13 @@
 import { useNavigationStore, type ViewId } from '../../stores/navigationStore';
+import { IconChat, IconOrchestrate, IconSkillMarket, IconDashboard, IconSettings, IconUser } from '../Icons';
+import type { IconProps } from '../Icons';
 
-const VIEWS: { id: ViewId; label: string; icon: string }[] = [
-  { id: 'chat', label: 'Chat', icon: '◉' },
-  { id: 'orchestrate', label: 'Orch', icon: '⬡' },
-  { id: 'skill-market', label: 'Mkt', icon: '◆' },
-  { id: 'dashboard', label: 'Dash', icon: '▦' },
-  { id: 'settings', label: 'Set', icon: '⚙' },
+const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
+  { id: 'chat', label: 'Chat', Icon: IconChat },
+  { id: 'orchestrate', label: 'Orch', Icon: IconOrchestrate },
+  { id: 'skill-market', label: 'Mkt', Icon: IconSkillMarket },
+  { id: 'dashboard', label: 'Dash', Icon: IconDashboard },
+  { id: 'settings', label: 'Set', Icon: IconSettings },
 ];
 
 export function ActivityBar() {
@@ -25,13 +27,13 @@ export function ActivityBar() {
             aria-label={view.label}
             aria-selected={activeView === view.id}
           >
-            <span className="activity-bar-icon">{view.icon}</span>
+            <view.Icon size={18} />
           </button>
         ))}
       </div>
       <div className="activity-bar-bottom">
         <button className="activity-bar-item" title="User" aria-label="User settings">
-          <span className="activity-bar-icon">◐</span>
+          <IconUser size={18} />
         </button>
       </div>
     </nav>
