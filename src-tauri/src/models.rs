@@ -263,6 +263,7 @@ pub struct McpConfigFile {
 // ---- Workflow types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Workflow {
     pub id: String,
     pub name: String,
@@ -272,6 +273,7 @@ pub struct Workflow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowRun {
     pub id: String,
     pub workflow_id: String,
@@ -282,6 +284,7 @@ pub struct WorkflowRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowStep {
     pub id: String,
     pub run_id: String,
@@ -296,6 +299,7 @@ pub struct WorkflowStep {
 // ---- Skill types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Skill {
     pub id: String,
     pub org: String,
@@ -308,6 +312,7 @@ pub struct Skill {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillReport {
     pub id: String,
     pub skill_id: String,
@@ -330,6 +335,7 @@ pub struct CostRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CostSummary {
     pub total_cost: f64,
     pub total_input_tokens: i64,
@@ -338,6 +344,7 @@ pub struct CostSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CostTrendPoint {
     pub date: String,
     pub cost: f64,
@@ -345,6 +352,7 @@ pub struct CostTrendPoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BudgetSettings {
     pub monthly_budget_usd: Option<f64>,
     pub alert_threshold: f64,
