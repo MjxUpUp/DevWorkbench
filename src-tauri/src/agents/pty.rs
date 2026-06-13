@@ -203,6 +203,8 @@ pub fn spawn_pty_agent(
     let injected_prompt = inject_knowledge_with_timeout(
         &db_conn, &agent_type, project_path, prompt,
     );
+    // Inject @file references with actual file content
+    let injected_prompt = inject_file_references(project_path, &injected_prompt);
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model, parent_session_id)?;
 
     // On Windows, portable_pty's read() blocks until the master is closed,
@@ -988,6 +990,114 @@ fn inject_knowledge_with_timeout(
             prompt.to_string()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// File reference injection (@path → actual file content)
+// ---------------------------------------------------------------------------
+
+/// Maximum bytes per file to inject.
+const FILE_INJECT_MAX_BYTES: usize = 50 * 1024;
+/// Maximum total bytes across all file injections.
+const FILE_INJECT_TOTAL_MAX_BYTES: usize = 200 * 1024;
+
+/// Parse `@/path/to/file` references from the prompt and replace them with
+/// the actual file content wrapped in markers. Paths may be absolute or
+/// relative to `project_path`.
+fn inject_file_references(project_path: &str, prompt: &str) -> String {
+    let mut result = prompt.to_string();
+    let mut total_injected: usize = 0;
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    // Manual scan for @/path or @X:\path patterns
+    let chars: Vec<char> = prompt.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '@' {
+            i += 1;
+            continue;
+        }
+
+        // Look ahead: must be '/' or '\' or a Windows drive letter like 'C:\'
+        let path_start = if i + 1 < chars.len() && (chars[i + 1] == '/' || chars[i + 1] == '\\') {
+            i + 1
+        } else if i + 3 < chars.len()
+            && chars[i + 1].is_ascii_alphabetic()
+            && chars[i + 2] == ':'
+            && (chars[i + 3] == '\\' || chars[i + 3] == '/')
+        {
+            i + 1
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Collect path chars until whitespace or end
+        let mut path_end = path_start;
+        while path_end < chars.len()
+            && !chars[path_end].is_whitespace()
+            && chars[path_end] != '@'
+        {
+            path_end += 1;
+        }
+
+        let file_path: String = chars[path_start..path_end].iter().collect();
+        let full_match: String = chars[i..path_end].iter().collect();
+
+        // Skip if already processed
+        if replacements.iter().any(|(m, _)| m == &full_match) {
+            i = path_end;
+            continue;
+        }
+
+        let path = if std::path::Path::new(&file_path).is_absolute() {
+            std::path::PathBuf::from(&file_path)
+        } else {
+            // Relative path like /src/main.rs → project_path/src/main.rs
+            let relative = file_path.trim_start_matches('/').trim_start_matches('\\');
+            std::path::PathBuf::from(project_path).join(relative)
+        };
+
+        // Read file content (with size limit)
+        let content = match std::fs::read(&path) {
+            Ok(bytes) => {
+                if bytes.len() > FILE_INJECT_MAX_BYTES {
+                    format!(
+                        "[File too large: {} bytes, showing first {} bytes]\n{}",
+                        bytes.len(),
+                        FILE_INJECT_MAX_BYTES,
+                        String::from_utf8_lossy(&bytes[..FILE_INJECT_MAX_BYTES])
+                    )
+                } else {
+                    String::from_utf8_lossy(&bytes).to_string()
+                }
+            }
+            Err(e) => format!("[Could not read file {}: {}]", path.display(), e),
+        };
+
+        let injected_len = content.len();
+        if total_injected + injected_len > FILE_INJECT_TOTAL_MAX_BYTES {
+            replacements.push((
+                full_match.to_string(),
+                format!("[File {} skipped: total injection limit reached]", path.display()),
+            ));
+            continue;
+        }
+        total_injected += injected_len;
+
+        let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let wrapped = format!(
+            "--- BEGIN FILE: {} ({}) ---\n{}\n--- END FILE: {} ---",
+            file_name, path.display(), content, file_name
+        );
+        replacements.push((full_match.to_string(), wrapped));
+    }
+
+    for (pattern, replacement) in replacements {
+        result = result.replace(&pattern, &replacement);
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
