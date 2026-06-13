@@ -46,6 +46,7 @@ function App() {
   // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
+  const activeView = useNavigationStore((s) => s.activeView);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -144,9 +145,9 @@ function App() {
   return (
     <ErrorBoundary>
     <ToastProvider>
-    <div className="app">
+    <div className={`app${activeView !== 'chat' ? ' sidebar-hidden' : ''}`}>
       <ActivityBar />
-      <Sidebar />
+      {activeView === 'chat' && <Sidebar />}
       <MainStage />
       <CommandPalette />
 
