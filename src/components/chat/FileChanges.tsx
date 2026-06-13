@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { Session, ContextSnapshot } from '../../types';
+import { IconEdit } from '../Icons';
 
 interface FileChangesProps {
   session: Session | null;
@@ -13,8 +14,6 @@ interface FileChange {
 
 function extractFileChanges(snapshot: ContextSnapshot | null | undefined): FileChange[] {
   if (!snapshot || !snapshot.filesChanged) return [];
-  // filesChanged is string[] — treat each as a path with zero diff stats
-  // (actual diff stats would come from git diff parsing in the backend)
   return snapshot.filesChanged.map(path => ({
     path,
     added: 0,
@@ -28,16 +27,16 @@ export function FileChanges({ session }: FileChangesProps) {
   if (files.length === 0) return null;
 
   return (
-    <div className="chat-block file-changes">
-      <div className="chat-block-header">
-        <span className="chat-block-title">File Changes</span>
-        <span className="chat-block-badge">{files.length} files</span>
+    <div className="agent-block">
+      <div className="agent-block-header">
+        <span className="agent-block-title">File Changes</span>
+        <span className="agent-block-badge">{files.length} files</span>
       </div>
-      <div className="chat-block-body">
+      <div className="agent-block-body">
         <div className="file-changes-list">
           {files.map((file, i) => (
             <div key={i} className="file-change-item">
-              <span className="file-change-icon">📝</span>
+              <span className="file-change-icon"><IconEdit size={14} /></span>
               <span className="file-change-path">{file.path}</span>
               {(file.added > 0 || file.removed > 0) && (
                 <span className="file-change-stats">

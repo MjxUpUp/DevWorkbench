@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import type { Session, QualityReport } from '../../types';
 import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
+import { IconEdit, IconCpu, IconStar, IconX, IconStop } from '../Icons';
 
 interface AgentMessageProps {
   session: Session;
@@ -9,6 +10,8 @@ interface AgentMessageProps {
   qualityReport: QualityReport | null;
   elapsed?: string;
 }
+
+const ICON_SIZE = 14;
 
 export function AgentMessage({ session, running, qualityReport, elapsed }: AgentMessageProps) {
   const [chainCollapsed, setChainCollapsed] = useState(false);
@@ -19,17 +22,21 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
 
   // Build decision chain steps from session data
   const chainSteps = useMemo(() => {
-    const steps: { icon: string; label: string; detail: string; status: 'done' | 'active' | 'pending' }[] = [];
-    steps.push({ icon: '📋', label: '需求定义', detail: session.prompt.slice(0, 80), status: 'done' });
+    const steps: { icon: React.ReactNode; label: string; detail: string; status: 'done' | 'active' | 'pending' }[] = [];
+    steps.push({ icon: <IconEdit size={ICON_SIZE} />, label: '需求定义', detail: session.prompt.slice(0, 80), status: 'done' });
     steps.push({
-      icon: '🤖',
+      icon: <IconCpu size={ICON_SIZE} />,
       label: 'Agent 执行',
       detail: `${session.agentType}${session.model ? ` · ${session.model}` : ''}`,
       status: running ? 'active' : 'done',
     });
     if (!running) {
       steps.push({
-        icon: session.status === 'completed' ? '✅' : session.status === 'failed' ? '❌' : '⏹',
+        icon: session.status === 'completed'
+          ? <IconStar size={ICON_SIZE} filled />
+          : session.status === 'failed'
+          ? <IconX size={ICON_SIZE} />
+          : <IconStop size={ICON_SIZE} />,
         label: '结果',
         detail: statusLabel,
         status: 'done',
@@ -107,7 +114,7 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
             <div className="file-changes-list">
               {fileChanges.map((file, i) => (
                 <div key={i} className="file-change-item">
-                  <span className="file-change-icon">📝</span>
+                  <span className="file-change-icon"><IconEdit size={ICON_SIZE} /></span>
                   <span className="file-change-path">{file.path}</span>
                   {(file.added > 0 || file.removed > 0) && (
                     <span className="file-change-stats">
@@ -129,7 +136,9 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
             <span className="agent-block-title">Quality Gate</span>
             <span className="agent-block-badge">
               {qualityReport.checks.filter((c) => c.status === 'passed').length}/{qualityReport.checks.length}
-              {' '}{qualityReport.overallStatus === 'passed' ? '✅' : '❌'}
+              {' '}{qualityReport.overallStatus === 'passed'
+                ? <IconStar size={12} filled />
+                : <IconX size={12} />}
             </span>
           </div>
           <div className="agent-block-body" style={{ padding: 0 }}>
