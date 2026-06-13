@@ -101,6 +101,8 @@ struct SpawnConfig {
     program: PathBuf,
     args: Vec<String>,
     cwd: PathBuf,
+    /// If set, the prompt is delivered via stdin instead of as a CLI arg.
+    stdin_prompt: Option<String>,
 }
 
 /// Cached version of `resolve_agent_exe`. Avoids PATH scanning on every spawn.
@@ -130,13 +132,21 @@ fn build_spawn_config(
     let is_continue = parent_session_id.is_some();
     let mut args: Vec<String> = Vec::new();
 
+    // If prompt is large (contains injected file content), deliver via stdin instead of CLI arg.
+    // Windows CLI limit is ~32K chars; file content easily exceeds this.
+    const STDIN_PROMPT_THRESHOLD: usize = 4096;
+    let use_stdin = prompt.len() > STDIN_PROMPT_THRESHOLD;
+    let stdin_prompt = if use_stdin { Some(prompt.to_string()) } else { None };
+
     match agent_type {
         AgentType::ClaudeCode => {
             args.push("--print".to_string());
             if is_continue {
                 args.push("--continue".to_string());
             }
-            args.push(prompt.to_string());
+            if !use_stdin {
+                args.push(prompt.to_string());
+            }
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m.to_string());
@@ -179,6 +189,7 @@ fn build_spawn_config(
         program: exe,
         args,
         cwd: PathBuf::from(project_path),
+        stdin_prompt,
     })
 }
 
@@ -516,13 +527,14 @@ fn spawn_pipe_fallback(
     prompt: &str,
     model: Option<&str>,
 ) -> Result<Session, String> {
-    log::info!("[PIPE spawn] program={}, args={:?}, cwd={}", config.program.display(), config.args, config.cwd.display());
+    log::info!("[PIPE spawn] program={}, args={:?}, cwd={}, stdin_prompt={}", config.program.display(), config.args, config.cwd.display(), config.stdin_prompt.is_some());
     let mut cmd = std::process::Command::new(&config.program);
+    let use_stdin = config.stdin_prompt.is_some();
     cmd.args(&config.args)
         .current_dir(&config.cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
+        .stdin(if use_stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
 
     #[cfg(target_os = "windows")]
     {
@@ -534,6 +546,18 @@ fn spawn_pipe_fallback(
         .spawn()
         .map_err(|e| format!("启动 {} 失败: {}", agent_type.display_name(), e))?;
     let pid = child.id();
+
+    // Write prompt to stdin if using stdin delivery
+    if let Some(ref prompt_text) = config.stdin_prompt {
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = std::io::Write::write_all(&mut stdin, prompt_text.as_bytes()) {
+                log::warn!("[PIPE spawn] Failed to write prompt to stdin: {}", e);
+            }
+            drop(stdin); // close stdin to signal EOF
+        }
+    } else {
+        drop(child.stdin.take());
+    }
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -595,7 +619,7 @@ fn spawn_pipe_fallback(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    drop(child.stdin.take());
+    // stdin already taken/handled above
 
     // Reader thread
     let app_reader = app.clone();
