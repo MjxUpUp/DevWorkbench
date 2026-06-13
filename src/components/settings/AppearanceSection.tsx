@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 
 export function AppearanceSection() {
-  const settings = useSettingsStore((s) => s.settings);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
   const error = useSettingsStore((s) => s.error);
 

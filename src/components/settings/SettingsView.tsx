@@ -8,7 +8,7 @@ import { BudgetSection } from './BudgetSection';
 import { SkillsSection } from './SkillsSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
-  IconSettings, IconSun, IconTerminal, IconCpu, IconCode, IconFolderOpen,
+  IconSettings, IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconStar,
 } from '../Icons';
 
