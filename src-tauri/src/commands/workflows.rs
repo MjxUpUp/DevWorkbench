@@ -107,6 +107,86 @@ pub async fn delete_workflow(db: State<'_, DbState>, id: String) -> Result<(), A
 }
 
 // Note: run_workflow was a stub returning "not yet implemented".
-// It has been removed — the real execution engine will land in Phase 1 as
-// kernel-compose::Graph, exposed via a new command surface that streams
-// AgentEvent rather than returning a single String.
+// It has been replaced by the real graph execution engine below.
+
+use serde::Serialize;
+use tauri::Emitter;
+
+use crate::commands::agents::AgentState;
+use crate::kernel_impl::executor::KernelExecutor;
+
+/// A single progress event the frontend subscribes to via `workflow:progress`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProgress {
+    pub run_id: String,
+    pub event: kernel_compose::GraphEvent,
+}
+
+/// Run a workflow defined as YAML. Parses → compiles → executes the graph,
+/// streaming `workflow:progress` events (one per GraphEvent) to the frontend,
+/// and returns the final output when the graph completes.
+///
+/// The workflow's Agent nodes resolve to opaque CLI agents (claude/codex/…)
+/// via the existing PTY engine; Gate nodes resolve to Forge / honesty.
+#[tauri::command]
+pub async fn run_workflow(
+    app: tauri::AppHandle,
+    agent_state: State<'_, AgentState>,
+    db: State<'_, DbState>,
+    yaml_content: String,
+    input: serde_json::Value,
+    working_dir: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    let compiled = kernel_compose::yaml::WorkflowDef::parse_and_compile(&yaml_content)
+        .map_err(AppError::NotFound)?;
+
+    let executor = KernelExecutor::new(
+        app.clone(),
+        agent_state.inner().0.clone(),
+        db.inner().clone(),
+    );
+
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let (stream, _approval_tx) = kernel_compose::run_graph_with_approvals(
+        compiled,
+        input,
+        working_dir,
+        Box::new(executor),
+    );
+
+    use futures::StreamExt;
+    let mut stream = stream;
+    let run_id_for_events = run_id.clone();
+    let app_for_events = app.clone();
+    let join_result = tokio::spawn(async move {
+        let mut last_output = serde_json::Value::Null;
+        while let Some(ev) = stream.next().await {
+            let _ = app_for_events.emit(
+                "workflow:progress",
+                WorkflowProgress {
+                    run_id: run_id_for_events.clone(),
+                    event: ev.clone(),
+                },
+            );
+            match ev {
+                kernel_compose::GraphEvent::GraphDone { output } => {
+                    last_output = output;
+                    break;
+                }
+                kernel_compose::GraphEvent::GraphFailed { error } => {
+                    return Err(error);
+                }
+                _ => {}
+            }
+        }
+        Ok(serde_json::json!({ "run_id": run_id_for_events, "output": last_output }))
+    })
+    .await;
+
+    match join_result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(graph_err)) => Err(AppError::NotFound(graph_err)),
+        Err(join_err) => Err(AppError::NotFound(format!("run task join: {join_err}"))),
+    }
+}

@@ -87,6 +87,23 @@ impl AgentType {
         }
     }
 
+    /// Parse an AgentType from a workflow node spec string. Accepts the snake_case
+    /// variant name (e.g. "claude_code"), the command name ("claude"), or
+    /// display-ish forms. Returns None for unknown agents (the caller may treat
+    /// that as a transparent/self-built agent).
+    pub fn from_spec(spec: &str) -> Option<Self> {
+        match spec.to_ascii_lowercase().as_str() {
+            "claude_code" | "claude-code" | "claudecode" | "claude" => Some(Self::ClaudeCode),
+            "codex" => Some(Self::Codex),
+            "cursor_agent" | "cursor-agent" | "cursor" => Some(Self::CursorAgent),
+            "gemini_cli" | "gemini-cli" | "gemini" => Some(Self::GeminiCli),
+            "copilot" | "github_copilot_cli" => Some(Self::Copilot),
+            "qwen_code" | "qwen-code" | "qwen" => Some(Self::QwenCode),
+            "pi" => Some(Self::Pi),
+            _ => None,
+        }
+    }
+
     pub fn display_name(&self) -> &str {
         match self {
             Self::ClaudeCode => "Claude Code",

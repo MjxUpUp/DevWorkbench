@@ -24,10 +24,13 @@ pub mod error;
 pub mod schema;
 pub mod traits;
 
-pub use agent::{Agent, AgentCaps, AgentError, AgentEvent, AgentInput, AgentKind, AgentOutcome};
+pub use agent::{
+    Agent, AgentCaps, AgentError, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+};
 pub use document::Document;
 pub use error::Error;
 pub use schema::{FunctionCall, Message, Role, ToolCall};
 pub use traits::{
-    ChatModel, ChatTemplate, ModelOptions, RetrieveOptions, Tool, ToolContext, ToolInfo,
+    ChatModel, ChatTemplate, MessageStream, ModelOptions, RetrieveOptions, Retriever, Tool,
+    ToolContext, ToolInfo,
 };

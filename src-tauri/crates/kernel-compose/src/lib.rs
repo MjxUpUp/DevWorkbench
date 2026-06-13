@@ -27,5 +27,5 @@ pub use graph::{
     BranchNode, CompiledGraph, Edge, GateNode, Graph, GraphBuilder, HumanNode, MergeNode,
     Node, NodeId, NodeType, ParallelNode, PromptNode, TransformNode,
 };
-pub use runner::run_graph;
+pub use runner::{run_graph, run_graph_with_approvals, HumanApproval};
 pub use yaml::{WorkflowDef, WorkflowNodeDef};

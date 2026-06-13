@@ -11,6 +11,7 @@ pub mod quality;
 pub mod mcp;
 pub mod skills;
 pub mod cost;
+pub mod kernel_impl;
 
 use tauri::Manager;
 
@@ -140,6 +141,7 @@ pub fn run() {
             commands::workflows::get_workflow,
             commands::workflows::update_workflow,
             commands::workflows::delete_workflow,
+            commands::workflows::run_workflow,
             commands::mcp_cmds::mcp_connect,
             commands::mcp_cmds::mcp_disconnect,
             commands::mcp_cmds::mcp_list_tools,

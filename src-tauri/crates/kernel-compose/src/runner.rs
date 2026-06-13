@@ -84,13 +84,59 @@ fn build_run_stream(
     stream! {
         let mut ready: Vec<NodeId> = vec![start.clone()];
         let mut outputs = outputs;
+        // Nodes that were skipped by an un-taken branch edge. A skipped node is
+        // NOT executed; it produces a Null value, emits a Skipped status, and
+        // propagates the skip to its own successors (so a whole deselected path
+        // is settled without running). This is the eino `reportSkip` analog.
+        let mut skipped: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+
+        // Helper: settle a node's successor edge — decrement remaining, push when
+        // ready, and propagate skip if the current node was skipped.
+        let mut settle = |edge: &crate::graph::Edge,
+                          node_value: Option<&Value>,
+                          parent_skipped: bool,
+                          ready: &mut Vec<NodeId>,
+                          outputs: &mut HashMap<NodeId, Value>,
+                          skipped: &mut std::collections::HashSet<NodeId>| {
+            if let Some(v) = node_value {
+                outputs.entry(edge.to.clone()).or_insert_with(|| v.clone());
+            }
+            let r = remaining.get_mut(&edge.to).unwrap();
+            if *r > 0 { *r -= 1; }
+            if *r == 0 {
+                if parent_skipped {
+                    // Parent was skipped → this successor has no real input from
+                    // this path. Mark it skipped too (cascade) and settle it
+                    // without executing.
+                    skipped.insert(edge.to.clone());
+                    ready.push(edge.to.clone());
+                } else {
+                    ready.push(edge.to.clone());
+                }
+            }
+        };
 
         while let Some(nid) = ready.pop() {
-            if nid == end {
-                let out = outputs.remove(&end).unwrap_or(Value::Null);
-                yield GraphEvent::GraphDone { output: out };
-                return;
+            // If this node was marked skipped by a branch, settle it without
+            // executing — emit Skipped, propagate to its successors.
+            if skipped.contains(&nid) {
+                let succs: Vec<crate::graph::Edge> = g.edges.iter()
+                    .filter(|e| e.from == nid).cloned().collect();
+                yield GraphEvent::NodeEnd {
+                    node: nid.clone(),
+                    status: NodeStatus::Skipped,
+                    error: None,
+                };
+                if nid == end {
+                    yield GraphEvent::GraphDone { output: Value::Null };
+                    return;
+                }
+                for edge in &succs {
+                    settle(edge, None, true, &mut ready, &mut outputs, &mut skipped);
+                }
+                continue;
             }
+
             let node = match g.nodes.get(&nid) {
                 Some(n) => n.clone(),
                 None => {
@@ -111,8 +157,10 @@ fn build_run_stream(
                     executor.run_gate(gate, incoming.clone(), working_dir.clone()).await
                 }
                 Node::Merge(m) => {
+                    // Collect only NON-skipped predecessors' outputs.
                     let pred_vals: Vec<Value> = preds.get(&nid).cloned().unwrap_or_default()
                         .into_iter()
+                        .filter(|p| !skipped.contains(p))
                         .filter_map(|p| outputs.get(&p).cloned())
                         .collect();
                     Ok(merge_values(pred_vals, &m.strategy))
@@ -144,20 +192,23 @@ fn build_run_stream(
                     outputs.insert(nid.clone(), v.clone());
                     yield GraphEvent::NodeEnd { node: nid.clone(), status: NodeStatus::Done, error: None };
 
-                    let succs: Vec<&crate::graph::Edge> = g.edges.iter().filter(|e| e.from == nid).collect();
+                    if nid == end {
+                        yield GraphEvent::GraphDone { output: v };
+                        return;
+                    }
+
+                    let succs: Vec<crate::graph::Edge> = g.edges.iter()
+                        .filter(|e| e.from == nid).cloned().collect();
                     for edge in &succs {
                         let fire = match (&node, &edge.when) {
                             (Node::Branch(_), Some(when_val)) => eval_branch(&incoming, when_val),
                             _ => true,
                         };
-                        if fire {
-                            outputs.entry(edge.to.clone()).or_insert(v.clone());
-                            let r = remaining.get_mut(&edge.to).unwrap();
-                            if *r > 0 { *r -= 1; }
-                            if *r == 0 {
-                                ready.push(edge.to.clone());
-                            }
-                        }
+                        // fire → settle with value, parent not skipped.
+                        // !fire (branch deselected) → settle WITHOUT value and mark
+                        // the successor skipped (cascade).
+                        settle(edge, if fire { Some(&v) } else { None }, !fire,
+                               &mut ready, &mut outputs, &mut skipped);
                     }
                 }
                 Err(e) => {

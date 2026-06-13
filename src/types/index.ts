@@ -259,5 +259,28 @@ export interface Workflow {
   updatedAt: string;
 }
 
-// Note: WorkflowRun / WorkflowStep removed — see models.rs comment.
-// Execution state will be reintroduced in Phase 1 via the Graph engine.
+// Note: WorkflowRun / WorkflowStep removed — the static run-tracking model was
+// never written to. Execution is now stream-based via the kernel-compose Graph
+// engine: run_workflow returns a { run_id, output } result and emits live
+// `workflow:progress` events the Orchestrate canvas subscribes to.
+
+/** Result of `invoke('run_workflow', { yamlContent, input, workingDir })`. */
+export interface WorkflowRunResult {
+  run_id: string;
+  output: unknown;
+}
+
+/** GraphEvent kinds emitted as `workflow:progress` payload.runId === run_id. */
+export type WorkflowProgressEvent =
+  | { kind: 'node_start'; node: string }
+  | { kind: 'node_end'; node: string; status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval'; error?: string }
+  | { kind: 'approval_required'; node: string; prompt: string; resume_token: string }
+  | { kind: 'node_output'; node: string; chunk: unknown }
+  | { kind: 'graph_done'; output: unknown }
+  | { kind: 'graph_failed'; error: string };
+
+/** The full `workflow:progress` Tauri event payload. */
+export interface WorkflowProgressPayload {
+  runId: string;
+  event: WorkflowProgressEvent;
+}
