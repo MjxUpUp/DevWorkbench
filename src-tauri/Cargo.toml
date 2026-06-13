@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # kernel. Phase 0 only adds kernel-core (trait/schema shell); existing modules
 # (agents/, knowledge/, quality/, mcp/) remain in the main crate and will migrate
 # incrementally in later phases.
-members = ["crates/kernel-core"]
+members = ["crates/kernel-core", "crates/kernel-compose"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
