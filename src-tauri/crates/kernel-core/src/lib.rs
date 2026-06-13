@@ -26,6 +26,7 @@ pub mod traits;
 
 pub use agent::{
     Agent, AgentCaps, AgentError, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+    ToolCallEvent, ToolCallStatus,
 };
 pub use document::Document;
 pub use error::Error;
