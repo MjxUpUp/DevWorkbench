@@ -16,26 +16,26 @@ html, body, #root {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* === App Layout — TitleBar on top, then 3 cols: ActivityBar | Sidebar | MainStage === */
+/* === App Layout — TitleBar on top, then 2 cols: LeftColumn | MainStage (zcode single-column) === */
 .app {
   display: grid;
-  grid-template-columns: var(--activity-bar-width) auto 1fr;
+  grid-template-columns: var(--sidebar-width) 1fr;
   grid-template-rows: var(--title-bar-height) 1fr var(--status-bar-height);
   grid-template-areas:
-    "title-bar title-bar title-bar"
-    "activity-bar sidebar main-stage"
-    "activity-bar sidebar status-bar";
+    "title-bar title-bar"
+    "left-column main-stage"
+    "left-column status-bar";
   height: 100vh;
   overflow: hidden;
   position: relative;
   z-index: 1;
 }
 
-/* Sidebar hidden state (Ctrl+B toggle) */
-.app.sidebar-hidden {
-  grid-template-columns: var(--activity-bar-width) 0px 1fr;
+/* Left column collapsed state */
+.app.left-column-hidden {
+  grid-template-columns: 0px 1fr;
 }
-.app.sidebar-hidden .sidebar {
+.app.left-column-hidden .left-column {
   width: 0 !important;
   min-width: 0 !important;
   max-width: 0 !important;
@@ -47,21 +47,21 @@ html, body, #root {
 /* Responsive breakpoints */
 @media (max-width: 1199px) {
   .app {
-    grid-template-columns: var(--activity-bar-width) 0px 1fr;
+    grid-template-columns: 0px 1fr;
   }
-  .sidebar {
+  .left-column {
     display: none;
   }
 }
 @media (max-width: 899px) {
   .app {
-    grid-template-columns: 0px 1fr;
+    grid-template-columns: 1fr;
     grid-template-areas:
-      "title-bar title-bar"
-      "main-stage main-stage"
-      "status-bar status-bar";
+      "title-bar"
+      "main-stage"
+      "status-bar";
   }
-  .activity-bar {
+  .left-column {
     display: none;
   }
 }

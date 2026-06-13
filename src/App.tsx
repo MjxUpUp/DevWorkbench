@@ -3,7 +3,6 @@ import { AddProject } from './components/AddProject';
 import { Sidebar } from './components/Sidebar';
 import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
-import { ActivityBar } from './components/layout/ActivityBar';
 import { TitleBar } from './components/layout/TitleBar';
 import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
@@ -47,7 +46,8 @@ function App() {
   // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
-  const activeView = useNavigationStore((s) => s.activeView);
+  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
+  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -128,6 +128,12 @@ function App() {
         }
       }
 
+      // Ctrl+B: Toggle left column (zcode-style sidebar toggle)
+      if (e.key === 'b' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        useNavigationStore.getState().toggleSidebar();
+      }
+
       // Ctrl+1~5: Switch views
       if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '5') {
         e.preventDefault();
@@ -146,10 +152,10 @@ function App() {
   return (
     <ErrorBoundary>
     <ToastProvider>
-    <div className={`app${activeView !== 'chat' ? ' sidebar-hidden' : ''}`}>
+    <div className={`app${!sidebarOpen ? ' left-column-hidden' : ''}`}>
       <TitleBar />
-      <ActivityBar />
-      {activeView === 'chat' && <Sidebar />}
+      <Sidebar />
+      <button className="left-column-reopen" onClick={toggleSidebar} title="展开边栏" aria-label="展开边栏">▸</button>
       <MainStage />
       <CommandPalette />
 

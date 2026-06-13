@@ -1,0 +1,185 @@
+/* === Left Column — zcode-style single column (header + views + tree + footer) === */
+.left-column {
+  grid-area: left-column;
+  position: relative;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: var(--sidebar-max);
+  background: var(--surface-0);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+
+/* Header — logo + collapse toggle */
+.left-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--title-bar-height);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  flex-shrink: 0;
+}
+
+.left-column-logo {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  letter-spacing: -0.5px;
+}
+
+.left-column-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+/* View switcher — icon + label list items (settings lives in footer) */
+.left-column-views {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.left-column-view-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-view-item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-view-item.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.left-column-view-icon {
+  flex-shrink: 0;
+}
+
+.left-column-view-label {
+  flex: 1;
+}
+
+/* Footer — user + settings */
+.left-column-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.left-column-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  padding: 4px var(--space-2);
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-user:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-settings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-settings:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-settings.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+/* Reopen button — shown only when left column is collapsed */
+.left-column-reopen {
+  position: fixed;
+  top: calc(var(--title-bar-height) + var(--space-2));
+  left: var(--space-2);
+  z-index: 50;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-0);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.app.left-column-hidden .left-column-reopen {
+  display: flex;
+}
+
+.left-column-reopen:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+}

@@ -196,19 +196,8 @@
   font-family: var(--font-mono);
 }
 
-/* === Sidebar — project tree only, navigation moved to ActivityBar === */
-.sidebar {
-  grid-area: sidebar;
-  position: relative;
-  min-width: var(--sidebar-min);
-  max-width: var(--sidebar-max);
-  background: var(--surface-0);
-  border-right: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
-  color: var(--text-secondary);
-  overflow: hidden;
-}
+/* === Left column — container styles moved to left-column.css (zcode single-column) === */
+/* Child sections below (.sidebar-quick-actions, .sidebar-scroll, .sidebar-project-*) are reused inside .left-column */
 
 .sidebar-scroll {
   flex: 1;

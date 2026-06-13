@@ -1,6 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import type { Session, Requirement, Project } from '../types';
-import { IconStop, IconPlus, IconFolderOpen, IconSearch } from './Icons';
+import { IconStop, IconPlus, IconFolderOpen, IconSearch, IconChat, IconOrchestrate, IconSkillMarket, IconDashboard, IconUser, IconSettings } from './Icons';
+import type { IconProps } from './Icons';
+import type { ViewId } from '../stores/navigationStore';
 import { useAgentStore } from '../stores/agentStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
@@ -38,6 +40,14 @@ const STATUS_ORDER: Record<string, number> = {
   done: 4,
 };
 
+/** Views shown in the left column — settings lives in the footer (zcode alignment) */
+const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
+  { id: 'chat', label: '对话', Icon: IconChat },
+  { id: 'orchestrate', label: '编排', Icon: IconOrchestrate },
+  { id: 'skill-market', label: '技能', Icon: IconSkillMarket },
+  { id: 'dashboard', label: '仪表盘', Icon: IconDashboard },
+];
+
 export function Sidebar() {
   // All data from stores
   const projects = useProjectStore((s) => s.projects);
@@ -55,6 +65,10 @@ export function Sidebar() {
   const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
   const toggleCommandPalette = useNavigationStore((s) => s.toggleCommandPalette);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
+  const activeView = useNavigationStore((s) => s.activeView);
+  const setActiveView = useNavigationStore((s) => s.setActiveView);
+  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
+  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
 
   const handleToggleProject = (project: typeof projects[0]) => {
     toggleProjectExpand(project.id);
@@ -91,7 +105,39 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="sidebar">
+    <aside className="left-column">
+      {/* Header — logo + collapse toggle (zcode-style single column) */}
+      <div className="left-column-header">
+        <div className="left-column-logo" title="Dev Workbench">DW</div>
+        <button
+          className="left-column-toggle"
+          onClick={toggleSidebar}
+          title={sidebarOpen ? '收起边栏' : '展开边栏'}
+          aria-label="切换边栏"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+            <line x1="5.5" y1="2.5" x2="5.5" y2="13.5" stroke="currentColor" strokeWidth="1.3" />
+          </svg>
+        </button>
+      </div>
+
+      {/* View switcher — settings lives in the footer (zcode alignment) */}
+      <nav className="left-column-views" aria-label="Views">
+        {VIEWS.map((view) => (
+          <button
+            key={view.id}
+            className={`left-column-view-item ${activeView === view.id ? 'active' : ''}`}
+            onClick={() => setActiveView(view.id)}
+            title={view.label}
+            aria-selected={activeView === view.id}
+          >
+            <view.Icon size={15} className="left-column-view-icon" />
+            <span className="left-column-view-label">{view.label}</span>
+          </button>
+        ))}
+      </nav>
+
       {/* Quick actions — zcode-style vertical menu (icon + label + shortcut) */}
       <div className="sidebar-quick-actions">
         <button className="sidebar-quick-btn" onClick={handleNewConversation} title="新建对话 (Ctrl+N)">
@@ -110,6 +156,7 @@ export function Sidebar() {
         </button>
       </div>
 
+      {/* Project tree */}
       <div className="sidebar-scroll">
         {projects.map(project => (
           <ProjectGroup
@@ -129,6 +176,22 @@ export function Sidebar() {
             onStopSession={stopAgent}
           />
         ))}
+      </div>
+
+      {/* Footer — user + settings (zcode alignment: settings lives here, not in view switcher) */}
+      <div className="left-column-footer">
+        <button className="left-column-user" title="用户">
+          <IconUser size={16} />
+          <span className="left-column-user-label">用户</span>
+        </button>
+        <button
+          className={`left-column-settings ${activeView === 'settings' ? 'active' : ''}`}
+          onClick={() => setActiveView('settings')}
+          title="设置"
+          aria-selected={activeView === 'settings'}
+        >
+          <IconSettings size={16} />
+        </button>
       </div>
     </aside>
   );

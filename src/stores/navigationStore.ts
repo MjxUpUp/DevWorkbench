@@ -18,6 +18,8 @@ interface NavigationState {
   addProjectOpen: boolean;
   /** Sidebar width (user draggable) */
   sidebarWidth: number;
+  /** Left column visible — zcode-style single-column toggle (replaces per-view auto-hide) */
+  sidebarOpen: boolean;
 
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
@@ -27,6 +29,7 @@ interface NavigationState {
   setCommandPaletteOpen: (open: boolean) => void;
   setAddProjectOpen: (open: boolean) => void;
   setSidebarWidth: (width: number) => void;
+  toggleSidebar: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -37,6 +40,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   commandPaletteOpen: false,
   addProjectOpen: false,
   sidebarWidth: 240,
+  sidebarOpen: true,
 
   setActiveView: (view) => set({ activeView: view }),
   selectProject: (project) => set({ activeProject: project, selectedSessionId: null }),
@@ -52,4 +56,5 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 }));
