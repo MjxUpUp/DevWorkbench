@@ -79,9 +79,21 @@
 }
 
 .settings-nav-item.active {
-  background: var(--surface-2);
-  color: var(--text-primary);
+  position: relative;
+  background: var(--accent-muted);
+  color: var(--accent);
   font-weight: 600;
+}
+
+.settings-nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 1px;
 }
 
 .settings-nav-icon {
@@ -95,7 +107,7 @@
 }
 
 .settings-nav-item.active .settings-nav-icon {
-  color: var(--text-primary);
+  color: var(--accent);
 }
 
 .settings-nav-item:hover .settings-nav-icon {
