@@ -11,6 +11,15 @@ rust-version = "1.77.2"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[workspace]
+# Workspace root sits in src-tauri/ so tauri.conf.json relative paths
+# (frontendDist: "../dist") keep working unchanged. The main crate (dev-workbench,
+# i.e. `.`) stays the Tauri entry point; kernel-* crates hold the new eino-inspired
+# kernel. Phase 0 only adds kernel-core (trait/schema shell); existing modules
+# (agents/, knowledge/, quality/, mcp/) remain in the main crate and will migrate
+# incrementally in later phases.
+members = ["crates/kernel-core"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
