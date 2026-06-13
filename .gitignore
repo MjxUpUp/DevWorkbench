@@ -33,3 +33,13 @@ Thumbs.db
 
 # Snapshot files
 .snapshot/
+
+# Dev process artifacts — visual regression baselines, scratch notes, agent debug
+*.png
+.playwright-mcp/
+_q.txt
+_cleanup_orphans.js
+
+# Product docs live outside the repo per AGENTS.md rule (commits = code only)
+doc-v1-full.xml
+e2e-test-plan.md
