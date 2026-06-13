@@ -9,6 +9,9 @@ use tauri::Emitter;
 /// Max chars kept as output summary (truncated from tail of output)
 const OUTPUT_SUMMARY_MAX_CHARS: usize = 2000;
 
+/// Maximum time a pipe session may run before being force-killed.
+const PIPE_SESSION_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
 /// Cache resolved agent exe paths to avoid repeated PATH scanning.
 static EXE_CACHE: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -650,14 +653,17 @@ fn spawn_pipe_fallback(
         }
     });
 
-    // Wait thread
+    // Wait thread — with timeout to prevent hung processes from blocking forever
     let app_exit = app.clone();
     let sid_exit = session_id.clone();
     let project_path_exit = project_path.to_string();
     let db_conn_exit = db_conn.clone();
     let agent_type_exit = agent_type.clone();
+    let processes_kill = processes.clone();
     std::thread::spawn(move || {
-        log::info!("[PIPE wait] Waiting for session {} to exit", sid_exit);
+        log::info!("[PIPE wait] Waiting for session {} to exit (timeout={}s)", sid_exit, PIPE_SESSION_TIMEOUT_SECS);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(PIPE_SESSION_TIMEOUT_SECS);
+        let mut timed_out = false;
         let (exit_code, session_status) = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -670,6 +676,13 @@ fn spawn_pipe_fallback(
                     break (code, st);
                 }
                 Ok(None) => {
+                    if std::time::Instant::now() > deadline {
+                        log::warn!("[PIPE wait] Session {} timed out after {}s, killing", sid_exit, PIPE_SESSION_TIMEOUT_SECS);
+                        timed_out = true;
+                        // Force-kill the process tree
+                        let _ = stop_agent(&processes_kill, &sid_exit);
+                        break (None, SessionStatus::Failed);
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
                 Err(_) => {
@@ -678,14 +691,16 @@ fn spawn_pipe_fallback(
             }
         };
 
-        log::info!("[PIPE wait] Session {} exited: code={:?}, status={}", sid_exit, exit_code, session_status.as_str());
+        log::info!("[PIPE wait] Session {} exited: code={:?}, status={}, timed_out={}", sid_exit, exit_code, session_status.as_str(), timed_out);
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit);
         let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
-            if exit_code.unwrap_or(-1) == 0 {
+            if timed_out {
+                Some(format!("(Session timed out after {}s and was killed)", PIPE_SESSION_TIMEOUT_SECS))
+            } else if exit_code.unwrap_or(-1) == 0 {
                 Some("(Agent completed with no text output)".to_string())
             } else {
                 Some(format!("(Process exited with code {:?})", exit_code))

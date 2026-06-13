@@ -229,9 +229,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       refreshSessions();
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
-    const p2 = listen<{ sessionId: string }>('agent:completed', async (event) => {
-      await refreshSessions();
-      await refreshRequirements();
+    const p2 = listen<{ sessionId: string; status: string; exitCode: number | null }>('agent:completed', async (event) => {
+      const { sessionId: completedId, status: completedStatus, exitCode: completedExitCode } = event.payload;
+
+      // Immediately update the session in store from event payload — don't wait for DB round-trip.
+      // This prevents the UI from showing "running" when the DB read returns stale WAL data.
+      set((s) => ({
+        sessions: s.sessions.map((ses) =>
+          ses.id === completedId
+            ? {
+                ...ses,
+                status: completedStatus === 'completed' ? 'completed' : 'failed',
+                exitCode: completedExitCode ?? ses.exitCode,
+                finishedAt: new Date().toISOString(),
+              }
+            : ses
+        ),
+      }));
+
+      // Full sync from DB in background (picks up outputSummary, contextSnapshot, etc.)
+      get().refreshSessions();
+      get().refreshRequirements();
 
       // Refresh activity timeline so new events show up immediately
       const { loadForProject, loadRecent } = useActivityStore.getState();
