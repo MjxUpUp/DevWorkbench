@@ -136,10 +136,20 @@ fn count_line_changes(repo: &git2::Repository) -> (u64, u64) {
 
     // `git diff --shortstat HEAD --untracked-files=normal`
     // 输出形如：" 2 files changed, 42 insertions(+), 7 deletions(-)\n"
-    let output = std::process::Command::new("git")
-        .args(["diff", "--shortstat", "--untracked-files=normal", "HEAD"])
-        .current_dir(workdir)
-        .output();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["diff", "--shortstat", "--untracked-files=normal", "HEAD"])
+        .current_dir(workdir);
+
+    // CREATE_NO_WINDOW — 不弹出控制台窗口（与 editor.rs/pty.rs 一致）。
+    // 没有这个标志，Windows 上每次 git 子进程都会闪一个黑框，而此命令在
+    // 每次切换项目（GitPanel + TitleBar 各调一次 get_git_status）都会触发。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output();
 
     let stdout = match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
