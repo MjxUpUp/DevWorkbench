@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import type { Project } from '../types';
+import { isTauri } from '../utils/env';
 
 interface ProjectState {
   projects: Project[];
@@ -23,6 +24,12 @@ export const useProjectStore = create<ProjectState>((set) => ({
   error: null,
 
   loadProjects: async () => {
+    // Plain browser / vite preview has no Tauri IPC — leave an empty list
+    // instead of surfacing a misleading "加载项目失败" error banner.
+    if (!isTauri()) {
+      set({ projects: [], loading: false, error: null });
+      return;
+    }
     try {
       set({ error: null });
       const data = await invoke<Project[]>('load_projects');

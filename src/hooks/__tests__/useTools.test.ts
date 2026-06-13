@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useTools } from '../useTools';
 
@@ -18,6 +18,15 @@ const mockTools = [
 describe('useTools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // These tests exercise the Tauri IPC path, so simulate the webview where
+    // __TAURI_INTERNALS__ is injected; otherwise the isTauri() guard skips invoke.
+    // @ts-expect-error — simulating Tauri injection for the IPC code path
+    window.__TAURI_INTERNALS__ = { invoke: () => Promise.resolve() };
+  });
+
+  afterEach(() => {
+    // @ts-expect-error — cleanup the simulated Tauri global
+    delete window.__TAURI_INTERNALS__;
   });
 
   it('should load tools on mount', async () => {
@@ -84,5 +93,20 @@ describe('useTools', () => {
     });
 
     expect(result.current.isInstalled('nonexistent')).toBe(false);
+  });
+
+  it('skips IPC and surfaces no error in a plain browser (no Tauri)', async () => {
+    // @ts-expect-error — simulate plain browser without Tauri IPC
+    delete window.__TAURI_INTERNALS__;
+
+    const { result } = renderHook(() => useTools());
+
+    await vi.waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(result.current.tools).toEqual([]);
+    expect(result.current.error).toBeNull();
   });
 });
