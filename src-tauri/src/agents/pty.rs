@@ -450,7 +450,13 @@ fn try_spawn_pty(
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
+        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
         let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit);
+        log::info!(
+            "[completion] Session {} snapshot done ({} files changed)",
+            sid_exit,
+            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0)
+        );
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if exit_code.unwrap_or(-1) == 0 {
                 Some("(Agent completed with no text output)".to_string())
@@ -474,7 +480,9 @@ fn try_spawn_pty(
             patch["outputSummary"] = serde_json::Value::String(summary);
         }
 
+        log::info!("[completion] Session {} locking DB for completion update...", sid_exit);
         if let Ok(conn) = db_conn_exit.lock() {
+            log::info!("[completion] Session {} DB locked, writing completion...", sid_exit);
             let _ = crate::agents::session::update_session_db(&conn, &sid_exit, patch);
             let event_type = match session_status {
                 SessionStatus::Completed => "session_completed",
@@ -721,7 +729,13 @@ fn spawn_pipe_fallback(
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
+        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
         let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit);
+        log::info!(
+            "[completion] Session {} snapshot done ({} files changed)",
+            sid_exit,
+            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0)
+        );
         let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if timed_out {
@@ -747,7 +761,9 @@ fn spawn_pipe_fallback(
             patch["outputSummary"] = serde_json::Value::String(summary);
         }
 
+        log::info!("[completion] Session {} locking DB for completion update...", sid_exit);
         if let Ok(conn) = db_conn_exit.lock() {
+            log::info!("[completion] Session {} DB locked, writing completion...", sid_exit);
             let _ = crate::agents::session::update_session_db(&conn, &sid_exit, patch);
             let event_type = match session_status {
                 SessionStatus::Completed => "session_completed",
@@ -872,8 +888,10 @@ pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read the output log for a session and return a truncated summary.
-fn read_output_summary(session_id: &str) -> Option<String> {
+/// Read the FULL output log for a session (ANSI stripped, not truncated).
+/// Used by the completed-session terminal view so users see the entire agent output
+/// instead of the tail-truncated `outputSummary` (which only keeps the end for list previews).
+pub(crate) fn read_full_session_output(session_id: &str) -> Option<String> {
     let agents_dir = crate::agents::session::agents_dir().ok()?;
     let log_path = agents_dir.join("outputs").join(format!("{}.log", session_id));
     if !log_path.exists() {
@@ -884,11 +902,29 @@ fn read_output_summary(session_id: &str) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
-    if text.len() > OUTPUT_SUMMARY_MAX_CHARS {
-        Some(format!("...{}", &text[text.len() - OUTPUT_SUMMARY_MAX_CHARS..]))
-    } else {
-        Some(text)
+    Some(text)
+}
+
+/// Read the output log for a session and return a truncated summary (list preview only).
+/// The completed-session view uses [`read_full_session_output`] for the complete text.
+fn read_output_summary(session_id: &str) -> Option<String> {
+    let text = read_full_session_output(session_id)?;
+    Some(truncate_tail(&text, OUTPUT_SUMMARY_MAX_CHARS))
+}
+
+/// Keep only the tail of `text` (up to `max` bytes), prefixed with `...`.
+/// The slice start is snapped to a UTF-8 char boundary so it never panics when
+/// `max` lands inside a multibyte (e.g. CJK) character. List-preview only — the
+/// completed-session view reads the full, untruncated text via [`read_full_session_output`].
+fn truncate_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
     }
+    let mut start = text.len() - max;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...{}", &text[start..])
 }
 
 /// Strip ANSI escape sequences from raw bytes, return clean UTF-8 string.
@@ -943,25 +979,50 @@ fn extract_context_snapshot(project_path: &str, session_id: &str) -> Option<Cont
     })
 }
 
+/// Maximum time to wait for `git diff --name-only` before giving up on the
+/// context snapshot. Large/dirty repos can block here and stall the completion
+/// event (which fires only after this returns). Timed-out diffs return empty.
+const GIT_DIFF_TIMEOUT_SECS: u64 = 15;
+
 fn capture_git_diff_names(project_path: &str) -> Vec<String> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["diff", "--name-only"])
-        .current_dir(project_path);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    cmd.output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect()
+    let pp = project_path.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("git-diff".into())
+        .spawn(move || {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(["diff", "--name-only"]).current_dir(&pp);
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let result = cmd
+                .output()
+                .ok()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|l| l.to_string())
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let _ = tx.send(result);
         })
-        .unwrap_or_default()
+        .ok();
+
+    match rx.recv_timeout(std::time::Duration::from_secs(GIT_DIFF_TIMEOUT_SECS)) {
+        Ok(v) => v,
+        Err(_) => {
+            log::warn!(
+                "[git diff] timed out after {}s for {} — skipping context snapshot",
+                GIT_DIFF_TIMEOUT_SECS,
+                project_path
+            );
+            Vec::new()
+        }
+    }
 }
 
 fn read_pre_diff(session_id: &str) -> Option<Vec<String>> {
@@ -1187,5 +1248,86 @@ fn run_post_session_hooks(
             "Failed to spawn post-session-hooks thread for session {}: {}",
             sid_for_log, e
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `capture_git_diff_names` must return tracked files modified in the
+    /// working tree. Guards the timeout wrapper added to stop the completion
+    /// event from stalling on slow `git diff` in large/dirty repos.
+    #[test]
+    fn capture_git_diff_names_lists_modified_tracked_files() {
+        // Skip when git isn't on PATH (some CI / sandboxed envs).
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if !git_ok {
+            eprintln!("git unavailable — skipping capture_git_diff_names test");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+
+        let run_git = |args: &[&str]| {
+            let mut c = std::process::Command::new("git");
+            c.args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com");
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            c.output().expect("git command succeeds")
+        };
+
+        run_git(&["init"]);
+        std::fs::write(path.join("base.txt"), "base").unwrap();
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "init"]);
+
+        // Modify the tracked file → creates an unstaged diff entry.
+        std::fs::write(path.join("base.txt"), "changed").unwrap();
+
+        let changed = capture_git_diff_names(&path.to_string_lossy());
+        assert!(
+            changed.iter().any(|f| f.ends_with("base.txt")),
+            "expected base.txt in diff, got {:?}",
+            changed
+        );
+    }
+
+    #[test]
+    fn truncate_tail_keeps_short_text_unchanged() {
+        assert_eq!(truncate_tail("hello", 2000), "hello");
+        assert_eq!(truncate_tail("短文本", 2000), "短文本");
+    }
+
+    #[test]
+    fn truncate_tail_keeps_tail_and_snaps_to_char_boundary() {
+        // 6 CJK chars = 18 bytes; truncate to 4 bytes. Before the char-boundary
+        // fix this panicked by slicing mid-character. The tail must be a valid
+        // UTF-8 suffix of the original text.
+        let text = "一二三四五六";
+        let out = truncate_tail(text, 4);
+        assert!(out.starts_with("..."), "truncated preview must be prefixed with ...; got {out:?}");
+        let tail = out.strip_prefix("...").unwrap_or(&out);
+        assert!(text.ends_with(tail), "tail must be a suffix of the original; got {out:?}");
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        let raw = b"\x1b[1mbold\x1b[0m and \x1b[90mgray\x1b[0m";
+        assert_eq!(strip_ansi(raw), "bold and gray");
     }
 }

@@ -51,6 +51,13 @@ pub struct GitStatus {
     pub ahead: u32,
     pub behind: u32,
     pub last_commit_time: Option<String>,
+    /// Lines added across HEAD→worktree (tracked files). Untracked files count
+    /// their full content as insertions. 0 when there is no HEAD (empty repo).
+    #[serde(default)]
+    pub insertions: u64,
+    /// Lines deleted across HEAD→worktree (tracked files). 0 when there is no HEAD.
+    #[serde(default)]
+    pub deletions: u64,
 }
 
 // ---- Agent Hub types ----

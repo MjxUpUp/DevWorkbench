@@ -10,6 +10,8 @@ import { useTools } from './hooks/useTools';
 import { useAgentStore } from './stores/agentStore';
 import { useNavigationStore, type ViewId } from './stores/navigationStore';
 import { useProjectStore } from './stores/projectStore';
+import { useSettingsStore } from './stores/settingsStore';
+import { applyTheme } from './utils/theme';
 import './styles/index.css';
 
 // Error boundary to catch React render crashes
@@ -47,7 +49,6 @@ function App() {
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
   const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
-  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -56,6 +57,15 @@ function App() {
   const loadProjects = useProjectStore((s) => s.loadProjects);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
+
+  // Load settings on mount — applies the persisted theme (light/dark/auto) ASAP
+  // to avoid a flash of the default theme before the store resolves.
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
+  useEffect(() => {
+    // Apply a sane default immediately; loadSettings will refine it once persisted.
+    applyTheme('auto');
+    loadSettings();
+  }, [loadSettings]);
 
   // Initialize agent store event listeners once (use getState to avoid re-render)
   useEffect(() => {
@@ -134,10 +144,10 @@ function App() {
         useNavigationStore.getState().toggleSidebar();
       }
 
-      // Ctrl+1~5: Switch views
-      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '5') {
+      // Ctrl+1~4: Switch views (task / search / skills / settings)
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '4') {
         e.preventDefault();
-        const views: ViewId[] = ['chat', 'orchestrate', 'skill-market', 'dashboard', 'settings'];
+        const views: ViewId[] = ['task', 'search', 'skills', 'settings'];
         const idx = parseInt(e.key) - 1;
         if (idx < views.length) {
           useNavigationStore.getState().setActiveView(views[idx]);
@@ -155,7 +165,6 @@ function App() {
     <div className={`app${!sidebarOpen ? ' left-column-hidden' : ''}`}>
       <TitleBar />
       <Sidebar />
-      <button className="left-column-reopen" onClick={toggleSidebar} title="展开边栏" aria-label="展开边栏">▸</button>
       <MainStage />
       <CommandPalette />
 

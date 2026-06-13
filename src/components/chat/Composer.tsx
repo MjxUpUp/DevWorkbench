@@ -1,6 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { IconPlay, IconStop } from '../Icons';
 import { TriggerMenu } from '../TriggerMenu';
+import { ModelSelector } from '../ModelSelector';
+import type { AgentMode } from '../ModeSelector';
 
 interface AttachedFile {
   path: string;
@@ -17,6 +19,12 @@ interface ComposerProps {
   attachedFiles: AttachedFile[];
   onAttachFile: (file: AttachedFile) => void;
   onRemoveFile: (path: string) => void;
+  /** Agent execution mode — surfaces a "计划模式" toggle in the action bar. */
+  agentMode?: AgentMode;
+  onModeChange?: (mode: AgentMode) => void;
+  /** Selected model id — surfaces a model picker in the action bar. */
+  selectedModel?: string;
+  onModelChange?: (model: string) => void;
   placeholder?: string;
 }
 
@@ -30,6 +38,10 @@ export function Composer({
   attachedFiles,
   onAttachFile,
   onRemoveFile,
+  agentMode,
+  onModeChange,
+  selectedModel,
+  onModelChange,
   placeholder,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -87,10 +99,20 @@ export function Composer({
   };
 
   // Explicit trigger buttons (@ file / / command / $ skill) — mirrors zcode's
-  // composer which surfaces these as visible glyphs left of the input rather
-  // than relying on the user typing the trigger character.
+  // composer which surfaces these as visible glyphs rather than relying on the
+  // user typing the trigger character. These live in a compact toolbar above
+  // the input so the bottom action bar stays uncluttered.
   const openTrigger = (type: '@' | '/' | '$') => {
     setTriggerMenu((prev) => (prev?.type === type ? null : { type, position: { top: 0, left: 0 } }));
+  };
+
+  // "计划模式" toggle — flips between the user's current mode and plan mode.
+  // When on, it shows as active regardless of which non-plan mode was set; the
+  // underlying value switches between 'plan' and 'default'.
+  const planActive = agentMode === 'plan';
+  const togglePlan = () => {
+    if (!onModeChange) return;
+    onModeChange(planActive ? 'default' : 'plan');
   };
 
   return (
@@ -118,6 +140,7 @@ export function Composer({
           </div>
         )}
 
+        {/* Compact trigger toolbar (kept above the input so the bottom row stays clean) */}
         <div className="composer-triggers">
           <button
             type="button"
@@ -145,7 +168,7 @@ export function Composer({
         <textarea
           ref={textareaRef}
           className="chat-composer-input"
-          placeholder={placeholder ?? '输入需求... @ 文件 / 命令 $ 技能'}
+          placeholder={placeholder ?? '提出后续修改要求...'}
           value={prompt}
           onChange={handlePromptChange}
           onKeyDown={handleKeyDown}
@@ -153,13 +176,25 @@ export function Composer({
           maxLength={10000}
           rows={1}
         />
-        <button
-          className="composer-attach-btn"
-          title="附加文件"
-          onClick={() => openTrigger('@')}
-        >
-          ⊕
-        </button>
+      </div>
+
+      {/* Bottom action bar: 计划模式 · 模型选择 · 发送 (aligns to target mockup) */}
+      <div className="composer-actions">
+        <div className="composer-actions-left">
+          {onModeChange && (
+            <button
+              type="button"
+              className={`composer-action-btn ${planActive ? 'active' : ''}`}
+              onClick={togglePlan}
+              title="计划模式 — 先输出计划，确认后执行"
+            >
+              计划模式
+            </button>
+          )}
+          {onModelChange && (
+            <ModelSelector value={selectedModel ?? 'default'} onChange={onModelChange} />
+          )}
+        </div>
         {isRunning ? (
           <button className="composer-send-btn stop" onClick={onStop} title="停止">
             <IconStop size={16} />

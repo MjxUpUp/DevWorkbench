@@ -189,7 +189,7 @@ export function ChatView() {
           <h2>Dev Workbench</h2>
           <p>多 Agent 编码操作系统</p>
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>
-            从左侧选择项目，或点击"添加项目"开始工作
+            从左侧选择项目开始创建任务
           </p>
           {installedAgents.length > 0 && (
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
@@ -216,7 +216,7 @@ export function ChatView() {
         />
         <div className="chat-empty">
           <div style={{ fontSize: 32, marginBottom: 'var(--space-2)' }}>✦</div>
-          <h2>新对话</h2>
+          <h2>创建任务</h2>
           <p>在下方输入需求或指令，开始与 Agent 协作</p>
         </div>
         <Composer
@@ -229,7 +229,11 @@ export function ChatView() {
           attachedFiles={attachedFiles}
           onAttachFile={handleAttachFile}
           onRemoveFile={handleRemoveFile}
-          placeholder="输入需求或指令开始新对话... @ 文件 / 命令 $ 技能"
+          agentMode={agentMode}
+          onModeChange={setAgentMode}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
+          placeholder="提出后续修改要求... @ 文件 / 命令 $ 技能"
         />
       </div>
     );
@@ -270,7 +274,11 @@ export function ChatView() {
         attachedFiles={attachedFiles}
         onAttachFile={handleAttachFile}
         onRemoveFile={handleRemoveFile}
-        placeholder={isContinuing ? '继续对话... @ 文件 / 命令 $ 技能' : '输入指令... @ 文件 / 命令 $ 技能'}
+        agentMode={agentMode}
+        onModeChange={setAgentMode}
+        selectedModel={selectedModel}
+        onModelChange={setSelectedModel}
+        placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}
       />
     </div>
   );

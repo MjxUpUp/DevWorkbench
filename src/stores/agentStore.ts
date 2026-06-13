@@ -146,6 +146,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   newConversation: async (projectPath, title, agentType) => {
+    // 插入 requirement 前先校验：必须有可用的 agent，否则 spawn 必失败、
+    // requirement 会变成 in_progress 的孤儿（spawn 卡死时 catch 不触发）。
+    if (!agentType) {
+      throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
+    }
     const reqId = crypto.randomUUID();
     const newReq: Requirement = {
       id: reqId,
@@ -169,6 +174,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       return session;
     } catch (e) {
       console.error('Failed to spawn agent:', e);
+      // spawn 失败/卡死 → 回滚 requirement，避免留下 in_progress 孤儿
       await get().updateRequirement(reqId, {
         status: 'todo',
         linkedSessionId: null,

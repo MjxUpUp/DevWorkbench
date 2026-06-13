@@ -5,6 +5,7 @@ import { AgentSection } from './AgentSection';
 import { ProvidersSection } from './ProvidersSection';
 import { McpSection } from './McpSection';
 import { SkillsSection } from './SkillsSection';
+import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
@@ -51,7 +52,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'memory', label: '记忆', Icon: IconStar, placeholder: { title: '记忆', desc: '管理智能体长期记忆条目', hint: '记忆管理功能正在开发中，敬请期待' } },
   { id: 'indexing', label: '索引', Icon: IconFolderOpen, placeholder: { title: '索引', desc: '代码库索引与语义检索配置', hint: '索引功能正在开发中，敬请期待' } },
   { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
-  { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, placeholder: { title: '使用统计', desc: '查看用量、成本与调用统计', hint: '使用统计功能正在开发中，敬请期待' } },
+  { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection },
   { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' } },
 ];
 

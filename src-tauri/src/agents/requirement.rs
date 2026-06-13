@@ -47,7 +47,15 @@ pub fn load_requirements_from_db(conn: &rusqlite::Connection) -> Result<Vec<Requ
         if req.status != RequirementStatus::InProgress {
             continue;
         }
-        let Some(ref sid) = req.linked_session_id else { continue };
+        // 孤儿 requirement：in_progress 但没有任何关联 session
+        // （spawn 在写库前卡死/崩溃，requirement 永远停在 in_progress）。
+        // 回滚为 todo，否则它在 UI 上既不可点击又不可删除。
+        let Some(ref sid) = req.linked_session_id else {
+            req.status = RequirementStatus::Todo;
+            req.updated_at = chrono::Local::now().to_rfc3339();
+            dirty = true;
+            continue;
+        };
 
         let session_status: Option<String> = conn.query_row(
             "SELECT status FROM sessions WHERE id = ?1",
@@ -292,19 +300,41 @@ mod tests {
 
         add_requirement_db(&conn, make_requirement("r1", "/proj/a", RequirementStatus::Todo)).unwrap();
 
-        // Todo -> InProgress
-        let patch = serde_json::json!({ "status": "in_progress" });
+        // Todo -> InProgress（同时关联一个 running session，否则 reconcile 会把
+        // 无 session 的 in_progress 孤儿回滚为 todo）
+        let patch = serde_json::json!({ "status": "in_progress", "linkedSessionId": "s1" });
         update_requirement_db(&conn, "r1", patch).unwrap();
+        // 插入关联的 running session，使 reconcile 认定它是正常进行中
+        crate::agents::session::insert_session_db(
+            &conn,
+            &crate::models::Session {
+                id: "s1".to_string(),
+                project_path: "/proj/a".to_string(),
+                agent_type: crate::models::AgentType::ClaudeCode,
+                status: crate::models::SessionStatus::Running,
+                prompt: "test".to_string(),
+                model: None,
+                started_at: chrono::Local::now().to_rfc3339(),
+                finished_at: None,
+                exit_code: None,
+                output_summary: None,
+                context_snapshot: None,
+                linked_requirement_id: Some("r1".to_string()),
+                parent_session_id: None,
+            },
+        ).unwrap();
 
         let loaded = load_requirements_from_db(&conn).unwrap();
-        assert_eq!(loaded[0].status, RequirementStatus::InProgress);
+        let r1 = loaded.iter().find(|r| r.id == "r1").unwrap();
+        assert_eq!(r1.status, RequirementStatus::InProgress);
 
         // InProgress -> Done
         let patch = serde_json::json!({ "status": "done" });
         update_requirement_db(&conn, "r1", patch).unwrap();
 
         let loaded = load_requirements_from_db(&conn).unwrap();
-        assert_eq!(loaded[0].status, RequirementStatus::Done);
+        let r1 = loaded.iter().find(|r| r.id == "r1").unwrap();
+        assert_eq!(r1.status, RequirementStatus::Done);
     }
 
     #[test]
@@ -346,5 +376,37 @@ mod tests {
         let result = update_requirement_db(&conn, "r1", patch);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("无效 status"));
+    }
+
+    /// 孤儿 requirement（in_progress + linked_session_id=None，即 spawn 在写库前
+    /// 卡死/崩溃留下的）必须在加载时被 reconcile 回滚为 todo，否则它在 UI 上
+    /// 既不可点击又不可删除。复现真实 bug：22:11 那次 spawn 卡死后的数据残留。
+    #[test]
+    fn reconcile_orphan_in_progress_resets_to_todo() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        // 孤儿：in_progress 且无关联 session
+        let mut orphan = make_requirement("orphan", "/proj/a", RequirementStatus::InProgress);
+        orphan.linked_session_id = None;
+        add_requirement_db(&conn, orphan).unwrap();
+
+        // 对照组：todo 的保持不变
+        add_requirement_db(&conn, make_requirement("healthy", "/proj/a", RequirementStatus::Todo)).unwrap();
+
+        let loaded = load_requirements_from_db(&conn).unwrap();
+        let orphan = loaded.iter().find(|r| r.id == "orphan").expect("orphan present");
+        assert_eq!(
+            orphan.status,
+            RequirementStatus::Todo,
+            "孤儿 in_progress requirement 应被回滚为 todo"
+        );
+
+        // 回滚必须落库 —— 重新打开连接加载，仍是 todo
+        drop(conn);
+        let conn2 = test_conn();
+        let reloaded = load_requirements_from_db(&conn2).unwrap();
+        let orphan2 = reloaded.iter().find(|r| r.id == "orphan").unwrap();
+        assert_eq!(orphan2.status, RequirementStatus::Todo, "回滚必须持久化到 DB");
     }
 }

@@ -22,7 +22,8 @@ export interface ToolStatus {
 export interface AppSettings {
   scan_directories: string[];
   tool_paths: Record<string, string>;
-  theme: string;
+  /** light | dark | auto (auto follows the OS via prefers-color-scheme) */
+  theme: 'light' | 'dark' | 'auto';
   preferred_terminal: string;
   cli_flags: Record<string, string>;
 }
@@ -44,6 +45,10 @@ export interface GitStatus {
   ahead: number;
   behind: number;
   lastCommitTime: string | null;
+  /** Lines added (tracked HEAD→worktree + untracked file contents). */
+  insertions: number;
+  /** Lines deleted (tracked HEAD→worktree). */
+  deletions: number;
 }
 
 // ---- Agent Hub types ----

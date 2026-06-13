@@ -35,11 +35,10 @@ export function CommandPalette() {
   if (!open) return null;
 
   const commands = [
-    { label: 'Chat', action: () => { setActiveView('chat'); setOpen(false); } },
-    { label: 'Orchestrate', action: () => { setActiveView('orchestrate'); setOpen(false); } },
-    { label: 'Skill Market', action: () => { setActiveView('skill-market'); setOpen(false); } },
-    { label: 'Dashboard', action: () => { setActiveView('dashboard'); setOpen(false); } },
-    { label: 'Settings', action: () => { setActiveView('settings'); setOpen(false); } },
+    { label: '创建任务', action: () => { setActiveView('task'); setOpen(false); } },
+    { label: '搜索', action: () => { setActiveView('search'); setOpen(false); } },
+    { label: '技能', action: () => { setActiveView('skills'); setOpen(false); } },
+    { label: '设置', action: () => { setActiveView('settings'); setOpen(false); } },
   ];
 
   // Add recent sessions as quick-access items
@@ -49,7 +48,7 @@ export function CommandPalette() {
     .map((s) => ({
       label: `对话: ${s.prompt.slice(0, 40)}`,
       action: () => {
-        setActiveView('chat');
+        setActiveView('task');
         useNavigationStore.getState().selectSession(s.id);
         setOpen(false);
       },

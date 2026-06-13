@@ -516,8 +516,8 @@
 .chat-composer-input-wrap {
   position: relative;
   display: flex;
-  align-items: flex-end;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface-1);
@@ -530,11 +530,11 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-/* Explicit trigger buttons (@ / / / $) — left of the input, zcode pattern */
+/* Explicit trigger buttons (@ / / / $) — toolbar row above the input */
 .composer-triggers {
   display: flex;
   gap: 2px;
-  padding: 0 2px 5px 2px;
+  padding: 0 2px;
   flex-shrink: 0;
 }
 
@@ -649,6 +649,49 @@
 
 .composer-send-btn.stop:hover {
   background: var(--danger-muted);
+}
+
+/* Bottom action bar: 计划模式 · 模型选择 · 发送 (target mockup layout) */
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 6px 2px 0;
+  flex-shrink: 0;
+}
+
+.composer-actions-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* Pill-style action button (计划模式 toggle). Repurposed for any future
+   single-action toggles so the composer keeps a consistent control shape. */
+.composer-action-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+  white-space: nowrap;
+}
+
+.composer-action-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.composer-action-btn.active {
+  background: var(--accent-muted);
+  border-color: transparent;
+  color: var(--accent);
 }
 
 /* Trigger popover — anchors above the input wrap */

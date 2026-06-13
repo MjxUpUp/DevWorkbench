@@ -1,6 +1,6 @@
 [package]
 name = "dev-workbench"
-version = "0.8.0"
+version = "1.0.0"
 description = "一目了然 — 本地开发工作台"
 authors = ["you"]
 license = "MIT"

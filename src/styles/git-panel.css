@@ -1,0 +1,150 @@
+/* === Git Panel — right-side tool shown inside the task view === */
+.git-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--surface-0);
+  border-left: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.git-panel-empty .git-panel-placeholder {
+  padding: var(--space-4) var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.git-panel-header {
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.git-panel-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.git-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+
+/* Changes summary row: ● 更改 +xxxx -xxxx */
+.git-status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.git-status-row.dirty .git-status-dot {
+  background: var(--status-warning);
+}
+
+.git-status-row.clean .git-status-dot {
+  background: var(--status-success);
+}
+
+.git-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-tertiary);
+}
+
+.git-status-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.git-status-counts {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.git-count.ins {
+  color: var(--status-success);
+}
+
+.git-count.del {
+  color: var(--status-error);
+}
+
+/* Branch row */
+.git-branch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  min-width: 0;
+}
+
+.git-branch-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.git-branch-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ahead / behind sync row */
+.git-sync-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.git-sync-ahead {
+  color: var(--status-success);
+}
+
+.git-sync-behind {
+  color: var(--status-warning);
+}
+
+/* Commit button */
+.git-commit-btn {
+  margin-top: var(--space-2);
+  padding: 8px var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease;
+}
+
+.git-commit-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.git-commit-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

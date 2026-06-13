@@ -10,6 +10,7 @@ pub fn get_git_status(project_path: String) -> Result<GitStatus, String> {
     let is_dirty = is_repo_dirty(&repo);
     let (ahead, behind) = get_ahead_behind(&repo);
     let last_commit_time = get_last_commit_time(&repo);
+    let (insertions, deletions) = count_line_changes(&repo);
 
     Ok(GitStatus {
         branch,
@@ -17,6 +18,8 @@ pub fn get_git_status(project_path: String) -> Result<GitStatus, String> {
         ahead,
         behind,
         last_commit_time,
+        insertions,
+        deletions,
     })
 }
 
@@ -117,4 +120,57 @@ fn get_last_commit_time(repo: &git2::Repository) -> Option<String> {
     let secs = time.seconds();
     let dt = chrono::DateTime::from_timestamp(secs, 0)?;
     Some(dt.to_rfc3339())
+}
+
+/// 统计工作区相对 HEAD 的增删行数。
+///
+/// 返回 `(insertions, deletions)`：
+/// - 已跟踪文件用 `git2` 的 `DiffStats` 统计 HEAD→worktree 的行差异；
+/// - 未跟踪文件按其内容行数计入 insertions（与 `git diff --stat` 的语义一致）。
+/// - 空 HEAD 仓库只统计未跟踪文件。
+fn count_line_changes(repo: &git2::Repository) -> (u64, u64) {
+    let mut insertions: u64 = 0;
+    let mut deletions: u64 = 0;
+
+    // HEAD→worktree 的已跟踪文件行差异
+    if let Ok(head_tree) = repo.head() {
+        if let Ok(head_commit) = head_tree.peel_to_commit() {
+            if let Ok(head_tree) = head_commit.tree() {
+                // diff_tree_to_tree with old=None compares against the worktree
+                // (the diff Tree-to-workdir variant in this git2 version).
+                if let Ok(diff) = repo.diff_tree_to_workdir(Some(&head_tree), None) {
+                    if let Ok(stats) = diff.stats() {
+                        insertions += stats.insertions() as u64;
+                        deletions += stats.deletions() as u64;
+                    }
+                }
+            }
+        }
+    }
+
+    // 未跟踪文件：整份内容计入 insertions
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .exclude_submodules(true);
+
+    if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
+        let workdir = repo.workdir();
+        for entry in statuses.iter() {
+            if !entry.status().is_wt_new() {
+                continue;
+            }
+            let Some(path) = entry.path() else { continue };
+            let Some(root) = workdir else { continue };
+            let file = root.join(path);
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                // 末尾换行不额外计一行；空文件计 0 行
+                if !text.is_empty() {
+                    insertions += text.lines().count() as u64;
+                }
+            }
+        }
+    }
+
+    (insertions, deletions)
 }

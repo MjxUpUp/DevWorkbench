@@ -116,6 +116,7 @@ pub fn run() {
             commands::agents::load_sessions,
             commands::agents::get_sessions_for_project,
             commands::agents::update_session,
+            commands::agents::read_session_output_cmd,
             commands::agents::load_requirements,
             commands::agents::add_requirement,
             commands::agents::update_requirement,

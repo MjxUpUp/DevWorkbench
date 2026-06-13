@@ -105,7 +105,8 @@ export function TerminalView({ sessionId, completedSession }: TerminalViewProps)
       return;
     }
 
-    // If we have a completed session, write its summary directly
+    // If we have a completed session, fetch its FULL output from disk (not the
+    // tail-truncated outputSummary, which would cut off the agent's actual reply).
     if (completedSession) {
       term.clear();
       term.options.disableStdin = true;
@@ -116,32 +117,36 @@ export function TerminalView({ sessionId, completedSession }: TerminalViewProps)
         `Exit: ${completedSession.exitCode ?? 'N/A'}\x1b[0m`);
       term.writeln('');
 
-      // Output summary
-      if (completedSession.outputSummary) {
-        const lines = completedSession.outputSummary.split('\n');
-        for (const line of lines) {
+      let cancelled = false;
+      const writeBody = (body: string) => {
+        if (cancelled) return;
+        for (const line of body.split('\n')) {
           term.writeln(line);
         }
-      } else {
-        term.writeln('\x1b[90m(无输出记录)\x1b[0m');
-      }
-
-      // Context snapshot
-      if (completedSession.contextSnapshot?.filesChanged?.length) {
-        term.writeln('');
-        term.writeln('\x1b[1m── Files Changed ──\x1b[0m');
-        for (const f of completedSession.contextSnapshot.filesChanged) {
-          term.writeln(`  \x1b[33m${f}\x1b[0m`);
+        // Context snapshot
+        if (completedSession.contextSnapshot?.filesChanged?.length) {
+          term.writeln('');
+          term.writeln('\x1b[1m── Files Changed ──\x1b[0m');
+          for (const f of completedSession.contextSnapshot.filesChanged) {
+            term.writeln(`  \x1b[33m${f}\x1b[0m`);
+          }
         }
-      }
-
-      term.writeln('');
-      term.writeln('\x1b[90m— 会话结束 —\x1b[0m');
-      if (completedSession.status === 'completed' || completedSession.status === 'failed') {
         term.writeln('');
-        term.writeln('\x1b[36m↩ 在下方输入框中输入指令继续此对话\x1b[0m');
-      }
-      return;
+        term.writeln('\x1b[90m— 会话结束 —\x1b[0m');
+        if (completedSession.status === 'completed' || completedSession.status === 'failed') {
+          term.writeln('');
+          term.writeln('\x1b[36m↩ 在下方输入框中输入指令继续此对话\x1b[0m');
+        }
+      };
+
+      // Prefer the full output from disk; fall back to the (tail-truncated) summary.
+      invoke<string | null>('read_session_output_cmd', { sessionId: completedSession.id })
+        .then((full) => writeBody(full ?? completedSession.outputSummary ?? '\x1b[90m(无输出记录)\x1b[0m'))
+        .catch(() => {
+          if (!cancelled) writeBody(completedSession.outputSummary ?? '\x1b[90m(无输出记录)\x1b[0m');
+        });
+
+      return () => { cancelled = true; };
     }
 
     if (!sessionId) {

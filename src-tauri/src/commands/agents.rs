@@ -39,6 +39,14 @@ pub fn update_session(db: State<'_, DbState>, id: String, patch: serde_json::Val
     crate::agents::session::update_session_db(&conn, &id, patch).map_err(|e| e.to_string())
 }
 
+/// Read the FULL (ANSI-stripped) output for a session, for the completed-session terminal view.
+/// Unlike the stored `outputSummary` (tail-truncated to OUTPUT_SUMMARY_MAX_CHARS), this returns
+/// the complete text so the completed session isn't cut off mid-reply.
+#[tauri::command]
+pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, String> {
+    Ok(pty::read_full_session_output(&session_id))
+}
+
 // Requirement commands
 #[tauri::command]
 pub fn load_requirements(db: State<'_, DbState>) -> Result<Vec<Requirement>, String> {

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
 
-export type ViewId = 'chat' | 'orchestrate' | 'skill-market' | 'dashboard' | 'settings';
+export type ViewId = 'task' | 'search' | 'skills' | 'settings';
 
 interface NavigationState {
   /** Currently active view in the main stage */
@@ -33,7 +33,7 @@ interface NavigationState {
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
-  activeView: 'chat',
+  activeView: 'task',
   activeProject: null,
   selectedSessionId: null,
   expandedProjectId: null,
@@ -46,8 +46,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   selectProject: (project) => set({ activeProject: project, selectedSessionId: null }),
   selectSession: (id) => set({
     selectedSessionId: id,
-    // Switch to chat view when selecting a session; stay on current view when deselecting
-    ...(id ? { activeView: 'chat' as ViewId } : {}),
+    // Switch to the task view when selecting a session; stay on current view when deselecting
+    ...(id ? { activeView: 'task' as ViewId } : {}),
   }),
   toggleProjectExpand: (projectId) => set((s) => ({
     expandedProjectId: s.expandedProjectId === projectId ? null : projectId,
