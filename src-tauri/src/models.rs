@@ -309,6 +309,18 @@ pub struct Skill {
     pub path: Option<String>,
     pub quality_score: Option<f64>,
     pub metadata: Option<String>,
+    // Catalog fields (populated from metadata JSON)
+    pub description: Option<String>,
+    pub icon: Option<String>,
+    pub category: Option<String>,
+    pub security_score: Option<f64>,
+    pub installs: Option<i64>,
+    pub rating: Option<f64>,
+    pub author: Option<String>,
+    pub compatible_agents: Option<String>,
+    pub quality_details: Option<String>,
+    pub security_details: Option<String>,
+    pub config_schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useSkillStore, useFilteredSkills } from '../../stores/skillStore';
 import { SkillSearchBar } from './SkillSearchBar';
 import { SkillCard } from './SkillCard';
@@ -5,9 +6,12 @@ import { FeaturedBanner } from './FeaturedBanner';
 import { SkillDetailPanel } from './SkillDetailPanel';
 
 export function SkillMarketView() {
+  const fetchSkills = useSkillStore((s) => s.fetchSkills);
   const filtered = useFilteredSkills();
   const selectedSkill = useSkillStore((s) => s.selectedSkill);
   const loading = useSkillStore((s) => s.loading);
+
+  useEffect(() => { fetchSkills(); }, [fetchSkills]);
 
   return (
     <div className="skill-market-view">
