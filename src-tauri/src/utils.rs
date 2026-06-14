@@ -26,6 +26,16 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Extract `filesChanged` from a ContextSnapshot JSON string.
+/// Shared by executor.rs (poll) and opaque_agent.rs (read_session_files) to
+/// avoid the duplicated parse logic (shotgun-surgery risk).
+pub fn files_changed_from_snapshot(snap: Option<&str>) -> Vec<String> {
+    snap.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("filesChanged").cloned())
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

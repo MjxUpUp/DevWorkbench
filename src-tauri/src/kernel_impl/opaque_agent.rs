@@ -51,6 +51,29 @@ impl OpaqueAgent {
     }
 }
 
+
+/// RAII guard that unregisters Tauri event listeners on drop. Ensures
+/// listeners are cleaned up even when the agent stream is dropped early
+/// (cancellation), fixing the leak where unlisten was only reached after Done.
+struct ListenerGuard {
+    app: tauri::AppHandle,
+    ids: Vec<tauri::EventId>,
+}
+
+impl ListenerGuard {
+    fn new(app: tauri::AppHandle, ids: Vec<tauri::EventId>) -> Self {
+        Self { app, ids }
+    }
+}
+
+impl Drop for ListenerGuard {
+    fn drop(&mut self) {
+        for id in self.ids.drain(..) {
+            let _ = self.app.unlisten(id);
+        }
+    }
+}
+
 #[async_trait]
 impl Agent for OpaqueAgent {
     fn kind(&self) -> AgentKind {
@@ -167,8 +190,8 @@ impl Agent for OpaqueAgent {
             // 3. Drain the channel into the stream. When we see a Done event,
             //    stop and unregister listeners (avoid leaking registrations
             //    across runs 鈥?Tauri listeners live until unlisten/app exit).
-            let output_id = output_id;
-            let done_id = done_id;
+            // C6: guard ensures unlisten runs even if the stream is dropped early.
+            let _listener_guard = ListenerGuard::new(app.clone(), vec![output_id, done_id]);
             while let Some(ev) = rx.recv().await {
                 let is_done = matches!(ev, Ok(AgentEvent::Done(_)));
                 yield ev?;
@@ -176,8 +199,7 @@ impl Agent for OpaqueAgent {
                     break;
                 }
             }
-            let _ = app.unlisten(output_id);
-            let _ = app.unlisten(done_id);
+            // _listener_guard drops here (or on early stream drop) -> unlisten both.
         };
         Ok(Box::pin(s))
     }
@@ -201,12 +223,7 @@ fn read_session_files(app: &tauri::AppHandle, session_id: &str) -> Vec<String> {
             |r| r.get::<_, Option<String>>(0),
         )
         .unwrap_or(None);
-    snap_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v| v.get("filesChanged").cloned())
-        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
-        .unwrap_or_default()
+    crate::utils::files_changed_from_snapshot(snap_str.as_deref())
 }
 
 #[cfg(test)]

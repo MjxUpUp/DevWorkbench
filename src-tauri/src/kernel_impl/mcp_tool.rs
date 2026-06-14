@@ -83,13 +83,16 @@ impl Tool for McpTool {
         // MCP calls are blocking I/O over stdio — push to the blocking pool.
         let client = self.client.clone();
         let tool_name = self.tool_name.clone();
-        let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        // M14: bound the blocking call — a hung MCP server would otherwise
+        // block this thread + hold the per-server Mutex indefinitely.
+        let join = tokio::task::spawn_blocking(move || -> Result<Value, String> {
             let mut c = client.lock().map_err(|e| format!("client lock: {e}"))?;
             c.call_tool(&tool_name, args).map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| Error::Tool(format!("join: {e}")))?
-        .map_err(Error::Tool)?;
+        });
+        let result = match tokio::time::timeout(std::time::Duration::from_secs(30), join).await {
+            Ok(r) => r.map_err(|e| Error::Tool(format!("join: {e}")))?.map_err(Error::Tool)?,
+            Err(_) => return Err(Error::Tool("MCP tool call timed out (30s)".into())),
+        };
         // MCP tools/call returns {"content": [...]}; flatten to text.
         Ok(flatten_mcp_result(&result))
     }

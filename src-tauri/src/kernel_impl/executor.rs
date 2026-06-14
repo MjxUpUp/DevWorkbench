@@ -143,7 +143,13 @@ struct SettledOutcome {
 /// Poll the sessions table until the given session is no longer "running".
 async fn poll_until_settled(db: &DbState, session_id: &str) -> Result<SettledOutcome, String> {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
+    // M12: bound the poll — a stuck session (orphaned CLI, dropped stream leak)
+    // would otherwise poll forever. Align with the pipe session timeout (600s).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("poll_until_settled timed out (600s) for session {session_id}"));
+        }
         interval.tick().await;
         let db = db.clone();
         let sid = session_id.to_string();
@@ -155,16 +161,10 @@ async fn poll_until_settled(db: &DbState, session_id: &str) -> Result<SettledOut
                     rusqlite::params![&sid],
                     |r| {
                         let snap_str: Option<String> = r.get(2)?;
-                        let files: Vec<String> = snap_str
-                            .as_deref()
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                            .and_then(|v| v.get("filesChanged").cloned())
-                            .and_then(|v| serde_json::from_value(v).ok())
-                            .unwrap_or_default();
                         Ok(SessionRow {
                             status: r.get(0)?,
                             output_summary: r.get(1)?,
-                            files_changed: files,
+                            files_changed: crate::utils::files_changed_from_snapshot(snap_str.as_deref()),
                         })
                     },
                 )

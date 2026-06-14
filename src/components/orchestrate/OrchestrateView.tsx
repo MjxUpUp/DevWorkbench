@@ -44,17 +44,26 @@ export function OrchestrateView() {
   const [running, setRunning] = useState(false);
   const [eventLog, setEventLog] = useState<string[]>([]);
 
-  // Subscribe to workflow:progress once.
+  // Subscribe to workflow:progress once. Guard against the unmount-before-
+  // resolve race: if the component unmounts while the async listen() is still
+  // pending, the cleanup runs with unlisten still null and the listener leaks.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
     (async () => {
-      unlisten = await listen<WorkflowProgressPayload>('workflow:progress', (e) => {
+      const fn = await listen<WorkflowProgressPayload>('workflow:progress', (e) => {
         const { event } = e.payload;
         applyEvent(event);
         setEventLog((prev) => [...prev.slice(-50), formatEvent(event)]);
       });
+      if (cancelled) {
+        fn(); // already unmounted — clean up immediately
+      } else {
+        unlisten = fn;
+      }
     })();
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [applyEvent]);
