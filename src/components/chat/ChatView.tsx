@@ -53,6 +53,21 @@ export function ChatView() {
 
   // Auto-select agent on mount
   const installedAgents = useMemo(() => agents.filter((a) => a.installed), [agents]);
+
+  // Reset agent selection when switching projects. Without this, the prior
+  // project's recommended agent lingers in local state and the <select> can
+  // render with a value that no longer matches its options — the "selector
+  // loses its options on project switch" symptom. Resetting to null lets the
+  // recommend-effect below re-pick for the new project.
+  const prevProjectPath = useRef<string | null>(project?.path ?? null);
+  useEffect(() => {
+    const currentPath = project?.path ?? null;
+    if (prevProjectPath.current !== currentPath) {
+      prevProjectPath.current = currentPath;
+      setSelectedAgent(null);
+    }
+  }, [project?.path]);
+
   useEffect(() => {
     if (selectedAgent) return;
     const tags = project?.tags ?? [];
