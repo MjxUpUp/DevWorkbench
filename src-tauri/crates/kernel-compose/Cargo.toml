@@ -16,5 +16,3 @@ async-trait = "0.1"
 async-stream = "0.3"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
-tokio-stream = "0.1"
-thiserror = "2"

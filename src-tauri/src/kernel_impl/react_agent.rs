@@ -48,7 +48,7 @@ impl GlmChatModel {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap_or_else(|_| reqwest::Client::new()),
             bound_tools: Vec::new(),
         }
     }
@@ -61,11 +61,39 @@ impl GlmChatModel {
         let msgs: Vec<Value> = messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .map(|m| {
-                json!({
-                    "role": match m.role { Role::User => "user", _ => "assistant" },
-                    "content": m.content,
-                })
+            .map(|m| match m.role {
+                Role::Tool => {
+                    // M5: Anthropic expects tool results as user-role messages with
+                    // a tool_result content block (not assistant text).
+                    json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
+                            "content": m.content,
+                        }],
+                    })
+                }
+                Role::User => json!({ "role": "user", "content": m.content }),
+                _ => {
+                    // Assistant: include tool_calls as tool_use blocks if present.
+                    if m.tool_calls.is_empty() {
+                        json!({ "role": "assistant", "content": m.content })
+                    } else {
+                        let mut content: Vec<Value> = vec![json!({"type":"text","text":m.content})];
+                        for tc in &m.tool_calls {
+                            let input: Value = serde_json::from_str(&tc.function.arguments)
+                                .unwrap_or(json!({}));
+                            content.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": input,
+                            }));
+                        }
+                        json!({ "role": "assistant", "content": content })
+                    }
+                }
             })
             .collect();
         let system: String = messages
@@ -297,7 +325,10 @@ impl ReactAgent {
         } else {
             match self.model.with_tools(&infos) {
                 Ok(b) => Arc::from(b),
-                Err(_) => Arc::clone(&self.model),
+                Err(e) => {
+                    log::warn!("[ReactAgent] with_tools failed, proceeding without tools: {e}");
+                    Arc::clone(&self.model)
+                }
             }
         };
 
@@ -391,7 +422,10 @@ impl kernel_core::Agent for ReactAgent {
             } else {
                 match model.with_tools(&infos) {
                     Ok(b) => Arc::from(b),
-                    Err(_) => model,
+                    Err(e) => {
+                        log::warn!("[ReactAgent] with_tools failed in stream, no tools: {e}");
+                        model
+                    }
                 }
             };
             let mut history = vec![Message::system(&system_prompt), Message::user(&task)];

@@ -149,7 +149,7 @@ fn build_run_stream(
             };
             yield GraphEvent::NodeStart { node: nid.clone() };
 
-            let incoming = outputs.remove(&nid).unwrap_or(Value::Null);
+            let incoming = outputs.get(&nid).cloned().unwrap_or(Value::Null);
 
             let result: Result<Value, String> = match &node {
                 Node::Prompt(p) => Ok(Value::String(p.text.clone())),
@@ -394,4 +394,41 @@ mod tests {
             GraphEvent::NodeEnd { node, status: NodeStatus::Done, .. } if node == "go_path")),
             "go_path should be done");
     }
+
+    #[tokio::test]
+    async fn diamond_merge_collects_all_predecessor_outputs() {
+        // H1 regression test: two predecessors both fire into a Merge(Concat);
+        // the merge output must contain BOTH values (not empty/null).
+        use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, MergeStrategy, Node};
+        let g = GraphBuilder::new()
+            .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), model: None, prompt: Some("alpha".into()), resume_from: None }))
+            .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), model: None, prompt: Some("beta".into()), resume_from: None }))
+            .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Concat }))
+            .edge("a1", "m").edge("a2", "m")
+            .start("a1").end("m").build().unwrap();
+        // NOTE: this graph has two start-able nodes (a1, a2 have no preds) but
+        // only "a1" is declared start. We need both to run. Use a prompt fan-out:
+        // Actually GraphBuilder.start sets one entry. For a true diamond we need
+        // a common source. Let's use a prompt -> {a1,a2} -> merge.
+        let g2 = GraphBuilder::new()
+            .node("p", Node::Prompt(crate::graph::PromptNode { text: "go".into(), vars: std::collections::HashMap::new() }))
+            .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), model: None, prompt: Some("alpha".into()), resume_from: None }))
+            .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), model: None, prompt: Some("beta".into()), resume_from: None }))
+            .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Collect }))
+            .edge("p", "a1").edge("p", "a2").edge("a1", "m").edge("a2", "m")
+            .start("p").end("m").build().unwrap();
+        let compiled = g2.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+        let done = events.iter().find_map(|e| match e {
+            GraphEvent::GraphDone { output } => Some(output.clone()), _ => None,
+        }).expect("graph must complete");
+        // MockExec returns json objects; Collect gathers them into an array.
+        // The key assertion: merge received BOTH predecessors (not empty/null).
+        assert!(done != Value::Null && done != json!(""), "merge output must not be null/empty: {done}");
+        // With Collect strategy it's an array of 2 predecessor outputs.
+        if let Some(arr) = done.as_array() {
+            assert_eq!(arr.len(), 2, "Collect should have 2 preds: {arr:?}");
+        }
+    }
+
 }

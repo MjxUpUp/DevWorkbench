@@ -23,9 +23,6 @@ pub enum Error {
     #[error("retrieval error: {0}")]
     Retrieval(String),
 
-    #[error("template error: {0}")]
-    Template(String),
-
     #[error("graph error: {0}")]
     Graph(String),
 

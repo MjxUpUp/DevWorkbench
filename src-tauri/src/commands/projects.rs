@@ -218,7 +218,7 @@ pub fn load_settings_from_db(conn: &rusqlite::Connection) -> Result<AppSettings,
                 cli_flags: std::collections::HashMap::new(),
             };
             conn.execute(
-                "INSERT OR IGNORE INTO settings (id, scan_directories, tool_paths, theme, preferred_terminal, cli_flags) VALUES (1, '[]', '{}', 'obsidian', '', '{}')",
+                "INSERT OR IGNORE INTO settings (id, scan_directories, tool_paths, theme, preferred_terminal, cli_flags) VALUES (1, '[]', '{}', 'auto', '', '{}')",
                 [],
             ).map_err(|e| e.to_string())?;
             Ok(defaults)

@@ -47,6 +47,9 @@ impl Drop for PooledConn {
             // Poison-tolerant: force-recover the lock if a thread panicked.
             let mut guard = self.pool.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.idle.push_back(c);
+            if guard.in_use > 0 {
+                guard.in_use -= 1;
+            }
             drop(guard);
             // Wake one waiter.
             self.pool.cvar.notify_one();
@@ -242,7 +245,7 @@ CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     scan_directories TEXT NOT NULL DEFAULT '[]',
     tool_paths TEXT NOT NULL DEFAULT '{}',
-    theme TEXT NOT NULL DEFAULT 'obsidian',
+    theme TEXT NOT NULL DEFAULT 'auto',
     preferred_terminal TEXT NOT NULL DEFAULT '',
     cli_flags TEXT NOT NULL DEFAULT '{}'
 );

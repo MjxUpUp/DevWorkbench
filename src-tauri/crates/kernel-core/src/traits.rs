@@ -73,7 +73,7 @@ pub trait ChatModel: Send + Sync {
         opts: &ModelOptions,
     ) -> Result<MessageStream, Error>;
 
-    /// Return a model with tool definitions bound. Default panics by intent —
+    /// Return a model with tool definitions bound. Default returns Unsupported
     /// a model that cannot call tools must override to error clearly.
     fn with_tools(&self, _tools: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
         Err(Error::Unsupported(

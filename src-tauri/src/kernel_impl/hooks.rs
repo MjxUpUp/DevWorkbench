@@ -116,6 +116,19 @@ impl HookManager {
 // Built-in hooks
 // ---------------------------------------------------------------------------
 
+
+/// Best-effort: extract a shell command string from a tool's JSON arguments
+/// (looks for "command"/"cmd"/"script" keys).
+fn extract_command_from_args(args: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(args).ok()?;
+    for key in &["command", "cmd", "script", "shell_command"] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
 /// Reject shell commands that are genuinely destructive. Uses token-based
 /// detection (the Forge bash-guard analog) instead of naive substring matching,
 /// so `rm -rf /home/user/old-build` (legitimate) is NOT blocked while
@@ -219,10 +232,26 @@ impl Hook for CommandGuardHook {
         "command_guard"
     }
     async fn before(&self, action: &Action) -> Result<(), BlockReason> {
-        if let Action::RunCommand { command } = action {
-            if let Some(reason) = self.classify(command) {
-                return Err(reason);
+        match action {
+            Action::RunCommand { command } => {
+                if let Some(reason) = self.classify(command) {
+                    return Err(reason);
+                }
             }
+            Action::CallTool { tool, arguments } => {
+                // M7: also guard tool calls whose name suggests shell execution.
+                let dangerous_tools = ["exec", "shell", "bash", "cmd", "powershell", "sh"];
+                let lower = tool.to_lowercase();
+                if dangerous_tools.iter().any(|dt| lower.contains(dt)) {
+                    // Inspect arguments for dangerous commands.
+                    if let Some(cmd) = extract_command_from_args(arguments) {
+                        if let Some(reason) = self.classify(&cmd) {
+                            return Err(reason);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
