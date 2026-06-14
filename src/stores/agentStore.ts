@@ -53,7 +53,20 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   refreshSessions: async () => {
     try {
       const result = await invoke<Session[]>('load_sessions');
-      set({ sessions: result });
+      set((s) => {
+        // Merge instead of replace. load_sessions reads from SQLite, and a
+        // just-spawned running session may not be visible to that read yet
+        // (WAL stale snapshot / write not committed at the instant the
+        // `agent:started` event fires refreshSessions). A blanket
+        // `set({ sessions: result })` wiped that in-memory running session —
+        // which is why switching projects and back mid-run showed an empty
+        // view, and why history flickered out after any event-driven refresh.
+        // DB result stays authoritative for sessions it knows; in-memory-only
+        // sessions are preserved and reconcile on the next refresh.
+        const dbIds = new Set(result.map((r) => r.id));
+        const localOnly = s.sessions.filter((sess) => !dbIds.has(sess.id));
+        return { sessions: [...result, ...localOnly] };
+      });
     } catch (e) {
       console.error('Failed to load sessions:', e);
     }
