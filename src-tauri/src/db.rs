@@ -325,3 +325,20 @@ pub fn is_migrated(conn: &Connection) -> bool {
         Err(_) => false,
     }
 }
+
+/// Check whether the v0.6→v0.7 sessions migration has been applied (version >= 7).
+///
+/// This is separate from `is_migrated` (>= 8) because migrate_v6_to_v7 runs
+/// *before* migrate_v7_to_v8 writes version=8. Using is_migrated as the v6
+/// guard made v6_to_v7 short-circuit once v7_to_v8 had run, so sessions.json
+/// was never imported — silently dropping all v0.6 conversation history.
+pub fn is_v6_migrated(conn: &Connection) -> bool {
+    match conn.query_row(
+        "SELECT COUNT(*) FROM schema_version WHERE version >= 7",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(count) => count > 0,
+        Err(_) => false,
+    }
+}

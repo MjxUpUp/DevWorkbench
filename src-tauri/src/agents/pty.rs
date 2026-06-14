@@ -125,10 +125,15 @@ fn build_spawn_config(
     let is_continue = parent_session_id.is_some();
     let mut args: Vec<String> = Vec::new();
 
-    // If prompt is large (contains injected file content), deliver via stdin instead of CLI arg.
-    // Windows CLI limit is ~32K chars; file content easily exceeds this.
+    // Prompt delivery: `claude --print` reads the prompt from stdin. Passing it
+    // as a CLI arg instead makes every line starting with "-" in injected file
+    // content parse as an unknown option (user-visible "unknown option" error
+    // when attaching @file references). So ClaudeCode always goes through stdin;
+    // the other CLIs fall back to argv but switch to stdin when the prompt is
+    // large (Windows CLI ~32K limit, and injected file content easily exceeds it).
     const STDIN_PROMPT_THRESHOLD: usize = 4096;
-    let use_stdin = prompt.len() > STDIN_PROMPT_THRESHOLD;
+    let use_stdin = matches!(agent_type, AgentType::ClaudeCode)
+        || prompt.len() > STDIN_PROMPT_THRESHOLD;
     let stdin_prompt = if use_stdin { Some(prompt.to_string()) } else { None };
 
     match agent_type {
@@ -137,9 +142,7 @@ fn build_spawn_config(
             if is_continue {
                 args.push("--continue".to_string());
             }
-            if !use_stdin {
-                args.push(prompt.to_string());
-            }
+            // Prompt is delivered via stdin (see use_stdin above) — never as argv.
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m.to_string());

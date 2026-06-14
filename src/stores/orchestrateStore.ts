@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
 import type { WorkflowProgressEvent } from '../types';
 
 /** Per-node status surfaced from workflow:progress events. */
@@ -29,6 +30,8 @@ interface OrchestrateState {
   applyEvent: (event: WorkflowProgressEvent) => void;
   /** Start a run (resets node map, sets runId). */
   startRun: (runId: string) => void;
+  /** Resolve the current pending approval (approve/reject a paused Human node). */
+  approve: (approved: boolean) => Promise<void>;
   reset: () => void;
 }
 
@@ -51,7 +54,7 @@ edges:
   - { from: agent_1, to: gate_1 }
 `;
 
-export const useOrchestrateStore = create<OrchestrateState>((set) => ({
+export const useOrchestrateStore = create<OrchestrateState>((set, get) => ({
   yaml: SAMPLE_YAML,
   nodes: {},
   runId: null,
@@ -119,6 +122,23 @@ export const useOrchestrateStore = create<OrchestrateState>((set) => ({
 
   reset: () =>
     set({ nodes: {}, output: null, error: null, runId: null, pendingApproval: null }),
+
+  approve: async (approved) => {
+    const { pendingApproval, runId } = get();
+    if (!pendingApproval || !runId) return;
+    try {
+      await invoke('approve_workflow_step', {
+        runId,
+        resumeToken: pendingApproval.resumeToken,
+        approved,
+      });
+      // Optimistically clear the prompt; the run continues and emits the
+      // node_end / graph_done events that finalize state.
+      set({ pendingApproval: null });
+    } catch (e) {
+      console.error('approve_workflow_step failed', e);
+    }
+  },
 }));
 
 /** Parse node ids out of the YAML so the canvas can show all nodes (even

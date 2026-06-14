@@ -109,11 +109,16 @@ pub async fn delete_workflow(db: State<'_, DbState>, id: String) -> Result<(), A
 // Note: run_workflow was a stub returning "not yet implemented".
 // It has been replaced by the real graph execution engine below.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::commands::agents::AgentState;
 use crate::kernel_impl::executor::KernelExecutor;
+
+use kernel_compose::HumanApproval;
 
 /// A single progress event the frontend subscribes to via `workflow:progress`.
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +127,15 @@ pub struct WorkflowProgress {
     pub run_id: String,
     pub event: kernel_compose::GraphEvent,
 }
+
+/// Holds the approval sender for each active workflow run, keyed by run_id.
+///
+/// When a Human node pauses, the graph emits `ApprovalRequired{resume_token}`
+/// and blocks on the approval channel. The frontend resolves it via
+/// [`approve_workflow_step`], which pulls this run's sender and forwards the
+/// decision. The entry is removed when the run reaches a terminal event.
+#[derive(Default)]
+pub struct ApprovalState(pub Mutex<HashMap<String, tokio::sync::mpsc::Sender<HumanApproval>>>);
 
 /// Run a workflow defined as YAML. Parses → compiles → executes the graph,
 /// streaming `workflow:progress` events (one per GraphEvent) to the frontend,
@@ -134,6 +148,7 @@ pub async fn run_workflow(
     app: tauri::AppHandle,
     agent_state: State<'_, AgentState>,
     db: State<'_, DbState>,
+    approval_state: State<'_, ApprovalState>,
     yaml_content: String,
     input: serde_json::Value,
     working_dir: Option<String>,
@@ -148,12 +163,20 @@ pub async fn run_workflow(
     );
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    let (stream, _approval_tx) = kernel_compose::run_graph_with_approvals(
+    let (stream, approval_tx) = kernel_compose::run_graph_with_approvals(
         compiled,
         input,
         working_dir,
         Box::new(executor),
     );
+    // Keep the approval sender reachable so the frontend can resume a paused
+    // Human node via `approve_workflow_step`. Previously this was discarded
+    // (`_approval_tx`), which deadlocked any workflow containing a Human node.
+    approval_state
+        .0
+        .lock()
+        .unwrap()
+        .insert(run_id.clone(), approval_tx);
 
     use futures::StreamExt;
     let mut stream = stream;
@@ -169,16 +192,32 @@ pub async fn run_workflow(
                     event: ev.clone(),
                 },
             );
+            let terminal = matches!(
+                ev,
+                kernel_compose::GraphEvent::GraphDone { .. }
+                    | kernel_compose::GraphEvent::GraphFailed { .. }
+            );
             match ev {
                 kernel_compose::GraphEvent::GraphDone { output } => {
                     last_output = output;
-                    break;
                 }
                 kernel_compose::GraphEvent::GraphFailed { error } => {
+                    if let Some(state) = app_for_events.try_state::<ApprovalState>() {
+                        state.0.lock().unwrap().remove(&run_id_for_events);
+                    }
                     return Err(error);
                 }
                 _ => {}
             }
+            if terminal {
+                break;
+            }
+        }
+        // Clean up this run's approval entry on terminal completion so the
+        // map doesn't leak finished runs (sender drop also unblocks any
+        // lingering waiters on the receiver side).
+        if let Some(state) = app_for_events.try_state::<ApprovalState>() {
+            state.0.lock().unwrap().remove(&run_id_for_events);
         }
         Ok(serde_json::json!({ "run_id": run_id_for_events, "output": last_output }))
     })
@@ -189,4 +228,41 @@ pub async fn run_workflow(
         Ok(Err(graph_err)) => Err(AppError::NotFound(graph_err)),
         Err(join_err) => Err(AppError::NotFound(format!("run task join: {join_err}"))),
     }
+}
+
+/// Resolve a paused Human node in a running workflow.
+///
+/// `approved = true` resumes the node with an affirmative decision;
+/// `approved = false` rejects it (the node fails with "human rejected" and the
+/// graph stops). `resume_token` must match the one in the `approval_required`
+/// event the frontend received. The sender is looked up by `run_id` in
+/// [`ApprovalState`]; a finished/cleaned-up run returns NotFound.
+#[tauri::command]
+pub async fn approve_workflow_step(
+    approval_state: State<'_, ApprovalState>,
+    run_id: String,
+    resume_token: String,
+    approved: bool,
+) -> Result<(), AppError> {
+    let tx = approval_state
+        .0
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .cloned();
+    let tx = tx.ok_or_else(|| {
+        AppError::NotFound(format!(
+            "no active approval channel for run {run_id} (already finished?)"
+        ))
+    })?;
+    // None = rejected (graph fails this node); Some = resume with this value.
+    let decision = if approved {
+        Some(serde_json::json!({ "approved": true }))
+    } else {
+        None
+    };
+    tx.send(HumanApproval { resume_token, decision })
+        .await
+        .map_err(|_| AppError::NotFound("approval channel closed".into()))?;
+    Ok(())
 }

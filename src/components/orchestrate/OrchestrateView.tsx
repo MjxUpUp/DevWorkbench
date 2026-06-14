@@ -38,6 +38,7 @@ export function OrchestrateView() {
   const error = useOrchestrateStore((s) => s.error);
   const pendingApproval = useOrchestrateStore((s) => s.pendingApproval);
   const applyEvent = useOrchestrateStore((s) => s.applyEvent);
+  const approve = useOrchestrateStore((s) => s.approve);
   const startRun = useOrchestrateStore((s) => s.startRun);
   const reset = useOrchestrateStore((s) => s.reset);
 
@@ -156,8 +157,8 @@ export function OrchestrateView() {
               <strong>需要审批: {pendingApproval.node}</strong>
               <p>{pendingApproval.prompt}</p>
               <div className="approval-actions">
-                <button className="btn btn-primary">批准</button>
-                <button className="btn">拒绝</button>
+                <button className="btn btn-primary" onClick={() => approve(true)}>批准</button>
+                <button className="btn" onClick={() => approve(false)}>拒绝</button>
               </div>
             </div>
           )}

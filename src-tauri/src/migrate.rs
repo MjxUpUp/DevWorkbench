@@ -12,7 +12,12 @@ use std::path::Path;
 ///   files are left untouched.
 /// - Backup: renames original files to `.v0.6.bak` on success.
 pub fn migrate_v6_to_v7(conn: &Connection, data_dir: &Path) -> Result<(), AppError> {
-    if db::is_migrated(conn) {
+    // v6-specific marker. The old guard used is_migrated (version >= 8), which
+    // was already true once migrate_v7_to_v8 had run — so this function
+    // short-circuited and sessions.json was never imported, silently losing all
+    // v0.6 conversation history. Additionally the body built a transaction but
+    // never committed it, so even when it did run nothing persisted. Both fixed.
+    if db::is_v6_migrated(conn) {
         return Ok(());
     }
 
@@ -21,19 +26,48 @@ pub fn migrate_v6_to_v7(conn: &Connection, data_dir: &Path) -> Result<(), AppErr
     // Begin transaction — all-or-nothing
     let tx = conn.unchecked_transaction()?;
 
-    // 1. Migrate sessions
-    let sessions_file = agents_dir.join("sessions.json");
+    // 1. Migrate sessions. Prefer the live sessions.json; fall back to
+    //    sessions.json.v0.6.bak — an earlier buggy run of this function
+    //    renamed the live file to .bak but (because it never committed) left
+    //    zero rows in the DB, so the .bak is the ONLY surviving copy of the
+    //    v0.6 history for installs that already hit that path.
+    let sessions_live = agents_dir.join("sessions.json");
+    let sessions_bak = agents_dir.join("sessions.json.v0.6.bak");
+    let (sessions_file, from_backup) = if sessions_live.exists() {
+        (sessions_live.clone(), false)
+    } else if sessions_bak.exists() {
+        (sessions_bak.clone(), true)
+    } else {
+        (sessions_live.clone(), false) // neither exists — reads below no-op
+    };
+    let mut imported = 0;
     if sessions_file.exists() {
         let content = fs::read_to_string(&sessions_file)?;
         if !content.trim().is_empty() {
             let sessions: Vec<Session> = serde_json::from_str(&content)?;
             for s in &sessions {
                 insert_session(&tx, s)?;
+                imported += 1;
             }
         }
     }
 
+    // 2. Mark v6→v7 done and COMMIT (the missing commit was the second half of
+    //    the history-loss bug — the transaction was discarded on drop).
+    tx.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (7, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
 
+    // 3. Backup the live sessions file (post-commit, best-effort). Skip when we
+    //    already read from the .bak — renaming it onto itself is a no-op at
+    //    best and could clobber the only surviving copy at worst.
+    if !from_backup && sessions_live.exists() {
+        let _ = fs::rename(&sessions_live, &sessions_bak);
+    }
+
+    log::info!("v0.6→v0.7 migration: imported {} sessions from sessions.json", imported);
     Ok(())
 }
 

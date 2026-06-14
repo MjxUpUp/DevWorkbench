@@ -1,5 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { parseNodeIds, useOrchestrateStore, SAMPLE_YAML } from '../orchestrateStore';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 describe('orchestrateStore', () => {
   beforeEach(() => {
@@ -111,6 +114,73 @@ describe('orchestrateStore', () => {
       expect(store.nodes).toEqual({});
       expect(store.runId).toBeNull();
       expect(store.output).toBeNull();
+    });
+  });
+
+  describe('approve — Human-node approval loop', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      useOrchestrateStore.getState().reset();
+    });
+
+    it('forwards an approve decision to approve_workflow_step and clears the prompt', async () => {
+      vi.mocked(invoke).mockResolvedValue(undefined);
+      useOrchestrateStore.setState({
+        runId: 'run-1',
+        pendingApproval: { node: 'human_1', prompt: '继续吗?', resumeToken: 'tok-abc' },
+      });
+
+      await useOrchestrateStore.getState().approve(true);
+
+      expect(invoke).toHaveBeenCalledWith('approve_workflow_step', {
+        runId: 'run-1',
+        resumeToken: 'tok-abc',
+        approved: true,
+      });
+      expect(useOrchestrateStore.getState().pendingApproval).toBeNull();
+    });
+
+    it('forwards a reject decision with approved=false', async () => {
+      vi.mocked(invoke).mockResolvedValue(undefined);
+      useOrchestrateStore.setState({
+        runId: 'run-9',
+        pendingApproval: { node: 'h', prompt: 'x', resumeToken: 't' },
+      });
+
+      await useOrchestrateStore.getState().approve(false);
+
+      expect(invoke).toHaveBeenCalledWith('approve_workflow_step', {
+        runId: 'run-9',
+        resumeToken: 't',
+        approved: false,
+      });
+    });
+
+    it('is a no-op when there is no pending approval or no run', async () => {
+      useOrchestrateStore.setState({ runId: 'run-1', pendingApproval: null });
+      await useOrchestrateStore.getState().approve(true);
+      expect(invoke).not.toHaveBeenCalled();
+
+      useOrchestrateStore.setState({
+        runId: null,
+        pendingApproval: { node: 'h', prompt: 'x', resumeToken: 't' },
+      });
+      await useOrchestrateStore.getState().approve(true);
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('keeps the prompt visible when the invoke rejects (run still live)', async () => {
+      vi.mocked(invoke).mockRejectedValue(new Error('channel closed'));
+      useOrchestrateStore.setState({
+        runId: 'run-7',
+        pendingApproval: { node: 'h', prompt: 'x', resumeToken: 't' },
+      });
+
+      await useOrchestrateStore.getState().approve(true);
+
+      // The optimistic clear only runs after a successful invoke — a rejection
+      // must leave the prompt so the user can retry.
+      expect(useOrchestrateStore.getState().pendingApproval).not.toBeNull();
     });
   });
 });

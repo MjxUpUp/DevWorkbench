@@ -4,9 +4,17 @@
    ============================================= */
 
 .settings-view {
+  /* Full-viewport overlay covering left-column + main-stage + status-bar.
+   * TitleBar stays visible above (top = --title-bar-height) so window controls
+   * and the sidebar toggle remain usable. Clicking 设置 lifts this above the
+   * normal view grid instead of rendering inside the main stage. */
+  position: fixed;
+  top: var(--title-bar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 200;
   display: flex;
-  height: 100%;
-  width: 100%;
   background: var(--bg-canvas);
 }
 
@@ -22,9 +30,30 @@
 }
 
 .settings-view-nav-header {
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3) var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: var(--space-1);
+}
+
+.settings-view-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.settings-view-close:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
 
 .settings-view-nav-header h2 {
@@ -70,6 +99,322 @@
 .settings-coming-soon span {
   font-size: var(--text-sm);
   color: var(--text-secondary);
+}
+
+/* =============================================
+   Shared settings primitives — nav items, sections, rows, inputs, buttons,
+   segmented control, card lists. These were referenced by every section
+   component but never defined, so the whole settings page fell back to
+   browser-default rendering (unstyled buttons/inputs).
+   ============================================= */
+
+/* Left-nav items inside the settings overlay */
+.settings-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 7px var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.settings-nav-item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.settings-nav-item:hover .settings-nav-icon {
+  color: var(--text-secondary);
+}
+
+.settings-nav-item.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.settings-nav-item.active .settings-nav-icon {
+  color: var(--accent);
+}
+
+/* Settings section — titled group of rows/cards */
+.settings-section {
+  margin-bottom: var(--space-6);
+}
+
+.settings-section-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.settings-section-desc {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-3);
+}
+
+/* Settings row — label/desc left, control right */
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  margin-bottom: var(--space-2);
+}
+
+.settings-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-row-label {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.settings-row-label-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-weight: 400;
+  word-break: break-all;
+}
+
+.settings-row-desc {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.settings-row-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.settings-row-input {
+  padding: 5px var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  min-width: 180px;
+  outline: none;
+  transition: border-color var(--duration-fast) ease;
+}
+
+.settings-row-input:focus {
+  border-color: var(--accent);
+}
+
+.settings-row-input-sm {
+  min-width: 140px;
+}
+
+.settings-row-btn-primary,
+.settings-row-btn-secondary,
+.settings-row-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 5px var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.settings-row-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.settings-row-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.settings-row-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-row-btn-secondary {
+  background: var(--surface-0);
+  color: var(--text-secondary);
+}
+
+.settings-row-btn-secondary:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.settings-row-btn-icon {
+  padding: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.settings-row-btn-icon:hover {
+  background: var(--surface-2);
+  color: var(--danger, #e5484d);
+}
+
+/* Segmented control (AppearanceSection) */
+.settings-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.settings-segmented button {
+  padding: 5px var(--space-3);
+  border: none;
+  background: var(--surface-0);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.settings-segmented button + button {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.settings-segmented button:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.settings-segmented button.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* Card list (AgentSection tool status / terminal preference) */
+.settings-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+
+.settings-tool-card.selectable {
+  cursor: pointer;
+  align-items: center;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.settings-tool-card.selectable:hover {
+  border-color: var(--accent);
+}
+
+.settings-tool-card.selectable.selected {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.settings-tool-card.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-tool-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.settings-tool-card-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.settings-tool-card-name {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-tool-card-path {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  word-break: break-all;
+}
+
+.settings-tool-card-status {
+  font-size: var(--text-xs);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-tool-card-status.installed {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.settings-tool-card-status.not-installed {
+  background: var(--surface-2);
+  color: var(--text-tertiary);
+}
+
+.settings-tool-card-badge {
+  font-size: var(--text-xs);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-tool-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 /* ---- Providers section (模型供应商) ---- */

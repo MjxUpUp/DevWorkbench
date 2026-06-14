@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Project } from '../types';
-import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate } from './Icons';
+import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate, IconTrash } from './Icons';
 import type { IconProps } from './Icons';
 import type { ViewId } from '../stores/navigationStore';
 import { useNavigationStore } from '../stores/navigationStore';
@@ -8,7 +8,7 @@ import { useProjectStore } from '../stores/projectStore';
 
 /**
  * Primary navigation — aligns to the target layout:
- *   logo (Z, toggles the column) → 创建任务 / 搜索 / 技能 → 工作区 (flat project
+ *   创建任务 / 搜索 / 技能 → 工作区 (flat project
  *   list, no conversation tree) → 用户资料 (opens a menu with 设置).
  *
  * The conversation tree that used to live here is removed: sessions are now
@@ -24,13 +24,13 @@ const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
 
 export function Sidebar() {
   const projects = useProjectStore((s) => s.projects);
+  const removeProject = useProjectStore((s) => s.removeProject);
   const activeProject = useNavigationStore((s) => s.activeProject);
   const selectProject = useNavigationStore((s) => s.selectProject);
   const selectSession = useNavigationStore((s) => s.selectSession);
-  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
-  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
   const activeView = useNavigationStore((s) => s.activeView);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
+  const setCommandPaletteOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
 
   const handleSelectProject = (project: Project) => {
     if (activeProject?.id === project.id) return;
@@ -40,27 +40,26 @@ export function Sidebar() {
     if (activeView !== 'task') setActiveView('task');
   };
 
+  const handleRemoveProject = (project: Project) => {
+    removeProject(project.id).catch((err) => console.error('removeProject failed', err));
+  };
+
   return (
     <aside className="left-column">
-      {/* Logo zone — doubles as the sidebar toggle (zcode convention) */}
-      <button
-        className="left-column-logo"
-        onClick={toggleSidebar}
-        title={sidebarOpen ? '收起边栏' : '展开边栏'}
-        aria-label="切换边栏"
-        aria-expanded={sidebarOpen}
-        type="button"
-      >
-        Z
-      </button>
-
-      {/* Primary navigation — 创建任务 / 搜索 / 技能 */}
+      {/* Primary navigation — 创建任务 / 搜索 / 技能. The brand mark and the
+          sidebar toggle both live in the title bar (TitleBar.tsx); not
+          duplicated as a "Z" logo here. */}
       <nav className="left-column-nav" aria-label="主导航">
         {VIEWS.map((view) => (
           <button
             key={view.id}
             className={`left-column-nav-item ${activeView === view.id ? 'active' : ''}`}
-            onClick={() => setActiveView(view.id)}
+            // "搜索" opens the command palette as a transparent centered modal
+            // that queries conversation history, instead of switching views.
+            onClick={() => {
+              if (view.id === 'search') setCommandPaletteOpen(true);
+              else setActiveView(view.id);
+            }}
             title={view.label}
             aria-selected={activeView === view.id}
           >
@@ -79,14 +78,31 @@ export function Sidebar() {
           <div className="left-column-projects-empty">暂无项目</div>
         )}
         {projects.map((project) => (
-          <button
+          <div
             key={project.id}
             className={`left-column-project ${activeProject?.id === project.id ? 'active' : ''}`}
             onClick={() => handleSelectProject(project)}
             title={project.path}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleSelectProject(project);
+              }
+            }}
           >
             <span className="left-column-project-name">{project.name}</span>
-          </button>
+            <button
+              className="left-column-project-remove"
+              onClick={(e) => { e.stopPropagation(); handleRemoveProject(project); }}
+              title="移除项目"
+              aria-label={`移除 ${project.name}`}
+              type="button"
+            >
+              <IconTrash size={14} />
+            </button>
+          </div>
         ))}
       </div>
 

@@ -12,8 +12,9 @@ import {
   IconSettings, IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconCode, IconInbox,
   IconUser, IconPlay, IconEdit, IconStar,
-  IconFolderOpen, IconDashboard, IconChat,
+  IconFolderOpen, IconDashboard, IconChat, IconX,
 } from '../Icons';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 type SettingsIcon = React.FC<{ size?: number; className?: string }>;
 
@@ -59,9 +60,19 @@ const SECTIONS: SectionDef[] = [
 export function SettingsView() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('ai-config');
   const loadSettings = useSettingsStore((s) => s.loadSettings);
+  const setActiveView = useNavigationStore((s) => s.setActiveView);
 
   // Load settings once on mount — shared store eliminates per-section loading
   useEffect(() => { loadSettings(); }, [loadSettings]);
+
+  // ESC closes the settings overlay (returns to the task view).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveView('task');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [setActiveView]);
 
   const active = SECTIONS.find(s => s.id === activeSection) ?? SECTIONS[0];
   const ActiveComponent = active.Component;
@@ -71,6 +82,15 @@ export function SettingsView() {
       <div className="settings-view-nav">
         <div className="settings-view-nav-header">
           <h2>设置</h2>
+          <button
+            className="settings-view-close"
+            onClick={() => setActiveView('task')}
+            title="返回 (Esc)"
+            aria-label="关闭设置"
+            type="button"
+          >
+            <IconX size={16} />
+          </button>
         </div>
         {SECTIONS.map(section => (
           <button

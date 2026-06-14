@@ -36,7 +36,6 @@ export function CommandPalette() {
 
   const commands = [
     { label: '创建任务', action: () => { setActiveView('task'); setOpen(false); } },
-    { label: '搜索', action: () => { setActiveView('search'); setOpen(false); } },
     { label: '技能', action: () => { setActiveView('skills'); setOpen(false); } },
     { label: '设置', action: () => { setActiveView('settings'); setOpen(false); } },
   ];

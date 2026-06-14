@@ -3,6 +3,7 @@ import { AddProject } from './components/AddProject';
 import { Sidebar } from './components/Sidebar';
 import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
+import { SettingsView } from './components/settings/SettingsView';
 import { TitleBar } from './components/layout/TitleBar';
 import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
@@ -49,6 +50,7 @@ function App() {
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
   const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
+  const activeView = useNavigationStore((s) => s.activeView);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -167,6 +169,7 @@ function App() {
       <Sidebar />
       <MainStage />
       <CommandPalette />
+      {activeView === 'settings' && <SettingsView />}
 
       {(projectError || toolsError) && <div className="error-banner" style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',zIndex:300}}>{projectError || toolsError}</div>}
 

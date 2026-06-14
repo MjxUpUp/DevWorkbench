@@ -89,6 +89,7 @@ pub fn run() {
             agents::pty::AgentProcesses::new(),
         )))
         .manage(mcp::registry::McpRegistry::new())
+        .manage(commands::workflows::ApprovalState::default())
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,
@@ -139,6 +140,7 @@ pub fn run() {
             commands::workflows::update_workflow,
             commands::workflows::delete_workflow,
             commands::workflows::run_workflow,
+            commands::workflows::approve_workflow_step,
             commands::mcp_cmds::mcp_connect,
             commands::mcp_cmds::mcp_disconnect,
             commands::mcp_cmds::mcp_list_tools,

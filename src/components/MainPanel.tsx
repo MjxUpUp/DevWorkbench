@@ -2,14 +2,14 @@ import { useNavigationStore } from '../stores/navigationStore';
 import { ChatView } from './chat/ChatView';
 import { SearchView } from './search/SearchView';
 import { SkillMarketView } from './skills/SkillMarketView';
-import { SettingsView } from './settings/SettingsView';
 import { OrchestrateView } from './orchestrate/OrchestrateView';
 import { GitPanel } from './git/GitPanel';
 
 /**
  * Main stage view router.
  *
- * Views: task (chat) / search / skills / orchestrate / settings.
+ * Views: task (chat) / search / skills / orchestrate. (Settings renders as a
+ * full-screen overlay above the grid — see App.tsx.)
  *
  * The task view is the only one that shows the right-side Git tool panel — the
  * stage becomes a 2-column grid (chat | git) in that mode. Other views are
@@ -28,7 +28,6 @@ export function MainStage() {
         {activeView === 'search' && <SearchView />}
         {activeView === 'skills' && <SkillMarketView />}
         {activeView === 'orchestrate' && <OrchestrateView />}
-        {activeView === 'settings' && <SettingsView />}
       </div>
       {isTask && <GitPanel projectPath={activeProject?.path ?? null} />}
     </main>
