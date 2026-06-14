@@ -44,3 +44,17 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
+
+/// Allow `?` from String-returning APIs (compose migration).
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::Other(s)
+    }
+}
+
+/// Allow `?` from `ok_or("literal")` patterns.
+impl From<&str> for Error {
+    fn from(s: &str) -> Self {
+        Error::Other(s.into())
+    }
+}
