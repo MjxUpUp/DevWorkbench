@@ -79,7 +79,7 @@ pub fn open_in_editor(editor: String, project_path: String, db: State<'_, DbStat
     }
 
     // 优先读取用户设置中的自定义路径
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     let custom_path = crate::commands::projects::load_settings_from_db(&conn)
         .ok()
         .and_then(|s| s.tool_paths.get(&editor).cloned())

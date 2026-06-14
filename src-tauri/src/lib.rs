@@ -38,49 +38,47 @@ pub fn run() {
                 app.handle().plugin(log_builder.build())?;
             }
 
-            // Initialize SQLite database
+            // Initialize SQLite database (connection pool + schema + pragmas)
             let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
             let db_path = data_dir.join("data.db");
-            let conn = db::init_db(&db_path)
+            let db_state = db::DbState::open(&db_path)
                 .expect("Failed to initialize database");
 
-            // Run v0.6 → v0.7 migration (idempotent)
-            migrate::migrate_v6_to_v7(&conn, &data_dir)
-                .expect("Failed to run data migration");
+            // Run migrations on one pooled connection (idempotent).
+            {
+                let conn = db_state.get()
+                    .expect("Failed to get DB connection from pool for migrations");
 
-            // Run v0.7 → v0.8 migration (projects/settings to SQLite)
-            migrate::migrate_v7_to_v8(&conn, &data_dir)
-                .expect("Failed to run projects/settings migration");
+                migrate::migrate_v6_to_v7(&conn, &data_dir)
+                    .expect("Failed to run data migration");
+                migrate::migrate_v7_to_v8(&conn, &data_dir)
+                    .expect("Failed to run projects/settings migration");
+                migrate::migrate_v8_to_v9(&conn)
+                    .expect("Failed to run v8 to v9 schema migration");
 
-            // Run v0.8 → v1.0 migration (workflows, skills, cost tables)
-            migrate::migrate_v8_to_v9(&conn)
-                .expect("Failed to run v8→v9 schema migration");
-
-            // Prune knowledge entries older than 180 days
-            match knowledge::store::prune_old_entries(&conn, 180) {
-                Ok(count) => {
-                    if count > 0 {
-                        log::info!("Pruned {} old knowledge entries", count);
+                match knowledge::store::prune_old_entries(&conn, 180) {
+                    Ok(count) => {
+                        if count > 0 {
+                            log::info!("Pruned {} old knowledge entries", count);
+                        }
                     }
-                }
-                Err(e) => {
-                    log::warn!("Knowledge prune failed (non-fatal): {}", e);
+                    Err(e) => {
+                        log::warn!("Knowledge prune failed (non-fatal): {}", e);
+                    }
                 }
             }
 
-            // Store the connection as managed state
-            let db_state = db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+            // Store the pool as managed state
             app.manage(db_state.clone());
 
-            // Start knowledge file watchers (background thread)
-            match knowledge::watchers::start_knowledge_watchers(db_state.0.clone()) {
+            // Start knowledge file watchers (background thread, shares the pool)
+            match knowledge::watchers::start_knowledge_watchers(db_state.clone()) {
                 Ok(_guard) => {
-                    // WatcherGuard stored in app setup — dropped when app shuts down
                     app.manage(_guard);
                     log::info!("Knowledge watchers started");
                 }
                 Err(e) => {
-                    log::warn!("Knowledge watchers 启动失败 (non-fatal): {}", e);
+                    log::warn!("Knowledge watchers failed to start (non-fatal): {}", e);
                 }
             }
 

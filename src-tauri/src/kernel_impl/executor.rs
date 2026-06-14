@@ -71,7 +71,7 @@ impl Executor for KernelExecutor {
             pty::spawn_pty_agent(
                 &app,
                 processes,
-                db.0.clone(),
+                db,
                 &project_path,
                 agent_type,
                 &prompt,
@@ -148,7 +148,7 @@ async fn poll_until_settled(db: &DbState, session_id: &str) -> Result<SettledOut
         let db = db.clone();
         let sid = session_id.to_string();
         let row = tokio::task::spawn_blocking(move || -> Result<Option<SessionRow>, String> {
-            let conn = db.0.lock().map_err(|e| format!("db lock: {e}"))?;
+            let conn = db.get().map_err(|e| format!("db lock: {e}"))?;
             let row = conn
                 .query_row(
                     "SELECT status, output_summary, context_snapshot FROM sessions WHERE id = ?1",

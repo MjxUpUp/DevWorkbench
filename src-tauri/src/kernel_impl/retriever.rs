@@ -41,7 +41,7 @@ impl Retriever for KnowledgeRetriever {
         // DB access is synchronous + may contend on the connection Mutex; push
         // it to the blocking pool so we don't stall the async runtime.
         let entries = tokio::task::spawn_blocking(move || -> Result<Vec<_>, Error> {
-            let conn = db.0.lock().map_err(|e| Error::Retrieval(format!("db lock: {e}")))?;
+            let conn = db.get().map_err(|e| Error::Retrieval(format!("db lock: {e}")))?;
             match scope_for_task {
                 Some(path) => {
                     let hash = hash_project_path(&path);

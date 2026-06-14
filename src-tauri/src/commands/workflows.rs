@@ -8,7 +8,7 @@ use crate::models::Workflow;
 
 #[tauri::command]
 pub async fn list_workflows(db: State<'_, DbState>) -> Result<Vec<Workflow>, AppError> {
-    let conn = db.0.lock().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
+    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
     let mut stmt = conn.prepare(
         "SELECT id, name, yaml_content, created_at, updated_at FROM workflows ORDER BY updated_at DESC",
     )?;
@@ -34,7 +34,7 @@ pub async fn create_workflow(
     name: String,
     yaml_content: String,
 ) -> Result<Workflow, AppError> {
-    let conn = db.0.lock().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
+    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -52,7 +52,7 @@ pub async fn create_workflow(
 
 #[tauri::command]
 pub async fn get_workflow(db: State<'_, DbState>, id: String) -> Result<Workflow, AppError> {
-    let conn = db.0.lock().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
+    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
     conn.query_row(
         "SELECT id, name, yaml_content, created_at, updated_at FROM workflows WHERE id = ?1",
         [&id],
@@ -76,7 +76,7 @@ pub async fn update_workflow(
     name: String,
     yaml_content: String,
 ) -> Result<Workflow, AppError> {
-    let conn = db.0.lock().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
+    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "UPDATE workflows SET name = ?1, yaml_content = ?2, updated_at = ?3 WHERE id = ?4",
@@ -101,7 +101,7 @@ pub async fn update_workflow(
 
 #[tauri::command]
 pub async fn delete_workflow(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
-    let conn = db.0.lock().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
+    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
     conn.execute("DELETE FROM workflows WHERE id = ?1", [&id])?;
     Ok(())
 }

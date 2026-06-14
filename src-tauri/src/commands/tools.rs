@@ -42,7 +42,7 @@ const NON_AGENT_TOOLS: &[&str] = &["code", "git"];
 
 #[tauri::command]
 pub fn detect_tools(db: State<'_, DbState>) -> Vec<ToolStatus> {
-    let conn = db.0.lock().expect("db lock");
+    let conn = db.get().expect("db pool get");
     // 读取用户自定义路径
     let custom_paths = crate::commands::projects::load_settings_from_db(&conn)
         .ok()

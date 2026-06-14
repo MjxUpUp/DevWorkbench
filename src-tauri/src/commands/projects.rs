@@ -64,13 +64,13 @@ fn load_all_projects(conn: &rusqlite::Connection) -> Result<Vec<Project>, String
 
 #[tauri::command]
 pub fn load_projects(db: State<'_, DbState>) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     load_all_projects(&conn)
 }
 
 #[tauri::command]
 pub fn add_project(db: State<'_, DbState>, project: Project) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     conn.execute(
         &format!("INSERT OR IGNORE INTO projects ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", PROJECT_COLUMNS),
         params![
@@ -93,7 +93,7 @@ pub fn add_project(db: State<'_, DbState>, project: Project) -> Result<Vec<Proje
 
 #[tauri::command]
 pub fn remove_project(db: State<'_, DbState>, id: String) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     let rows = conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     if rows == 0 {
@@ -104,7 +104,7 @@ pub fn remove_project(db: State<'_, DbState>, id: String) -> Result<Vec<Project>
 
 #[tauri::command]
 pub fn update_project(db: State<'_, DbState>, id: String, patch: serde_json::Value) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
 
     let mut set_clauses: Vec<String> = Vec::new();
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -156,7 +156,7 @@ pub fn update_project(db: State<'_, DbState>, id: String, patch: serde_json::Val
 
 #[tauri::command]
 pub fn update_project_open(db: State<'_, DbState>, id: String) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().to_rfc3339();
     conn.execute(
         "UPDATE projects SET open_count = open_count + 1, last_opened_at = ?1 WHERE id = ?2",
@@ -167,7 +167,7 @@ pub fn update_project_open(db: State<'_, DbState>, id: String) -> Result<Vec<Pro
 
 #[tauri::command]
 pub fn record_tool_open(db: State<'_, DbState>, id: String, tool_name: String) -> Result<Vec<Project>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     let tools_json: String = conn.query_row(
         "SELECT last_opened_tools FROM projects WHERE id = ?1",
         params![id],
@@ -244,12 +244,12 @@ pub fn save_settings_to_db(conn: &rusqlite::Connection, settings: &AppSettings) 
 
 #[tauri::command]
 pub fn load_settings(db: State<'_, DbState>) -> Result<AppSettings, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     load_settings_from_db(&conn)
 }
 
 #[tauri::command]
 pub fn save_settings(db: State<'_, DbState>, settings: AppSettings) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     save_settings_to_db(&conn, &settings)
 }

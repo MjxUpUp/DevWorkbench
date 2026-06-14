@@ -23,7 +23,7 @@ pub fn claude_project_dir(project_path: &str) -> Option<PathBuf> {
 ///
 /// Returns a `WatcherGuard` whose drop stops the watchers.
 pub fn start_knowledge_watchers(
-    db: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    db: crate::db::DbState,
 ) -> Result<WatcherGuard, String> {
     let home = crate::commands::projects::dirs_home();
 
@@ -121,7 +121,7 @@ pub fn start_knowledge_watchers(
                 // Process pending file changes
                 let paths_to_process: Vec<PathBuf> = pending_paths.drain().collect();
                 for path in &paths_to_process {
-                    if let Ok(conn) = db.lock() {
+                    if let Ok(conn) = db.get() {
                         process_file_change(&conn, path, &claude_dir_clone, &codex_dir_clone);
                     }
                     // If lock fails (e.g., main thread holding it), skip this cycle

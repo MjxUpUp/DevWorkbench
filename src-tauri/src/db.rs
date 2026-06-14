@@ -1,15 +1,98 @@
 use crate::error::AppError;
 use rusqlite::Connection;
+use std::collections::VecDeque;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// Managed state wrapping the SQLite connection.
-/// Uses Arc so it can be cloned and passed to background threads (e.g. pty wait thread).
-pub struct DbState(pub Arc<Mutex<Connection>>);
+/// Number of connections in the pool. SQLite in WAL mode allows concurrent
+/// readers + one writer; a small pool removes the global lock contention that
+/// previously serialized UI / spawn / wait-thread / watcher DB access.
+const POOL_SIZE: usize = 8;
+
+/// A pooled SQLite connection. Returns to the pool on drop.
+/// `Deref`s to `rusqlite::Connection`, so existing `conn.execute(...) /
+/// conn.query_*` call sites work unchanged after `db.get()`.
+pub struct PooledConn {
+    conn: Option<Connection>,
+    pool: Arc<Mutex<VecDeque<Connection>>>,
+}
+
+impl Deref for PooledConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("pooled conn used after return")
+    }
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(c) = self.conn.take() {
+            if let Ok(mut deque) = self.pool.lock() {
+                deque.push_back(c);
+            }
+            // If the pool lock fails we just drop the connection (pool shrinks);
+            // it will be reopened on next open if empty -?but we keep it simple
+            // and let the connection be lost (acceptable; pool self-heals on restart).
+        }
+    }
+}
+
+/// Error returned when the pool is exhausted (all connections in use) -?kept as
+/// a String so callers can map it to their error type uniformly.
+type PoolError = String;
+
+/// Managed state wrapping a SQLite **connection pool**.
+///
+/// Previously this held a single `Arc<Mutex<Connection>>`, which serialized
+/// every DB operation behind one lock. The 2s/15s/600s defensive timeouts in
+/// `agents/pty.rs` existed to defend against that lock. A pool lets each
+/// operation take its own connection.
+///
+/// `.0` is `Arc<Mutex<VecDeque<Connection>>>`. `.get()` returns a `PooledConn`
+/// which `Deref`s to `Connection`. Call sites: `db.get()` -?`db.get()`.
+pub struct DbState(pub Arc<Mutex<VecDeque<Connection>>>);
 
 impl Clone for DbState {
     fn clone(&self) -> Self {
         DbState(self.0.clone())
+    }
+}
+
+impl DbState {
+    /// Open a pool of `POOL_SIZE` connections over the DB file, running schema
+    /// init + pragmas on each. WAL mode enables concurrent readers.
+    pub fn open(db_path: &Path) -> Result<Self, AppError> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut deque = VecDeque::with_capacity(POOL_SIZE);
+        for _ in 0..POOL_SIZE {
+            let conn = Connection::open(db_path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+            // Run schema idempotently on each (CREATE TABLE IF NOT EXISTS is safe).
+            conn.execute_batch(SCHEMA)?;
+            deque.push_back(conn);
+        }
+        Ok(DbState(Arc::new(Mutex::new(deque))))
+    }
+
+    /// Take a connection from the pool. Returns it on drop.
+    /// Errors if the pool is exhausted (all connections checked out).
+    pub fn get(&self) -> Result<PooledConn, PoolError> {
+        let conn = self
+            .0
+            .lock()
+            .map_err(|e| format!("pool lock: {e}"))?
+            .pop_front();
+        match conn {
+            Some(c) => Ok(PooledConn {
+                conn: Some(c),
+                pool: self.0.clone(),
+            }),
+            None => Err("DB pool exhausted (all connections in use)".into()),
+        }
     }
 }
 

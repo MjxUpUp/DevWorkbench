@@ -12,27 +12,21 @@ use crate::models::Skill;
 
 #[tauri::command]
 pub async fn list_skills(db: State<'_, DbState>) -> Result<Vec<Skill>, AppError> {
-    let conn = db
-        .0
-        .lock()
+    let conn = db.get()
         .map_err(|e| crate::error::AppError::Config(format!("Lock error: {}", e)))?;
     crate::skills::registry::list_skills(&conn)
 }
 
 #[tauri::command]
 pub async fn install_skill(db: State<'_, DbState>, skill: Skill) -> Result<(), AppError> {
-    let conn = db
-        .0
-        .lock()
+    let conn = db.get()
         .map_err(|e| crate::error::AppError::Config(format!("Lock error: {}", e)))?;
     crate::skills::registry::install_skill(&conn, &skill)
 }
 
 #[tauri::command]
 pub async fn uninstall_skill(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
-    let conn = db
-        .0
-        .lock()
+    let conn = db.get()
         .map_err(|e| crate::error::AppError::Config(format!("Lock error: {}", e)))?;
     crate::skills::registry::uninstall_skill(&conn, &id)
 }
@@ -125,9 +119,7 @@ pub async fn install_skill_from_catalog(
         security_details: None,
         config_schema: None,
     };
-    let conn = db
-        .0
-        .lock()
+    let conn = db.get()
         .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
     crate::skills::registry::install_skill(&conn, &skill)?;
     Ok(skill)
@@ -143,9 +135,7 @@ pub async fn rate_skill(
     if !(0.0..=5.0).contains(&rating) {
         return Err(AppError::Skill("rating must be 0..=5".into()));
     }
-    let conn = db
-        .0
-        .lock()
+    let conn = db.get()
         .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
     // Load existing metadata, merge rating, write back.
     let existing: Option<String> = conn

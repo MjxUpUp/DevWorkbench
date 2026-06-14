@@ -201,7 +201,7 @@ fn build_spawn_config(
 pub fn spawn_pty_agent(
     app: &tauri::AppHandle,
     processes: Arc<AgentProcesses>,
-    db_conn: Arc<Mutex<rusqlite::Connection>>,
+    db_conn: crate::db::DbState,
     project_path: &str,
     agent_type: AgentType,
     prompt: &str,
@@ -245,7 +245,7 @@ pub fn spawn_pty_agent(
 fn try_spawn_pty(
     app: &tauri::AppHandle,
     processes: &Arc<AgentProcesses>,
-    db_conn: &Arc<Mutex<rusqlite::Connection>>,
+    db_conn: &crate::db::DbState,
     config: &SpawnConfig,
     agent_type: &AgentType,
     project_path: &str,
@@ -342,7 +342,7 @@ fn try_spawn_pty(
     };
 
     {
-        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        let conn = db_conn.get().map_err(|e| e.to_string())?;
         crate::agents::session::insert_session_db(&conn, &session)
             .map_err(|e| e.to_string())?;
         let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
@@ -450,13 +450,7 @@ fn try_spawn_pty(
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
-        let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit);
-        log::info!(
-            "[completion] Session {} snapshot done ({} files changed)",
-            sid_exit,
-            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0)
-        );
+        // Read output summary FIRST so key_output can be derived from it.
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if exit_code.unwrap_or(-1) == 0 {
                 Some("(Agent completed with no text output)".to_string())
@@ -464,6 +458,14 @@ fn try_spawn_pty(
                 Some(format!("(Process exited with code {:?})", exit_code))
             }
         });
+        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
+        let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit, output_summary.as_deref());
+        log::info!(
+            "[completion] Session {} snapshot done ({} files changed, {} key_output chars)",
+            sid_exit,
+            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0),
+            snapshot.as_ref().map(|s| s.key_output.chars().count()).unwrap_or(0)
+        );
         let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
 
         let mut patch = serde_json::json!({
@@ -481,7 +483,7 @@ fn try_spawn_pty(
         }
 
         log::info!("[completion] Session {} locking DB for completion update...", sid_exit);
-        if let Ok(conn) = db_conn_exit.lock() {
+        if let Ok(conn) = db_conn_exit.get() {
             log::info!("[completion] Session {} DB locked, writing completion...", sid_exit);
             let _ = crate::agents::session::update_session_db(&conn, &sid_exit, patch);
             let event_type = match session_status {
@@ -526,7 +528,7 @@ fn try_spawn_pty(
 fn spawn_pipe_fallback(
     app: &tauri::AppHandle,
     processes: &Arc<AgentProcesses>,
-    db_conn: &Arc<Mutex<rusqlite::Connection>>,
+    db_conn: &crate::db::DbState,
     config: &SpawnConfig,
     agent_type: &AgentType,
     project_path: &str,
@@ -610,7 +612,7 @@ fn spawn_pipe_fallback(
     };
 
     {
-        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        let conn = db_conn.get().map_err(|e| e.to_string())?;
         crate::agents::session::insert_session_db(&conn, &session)
             .map_err(|e| e.to_string())?;
         let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
@@ -729,14 +731,7 @@ fn spawn_pipe_fallback(
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
-        let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit);
-        log::info!(
-            "[completion] Session {} snapshot done ({} files changed)",
-            sid_exit,
-            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0)
-        );
-        let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
+        // Read output summary FIRST so key_output can be derived from it.
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if timed_out {
                 Some(format!("(Session timed out after {}s and was killed)", PIPE_SESSION_TIMEOUT_SECS))
@@ -746,6 +741,15 @@ fn spawn_pipe_fallback(
                 Some(format!("(Process exited with code {:?})", exit_code))
             }
         });
+        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
+        let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit, output_summary.as_deref());
+        log::info!(
+            "[completion] Session {} snapshot done ({} files changed, {} key_output chars)",
+            sid_exit,
+            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0),
+            snapshot.as_ref().map(|s| s.key_output.chars().count()).unwrap_or(0)
+        );
+        let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
 
         let mut patch = serde_json::json!({
             "status": session_status.as_str(),
@@ -762,7 +766,7 @@ fn spawn_pipe_fallback(
         }
 
         log::info!("[completion] Session {} locking DB for completion update...", sid_exit);
-        if let Ok(conn) = db_conn_exit.lock() {
+        if let Ok(conn) = db_conn_exit.get() {
             log::info!("[completion] Session {} DB locked, writing completion...", sid_exit);
             let _ = crate::agents::session::update_session_db(&conn, &sid_exit, patch);
             let event_type = match session_status {
@@ -965,7 +969,15 @@ fn strip_ansi(bytes: &[u8]) -> String {
     result
 }
 
-fn extract_context_snapshot(project_path: &str, session_id: &str) -> Option<ContextSnapshot> {
+/// Build a context snapshot: files changed (git diff) + key output (the most
+/// relevant tail of the agent's output, stripped of ANSI noise). The key_output
+/// is a compact summary -- previously always empty, which made the column
+/// near-useless for resume/search.
+fn extract_context_snapshot(
+    project_path: &str,
+    session_id: &str,
+    output_summary: Option<&str>,
+) -> Option<ContextSnapshot> {
     let post_diff = capture_git_diff_names(project_path);
     let pre_diff = read_pre_diff(session_id).unwrap_or_default();
     let agent_files: Vec<String> = post_diff
@@ -973,10 +985,42 @@ fn extract_context_snapshot(project_path: &str, session_id: &str) -> Option<Cont
         .filter(|f| !pre_diff.contains(f))
         .collect();
 
+    let key_output = output_summary
+        .map(|s| {
+            let stripped = strip_ansi_basic(s);
+            let compact: String = stripped
+                .lines()
+                .map(|l| l.trim_end())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            compact.chars().take(500).collect()
+        })
+        .unwrap_or_default();
+
     Some(ContextSnapshot {
         files_changed: agent_files,
-        key_output: String::new(),
+        key_output,
     })
+}
+
+/// Minimal ANSI escape stripper: removes common CSI sequences for clean key_output.
+fn strip_ansi_basic(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            while let Some(nc) = chars.next() {
+                if nc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Maximum time to wait for `git diff --name-only` before giving up on the
@@ -1046,7 +1090,7 @@ fn read_pre_diff(session_id: &str) -> Option<Vec<String>> {
 /// Inject knowledge into the prompt in a background thread with a 2s timeout.
 /// Falls back to the original prompt if injection takes too long.
 fn inject_knowledge_with_timeout(
-    db_conn: &Arc<Mutex<rusqlite::Connection>>,
+    db_conn: &crate::db::DbState,
     agent_type: &AgentType,
     project_path: &str,
     prompt: &str,
@@ -1060,7 +1104,7 @@ fn inject_knowledge_with_timeout(
     std::thread::Builder::new()
         .name("knowledge-inject".into())
         .spawn(move || {
-            let result = match conn.lock() {
+            let result = match conn.get() {
                 Ok(conn) => crate::knowledge::injector::inject_for_agent(&conn, &at, &pp, &p),
                 Err(_) => p,
             };
@@ -1209,7 +1253,7 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
 /// Run knowledge collection and quality gate in a background thread.
 /// Extracted to avoid code duplication between PTY and Pipe wait threads.
 fn run_post_session_hooks(
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: crate::db::DbState,
     project_path: String,
     session_id: String,
     agent_type: AgentType,
@@ -1221,7 +1265,7 @@ fn run_post_session_hooks(
         .spawn(move || {
             // 1. Knowledge collection (only on success)
             if session_status == SessionStatus::Completed {
-                if let Ok(conn) = db.lock() {
+                if let Ok(conn) = db.get() {
                     let _ = crate::knowledge::collector::collect_from_session(
                         &conn, &project_path, &session_id, &agent_type,
                     );
@@ -1231,7 +1275,7 @@ fn run_post_session_hooks(
             let forge_result = crate::quality::forge::run_forge_gate(std::path::Path::new(&project_path));
             match forge_result {
                 Ok(report) => {
-                    if let Ok(conn) = db.lock() {
+                    if let Ok(conn) = db.get() {
                         let _ = crate::quality::report::save_report(&conn, &report);
                         let _ = crate::quality::feedback::create_feedback(
                             &conn, &report, &project_path, &agent_type,
