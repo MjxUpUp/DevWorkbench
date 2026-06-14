@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Project } from '../types';
-import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings } from './Icons';
+import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate } from './Icons';
 import type { IconProps } from './Icons';
 import type { ViewId } from '../stores/navigationStore';
 import { useNavigationStore } from '../stores/navigationStore';
@@ -19,6 +19,7 @@ const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
   { id: 'task', label: '创建任务', Icon: IconPlus },
   { id: 'search', label: '搜索', Icon: IconSearch },
   { id: 'skills', label: '技能', Icon: IconSparkles },
+  { id: 'orchestrate', label: '编排', Icon: IconOrchestrate },
 ];
 
 export function Sidebar() {

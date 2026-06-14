@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
 
-export type ViewId = 'task' | 'search' | 'skills' | 'settings';
+export type ViewId = 'task' | 'search' | 'skills' | 'orchestrate' | 'settings';
 
 interface NavigationState {
   /** Currently active view in the main stage */
