@@ -102,6 +102,15 @@ pub struct AgentOutcome {
     pub exit_code: Option<i32>,
     /// Truncated textual summary (tail of output).
     pub output_summary: Option<String>,
+    /// Post-hoc honesty audit result (JSON from HonestyVerifier).
+    ///
+    /// Opaque agents (black-box CLI) fill this: call-level hooks are physically
+    /// impossible inside the subprocess, so honesty is enforced *after* the CLI
+    /// exits by scanning the uncommitted diff for assertion weakening + sanity-
+    /// checking the compile env. Transparent agents (ReactAgent) leave this
+    /// `None` — their honesty is enforced at the call level via HookManager,
+    /// where each tool invocation can be inspected before it commits.
+    pub honesty: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

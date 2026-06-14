@@ -506,6 +506,10 @@ impl kernel_core::Agent for ReactAgent {
                 files_changed: Vec::new(),
                 exit_code: Some(0),
                 output_summary: Some(final_output),
+                // Transparent agent: honesty is enforced at the call level via
+                // HookManager (each tool invocation inspectable before commit),
+                // not via post-hoc diff audit. OpaqueAgent fills this instead.
+                honesty: None,
             });
         };
         Ok(Box::pin(s))

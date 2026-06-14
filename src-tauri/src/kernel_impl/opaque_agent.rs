@@ -27,6 +27,21 @@ use crate::agents::pty::{self, AgentProcesses};
 use crate::db::DbState;
 use crate::models::AgentType;
 
+/// Internal message from the Tauri event listeners to the agent stream's
+/// main loop. Listeners are synchronous Tauri callbacks and cannot `await`
+/// (so they cannot run the blocking honesty audit); they send a lightweight
+/// signal and the async main loop does the heavy work (audit + Done).
+enum AgentMsg {
+    /// A chunk of CLI stdout (pty:output).
+    Token(String),
+    /// The CLI process exited (agent:completed). Carries just the parsed
+    /// status/exit-code; the main loop attaches files_changed + honesty audit.
+    Completed {
+        status: AgentRunStatus,
+        exit_code: Option<i32>,
+    },
+}
+
 /// An external CLI agent, wrapped to satisfy the kernel's `Agent` trait.
 pub struct OpaqueAgent {
     app: tauri::AppHandle,
@@ -132,12 +147,14 @@ impl Agent for OpaqueAgent {
             let session_id = session.id.clone();
 
             // 2. Wire up Tauri event listeners that feed an mpsc channel. We
-            //    listen for pty:output (Token) and agent:completed (Done),
-            //    filtering by this session's id.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, kernel_core::Error>>(64);
+            //    listen for pty:output (Token chunks) and agent:completed (the
+            //    CLI exited). Listeners are sync Tauri callbacks, so they only
+            //    send a lightweight AgentMsg signal; the async main loop below
+            //    does the heavy work (honesty audit + building the outcome).
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentMsg>(64);
 
-            // pty:output -> AgentEvent::Token (decode bytes lossily as UTF-8;
-            // ANSI escapes are preserved 鈥?the frontend renders them).
+            // pty:output -> AgentMsg::Token (decode bytes lossily as UTF-8;
+            // ANSI escapes are preserved — the frontend renders them).
             let tx_out = tx.clone();
             let sid_for_output = session_id.clone();
             let output_id = app.listen("pty:output", move |event| {
@@ -149,17 +166,18 @@ impl Agent for OpaqueAgent {
                                 .filter_map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
                                 .collect();
                             let text = String::from_utf8_lossy(&bytes).into_owned();
-                            let _ = tx_out.try_send(Ok(AgentEvent::Token(text)));
+                            let _ = tx_out.try_send(AgentMsg::Token(text));
                         }
                     }
                 }
             });
 
-            // agent:completed -> AgentEvent::Done. We also fetch files_changed
-            // from the DB session row (the wait thread populates it).
+            // agent:completed -> AgentMsg::Completed. The listener only parses
+            // status/exit-code; the main loop attaches files_changed + runs the
+            // post-hoc honesty audit (it can't run here — listeners can't await
+            // the blocking git-diff/cargo-check work).
             let tx_done = tx.clone();
             let sid_for_done = session_id.clone();
-            let app_for_done = app.clone();
             let done_id = app.listen("agent:completed", move |event| {
                 let payload = event.payload();
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
@@ -171,32 +189,48 @@ impl Agent for OpaqueAgent {
                         } else {
                             AgentRunStatus::Failed
                         };
-
-                        // Best-effort: read files_changed from the session row.
-                        let files_changed = read_session_files(&app_for_done, &sid_for_done);
-
-                        let _ = tx_done.try_send(Ok(AgentEvent::Done(AgentOutcome {
+                        let _ = tx_done.try_send(AgentMsg::Completed {
                             status: run_status,
-                            files_changed,
                             exit_code,
-                            output_summary: None,
-                        })));
-                        // Signal stream end.
-                        let _ = tx_done.try_send(Ok(AgentEvent::TurnBoundary));
+                        });
                     }
                 }
             });
 
-            // 3. Drain the channel into the stream. When we see a Done event,
-            //    stop and unregister listeners (avoid leaking registrations
-            //    across runs 鈥?Tauri listeners live until unlisten/app exit).
-            // C6: guard ensures unlisten runs even if the stream is dropped early.
+            // 3. Drain the channel into the stream. On Completed, run the
+            //    post-hoc honesty audit (gap-③): the opaque CLI is a black box,
+            //    so call-level hooks are impossible — we scan its uncommitted
+            //    diff for assertion weakening + sanity-check the env *after* it
+            //    exits, then emit Done with the audit attached.
+            //    ListenerGuard ensures unlisten runs even on early stream drop.
             let _listener_guard = ListenerGuard::new(app.clone(), vec![output_id, done_id]);
-            while let Some(ev) = rx.recv().await {
-                let is_done = matches!(ev, Ok(AgentEvent::Done(_)));
-                yield ev?;
-                if is_done {
-                    break;
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    AgentMsg::Token(text) => {
+                        yield AgentEvent::Token(text);
+                    }
+                    AgentMsg::Completed { status, exit_code } => {
+                        let audit_dir = working_dir.clone();
+                        let honesty = tokio::task::spawn_blocking(move || {
+                            crate::kernel_impl::honesty::audit_project(
+                                std::path::Path::new(&audit_dir),
+                                "",
+                            )
+                        })
+                        .await
+                        .map_err(|e| Error::Agent(format!("honesty audit join: {e}")))?;
+
+                        let files_changed = read_session_files(&app, &session_id);
+
+                        yield AgentEvent::Done(AgentOutcome {
+                            status,
+                            files_changed,
+                            exit_code,
+                            output_summary: None,
+                            honesty: Some(honesty),
+                        });
+                        break;
+                    }
                 }
             }
             // _listener_guard drops here (or on early stream drop) -> unlisten both.
