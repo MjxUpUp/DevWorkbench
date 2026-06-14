@@ -43,6 +43,7 @@ pub struct FunctionCall {
 ///
 /// `tool_calls` is present only on assistant messages.
 /// `tool_call_id` is present only on tool messages (correlates back to a ToolCall.id).
+#[must_use = "Message construction has no side effect; use the returned value"]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,

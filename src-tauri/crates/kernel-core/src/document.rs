@@ -7,7 +7,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Well-known metadata keys. Constants (not magic strings) prevent
+/// producer/consumer drift on "score" vs "Score" etc.
+pub const META_SCORE: &str = "score";
+pub const META_SOURCE: &str = "source";
+
 /// A retrieved or to-be-indexed piece of text with provenance metadata.
+#[must_use = "Document construction has no side effect; use the returned value"]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub id: String,
@@ -25,19 +31,19 @@ impl Document {
         }
     }
 
-    /// Relevance score in [0.0, 1.0]. Populated by retrievers; absent ⇒ None.
+    /// Relevance score in [0.0, 1.0]. Populated by retrievers; absent => None.
     pub fn score(&self) -> Option<f64> {
-        self.metadata.get("score").and_then(|v| v.as_f64())
+        self.metadata.get(META_SCORE).and_then(|v| v.as_f64())
     }
 
     pub fn with_score(mut self, score: f64) -> Self {
-        self.metadata.insert("score".into(), score.into());
+        self.metadata.insert(META_SCORE.into(), score.into());
         self
     }
 
-    /// Human-readable source label (file path, URL, session id, …).
+    /// Human-readable source label (file path, URL, session id, ...).
     pub fn source(&self) -> Option<&str> {
-        self.metadata.get("source").and_then(|v| v.as_str())
+        self.metadata.get(META_SOURCE).and_then(|v| v.as_str())
     }
 }
 
