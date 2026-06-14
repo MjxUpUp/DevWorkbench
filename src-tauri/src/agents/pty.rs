@@ -218,30 +218,16 @@ pub fn spawn_pty_agent(
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model, parent_session_id)?;
 
-    // On Windows, portable_pty's read() blocks until the master is closed,
-    // making real-time streaming impossible. Use pipe mode as the primary path.
-    // On other platforms, try PTY first for full terminal emulation.
-    #[cfg(target_os = "windows")]
-    {
-        spawn_pipe_fallback(&app, &processes, &db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, prompt, model)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        match try_spawn_pty(&app, &processes, &db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, prompt, model) {
-            Ok(session) => Ok(session),
-            Err(pty_err) => {
-                log::warn!("PTY creation failed ({}), falling back to pipe mode", pty_err);
-                spawn_pipe_fallback(&app, &processes, &db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, prompt, model)
-            }
-        }
-    }
+    // Unified pipe mode for all platforms. PTY path removed from runtime:
+    // all target CLIs support non-interactive --print/exec pipe mode.
+    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, prompt, model)
 }
 
 // ---------------------------------------------------------------------------
 // PTY path
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[cfg(any())] // PTY path compiled out — pipe-only
 fn try_spawn_pty(
     app: &tauri::AppHandle,
     processes: &Arc<AgentProcesses>,
@@ -526,8 +512,8 @@ fn try_spawn_pty(
 
 fn spawn_pipe_fallback(
     app: &tauri::AppHandle,
-    processes: &Arc<AgentProcesses>,
-    db_conn: &crate::db::DbState,
+    processes: Arc<AgentProcesses>,
+    db_conn: crate::db::DbState,
     config: &SpawnConfig,
     agent_type: &AgentType,
     project_path: &str,
