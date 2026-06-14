@@ -64,8 +64,6 @@ export type AgentType =
 
 export type SessionStatus = 'running' | 'completed' | 'failed';
 
-export type RequirementStatus = 'todo' | 'in_progress' | 'done';
-
 export interface AgentInfo {
   agentType: AgentType;
   displayName: string;
@@ -96,19 +94,6 @@ export interface Session {
   parentSessionId: string | null;
   tokenUsage?: number;
   estimatedCost?: number;
-}
-
-export interface Requirement {
-  id: string;
-  projectPath: string;
-  title: string;
-  description: string | null;
-  status: RequirementStatus;
-  priority: string | null;
-  linkedSessionId: string | null;
-  artifacts: string[];
-  createdAt: string;
-  updatedAt: string;
 }
 
 // ---- Activity types ----

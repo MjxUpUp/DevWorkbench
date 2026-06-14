@@ -1,6 +1,6 @@
 use crate::db;
 use crate::error::AppError;
-use crate::models::{AppSettings, Project, Requirement, Session};
+use crate::models::{AppSettings, Project, Session};
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
@@ -33,33 +33,6 @@ pub fn migrate_v6_to_v7(conn: &Connection, data_dir: &Path) -> Result<(), AppErr
         }
     }
 
-    // 2. Migrate requirements
-    let reqs_file = agents_dir.join("requirements.json");
-    if reqs_file.exists() {
-        let content = fs::read_to_string(&reqs_file)?;
-        if !content.trim().is_empty() {
-            let reqs: Vec<Requirement> = serde_json::from_str(&content)?;
-            for r in &reqs {
-                insert_requirement(&tx, r)?;
-            }
-        }
-    }
-
-    // 3. Mark migration done
-    tx.execute(
-        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (7, ?1)",
-        [chrono::Utc::now().to_rfc3339()],
-    )?;
-
-    tx.commit()?;
-
-    // 4. Backup original files (post-commit, best-effort)
-    if sessions_file.exists() {
-        let _ = fs::rename(&sessions_file, agents_dir.join("sessions.json.v0.6.bak"));
-    }
-    if reqs_file.exists() {
-        let _ = fs::rename(&reqs_file, agents_dir.join("requirements.json.v0.6.bak"));
-    }
 
     Ok(())
 }
@@ -86,29 +59,6 @@ fn insert_session(conn: &Connection, s: &Session) -> Result<(), AppError> {
             snapshot_json,
             s.linked_requirement_id,
             s.parent_session_id,
-        ],
-    )?;
-    Ok(())
-}
-
-fn insert_requirement(conn: &Connection, r: &Requirement) -> Result<(), AppError> {
-    let artifacts_json = serde_json::to_string(&r.artifacts).unwrap_or_else(|_| "[]".to_string());
-    conn.execute(
-        "INSERT OR IGNORE INTO requirements
-            (id, project_path, title, description, status, priority,
-             linked_session_id, artifacts, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        rusqlite::params![
-            r.id,
-            r.project_path,
-            r.title,
-            r.description,
-            r.status.as_str(),
-            r.priority,
-            r.linked_session_id,
-            artifacts_json,
-            r.created_at,
-            r.updated_at,
         ],
     )?;
     Ok(())

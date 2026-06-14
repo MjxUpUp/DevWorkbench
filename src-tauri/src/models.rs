@@ -173,39 +173,6 @@ pub struct ContextSnapshot {
     pub key_output: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RequirementStatus {
-    Todo,
-    InProgress,
-    Done,
-}
-
-impl RequirementStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Todo => "todo",
-            Self::InProgress => "in_progress",
-            Self::Done => "done",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Requirement {
-    pub id: String,
-    pub project_path: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub status: RequirementStatus,
-    pub priority: Option<String>,
-    pub linked_session_id: Option<String>,
-    pub artifacts: Vec<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 // ---- Activity types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

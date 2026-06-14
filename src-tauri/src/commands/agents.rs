@@ -2,7 +2,7 @@ use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
 use crate::agents::pty;
 use crate::db::DbState;
 use crate::error::AppError;
-use crate::models::{AgentType, Requirement, Session};
+use crate::models::{AgentType, Session};
 use std::sync::Arc;
 use tauri::{Emitter, State};
 
@@ -46,37 +46,6 @@ pub fn update_session(db: State<'_, DbState>, id: String, patch: serde_json::Val
 #[tauri::command]
 pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, AppError> {
     Ok(pty::read_full_session_output(&session_id))
-}
-
-// Requirement commands
-#[tauri::command]
-pub fn load_requirements(db: State<'_, DbState>) -> Result<Vec<Requirement>, AppError> {
-    let conn = db.get()?;
-    crate::agents::requirement::load_requirements_from_db(&conn).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn add_requirement(db: State<'_, DbState>, req: Requirement) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::agents::requirement::add_requirement_db(&conn, req).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn update_requirement(db: State<'_, DbState>, id: String, patch: serde_json::Value) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::agents::requirement::update_requirement_db(&conn, &id, patch).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn remove_requirement(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::agents::requirement::remove_requirement_db(&conn, &id).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn get_requirements_for_project(db: State<'_, DbState>, project_path: String) -> Result<Vec<Requirement>, AppError> {
-    let conn = db.get()?;
-    crate::agents::requirement::get_requirements_for_project_db(&conn, &project_path).map_err(AppError::from)
 }
 
 // Agent process lifecycle commands (PTY-based)

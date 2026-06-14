@@ -3,19 +3,17 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, Requirement, AgentType, QualityReport } from '../types';
+import type { AgentInfo, Session, AgentType, QualityReport } from '../types';
 
 interface AgentState {
   agents: AgentInfo[];
   sessions: Session[];
-  requirements: Requirement[];
   loading: boolean;
   ptyOutput: Map<string, Uint8Array[]>;
   qualityReports: Map<string, QualityReport>;
 
   refreshAgents: () => Promise<void>;
   refreshSessions: () => Promise<void>;
-  refreshRequirements: () => Promise<void>;
   spawnAgent: (
     projectPath: string,
     agentType: AgentType,
@@ -25,16 +23,11 @@ interface AgentState {
     parentSessionId?: string,
   ) => Promise<Session>;
   stopAgent: (sessionId: string) => Promise<void>;
-  addRequirement: (req: Requirement) => Promise<Requirement[]>;
-  updateRequirement: (id: string, patch: Record<string, unknown>) => Promise<Requirement[]>;
-  removeRequirement: (id: string) => Promise<Requirement[]>;
   getSessionsForProject: (projectPath: string) => Session[];
-  getRequirementsForProject: (projectPath: string) => Requirement[];
   recommendAgent: (tags: string[]) => Promise<AgentType | null>;
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
   newConversation: (projectPath: string, title: string, agentType: AgentType) => Promise<Session>;
-  launchForRequirement: (projectPath: string, requirementId: string, agentType: string) => Promise<Session | null>;
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
   clearPtyOutput: (sessionId: string) => void;
@@ -44,7 +37,6 @@ interface AgentState {
 export const useAgentStore = create<AgentState>((set, get) => ({
   agents: [],
   sessions: [],
-  requirements: [],
   loading: true,
   ptyOutput: new Map(),
   qualityReports: new Map(),
@@ -96,19 +88,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   addRequirement: async (req) => {
     await invoke('add_requirement', { req });
-    await get().refreshRequirements();
+    await
     return get().requirements;
   },
 
   updateRequirement: async (id, patch) => {
     await invoke('update_requirement', { id, patch });
-    await get().refreshRequirements();
+    await
     return get().requirements;
   },
 
   removeRequirement: async (id) => {
     await invoke('remove_requirement', { id });
-    await get().refreshRequirements();
+    await
     return get().requirements;
   },
 
@@ -116,9 +108,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().sessions.filter((s) => s.projectPath === projectPath);
   },
 
-  getRequirementsForProject: (projectPath) => {
-    return get().requirements.filter((r) => r.projectPath === projectPath);
-  },
 
   recommendAgent: async (tags) => {
     return invoke<AgentType | null>('recommend_agent_for_project', { tags });
@@ -146,61 +135,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   newConversation: async (projectPath, title, agentType) => {
-    // 插入 requirement 前先校验：必须有可用的 agent，否则 spawn 必失败、
-    // requirement 会变成 in_progress 的孤儿（spawn 卡死时 catch 不触发）。
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
-    const reqId = crypto.randomUUID();
-    const newReq: Requirement = {
-      id: reqId,
-      projectPath,
-      title,
-      description: null,
-      status: 'in_progress',
-      priority: null,
-      linkedSessionId: null,
-      artifacts: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await get().addRequirement(newReq);
-    try {
-      const session = await get().spawnAgent(projectPath, agentType, title, undefined, reqId, undefined);
-      await get().updateRequirement(reqId, {
-        linkedSessionId: session.id,
-        updatedAt: new Date().toISOString(),
-      });
-      return session;
-    } catch (e) {
-      console.error('Failed to spawn agent:', e);
-      // spawn 失败/卡死 → 回滚 requirement，避免留下 in_progress 孤儿
-      await get().updateRequirement(reqId, {
-        status: 'todo',
-        linkedSessionId: null,
-        updatedAt: new Date().toISOString(),
-      });
-      throw e;
-    }
+    // Dialogue IS the task — spawn a session directly, no separate requirement.
+    return await get().spawnAgent(projectPath, agentType, title, undefined, undefined, undefined);
   },
 
-  launchForRequirement: async (projectPath, requirementId, agentType) => {
-    const reqs = get().getRequirementsForProject(projectPath);
-    const req = reqs.find(r => r.id === requirementId);
-    if (!req) return null;
-    try {
-      const session = await get().spawnAgent(projectPath, agentType as AgentType, req.title, undefined, requirementId, undefined);
-      await get().updateRequirement(requirementId, {
-        status: 'in_progress',
-        linkedSessionId: session.id,
-        updatedAt: new Date().toISOString(),
-      });
-      return session;
-    } catch (e) {
-      console.error('Failed to spawn agent for requirement:', e);
-      return null;
-    }
-  },
 
   getDefaultAgent: () => {
     const installed = get().agents.filter(a => a.installed);
@@ -225,7 +166,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   initEventListeners: () => {
-    const { refreshSessions, refreshRequirements } = get();
+    const { refreshSessions } = get();
 
     // Store all unlisten functions — wait for promises to resolve
     const unlisteners: Array<() => void> = [];
@@ -255,7 +196,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
       // Full sync from DB in background (picks up outputSummary, contextSnapshot, etc.)
       get().refreshSessions();
-      get().refreshRequirements();
 
       // Refresh activity timeline so new events show up immediately
       const { loadForProject, loadRecent } = useActivityStore.getState();
@@ -285,7 +225,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Initial load
-    Promise.all([get().refreshAgents(), refreshSessions(), refreshRequirements()])
+    Promise.all([get().refreshAgents(), refreshSessions())])
       .finally(() => set({ loading: false }));
 
     return () => {
