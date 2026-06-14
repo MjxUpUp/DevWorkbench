@@ -71,3 +71,109 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
+
+/* ---- Providers section (模型供应商) ---- */
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.provider-card {
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-3);
+}
+
+.provider-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.provider-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.provider-enabled-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.provider-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.provider-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-field-label {
+  flex: 0 0 72px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.provider-field-input {
+  flex: 1;
+  padding: 6px 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.provider-field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.provider-models {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.provider-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.provider-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+}
+
+.provider-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.provider-btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.provider-btn.secondary {
+  background: var(--surface-0);
+  color: var(--text-primary);
+}

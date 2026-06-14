@@ -128,15 +128,33 @@ impl Executor for KernelExecutor {
 // Dual-mode dispatch helpers
 // ---------------------------------------------------------------------------
 
-/// Build a transparent ReactAgent. Task 3 (`fix/providers-glm46`) wires the real
-/// providers.toml api_key plumbing; for now the key is empty (GLM calls fail at
-/// request time until the config is filled). The default model is `glm-4.6` —
-/// the strongest tool-calling GLM on the Anthropic-compatible endpoint —
-/// overridable via `spec.model`. Flagship models stay on the opaque path
-/// (claude/codex/gemini) where the user selects them.
+/// Build a transparent ReactAgent, resolving credentials from the user's
+/// `providers.toml` (gap-②). The default model is `glm-4.6` — the strongest
+/// tool-calling GLM on the Anthropic-compatible endpoint — overridable via
+/// `spec.model`. Flagship models stay on the opaque path (claude/codex/gemini)
+/// where the user selects them.
+///
+/// If no enabled+keyed provider serves the requested model (e.g. the user
+/// hasn't filled an API key yet), we fall back to an empty-key default Z.AI
+/// model: the agent still CONSTRUCTS (so the graph run doesn't crash), but GLM
+/// calls fail at request time with 401 — the honest signal that Settings →
+/// Providers needs a key.
 fn build_react_agent(model: Option<&str>) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
-    let chat = GlmChatModel::bigmodel(String::new(), model_id);
+    let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
+    let (endpoint, api_key, resolved_model) =
+        match crate::config::providers::load_providers_config(&data_dir)
+            .ok()
+            .and_then(|c| crate::config::providers::resolve_provider(&c, &model_id))
+        {
+            Some(r) => (r.endpoint, r.api_key, r.model),
+            None => (
+                "https://open.bigmodel.cn/api/anthropic".to_string(),
+                String::new(),
+                model_id,
+            ),
+        };
+    let chat = GlmChatModel::new(endpoint, api_key, resolved_model);
     Ok(ReactAgent::new(
         chat,
         ToolRegistry::new(),
