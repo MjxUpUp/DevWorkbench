@@ -151,7 +151,7 @@ pub fn parse_devworkbench_log(
     let project_hash = hash_project_path(project_path);
     let bytes = std::fs::read(log_path)?;
     let text = String::from_utf8_lossy(&bytes);
-    let text = strip_ansi_escapes(&text);
+    let text = crate::utils::strip_ansi(&text);
 
     if text.trim().is_empty() || text.len() < 20 {
         return Ok(vec![]);
@@ -547,41 +547,6 @@ fn split_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-fn strip_ansi_escapes(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    while let Some(&ch) = chars.peek() {
-                        chars.next();
-                        if ('\x40'..='\x7e').contains(&ch) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    while let Some(&ch) = chars.peek() {
-                        chars.next();
-                        if ch == '\x07' || ch == '\\' {
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
 
 #[cfg(test)]
 mod tests {

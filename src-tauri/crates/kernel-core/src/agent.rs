@@ -112,10 +112,6 @@ pub enum AgentRunStatus {
     Cancelled,
 }
 
-/// Agent-layer error alias (kept distinct from the broader crate Error so
-/// callers can match on agent-specific failures if needed).
-pub type AgentError = Error;
-
 /// The unified agent trait.
 #[async_trait]
 pub trait Agent: Send + Sync {
@@ -128,7 +124,7 @@ pub trait Agent: Send + Sync {
     fn run(
         &self,
         input: AgentInput,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, AgentError>>, AgentError>;
+    ) -> Result<BoxStream<'static, Result<AgentEvent, Error>>, Error>;
 }
 
 #[cfg(test)]

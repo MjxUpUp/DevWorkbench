@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod skills;
 pub mod cost;
 pub mod kernel_impl;
+pub mod utils;
 
 use tauri::Manager;
 

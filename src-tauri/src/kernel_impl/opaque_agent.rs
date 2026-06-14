@@ -1,24 +1,25 @@
-//! OpaqueAgent — wraps an external CLI process (claude/codex/gemini/…) as a
+//! OpaqueAgent 鈥?wraps an external CLI process (claude/codex/gemini/鈥? as a
 //! `kernel_core::Agent`.
 //!
 //! This is the "opaque" half of the dual-mode kernel: the agent's internal
-//! reason→tool loop runs inside a subprocess we cannot inspect; we only observe
+//! reason鈫抰ool loop runs inside a subprocess we cannot inspect; we only observe
 //! its stdout stream and exit. OpaqueAgent bridges those observations into the
 //! unified `AgentEvent` stream so the graph engine and frontend treat opaque
 //! and transparent (ReactAgent) uniformly.
 //!
 //! Pipeline:
-//!   spawn_pty_agent (sync) → session id
-//!   listen("pty:output", filter by sid)  → AgentEvent::Token
-//!   listen("agent:completed", filter sid) → AgentEvent::Done(AgentOutcome)
-//!   stream dropped / cancelled           → stop_agent (Ctrl-C semantics)
+//!   spawn_pty_agent (sync) 鈫?session id
+//!   listen("pty:output", filter by sid)  鈫?AgentEvent::Token
+//!   listen("agent:completed", filter sid) 鈫?AgentEvent::Done(AgentOutcome)
+//!   stream dropped / cancelled           鈫?stop_agent (Ctrl-C semantics)
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
-    Agent, AgentCaps, AgentError, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+    Error,
+    Agent, AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
 };
 use tauri::Listener;
 
@@ -70,7 +71,7 @@ impl Agent for OpaqueAgent {
     fn run(
         &self,
         input: AgentInput,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, AgentError>>, AgentError> {
+    ) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
         let app = self.app.clone();
         let processes = self.processes.clone();
         let db = self.db.clone();
@@ -102,18 +103,18 @@ impl Agent for OpaqueAgent {
                     )
                 })
                 .await
-                .map_err(|e| AgentError::Agent(format!("spawn join: {e}")))?
-                .map_err(AgentError::Agent)?
+                .map_err(|e| Error::Agent(format!("spawn join: {e}")))?
+                .map_err(Error::Agent)?
             };
             let session_id = session.id.clone();
 
             // 2. Wire up Tauri event listeners that feed an mpsc channel. We
             //    listen for pty:output (Token) and agent:completed (Done),
             //    filtering by this session's id.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, AgentError>>(64);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, kernel_core::Error>>(64);
 
             // pty:output -> AgentEvent::Token (decode bytes lossily as UTF-8;
-            // ANSI escapes are preserved — the frontend renders them).
+            // ANSI escapes are preserved 鈥?the frontend renders them).
             let tx_out = tx.clone();
             let sid_for_output = session_id.clone();
             let output_id = app.listen("pty:output", move |event| {
@@ -165,7 +166,7 @@ impl Agent for OpaqueAgent {
 
             // 3. Drain the channel into the stream. When we see a Done event,
             //    stop and unregister listeners (avoid leaking registrations
-            //    across runs — Tauri listeners live until unlisten/app exit).
+            //    across runs 鈥?Tauri listeners live until unlisten/app exit).
             let output_id = output_id;
             let done_id = done_id;
             while let Some(ev) = rx.recv().await {
@@ -213,7 +214,7 @@ mod tests {
     use super::*;
     use crate::models::AgentType;
 
-    /// Every opaque CLI spec string must resolve to an AgentType — this is the
+    /// Every opaque CLI spec string must resolve to an AgentType 鈥?this is the
     /// precondition for OpaqueAgent construction. Guards the from_spec table.
     #[test]
     fn all_cli_specs_resolve_to_agent_type() {

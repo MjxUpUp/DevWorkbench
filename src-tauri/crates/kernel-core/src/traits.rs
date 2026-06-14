@@ -4,12 +4,9 @@
 //! - [`ChatModel`]: call an LLM (blocking + streaming)
 //! - [`Tool`]: a callable tool the agent can invoke
 //! - [`Retriever`]: fetch relevant documents (RAG)
-//! - [`ChatTemplate`]: render variables into a message list
 //!
 //! All traits are `async` via `async_trait` and return `BoxStream` for streaming,
 //! mirroring eino's `StreamReader`-based design but in idiomatic Rust.
-
-use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -139,16 +136,6 @@ pub trait Retriever: Send + Sync {
     ) -> Result<Vec<Document>, Error>;
 }
 
-// ---------------------------------------------------------------------------
-// ChatTemplate
-// ---------------------------------------------------------------------------
-
-/// Renders a variables map into the message list a ChatModel consumes.
-/// Mirrors eino's `ChatTemplate.Format`. Missing required keys ⇒ Error.
-#[async_trait]
-pub trait ChatTemplate: Send + Sync {
-    async fn format(
-        &self,
-        vars: &HashMap<String, serde_json::Value>,
-    ) -> Result<Vec<Message>, Error>;
-}
+// Note: ChatTemplate trait removed — it had zero implementors and zero callers
+// (YAGNI). If prompt templating is needed, add it back when a real consumer
+// exists, carrying the concrete templating syntax required then.

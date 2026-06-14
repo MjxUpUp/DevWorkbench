@@ -211,28 +211,8 @@ CREATE TABLE IF NOT EXISTS workflows (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS workflow_runs (
-    id TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    started_at TEXT,
-    finished_at TEXT,
-    result TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id);
-
-CREATE TABLE IF NOT EXISTS workflow_steps (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    node_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    started_at TEXT,
-    finished_at TEXT,
-    output TEXT,
-    FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(run_id);
+-- Note: workflow_runs / workflow_steps tables removed — never written to.
+-- Execution state is stream-based (GraphEvent via kernel-compose).
 
 CREATE TABLE IF NOT EXISTS skills (
     id TEXT PRIMARY KEY,

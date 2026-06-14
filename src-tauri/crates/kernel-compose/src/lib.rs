@@ -28,4 +28,4 @@ pub use graph::{
     Node, NodeId, NodeType, ParallelNode, PromptNode, TransformNode,
 };
 pub use runner::{run_graph, run_graph_with_approvals, HumanApproval};
-pub use yaml::{WorkflowDef, WorkflowNodeDef};
+pub use yaml::WorkflowDef;

@@ -7,7 +7,7 @@
 //! Three pieces:
 //! - [`GlmChatModel`]: `ChatModel` impl calling Zhipu GLM via Anthropic API.
 //! - [`ToolRegistry`]: a cloneable collection of `dyn Tool` (MCP + Skill + builtin).
-//! - [`ReactAgent`]: reason→act→observe loop, bounded by max_steps, implements
+//! - [`ReactAgent`]: reason鈫抋ct鈫抩bserve loop, bounded by max_steps, implements
 //!   `kernel_core::Agent`. Now executes tool calls for real.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
-    AgentCaps, AgentError, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
     ChatModel, Error, Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
 };
 use serde_json::{json, Value};
@@ -146,7 +146,7 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
 }
 
 // ---------------------------------------------------------------------------
-// ToolRegistry — cloneable collection of tools (MCP + Skill + builtin)
+// ToolRegistry 鈥?cloneable collection of tools (MCP + Skill + builtin)
 // ---------------------------------------------------------------------------
 
 /// A cloneable registry of tools. Wraps each tool in `Arc` so the registry
@@ -192,7 +192,7 @@ impl ToolRegistry {
     }
 }
 
-/// Convert a boxed tool into an Arc tool. (Box → Arc requires a thin owning
+/// Convert a boxed tool into an Arc tool. (Box 鈫?Arc requires a thin owning
 /// wrapper since `Box<dyn Trait>` can't be turned into `Arc<dyn Trait>` directly.)
 fn boxed_tool_to_arc(tool: Box<dyn Tool>) -> Arc<dyn Tool> {
     struct ToolBox(Box<dyn Tool>);
@@ -215,7 +215,7 @@ fn boxed_tool_to_arc(tool: Box<dyn Tool>) -> Arc<dyn Tool> {
 }
 
 // ---------------------------------------------------------------------------
-// ReactAgent — the transparent reason→act→observe loop
+// ReactAgent 鈥?the transparent reason鈫抋ct鈫抩bserve loop
 // ---------------------------------------------------------------------------
 
 /// A transparent agent: a ChatModel + a registry of tools, looped up to
@@ -229,7 +229,7 @@ pub struct ReactAgent {
 }
 
 impl ReactAgent {
-    /// Build from any ChatModel (GLM, a mock, a local model, …).
+    /// Build from any ChatModel (GLM, a mock, a local model, 鈥?.
     pub fn new(
         model: impl ChatModel + 'static,
         tools: ToolRegistry,
@@ -296,7 +296,7 @@ impl ReactAgent {
     }
 }
 
-/// Box<dyn ChatModel> → Arc<dyn ChatModel> (same owning-wrapper trick as tools).
+/// Box<dyn ChatModel> 鈫?Arc<dyn ChatModel> (same owning-wrapper trick as tools).
 fn boxed_chatmodel_to_arc(model: Box<dyn ChatModel>) -> Arc<dyn ChatModel> {
     struct ModelBox(Box<dyn ChatModel>);
     #[async_trait]
@@ -328,7 +328,7 @@ impl kernel_core::Agent for ReactAgent {
         }
     }
 
-    fn run(&self, input: AgentInput) -> Result<BoxStream<'static, Result<AgentEvent, AgentError>>, AgentError> {
+    fn run(&self, input: AgentInput) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let system_prompt = self.system_prompt.clone();
@@ -342,7 +342,7 @@ impl kernel_core::Agent for ReactAgent {
             let mut final_output = String::new();
 
             for step in 0..max_steps {
-                let resp = model.generate(&history, &opts).await.map_err(AgentError::from)?;
+                let resp = model.generate(&history, &opts).await.map_err(Error::from)?;
                 history.push(resp.clone());
                 if !resp.content.is_empty() {
                     yield AgentEvent::Token(resp.content.clone());
@@ -352,7 +352,7 @@ impl kernel_core::Agent for ReactAgent {
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
-                // Execute tool calls (the reason→act→observe loop).
+                // Execute tool calls (the reason鈫抋ct鈫抩bserve loop).
                 for call in &resp.tool_calls {
                     yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                         tool: call.function.name.clone(),

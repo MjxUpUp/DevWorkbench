@@ -933,40 +933,7 @@ fn truncate_tail(text: &str, max: usize) -> String {
 
 /// Strip ANSI escape sequences from raw bytes, return clean UTF-8 string.
 fn strip_ansi(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    while let Some(&ch) = chars.peek() {
-                        chars.next();
-                        if ('\x40'..='\x7e').contains(&ch) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    while let Some(&ch) = chars.peek() {
-                        chars.next();
-                        if ch == '\x07' || ch == '\\' {
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
+    crate::utils::strip_ansi(&String::from_utf8_lossy(bytes))
 }
 
 /// Build a context snapshot: files changed (git diff) + key output (the most
@@ -1006,26 +973,10 @@ fn extract_context_snapshot(
 
 /// Minimal ANSI escape stripper: removes common CSI sequences for clean key_output.
 fn strip_ansi_basic(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            while let Some(nc) = chars.next() {
-                if nc.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    crate::utils::strip_ansi(s)
 }
 
-/// Maximum time to wait for `git diff --name-only` before giving up on the
-/// context snapshot. Large/dirty repos can block here and stall the completion
-/// event (which fires only after this returns). Timed-out diffs return empty.
+/// Max time to wait for git diff --name-only before giving up.
 const GIT_DIFF_TIMEOUT_SECS: u64 = 15;
 
 fn capture_git_diff_names(project_path: &str) -> Vec<String> {

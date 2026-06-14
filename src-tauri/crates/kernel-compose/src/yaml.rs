@@ -49,10 +49,6 @@ pub struct WorkflowEdge {
     pub when: Option<String>,
 }
 
-/// Alias kept for API symmetry with the product spec (which speaks of
-/// "workflow nodes"). Identical to [`Node`].
-pub type WorkflowNodeDef = Node;
-
 impl WorkflowDef {
     /// Parse YAML text into a workflow definition.
     pub fn from_yaml(yaml: &str) -> Result<Self, String> {
