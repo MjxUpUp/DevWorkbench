@@ -47,10 +47,14 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
     return steps;
   }, [session, running, statusLabel]);
 
-  // File changes from context snapshot
+  // File changes from context snapshot. Prefer fileDiffs (real +/- from git
+  // numstat) when the backend attached them; fall back to the filesChanged
+  // path list without per-file stats for older sessions.
   const fileChanges = useMemo(() => {
-    if (!session.contextSnapshot?.filesChanged?.length) return [];
-    return session.contextSnapshot.filesChanged.map((path) => ({ path, added: 0, removed: 0 }));
+    const snap = session.contextSnapshot;
+    if (!snap) return [];
+    if (snap.fileDiffs && snap.fileDiffs.length > 0) return snap.fileDiffs;
+    return (snap.filesChanged ?? []).map((path) => ({ path, added: 0, removed: 0 }));
   }, [session.contextSnapshot]);
 
   return (

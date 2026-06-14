@@ -1,4 +1,4 @@
-use crate::models::{AgentType, ContextSnapshot, Session, SessionStatus};
+use crate::models::{AgentType, ContextSnapshot, FileDiff, Session, SessionStatus};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
@@ -897,12 +897,14 @@ fn extract_context_snapshot(
     session_id: &str,
     output_summary: Option<&str>,
 ) -> Option<ContextSnapshot> {
-    let post_diff = capture_git_diff_names(project_path);
+    let post_diff = capture_git_diff_numstat(project_path);
     let pre_diff = read_pre_diff(session_id).unwrap_or_default();
-    let agent_files: Vec<String> = post_diff
+    // Keep only files this session touched (not already-dirty before it ran).
+    let file_diffs: Vec<FileDiff> = post_diff
         .into_iter()
-        .filter(|f| !pre_diff.contains(f))
+        .filter(|d| !pre_diff.contains(&d.path))
         .collect();
+    let files_changed: Vec<String> = file_diffs.iter().map(|d| d.path.clone()).collect();
 
     let key_output = output_summary
         .map(|s| {
@@ -918,8 +920,9 @@ fn extract_context_snapshot(
         .unwrap_or_default();
 
     Some(ContextSnapshot {
-        files_changed: agent_files,
+        files_changed,
         key_output,
+        file_diffs,
     })
 }
 
@@ -931,14 +934,25 @@ fn strip_ansi_basic(s: &str) -> String {
 /// Max time to wait for git diff --name-only before giving up.
 const GIT_DIFF_TIMEOUT_SECS: u64 = 15;
 
+/// Path-only projection of the working-tree diff — used to capture the
+/// pre-session "already dirty" baseline (`.pre-diff`) so extract_context_snapshot
+/// can attribute only the files this session actually touched. Thin wrapper
+/// over capture_git_diff_numstat; kept because pre-diff capture only needs paths.
 fn capture_git_diff_names(project_path: &str) -> Vec<String> {
+    capture_git_diff_numstat(project_path)
+        .into_iter()
+        .map(|d| d.path)
+        .collect()
+}
+
+fn capture_git_diff_numstat(project_path: &str) -> Vec<FileDiff> {
     let pp = project_path.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
-        .name("git-diff".into())
+        .name("git-diff-numstat".into())
         .spawn(move || {
             let mut cmd = std::process::Command::new("git");
-            cmd.args(["diff", "--name-only"]).current_dir(&pp);
+            cmd.args(["diff", "--numstat"]).current_dir(&pp);
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -950,9 +964,8 @@ fn capture_git_diff_names(project_path: &str) -> Vec<String> {
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(|l| l.to_string())
-                        .collect::<Vec<String>>()
+                        .filter_map(parse_numstat_line)
+                        .collect::<Vec<FileDiff>>()
                 })
                 .unwrap_or_default();
             let _ = tx.send(result);
@@ -963,13 +976,33 @@ fn capture_git_diff_names(project_path: &str) -> Vec<String> {
         Ok(v) => v,
         Err(_) => {
             log::warn!(
-                "[git diff] timed out after {}s for {} — skipping context snapshot",
+                "[git diff numstat] timed out after {}s for {} — skipping context snapshot",
                 GIT_DIFF_TIMEOUT_SECS,
                 project_path
             );
             Vec::new()
         }
     }
+}
+
+/// Parse one `git diff --numstat` line: `<added>\t<removed>\t<path>`.
+/// added/removed are `-` for binary files — coerce parse failures to 0.
+/// The path itself may contain tabs (renames with spaces), so rejoin the tail.
+fn parse_numstat_line(line: &str) -> Option<FileDiff> {
+    let mut parts = line.splitn(3, '\t');
+    let added_raw = parts.next()?;
+    let removed_raw = parts.next()?;
+    let path = parts.next()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let added = added_raw.trim().parse::<i64>().unwrap_or(0);
+    let removed = removed_raw.trim().parse::<i64>().unwrap_or(0);
+    Some(FileDiff {
+        path: path.to_string(),
+        added,
+        removed,
+    })
 }
 
 fn read_pre_diff(session_id: &str) -> Option<Vec<String>> {
@@ -1252,6 +1285,30 @@ mod tests {
             "expected base.txt in diff, got {:?}",
             changed
         );
+    }
+
+    #[test]
+    fn parse_numstat_line_parses_added_removed_path() {
+        let d = parse_numstat_line("12\t3\tsrc/main.rs").unwrap();
+        assert_eq!(d.path, "src/main.rs");
+        assert_eq!(d.added, 12);
+        assert_eq!(d.removed, 3);
+    }
+
+    #[test]
+    fn parse_numstat_line_coerces_binary_dash_to_zero() {
+        // Binary files report `-` for both counts — must not panic, must be 0.
+        let d = parse_numstat_line("-\t-\timage.png").unwrap();
+        assert_eq!(d.path, "image.png");
+        assert_eq!(d.added, 0);
+        assert_eq!(d.removed, 0);
+    }
+
+    #[test]
+    fn parse_numstat_line_rejects_malformed() {
+        assert!(parse_numstat_line("").is_none());
+        assert!(parse_numstat_line("only-one-field").is_none());
+        assert!(parse_numstat_line("1\t2\t").is_none(), "empty path rejected");
     }
 
     #[test]

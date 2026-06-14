@@ -11,9 +11,16 @@ export function StatusBar() {
   const [appVersion, setAppVersion] = useState('');
   const [gitBranch, setGitBranch] = useState<string>('');
 
-  const runningSession = sessions.find(s => s.status === 'running');
+  // Scope running state to the active project. Without this filter, a session
+  // still running in project A keeps the status bar showing "X running" after
+  // the user switches to project B — the cross-project leak caught in the
+  // acceptance round.
+  const projectSessions = activeProject
+    ? sessions.filter(s => s.projectPath === activeProject.path)
+    : sessions;
+  const runningSession = projectSessions.find(s => s.status === 'running');
   const projectName = activeProject?.name ?? 'No project';
-  const runningCount = sessions.filter(s => s.status === 'running').length;
+  const runningCount = projectSessions.filter(s => s.status === 'running').length;
 
   useEffect(() => { getVersion().then(v => setAppVersion(v)).catch(() => setAppVersion('dev')); }, []);
 
@@ -26,7 +33,7 @@ export function StatusBar() {
   }, [activeProject?.path]);
 
   // Resolve display model name from running session or last session
-  const modelDisplay = runningSession?.model || sessions[sessions.length - 1]?.model || '';
+  const modelDisplay = runningSession?.model || projectSessions[projectSessions.length - 1]?.model || '';
 
   return (
     <footer className="status-bar">

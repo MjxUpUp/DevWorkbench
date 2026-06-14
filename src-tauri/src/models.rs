@@ -168,9 +168,23 @@ pub struct Session {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileDiff {
+    pub path: String,
+    pub added: i64,
+    pub removed: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextSnapshot {
     pub files_changed: Vec<String>,
     pub key_output: String,
+    /// Per-file line add/remove counts from `git diff --numstat`. Drives the
+    /// "+N / -M" badges in the agent message File Changes block. `#[serde(default)]`
+    /// so older context_snapshot JSON (persisted before this field) still
+    /// deserializes as an empty list.
+    #[serde(default)]
+    pub file_diffs: Vec<FileDiff>,
 }
 
 // ---- Activity types ----

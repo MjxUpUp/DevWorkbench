@@ -69,6 +69,13 @@ function App() {
     loadSettings();
   }, [loadSettings]);
 
+  // Load historical sessions from the DB on startup. Without this call,
+  // store.sessions only ever holds sessions spawned during the current app run,
+  // so opening a project that had prior conversations showed an empty history
+  // until the user sent a new message (acceptance round caught this).
+  const refreshSessions = useAgentStore((s) => s.refreshSessions);
+  useEffect(() => { refreshSessions(); }, [refreshSessions]);
+
   // Initialize agent store event listeners once (use getState to avoid re-render)
   useEffect(() => {
     return useAgentStore.getState().initEventListeners();

@@ -73,9 +73,18 @@ export interface AgentInfo {
   supportsResume: boolean;
 }
 
+export interface FileDiff {
+  path: string;
+  added: number;
+  removed: number;
+}
+
 export interface ContextSnapshot {
   filesChanged: string[];
   keyOutput: string;
+  /** Per-file line stats from `git diff --numstat`. Optional because older
+   *  sessions persisted before this field existed only have filesChanged. */
+  fileDiffs?: FileDiff[];
 }
 
 export interface Session {
