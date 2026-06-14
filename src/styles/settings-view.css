@@ -73,6 +73,60 @@
 }
 
 /* ---- Providers section (模型供应商) ---- */
+.providers-section {
+  position: relative;
+}
+
+/* Default model selector — drives modelMapping[DEFAULT_MODEL_ID] */
+.provider-default-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+  margin-bottom: var(--space-3);
+}
+
+.provider-default-select {
+  flex: 1;
+  max-width: 320px;
+  padding: 6px 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.provider-default-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+/* Section-level save bar — single source of truth for "save all" */
+.provider-save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-3);
+  position: sticky;
+  top: 0;
+  background: var(--bg-canvas);
+  z-index: 2;
+}
+
+.provider-dirty-badge {
+  font-size: var(--text-xs, 12px);
+  color: var(--accent);
+  background: var(--accent-soft, rgba(0, 122, 255, 0.1));
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
 .provider-list {
   display: flex;
   flex-direction: column;
@@ -84,29 +138,125 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
   padding: var(--space-3);
+  transition: border-color 0.15s;
+}
+
+.provider-card.dirty {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.provider-card.disabled {
+  opacity: 0.65;
 }
 
 .provider-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--space-2);
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
-.provider-name {
+.provider-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-name-input {
+  flex: 1;
+  min-width: 0;
   font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 6px;
 }
 
-.provider-enabled-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: var(--text-sm);
+.provider-name-input:hover {
+  border-color: var(--border-subtle);
+}
+
+.provider-name-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-canvas);
+}
+
+/* Switch-styled checkbox toggle (provider + model enabled) */
+.provider-toggle {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.provider-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.provider-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border-strong, #999);
+  border-radius: 18px;
+  transition: background 0.2s;
+}
+
+.provider-toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.provider-toggle input:checked + .provider-toggle-slider {
+  background: var(--accent);
+}
+
+.provider-toggle input:checked + .provider-toggle-slider::before {
+  transform: translateX(16px);
+}
+
+.provider-enabled-text {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-secondary);
+  min-width: 40px;
+}
+
+.provider-icon-btn {
+  padding: 4px 8px;
+  font-size: var(--text-xs, 12px);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
   color: var(--text-secondary);
   cursor: pointer;
-  user-select: none;
+}
+
+.provider-icon-btn:hover {
+  background: var(--bg-canvas);
+}
+
+.provider-delete-btn {
+  color: var(--danger, #d33);
+  border-color: var(--border-subtle);
+}
+
+.provider-delete-btn:hover {
+  background: var(--danger-soft, rgba(221, 51, 51, 0.08));
 }
 
 .provider-fields {
@@ -117,24 +267,33 @@
 
 .provider-field {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-2);
 }
 
 .provider-field-label {
   flex: 0 0 72px;
+  padding-top: 6px;
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
-.provider-field-input {
+.provider-field-control {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.provider-field-input {
+  width: 100%;
   padding: 6px 8px;
   background: var(--bg-canvas);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   font-size: var(--text-sm);
   color: var(--text-primary);
+  box-sizing: border-box;
 }
 
 .provider-field-input:focus {
@@ -142,18 +301,201 @@
   border-color: var(--accent);
 }
 
-.provider-models {
+.provider-field-input:disabled {
+  background: var(--surface-0);
+  cursor: not-allowed;
+}
+
+.provider-field-input.invalid {
+  border-color: var(--danger, #d33);
+}
+
+.provider-field-error {
+  font-size: var(--text-xs, 12px);
+  color: var(--danger, #d33);
+}
+
+/* API Key with reveal toggle + configured badge */
+.provider-key-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-key-wrap .provider-field-input {
   flex: 1;
-  font-size: var(--text-sm);
+}
+
+.provider-key-reveal {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: var(--text-xs, 12px);
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: pointer;
   color: var(--text-secondary);
 }
 
-.provider-actions {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
+.provider-key-reveal:hover {
+  background: var(--bg-canvas);
 }
 
+.provider-key-badge {
+  flex: 0 0 auto;
+  font-size: var(--text-xs, 12px);
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: var(--text-tertiary, var(--text-secondary));
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+}
+
+.provider-key-badge.configured {
+  color: var(--success, #2c8a2c);
+  border-color: var(--success-soft, rgba(44, 138, 44, 0.3));
+  background: var(--success-soft, rgba(44, 138, 44, 0.08));
+}
+
+/* Models editable list */
+.provider-models-field {
+  align-items: flex-start;
+}
+
+.provider-models-empty {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary, var(--text-secondary));
+  font-style: italic;
+}
+
+.provider-models-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 6px);
+}
+
+.provider-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-model-input {
+  padding: 4px 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.provider-model-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.provider-model-input.provider-model-id {
+  flex: 1;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 12px);
+}
+
+.provider-model-row .provider-model-input:not(.provider-model-id) {
+  width: 140px;
+  flex: 0 0 140px;
+}
+
+.provider-model-remove {
+  flex: 0 0 auto;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+}
+
+.provider-model-remove:hover {
+  color: var(--danger, #d33);
+}
+
+.provider-add-model-btn {
+  align-self: flex-start;
+  margin-top: var(--space-1, 6px);
+  padding: 4px 10px;
+  font-size: var(--text-xs, 12px);
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.provider-add-model-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Connectivity probe row — in-card result, not a transient toast */
+.provider-test-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.provider-test-select {
+  padding: 6px 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  min-width: 140px;
+}
+
+.provider-test-context {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-secondary);
+}
+
+.provider-test-result {
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.provider-test-result.ok {
+  color: var(--success, #2c8a2c);
+  background: var(--success-soft, rgba(44, 138, 44, 0.1));
+}
+
+.provider-test-result.fail {
+  color: var(--danger, #d33);
+  background: var(--danger-soft, rgba(221, 51, 51, 0.1));
+}
+
+.provider-add-btn {
+  margin-top: var(--space-3);
+  padding: 8px 16px;
+  font-size: var(--text-sm);
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  width: 100%;
+}
+
+.provider-add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Shared button styles */
 .provider-btn {
   padding: 6px 14px;
   border-radius: 6px;
@@ -171,6 +513,10 @@
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
+}
+
+.provider-btn.primary:not(:disabled) {
+  background: var(--accent-strong, var(--accent));
 }
 
 .provider-btn.secondary {

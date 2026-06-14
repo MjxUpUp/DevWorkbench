@@ -1,20 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProvidersSection } from '../ProvidersSection';
 import { useProvidersStore } from '../../../stores/providersStore';
 import type { ProvidersConfig } from '../../../types';
 
 /**
- * ProvidersSection drives the global providers.toml: it loads on mount, edits a
- * local draft, persists the whole file on save, and probes credentials on test.
- * These tests stub the Tauri invoke bridge (routed by command name) + Toast so
- * the component renders deterministically and its invoke calls are assertable.
+ * ProvidersSection drives the global providers.toml. These tests stub the Tauri
+ * invoke bridge (routed by command name) + Toast so renders are deterministic
+ * and invoke calls + toast feedback are assertable. They cover the UX redesign:
+ * section-level save (not per-card), dirty indicator, validation, key reveal,
+ * in-card test result, add/remove provider+model, and default-model mapping.
+ *
+ * Note: MOCK_CONFIG has 2 providers, so per-card controls (endpoint/key/test
+ * button) are scoped with `within(card)` to disambiguate.
  */
 const mockInvoke = vi.hoisted(() => vi.fn());
+const toastSpies = vi.hoisted(() => ({
+  info: vi.fn(),
+  error: vi.fn(),
+  success: vi.fn(),
+  toast: vi.fn(),
+}));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 vi.mock('../../Toast', () => ({
-  useToast: () => ({ info: vi.fn(), error: vi.fn(), success: vi.fn(), toast: vi.fn() }),
+  useToast: () => toastSpies,
 }));
 
 const MOCK_CONFIG: ProvidersConfig = {
@@ -27,7 +37,16 @@ const MOCK_CONFIG: ProvidersConfig = {
       enabled: true,
       models: [
         { id: 'glm-4.6', label: 'GLM-4.6', enabled: true },
+        { id: 'glm-4-plus', label: 'GLM-4-Plus', enabled: true },
       ],
+    },
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      endpoint: 'https://api.anthropic.com',
+      apiKey: '',
+      enabled: false,
+      models: [{ id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', enabled: true }],
     },
   ],
   modelMapping: {},
@@ -44,34 +63,46 @@ function setupInvoke(
       return (overrides.set_providers_config ?? (() => undefined))(args);
     }
     if (cmd === 'test_provider_connection') {
-      return (overrides.test_provider_connection ??
-        (() => ({ ok: true, status: 200, message: '连接成功' })))(args);
+      return (
+        overrides.test_provider_connection ??
+        (() => ({ ok: true, status: 200, message: '连接成功' }))
+      )(args);
     }
     return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
   });
 }
 
+/** Resolve the Z.AI card element after config has loaded. */
+async function zaiCard(): Promise<HTMLElement> {
+  const nameInput = await screen.findByDisplayValue('Z.AI (GLM)');
+  return nameInput.closest('.provider-card') as HTMLElement;
+}
+
 describe('ProvidersSection', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+    Object.values(toastSpies).forEach((s) => s.mockClear());
     // Zustand store is a module singleton — reset between tests so a prior
-    // test's loaded config doesn't leak into the next (e.g. the load-failure
-    // test must see config === null, not the previous MOCK_CONFIG).
+    // test's loaded config doesn't leak (e.g. load-failure must see null).
     useProvidersStore.setState({ config: null, loading: false });
   });
 
-  it('loads providers on mount and renders the provider card', async () => {
+  it('loads providers on mount and renders provider cards', async () => {
     setupInvoke();
     render(<ProvidersSection />);
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('get_providers_config');
-    });
-    expect(await screen.findByText('Z.AI (GLM)')).toBeInTheDocument();
-    // Models render as labels.
-    expect(screen.getByText(/GLM-4\.6/)).toBeInTheDocument();
+    const zai = await zaiCard();
+    expect(screen.getByDisplayValue('Anthropic')).toBeInTheDocument();
+    // Models render as editable rows (label inputs). (Can't use getByDisplayValue
+    // here: testing-library matches a <select> against its selected option's text,
+    // and the in-card test-model select also shows "GLM-4.6".)
+    const labels = within(zai).getAllByLabelText('模型显示名');
+    expect(labels.map((i) => (i as HTMLInputElement).value)).toEqual([
+      'GLM-4.6',
+      'GLM-4-Plus',
+    ]);
   });
 
-  it('edits the endpoint and persists the whole config on save', async () => {
+  it('persists the whole config via the section-level save (not per-card)', async () => {
     const user = userEvent.setup();
     let savedConfig: ProvidersConfig | null = null;
     setupInvoke({
@@ -81,48 +112,170 @@ describe('ProvidersSection', () => {
       },
     });
     render(<ProvidersSection />);
-    const endpointInput = await screen.findByPlaceholderText('https://...');
+    const zai = await zaiCard();
+
+    // No per-card save buttons — only one section-level save.
+    expect(screen.getAllByRole('button', { name: /保存全部更改|已保存/ })).toHaveLength(1);
+
+    const endpointInput = within(zai).getByLabelText('接口地址');
     await user.clear(endpointInput);
     await user.type(endpointInput, 'https://new.endpoint/v1');
 
-    await user.click(screen.getByRole('button', { name: '保存' }));
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
 
-    await waitFor(() => {
-      expect(savedConfig).not.toBeNull();
-    });
+    await waitFor(() => expect(savedConfig).not.toBeNull());
     expect(savedConfig!.providers[0].endpoint).toBe('https://new.endpoint/v1');
-    // The api_key + enabled flags survive the round-trip.
+    // Other provider + api_key survive the round-trip.
     expect(savedConfig!.providers[0].apiKey).toBe('sk-test-key');
-    expect(savedConfig!.providers[0].enabled).toBe(true);
+    expect(savedConfig!.providers[1].name).toBe('Anthropic');
   });
 
-  it('probes credentials with endpoint + key + first enabled model', async () => {
+  it('shows a dirty badge while editing and clears it after save', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    // Clean on load — no dirty badge.
+    expect(screen.queryByText('有未保存的更改')).not.toBeInTheDocument();
+
+    await user.type(within(zai).getByLabelText('接口地址'), '-edited');
+    expect(await screen.findByText('有未保存的更改')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+    await waitFor(() => {
+      expect(screen.queryByText('有未保存的更改')).not.toBeInTheDocument();
+    });
+  });
+
+  it('blocks save and flags the field when an enabled provider has an invalid endpoint', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    const endpointInput = within(zai).getByLabelText('接口地址');
+    await user.clear(endpointInput);
+    await user.type(endpointInput, 'not-a-url');
+
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+
+    // Validation error surfaces in-card and the persist call never fires.
+    expect(await within(zai).findByText('需为合法 http(s) 地址')).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith('set_providers_config', expect.anything());
+    expect(toastSpies.error).toHaveBeenCalledWith('请修正标红的字段后再保存');
+  });
+
+  it('toggles API Key visibility', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    const keyInput = within(zai).getByLabelText('API Key');
+    expect(keyInput).toHaveAttribute('type', 'password');
+
+    await user.click(within(zai).getByRole('button', { name: '显示密钥' }));
+    expect(keyInput).toHaveAttribute('type', 'text');
+
+    await user.click(within(zai).getByRole('button', { name: '隐藏密钥' }));
+    expect(keyInput).toHaveAttribute('type', 'password');
+  });
+
+  it('shows the in-card test result after probing (not just a toast)', async () => {
+    const user = userEvent.setup();
+    setupInvoke({
+      test_provider_connection: () => ({ ok: false, status: 401, message: 'invalid api key' }),
+    });
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    await user.click(within(zai).getByRole('button', { name: '测试连接' }));
+
+    // Failure result persists in-card with the message.
+    expect(await within(zai).findByText(/invalid api key/)).toBeInTheDocument();
+  });
+
+  it('probes credentials with endpoint + key + the selected model', async () => {
     const user = userEvent.setup();
     let probeArgs: Record<string, unknown> | null = null;
     setupInvoke({
       test_provider_connection: (args) => {
         probeArgs = args as Record<string, unknown>;
-        return { ok: true, status: 200, message: '连接成功' };
+        return { ok: true, status: 200, message: 'ok' };
       },
     });
     render(<ProvidersSection />);
-    await screen.findByText('Z.AI (GLM)');
-    await user.click(screen.getByRole('button', { name: '测试连接' }));
+    const zai = await zaiCard();
 
-    await waitFor(() => {
-      expect(probeArgs).not.toBeNull();
-    });
+    // Pick the second model, then probe.
+    await user.selectOptions(within(zai).getByLabelText('测试模型 - Z.AI (GLM)'), 'glm-4-plus');
+    await user.click(within(zai).getByRole('button', { name: '测试连接' }));
+
+    await waitFor(() => expect(probeArgs).not.toBeNull());
     expect(probeArgs).toEqual({
       endpoint: 'https://open.bigmodel.cn/api/anthropic',
       apiKey: 'sk-test-key',
-      model: 'glm-4.6',
+      model: 'glm-4-plus',
     });
   });
 
+  it('adds a new provider card on demand', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    await zaiCard();
+
+    expect(screen.getAllByLabelText('供应商名称')).toHaveLength(2);
+    await user.click(screen.getByRole('button', { name: '+ 添加供应商' }));
+    expect(screen.getAllByLabelText('供应商名称')).toHaveLength(3);
+    expect(screen.getByDisplayValue('新供应商')).toBeInTheDocument();
+  });
+
+  it('removes a provider card', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    await zaiCard();
+
+    expect(screen.getByDisplayValue('Anthropic')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '删除供应商 Anthropic' }));
+    expect(screen.queryByDisplayValue('Anthropic')).not.toBeInTheDocument();
+  });
+
+  it('adds a model row to a provider', async () => {
+    const user = userEvent.setup();
+    setupInvoke();
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    expect(within(zai).getAllByLabelText('模型显示名')).toHaveLength(2);
+    await user.click(within(zai).getByRole('button', { name: '+ 添加模型' }));
+    expect(within(zai).getAllByLabelText('模型显示名')).toHaveLength(3);
+  });
+
+  it('writes the default-model selection into modelMapping on save', async () => {
+    const user = userEvent.setup();
+    let savedConfig: ProvidersConfig | null = null;
+    setupInvoke({
+      set_providers_config: (args) => {
+        savedConfig = (args as { config: ProvidersConfig }).config;
+        return undefined;
+      },
+    });
+    render(<ProvidersSection />);
+    await zaiCard();
+
+    // Redirect the kernel default (glm-4.6) to glm-4-plus.
+    await user.selectOptions(screen.getByLabelText('默认模型'), 'glm-4-plus');
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+
+    await waitFor(() => expect(savedConfig).not.toBeNull());
+    expect(savedConfig!.modelMapping['glm-4.6']).toBe('glm-4-plus');
+  });
+
   it('shows the disabled state when the load fails', async () => {
-    mockInvoke.mockImplementation(() =>
-      Promise.reject(new Error('data dir locked')),
-    );
+    mockInvoke.mockImplementation(() => Promise.reject(new Error('data dir locked')));
     render(<ProvidersSection />);
     expect(
       await screen.findByText('无法加载供应商配置,请检查应用数据目录权限'),
