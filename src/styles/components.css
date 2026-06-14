@@ -15,6 +15,43 @@ select {
   cursor: pointer;
 }
 
+/* === Button baseline ===
+   Shared .btn / .btn-primary used across views (orchestrate run/reset,
+   approval actions). Without this every consumer rendered as a bare
+   OS-default button. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--always-white, #fff);
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
 /* === Project Grid === */
 .project-grid {
   display: grid;

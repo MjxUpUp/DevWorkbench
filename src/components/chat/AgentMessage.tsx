@@ -1,4 +1,6 @@
 import { useState, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { Session, QualityReport } from '../../types';
 import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
@@ -84,6 +86,22 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Agent text output — the agent's reply, rendered as Markdown.
+          outputSummary is null while running, so this block only appears for
+          completed sessions (streaming live text is a separate backend feature). */}
+      {session.outputSummary && (
+        <div className="agent-block">
+          <div className="agent-block-header">
+            <span className="agent-block-title">输出</span>
+          </div>
+          <div className="agent-block-body agent-output">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {session.outputSummary}
+            </ReactMarkdown>
+          </div>
         </div>
       )}
 

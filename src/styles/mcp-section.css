@@ -1,0 +1,235 @@
+/* === MCP Server section — config-* classes (McpSection + McpServerList) ===
+   Previously zero CSS: the entire MCP management page rendered as bare
+   OS-default inputs/buttons/list. */
+
+.config-center-loading,
+.config-center-error {
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}
+.config-center-loading { color: var(--text-tertiary); }
+.config-center-error {
+  color: var(--danger, #ef4444);
+  background: var(--surface-2);
+}
+.config-center-placeholder {
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+/* Server list */
+.config-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.config-server-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.config-server-item.disabled { opacity: 0.55; }
+.config-server-item-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+.config-server-toggle {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.config-server-toggle:hover { background: var(--surface-2); }
+.config-server-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.config-server-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.config-server-command {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.config-server-edit,
+.config-server-remove {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.config-server-edit:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+.config-server-remove {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+.config-server-remove:hover {
+  border-color: var(--danger, #ef4444);
+  color: var(--danger, #ef4444);
+}
+
+.config-server-targets {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-subtle, var(--border));
+  background: var(--surface-0);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.config-server-targets-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  width: 100%;
+}
+.config-server-target-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+/* Add form */
+.config-server-add {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+.config-server-input {
+  flex: 1;
+  min-width: 160px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-0);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  outline: none;
+  transition: border-color var(--duration-fast) ease;
+}
+.config-server-input:focus { border-color: var(--accent); }
+.config-server-input-wide { min-width: 240px; flex: 2; }
+.config-server-add-btn {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--always-white, #fff);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter var(--duration-fast) ease;
+}
+.config-server-add-btn:hover:not(:disabled) { filter: brightness(0.95); }
+.config-server-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Actions */
+.config-server-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.config-server-save-btn,
+.config-server-apply-btn {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.config-server-save-btn:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+.config-server-apply-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--always-white, #fff);
+}
+.config-server-apply-btn:hover { filter: brightness(0.95); }
+
+/* Apply result */
+.config-apply-result {
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+.config-apply-result ul {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+}
+.config-apply-result code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* Agents info */
+.config-agents-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+}
+.config-agents-label { color: var(--text-tertiary); }
+.config-agent-badge {
+  padding: 2px var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}

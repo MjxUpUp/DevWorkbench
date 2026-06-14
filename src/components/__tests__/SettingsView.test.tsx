@@ -13,7 +13,14 @@ describe('SettingsView — full-screen overlay', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // loadSettings calls invoke('load_settings'); resolve with the store default.
-    vi.mocked(invoke).mockResolvedValue(useSettingsStore.getState().settings);
+    // Other commands (e.g. AgentSection's discover_agents_cmd) get [] so list
+    // rendering in the default section doesn't throw on a non-array.
+    vi.mocked(invoke).mockImplementation((cmd) => {
+      if (String(cmd) === 'load_settings') {
+        return Promise.resolve(useSettingsStore.getState().settings);
+      }
+      return Promise.resolve([]);
+    });
     useNavigationStore.setState({ activeView: 'settings' });
   });
 

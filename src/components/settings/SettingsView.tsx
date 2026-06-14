@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { GeneralSection } from './GeneralSection';
 import { AppearanceSection } from './AppearanceSection';
 import { AgentSection } from './AgentSection';
 import { ProvidersSection } from './ProvidersSection';
@@ -9,27 +8,27 @@ import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
-  IconSettings, IconSun, IconTerminal, IconCpu,
-  IconSparkles, IconBrain, IconCode, IconInbox,
+  IconSun, IconTerminal, IconCpu,
+  IconSparkles, IconBrain, IconInbox,
   IconUser, IconPlay, IconEdit, IconStar,
-  IconFolderOpen, IconDashboard, IconChat, IconX,
+  IconDashboard, IconChat, IconX,
 } from '../Icons';
 import { useNavigationStore } from '../../stores/navigationStore';
 
 type SettingsIcon = React.FC<{ size?: number; className?: string }>;
 
 /**
- * Settings categories aligned to zcode's 15-section navigation order.
- * Implemented categories map to a real section component; pending ones reuse
- * PlaceholderSection so the whole nav shares one aesthetic.
- *
- * zcode order: AI配置 / 代码预览 / 智能体工具 / 模型供应商 / 插件 / 技能 /
- *              MCP服务器 / 子智能体 / 命令 / 钩子 / 记忆 / 索引 / 输出样式 / 使用统计 / 引导
+ * Settings categories. Slimmed down from the earlier 15-section list:
+ *   - removed "AI 配置" (was GeneralSection — didn't match the label's intent)
+ *   - removed "代码预览" (placeholder)
+ *   - removed "索引" (placeholder)
+ * Remaining sections map to a real component or share the PlaceholderSection
+ * aesthetic.
  */
 export type SettingsSection =
-  | 'ai-config' | 'code-preview' | 'agent-tools' | 'providers' | 'plugins'
+  | 'agent-tools' | 'providers' | 'plugins'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
-  | 'memory' | 'indexing' | 'output-style' | 'usage-stats' | 'onboarding';
+  | 'memory' | 'output-style' | 'usage-stats' | 'onboarding';
 
 interface SectionDef {
   id: SettingsSection;
@@ -40,8 +39,6 @@ interface SectionDef {
 }
 
 const SECTIONS: SectionDef[] = [
-  { id: 'ai-config', label: 'AI 配置', Icon: IconSettings, Component: GeneralSection },
-  { id: 'code-preview', label: '代码预览', Icon: IconCode, placeholder: { title: '代码预览', desc: '配置代码差异预览与语法高亮样式', hint: '代码预览功能正在开发中，敬请期待' } },
   { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection },
   { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection },
   { id: 'plugins', label: '插件', Icon: IconInbox, placeholder: { title: '插件', desc: '管理已安装的插件与扩展能力', hint: '插件管理功能正在开发中，敬请期待' } },
@@ -51,14 +48,13 @@ const SECTIONS: SectionDef[] = [
   { id: 'commands', label: '命令', Icon: IconPlay, placeholder: { title: '命令', desc: '管理自定义斜杠命令', hint: '命令管理功能正在开发中，敬请期待' } },
   { id: 'hooks', label: '钩子', Icon: IconEdit, placeholder: { title: '钩子', desc: '配置生命周期钩子与事件回调', hint: '钩子配置正在开发中，敬请期待' } },
   { id: 'memory', label: '记忆', Icon: IconStar, placeholder: { title: '记忆', desc: '管理智能体长期记忆条目', hint: '记忆管理功能正在开发中，敬请期待' } },
-  { id: 'indexing', label: '索引', Icon: IconFolderOpen, placeholder: { title: '索引', desc: '代码库索引与语义检索配置', hint: '索引功能正在开发中，敬请期待' } },
   { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
   { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection },
   { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' } },
 ];
 
 export function SettingsView() {
-  const [activeSection, setActiveSection] = useState<SettingsSection>('ai-config');
+  const [activeSection, setActiveSection] = useState<SettingsSection>('agent-tools');
   const loadSettings = useSettingsStore((s) => s.loadSettings);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
 
@@ -74,7 +70,7 @@ export function SettingsView() {
     return () => window.removeEventListener('keydown', onKey);
   }, [setActiveView]);
 
-  const active = SECTIONS.find(s => s.id === activeSection) ?? SECTIONS[0];
+  const active = SECTIONS.find((s) => s.id === activeSection) ?? SECTIONS[0];
   const ActiveComponent = active.Component;
 
   return (
@@ -92,7 +88,7 @@ export function SettingsView() {
             <IconX size={16} />
           </button>
         </div>
-        {SECTIONS.map(section => (
+        {SECTIONS.map((section) => (
           <button
             key={section.id}
             className={`settings-nav-item ${activeSection === section.id ? 'active' : ''}`}

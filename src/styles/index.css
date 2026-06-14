@@ -11,6 +11,7 @@
 @import './terminal.css';
 @import './command-palette.css';
 @import './settings-view.css';
+@import './mcp-section.css';
 @import './dashboard.css';
 @import './skill-market.css';
 @import './git-panel.css';
