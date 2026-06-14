@@ -5,10 +5,12 @@
 //! as a self-built agent that can call MCP tools and Skills.
 //!
 //! Three pieces:
-//! - [`GlmChatModel`]: `ChatModel` impl calling Zhipu GLM via Anthropic API.
+//! - [`GlmChatModel`]: `ChatModel` impl calling Zhipu GLM via Anthropic API,
+//!   with real SSE streaming and tool binding.
 //! - [`ToolRegistry`]: a cloneable collection of `dyn Tool` (MCP + Skill + builtin).
-//! - [`ReactAgent`]: reason鈫抋ct鈫抩bserve loop, bounded by max_steps, implements
-//!   `kernel_core::Agent`. Now executes tool calls for real.
+//! - [`ReactAgent`]: reason->act->observe loop, bounded by max_steps, implements
+//!   `kernel_core::Agent`. Binds tools to the model, dispatches hooks around
+//!   tool calls, and streams AgentEvents.
 
 use std::sync::Arc;
 
@@ -19,6 +21,8 @@ use kernel_core::{
     ChatModel, Error, Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
 };
 use serde_json::{json, Value};
+
+use crate::kernel_impl::hooks::HookManager;
 
 // ---------------------------------------------------------------------------
 // GlmChatModel
@@ -31,6 +35,7 @@ pub struct GlmChatModel {
     api_key: String,
     model: String,
     client: reqwest::Client,
+    bound_tools: Vec<ToolInfo>,
 }
 
 impl GlmChatModel {
@@ -44,10 +49,10 @@ impl GlmChatModel {
             api_key: api_key.into(),
             model: model.into(),
             client: reqwest::Client::new(),
+            bound_tools: Vec::new(),
         }
     }
 
-    /// From the user's standard backend (open.bigmodel.cn).
     pub fn bigmodel(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new("https://open.bigmodel.cn/api/anthropic", api_key, model)
     }
@@ -81,6 +86,16 @@ impl GlmChatModel {
         if let Some(t) = opts.temperature {
             body["temperature"] = json!(t);
         }
+        if !self.bound_tools.is_empty() {
+            let tools: Vec<Value> = self.bound_tools.iter().map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters_schema,
+                })
+            }).collect();
+            body["tools"] = Value::Array(tools);
+        }
         body
     }
 }
@@ -101,8 +116,7 @@ impl ChatModel for GlmChatModel {
             .map_err(|e| Error::Network(e.to_string()))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Model(format!("GLM {status}: {text}")));
+                Err(Error::Model(format!("GLM stream failed: {status}")))?;
         }
         let v: Value = resp
             .json()
@@ -112,45 +126,93 @@ impl ChatModel for GlmChatModel {
     }
 
     fn stream(&self, messages: &[Message], opts: &ModelOptions) -> Result<MessageStream, Error> {
-        let model = self.clone();
+        let model_clone = self.clone();
         let messages = messages.to_vec();
         let opts = opts.clone();
         let s = async_stream::try_stream! {
-            let msg = model.generate(&messages, &opts).await?;
-            yield msg;
+            let model_name = opts.model.clone().unwrap_or_else(|| model_clone.model.clone());
+            let body = model_clone.build_body(&model_name, &messages, &opts, true);
+            let resp = model_clone.client
+                .post(format!("{}/v1/messages", model_clone.base_url))
+                .header("x-api-key", &model_clone.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| Error::Network(e.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                Err(Error::Model(format!("GLM stream failed: {status}")))?;
+            }
+            use futures::StreamExt;
+            let mut byte_stream = resp.bytes_stream();
+            let mut buf = String::new();
+            while let Some(chunk_res) = byte_stream.next().await {
+                let bytes = chunk_res.map_err(|e| Error::Network(e.to_string()))?;
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(nl) = buf.find('\n') {
+                    let line = buf[..nl].trim().to_string();
+                    buf.drain(..=nl);
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
+                            if ev.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
+                                if let Some(text) = ev.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
+                                    yield Message::assistant(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         };
         Ok(Box::pin(s))
     }
+
+    fn with_tools(&self, tools: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+        let mut clone = self.clone();
+        clone.bound_tools = tools.to_vec();
+        Ok(Box::new(clone))
+    }
 }
 
-/// Decode an Anthropic-format response into our Message.
 fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
-    let content = v
-        .get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .filter_map(|block| {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        block.get("text").and_then(|t| t.as_str()).map(String::from)
-                    } else {
-                        None
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
+        for block in arr {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                        text_parts.push(t.to_string());
                     }
-                })
-                .collect::<Vec<_>>()
-                .first()
-                .cloned()
-        })
-        .unwrap_or_default();
-    Ok(Message::assistant(content))
+                }
+                Some("tool_use") => {
+                    let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let args = block.get("input").map(|i| i.to_string()).unwrap_or_else(|| "{}".to_string());
+                    tool_calls.push(kernel_core::ToolCall {
+                        id,
+                        call_type: "function".into(),
+                        function: kernel_core::FunctionCall { name, arguments: args },
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(Message {
+        role: Role::Assistant,
+        content: text_parts.join(""),
+        tool_calls,
+        tool_call_id: None,
+        reasoning: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
-// ToolRegistry 鈥?cloneable collection of tools (MCP + Skill + builtin)
+// ToolRegistry
 // ---------------------------------------------------------------------------
 
-/// A cloneable registry of tools. Wraps each tool in `Arc` so the registry
-/// itself can be cheaply cloned into an async stream.
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
@@ -170,9 +232,8 @@ impl ToolRegistry {
         self.tools.push(Arc::new(tool));
     }
 
-    /// Add a tool from an already-erased `Box<dyn Tool>` (e.g. an McpTool).
-    pub fn push_boxed(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(boxed_tool_to_arc(tool));
+    pub fn push_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.push(tool);
     }
 
     pub fn infos(&self) -> Vec<ToolInfo> {
@@ -192,44 +253,19 @@ impl ToolRegistry {
     }
 }
 
-/// Convert a boxed tool into an Arc tool. (Box 鈫?Arc requires a thin owning
-/// wrapper since `Box<dyn Trait>` can't be turned into `Arc<dyn Trait>` directly.)
-fn boxed_tool_to_arc(tool: Box<dyn Tool>) -> Arc<dyn Tool> {
-    struct ToolBox(Box<dyn Tool>);
-    #[async_trait]
-    impl Tool for ToolBox {
-        fn info(&self) -> ToolInfo {
-            self.0.info()
-        }
-        async fn invoke(&self, args: &str, ctx: &ToolContext) -> Result<String, Error> {
-            self.0.invoke(args, ctx).await
-        }
-        fn is_dangerous(&self) -> bool {
-            self.0.is_dangerous()
-        }
-        fn is_read_only(&self) -> bool {
-            self.0.is_read_only()
-        }
-    }
-    Arc::new(ToolBox(tool))
-}
-
 // ---------------------------------------------------------------------------
-// ReactAgent 鈥?the transparent reason鈫抋ct鈫抩bserve loop
+// ReactAgent
 // ---------------------------------------------------------------------------
 
-/// A transparent agent: a ChatModel + a registry of tools, looped up to
-/// max_steps. Holds the model as `Arc<dyn ChatModel>` so the agent is testable
-/// with a mock model and the loop can be driven into an async stream.
 pub struct ReactAgent {
     model: Arc<dyn ChatModel>,
     tools: ToolRegistry,
+    hooks: Option<Arc<HookManager>>,
     max_steps: usize,
     system_prompt: String,
 }
 
 impl ReactAgent {
-    /// Build from any ChatModel (GLM, a mock, a local model, 鈥?.
     pub fn new(
         model: impl ChatModel + 'static,
         tools: ToolRegistry,
@@ -238,23 +274,15 @@ impl ReactAgent {
         Self {
             model: Arc::new(model),
             tools,
+            hooks: None,
             max_steps: 12,
             system_prompt: system_prompt.into(),
         }
     }
 
-    /// Build from an already-erased boxed model.
-    pub fn new_boxed(
-        model: Box<dyn ChatModel>,
-        tools: ToolRegistry,
-        system_prompt: impl Into<String>,
-    ) -> Self {
-        Self {
-            model: boxed_chatmodel_to_arc(model),
-            tools,
-            max_steps: 12,
-            system_prompt: system_prompt.into(),
-        }
+    pub fn with_hooks(mut self, hooks: Arc<HookManager>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     pub fn with_max_steps(mut self, n: usize) -> Self {
@@ -262,24 +290,26 @@ impl ReactAgent {
         self
     }
 
-    /// Run the loop to completion, returning the final answer text.
     pub async fn run_loop(&self, task: &str, opts: ModelOptions) -> Result<String, Error> {
+        let infos = self.tools.infos();
+        let model: Arc<dyn ChatModel> = if infos.is_empty() {
+            Arc::clone(&self.model)
+        } else {
+            match self.model.with_tools(&infos) {
+                Ok(b) => Arc::from(b),
+                Err(_) => Arc::clone(&self.model),
+            }
+        };
+
         let mut history = vec![Message::system(&self.system_prompt), Message::user(task)];
         for _step in 0..self.max_steps {
-            let resp = self.model.generate(&history, &opts).await?;
+            let resp = model.generate(&history, &opts).await?;
             history.push(resp.clone());
             if resp.tool_calls.is_empty() {
                 return Ok(resp.content);
             }
             for call in &resp.tool_calls {
-                let result = match self.tools.find(&call.function.name) {
-                    Some(t) => {
-                        t.invoke(&call.function.arguments, &ToolContext::default())
-                            .await
-                            .unwrap_or_else(|e| format!("[tool error: {e}]"))
-                    }
-                    None => format!("[unknown tool: {}]", call.function.name),
-                };
+                let result = self.execute_tool_call(call, &ToolContext::default()).await;
                 history.push(Message {
                     role: Role::Tool,
                     content: result,
@@ -294,24 +324,41 @@ impl ReactAgent {
             self.max_steps
         )))
     }
-}
 
-/// Box<dyn ChatModel> 鈫?Arc<dyn ChatModel> (same owning-wrapper trick as tools).
-fn boxed_chatmodel_to_arc(model: Box<dyn ChatModel>) -> Arc<dyn ChatModel> {
-    struct ModelBox(Box<dyn ChatModel>);
-    #[async_trait]
-    impl ChatModel for ModelBox {
-        async fn generate(&self, m: &[Message], o: &ModelOptions) -> Result<Message, Error> {
-            self.0.generate(m, o).await
+    async fn execute_tool_call(&self, call: &kernel_core::ToolCall, ctx: &ToolContext) -> String {
+        if let Some(hooks) = &self.hooks {
+            let action = crate::kernel_impl::hooks::Action::CallTool {
+                tool: call.function.name.clone(),
+                arguments: call.function.arguments.clone(),
+            };
+            if let Err(reason) = hooks.before(&action).await {
+                return format!("[blocked by {}: {}]", reason.hook, reason.message);
+            }
         }
-        fn stream(&self, m: &[Message], o: &ModelOptions) -> Result<MessageStream, Error> {
-            self.0.stream(m, o)
+        let result = match self.tools.find(&call.function.name) {
+            Some(t) => t
+                .invoke(&call.function.arguments, ctx)
+                .await
+                .unwrap_or_else(|e| format!("[tool error: {e}]")),
+            None => format!("[unknown tool: {}]", call.function.name),
+        };
+        if let Some(hooks) = &self.hooks {
+            let outcome = crate::kernel_impl::hooks::ActionOutcome {
+                action: crate::kernel_impl::hooks::Action::CallTool {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                },
+                ok: !result.starts_with("[tool error"),
+                diff: None,
+                error: if result.starts_with('[') { Some(result.clone()) } else { None },
+            };
+            let findings = hooks.after(&outcome).await;
+            for f in findings {
+                log::warn!("[hook] {}: {}", f.rule, f.explanation);
+            }
         }
-        fn with_tools(&self, tools: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
-            self.0.with_tools(tools)
-        }
+        result
     }
-    Arc::new(ModelBox(model))
 }
 
 #[async_trait]
@@ -331,18 +378,28 @@ impl kernel_core::Agent for ReactAgent {
     fn run(&self, input: AgentInput) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
+        let hooks = self.hooks.clone();
         let system_prompt = self.system_prompt.clone();
         let max_steps = self.max_steps;
         let task = input.prompt;
         let model_opt = input.model;
 
         let s = async_stream::try_stream! {
+            let infos = tools.infos();
+            let bound: Arc<dyn ChatModel> = if infos.is_empty() {
+                model
+            } else {
+                match model.with_tools(&infos) {
+                    Ok(b) => Arc::from(b),
+                    Err(_) => model,
+                }
+            };
             let mut history = vec![Message::system(&system_prompt), Message::user(&task)];
             let opts = ModelOptions { model: model_opt, ..Default::default() };
             let mut final_output = String::new();
 
-            for step in 0..max_steps {
-                let resp = model.generate(&history, &opts).await.map_err(Error::from)?;
+            for _step in 0..max_steps {
+                let resp = bound.generate(&history, &opts).await.map_err(Error::from)?;
                 history.push(resp.clone());
                 if !resp.content.is_empty() {
                     yield AgentEvent::Token(resp.content.clone());
@@ -352,33 +409,54 @@ impl kernel_core::Agent for ReactAgent {
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
-                // Execute tool calls (the reason鈫抋ct鈫抩bserve loop).
                 for call in &resp.tool_calls {
                     yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                         tool: call.function.name.clone(),
                         arguments: call.function.arguments.clone(),
                         status: kernel_core::ToolCallStatus::Started,
                     });
-                    let result = match tools.find(&call.function.name) {
-                        Some(t) => match t.invoke(&call.function.arguments, &ToolContext::default()).await {
-                            Ok(out) => {
-                                yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
-                                    tool: call.function.name.clone(),
-                                    arguments: call.function.arguments.clone(),
-                                    status: kernel_core::ToolCallStatus::Succeeded,
-                                });
-                                out
-                            }
-                            Err(e) => {
+                    let blocked = if let Some(h) = &hooks {
+                        let action = crate::kernel_impl::hooks::Action::CallTool {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                        };
+                        match h.before(&action).await {
+                            Err(reason) => {
                                 yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                                     tool: call.function.name.clone(),
                                     arguments: call.function.arguments.clone(),
                                     status: kernel_core::ToolCallStatus::Failed,
                                 });
-                                format!("[tool error: {e}]")
+                                Some(format!("[blocked by {}: {}]", reason.hook, reason.message))
                             }
+                            Ok(()) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let result = match blocked {
+                        Some(b) => b,
+                        None => match tools.find(&call.function.name) {
+                            Some(t) => match t.invoke(&call.function.arguments, &ToolContext::default()).await {
+                                Ok(out) => {
+                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                                        tool: call.function.name.clone(),
+                                        arguments: call.function.arguments.clone(),
+                                        status: kernel_core::ToolCallStatus::Succeeded,
+                                    });
+                                    out
+                                }
+                                Err(e) => {
+                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                                        tool: call.function.name.clone(),
+                                        arguments: call.function.arguments.clone(),
+                                        status: kernel_core::ToolCallStatus::Failed,
+                                    });
+                                    format!("[tool error: {e}]")
+                                }
+                            },
+                            None => format!("[unknown tool: {}]", call.function.name),
                         },
-                        None => format!("[unknown tool: {}]", call.function.name),
                     };
                     history.push(Message {
                         role: Role::Tool,
@@ -388,7 +466,6 @@ impl kernel_core::Agent for ReactAgent {
                         reasoning: None,
                     });
                 }
-                let _ = step;
             }
             yield AgentEvent::Done(AgentOutcome {
                 status: AgentRunStatus::Completed,
@@ -415,21 +492,53 @@ mod tests {
     }
 
     #[test]
-    fn build_body_separates_system_from_user() {
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
-        let body = model.build_body(
-            "glm-4.6",
-            &[Message::system("be brief"), Message::user("hi")],
-            &ModelOptions::default(),
-            false,
-        );
-        assert_eq!(body["system"], "be brief");
-        assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["model"], "glm-4.6");
-        assert_eq!(body["stream"], false);
+    fn decode_anthropic_tool_use_block() {
+        let v = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "grep",
+                "input": {"pattern": "foo"}
+            }]
+        });
+        let m = decode_anthropic_message(&v).unwrap();
+        assert_eq!(m.tool_calls.len(), 1);
+        assert_eq!(m.tool_calls[0].function.name, "grep");
+        assert_eq!(m.tool_calls[0].id, "call_1");
+        assert!(m.tool_calls[0].function.arguments.contains("foo"));
     }
 
-    /// A deterministic in-memory tool for testing the loop without network.
+    #[test]
+    fn build_body_injects_bound_tools() {
+        let mut model = GlmChatModel::bigmodel("k", "glm-4.6");
+        model.bound_tools = vec![ToolInfo {
+            name: "grep".into(),
+            description: "search".into(),
+            parameters_schema: json!({"type": "object"}),
+        }];
+        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        assert_eq!(body["tools"][0]["name"], "grep");
+    }
+
+    #[test]
+    fn build_body_omits_tools_when_empty() {
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn with_tools_returns_bound_clone() {
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let _bound = model.with_tools(&[ToolInfo {
+            name: "x".into(),
+            description: "y".into(),
+            parameters_schema: json!({}),
+        }]).unwrap();
+        let body_orig = model.build_body("m", &[Message::user("a")], &ModelOptions::default(), false);
+        assert!(body_orig.get("tools").is_none(), "original stays unbound");
+    }
+
     struct EchoTool;
     #[async_trait]
     impl Tool for EchoTool {
