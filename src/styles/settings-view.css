@@ -438,7 +438,7 @@
   flex: 1;
   max-width: 320px;
   padding: 6px 8px;
-  background: var(--bg-canvas);
+  background-color: var(--bg-canvas);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   font-size: var(--text-sm);
@@ -793,7 +793,7 @@
 
 .provider-test-select {
   padding: 6px 8px;
-  background: var(--bg-canvas);
+  background-color: var(--bg-canvas);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   font-size: var(--text-sm);
