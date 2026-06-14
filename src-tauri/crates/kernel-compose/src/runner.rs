@@ -82,44 +82,47 @@ fn build_run_stream(
     }
 
     stream! {
-        let mut ready: Vec<NodeId> = vec![start.clone()];
+        let mut ready: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
+        ready.push_back(start.clone());
         let mut outputs = outputs;
         // Nodes that were skipped by an un-taken branch edge. A skipped node is
         // NOT executed; it produces a Null value, emits a Skipped status, and
         // propagates the skip to its own successors (so a whole deselected path
         // is settled without running). This is the eino `reportSkip` analog.
         let mut skipped: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        // Nodes that received at least one FIRING predecessor edge. A node with
+        // no firing predecessor (all its in-edges were branch-deselected) is
+        // skipped. This correctly handles diamond merge: if ONE predecessor
+        // fired, the merge node runs (collecting that predecessor's output),
+        // even if another predecessor was skipped.
+        let mut has_fire_input: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        // Pre-seed: the start node always has a (synthetic) firing input.
+        has_fire_input.insert(start.clone());
 
-        // Helper: settle a node's successor edge — decrement remaining, push when
-        // ready, and propagate skip if the current node was skipped.
+        // Helper: settle a successor edge — record fired inputs, decrement
+        // remaining, push to ready when all predecessors settled.
         let mut settle = |edge: &crate::graph::Edge,
                           node_value: Option<&Value>,
-                          parent_skipped: bool,
-                          ready: &mut Vec<NodeId>,
+                          ready: &mut std::collections::VecDeque<NodeId>,
                           outputs: &mut HashMap<NodeId, Value>,
-                          skipped: &mut std::collections::HashSet<NodeId>| {
+                          has_fire_input: &mut std::collections::HashSet<NodeId>| {
             if let Some(v) = node_value {
                 outputs.entry(edge.to.clone()).or_insert_with(|| v.clone());
+                has_fire_input.insert(edge.to.clone());
             }
             let r = remaining.get_mut(&edge.to).unwrap();
             if *r > 0 { *r -= 1; }
             if *r == 0 {
-                if parent_skipped {
-                    // Parent was skipped → this successor has no real input from
-                    // this path. Mark it skipped too (cascade) and settle it
-                    // without executing.
-                    skipped.insert(edge.to.clone());
-                    ready.push(edge.to.clone());
-                } else {
-                    ready.push(edge.to.clone());
-                }
+                ready.push_back(edge.to.clone());
             }
         };
 
-        while let Some(nid) = ready.pop() {
-            // If this node was marked skipped by a branch, settle it without
-            // executing — emit Skipped, propagate to its successors.
-            if skipped.contains(&nid) {
+        while let Some(nid) = ready.pop_front() {
+            // A node is skipped iff NONE of its predecessors fired (no real
+            // input). Diamond merge with one fired predecessor runs normally.
+            let is_skipped = !has_fire_input.contains(&nid);
+            if is_skipped {
+                skipped.insert(nid.clone());
                 let succs: Vec<crate::graph::Edge> = g.edges.iter()
                     .filter(|e| e.from == nid).cloned().collect();
                 yield GraphEvent::NodeEnd {
@@ -132,7 +135,7 @@ fn build_run_stream(
                     return;
                 }
                 for edge in &succs {
-                    settle(edge, None, true, &mut ready, &mut outputs, &mut skipped);
+                    settle(edge, None, &mut ready, &mut outputs, &mut has_fire_input);
                 }
                 continue;
             }
@@ -173,14 +176,18 @@ fn build_run_stream(
                         prompt: h.prompt.clone(),
                         resume_token: resume_token.clone(),
                     };
-                    match approval_rx.recv().await {
-                        Some(approval) if approval.resume_token == resume_token => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(300),
+                        approval_rx.recv(),
+                    ).await {
+                        Ok(Some(approval)) if approval.resume_token == resume_token => {
                             match approval.decision {
                                 Some(v) => Ok(v),
                                 None => Err("human rejected".into()),
                             }
                         }
-                        _ => Err("approval channel closed".into()),
+                        Ok(_) => Err("approval channel closed".into()),
+                        Err(_) => Err("human approval timed out (300s)".into()),
                     }
                 }
                 Node::Transform(t) => Ok(apply_transform(t, incoming.clone())),
@@ -207,8 +214,8 @@ fn build_run_stream(
                         // fire → settle with value, parent not skipped.
                         // !fire (branch deselected) → settle WITHOUT value and mark
                         // the successor skipped (cascade).
-                        settle(edge, if fire { Some(&v) } else { None }, !fire,
-                               &mut ready, &mut outputs, &mut skipped);
+                        settle(edge, if fire { Some(&v) } else { None },
+                               &mut ready, &mut outputs, &mut has_fire_input);
                     }
                 }
                 Err(e) => {
@@ -317,5 +324,74 @@ mod tests {
         let v: Value = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
         assert_eq!(v["gate"], "forge");
         assert_eq!(v["config"]["strict"], true);
+    }
+    // ---- m8: execution-path tests (previously only pure functions were tested) ----
+
+    /// A deterministic executor: agent echoes input upper-cased, gate passes.
+    struct MockExec;
+    #[async_trait::async_trait]
+    impl crate::graph::Executor for MockExec {
+        async fn run_agent(&self, spec: &crate::graph::AgentNodeSpec, input: Value, _wd: Option<String>) -> Result<Value, String> {
+            let t = spec.prompt.clone().or_else(|| input.as_str().map(String::from)).unwrap_or_default();
+            Ok(json!({ "agent": spec.agent, "out": t.to_uppercase() }))
+        }
+        async fn run_gate(&self, gate: &crate::graph::GateNode, input: Value, _wd: Option<String>) -> Result<Value, String> {
+            Ok(json!({ "gate": gate.gate, "passed": true, "saw": input }))
+        }
+    }
+
+    async fn collect_events(stream: impl futures::Stream<Item = GraphEvent>) -> Vec<GraphEvent> {
+        use futures::StreamExt;
+        let mut s = Box::pin(stream);
+        let mut out = Vec::new();
+        while let Some(ev) = s.next().await {
+            let terminal = matches!(ev, GraphEvent::GraphDone { .. } | GraphEvent::GraphFailed { .. });
+            out.push(ev);
+            if terminal { break; }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn linear_graph_executes_in_fifo_order() {
+        use crate::graph::{GraphBuilder, MergeNode, Node, PromptNode};
+        use std::collections::HashMap;
+        let g = GraphBuilder::new()
+            .node("p", Node::Prompt(PromptNode { text: "start".into(), vars: HashMap::new() }))
+            .node("a", Node::Agent(crate::graph::AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None }))
+            .node("e", Node::Merge(MergeNode::default()))
+            .edge("p", "a").edge("a", "e")
+            .start("p").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+        let started: Vec<String> = events.iter().filter_map(|e| match e {
+            GraphEvent::NodeStart { node } => Some(node.clone()), _ => None,
+        }).collect();
+        assert_eq!(started, vec!["p", "a", "e"], "FIFO order: got {started:?}");
+        assert!(events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })));
+    }
+
+    #[tokio::test]
+    async fn branch_deselect_skips_unreached_path() {
+        use crate::graph::{BranchNode, GraphBuilder, MergeNode, MergeStrategy, Node, PromptNode, TransformNode};
+        let g = GraphBuilder::new()
+            .node("in", Node::Prompt(PromptNode { text: "go".into(), vars: HashMap::new() }))
+            .node("br", Node::Branch(BranchNode { condition: "contains:go".into() }))
+            .node("go_path", Node::Transform(TransformNode { op: crate::graph::TransformOp::Truncate(100) }))
+            .node("stop_path", Node::Transform(TransformNode { op: crate::graph::TransformOp::Truncate(0) }))
+            .node("out", Node::Merge(MergeNode { strategy: MergeStrategy::LastWins }))
+            .edge("in", "br")
+            .branch_edge("br", "go_path", "contains:go")
+            .branch_edge("br", "stop_path", "contains:stop")
+            .edge("go_path", "out").edge("stop_path", "out")
+            .start("in").end("out").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("x"), None, Box::new(MockExec))).await;
+        assert!(events.iter().any(|e| matches!(e,
+            GraphEvent::NodeEnd { node, status: NodeStatus::Skipped, .. } if node == "stop_path")),
+            "stop_path should be skipped");
+        assert!(events.iter().any(|e| matches!(e,
+            GraphEvent::NodeEnd { node, status: NodeStatus::Done, .. } if node == "go_path")),
+            "go_path should be done");
     }
 }
