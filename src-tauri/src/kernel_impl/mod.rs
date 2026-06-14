@@ -6,6 +6,7 @@ pub mod executor;
 pub mod hooks;
 pub mod honesty;
 pub mod mcp_tool;
+pub mod opaque_agent;
 pub mod react_agent;
 pub mod retriever;
 pub mod skill_tool;
