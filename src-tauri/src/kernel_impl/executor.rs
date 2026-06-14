@@ -63,10 +63,6 @@ impl Executor for KernelExecutor {
         // spawn_pty_agent is synchronous and returns immediately with a Session
         // (completion happens on a background wait-thread). Run it on the
         // blocking pool, then poll the DB until the session finalizes.
-        //
-        // NOTE: do NOT lock db here — spawn_pty_agent locks the connection
-        // internally (insert_session_db). Holding the lock out here would
-        // deadlock against the inner lock.
         let session = tokio::task::spawn_blocking(move || -> Result<crate::models::Session, String> {
             pty::spawn_pty_agent(
                 &app,

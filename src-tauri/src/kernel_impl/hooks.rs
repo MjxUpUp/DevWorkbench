@@ -116,26 +116,100 @@ impl HookManager {
 // Built-in hooks
 // ---------------------------------------------------------------------------
 
-/// Reject shell commands containing dangerous metacharacters (the Forge
-/// bash-guard analog: block `rm -rf /`, force-kills, etc.).
+/// Reject shell commands that are genuinely destructive. Uses token-based
+/// detection (the Forge bash-guard analog) instead of naive substring matching,
+/// so `rm -rf /home/user/old-build` (legitimate) is NOT blocked while
+/// `rm -rf /` (wipe root) IS.
 pub struct CommandGuardHook {
-    blocked_patterns: Vec<&'static str>,
+    /// User-configurable allowlist of command prefixes that bypass the guard.
+    allowlist: Vec<String>,
 }
 
 impl Default for CommandGuardHook {
     fn default() -> Self {
-        Self {
-            blocked_patterns: vec![
-                "rm -rf /",
-                "rm -rf ~",
-                "rm -rf /*",
-                ":(){:|:&};:",   // fork bomb
-                "mkfs",
-                "dd if=/dev/zero of=/dev/sd",
-                "shutdown",
-                "format c:",
-            ],
+        Self { allowlist: Vec::new() }
+    }
+}
+
+impl CommandGuardHook {
+    pub fn with_allowlist(allowlist: Vec<String>) -> Self {
+        Self { allowlist }
+    }
+
+    /// Returns a BlockReason if the command is dangerous, else None.
+    /// Token-based: splits on whitespace, inspects the program + flags + target.
+    fn classify(&self, command: &str) -> Option<BlockReason> {
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        if tokens.is_empty() {
+            return None;
         }
+        let prog = tokens[0].to_lowercase();
+        let joined = command.to_lowercase();
+
+        // Allowlist bypass.
+        for allowed in &self.allowlist {
+            if joined.starts_with(&allowed.to_lowercase()) {
+                return None;
+            }
+        }
+
+        // rm with recursive-force targeting root or home root.
+        if prog == "rm" || prog.ends_with("/rm") {
+            let has_rf = tokens.iter().any(|t| {
+                let t = t.trim_start_matches('-');
+                t.contains('r') && t.contains('f')
+            });
+            if has_rf {
+                // Find the path target (first non-flag token after flags).
+                let target = tokens.iter().skip(1).find(|t| !t.starts_with('-'));
+                if let Some(t) = target {
+                    let t = t.trim_matches('"').trim_matches('\'');
+                    // Block wiping root, home root, or system dirs.
+                    let dangerous = t == "/" || t == "~" || t == "/*"
+                        || t == "/home" || t == "/usr" || t == "/bin"
+                        || t == "/etc" || t == "/var" || t == "/boot"
+                        || t.starts_with("/dev/sd") || t.starts_with("/dev/nvme");
+                    if dangerous {
+                        return Some(BlockReason {
+                            hook: "command_guard".into(),
+                            message: format!("blocked rm -rf on system path: {t}"),
+                            severity: Severity::Block,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Fork bomb variants.
+        if joined.contains(":(){") || joined.contains(": () {") {
+            return Some(BlockReason {
+                hook: "command_guard".into(),
+                message: "blocked fork bomb".into(),
+                severity: Severity::Block,
+            });
+        }
+
+        // Filesystem format / disk wipe.
+        if prog == "mkfs" || joined.contains("dd if=/dev/zero of=/dev/")
+            || joined.contains("dd if=/dev/urandom of=/dev/")
+        {
+            return Some(BlockReason {
+                hook: "command_guard".into(),
+                message: "blocked filesystem format / disk wipe".into(),
+                severity: Severity::Block,
+            });
+        }
+
+        // Shutdown / reboot.
+        if prog == "shutdown" || prog == "halt" || prog == "poweroff" {
+            return Some(BlockReason {
+                hook: "command_guard".into(),
+                message: "blocked shutdown/poweroff".into(),
+                severity: Severity::Block,
+            });
+        }
+
+        None
     }
 }
 
@@ -146,15 +220,8 @@ impl Hook for CommandGuardHook {
     }
     async fn before(&self, action: &Action) -> Result<(), BlockReason> {
         if let Action::RunCommand { command } = action {
-            let lower = command.to_lowercase();
-            for pat in &self.blocked_patterns {
-                if lower.contains(pat) {
-                    return Err(BlockReason {
-                        hook: self.name().into(),
-                        message: format!("blocked dangerous command pattern: {pat}"),
-                        severity: Severity::Block,
-                    });
-                }
+            if let Some(reason) = self.classify(command) {
+                return Err(reason);
             }
         }
         Ok(())
@@ -240,7 +307,7 @@ mod tests {
         let h = CommandGuardHook::default();
         let err = h.before(&cmd("rm -rf /")).await.unwrap_err();
         assert_eq!(err.severity, Severity::Block);
-        assert!(err.message.contains("rm -rf /"));
+        assert!(err.message.contains("system path"), "got: {err:?}");
     }
 
     #[tokio::test]
