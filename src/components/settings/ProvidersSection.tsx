@@ -44,7 +44,7 @@ function cloneConfig(c: ProvidersConfig): ProvidersConfig {
 
 export function ProvidersSection() {
   const { config, loading, loadProviders, saveProviders, testProvider } = useProvidersStore();
-  const { info, error, success } = useToast();
+  const { error, success } = useToast();
 
   const [draft, setDraft] = useState<ProvidersConfig | null>(null);
   const [saving, setSaving] = useState(false);
