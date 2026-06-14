@@ -1,4 +1,4 @@
-import type { Project, GitStatus, Session, AgentInfo, Requirement } from '../types';
+import type { Project, GitStatus, Session, AgentInfo } from '../types';
 import { ToolButton } from './ToolButton';
 import { AgentStatus } from './AgentStatus';
 import { IconStar, IconEdit, IconTrash, IconSparkles } from './Icons';
@@ -20,11 +20,10 @@ interface ProjectCardProps {
   onToggleStar: (id: string) => void;
   sessions?: Session[];
   agents?: AgentInfo[];
-  requirements?: Requirement[];
   onOpenAgent?: (project: Project) => void;
 }
 
-export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents = [], requirements = [], onOpenAgent }: ProjectCardProps) {
+export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdit, onRemove, onToggleStar, sessions = [], agents = [], onOpenAgent }: ProjectCardProps) {
   const lastOpened = project.last_opened_at
     ? new Date(project.last_opened_at).toLocaleString('zh-CN')
     : '尚未打开';
@@ -96,9 +95,6 @@ export function ProjectCard({ project, gitStatus, isInstalled, onToolOpen, onEdi
             {project.tags.map(tag => (
               <span key={tag} className="tag">{tag}</span>
             ))}
-            {requirements.length > 0 && (
-              <span className="agent-badge">{requirements.length} 需求</span>
-            )}
           </div>
         )}
 

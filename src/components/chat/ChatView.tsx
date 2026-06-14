@@ -33,11 +33,9 @@ export function ChatView() {
   const getSessionsForProject = useAgentStore((s) => s.getSessionsForProject);
   const recommendAgent = useAgentStore((s) => s.recommendAgent);
   const newConversation = useAgentStore((s) => s.newConversation);
-  const updateRequirement = useAgentStore((s) => s.updateRequirement);
   const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
   const qualityReports = useAgentStore((s) => s.qualityReports);
   const fetchQualityReport = useAgentStore((s) => s.fetchQualityReport);
-  const requirements = useAgentStore((s) => s.requirements);
 
   const projectSessions = useMemo(
     () => project ? getSessionsForProject(project.path) : [],
@@ -125,19 +123,15 @@ export function ChatView() {
     const text = buildFullPrompt();
     try {
       if (activeSessionId && displaySession && displaySession.status !== 'running') {
-        const linkedReq = requirements.find((r) => r.linkedSessionId === activeSessionId);
+        // Continuing a prior conversation — spawn a follow-up session linked
+        // to the active one via parentSessionId. (Requirement concept removed:
+        // the dialogue itself is the task.)
         const session = await spawnAgent(
           project.path, selectedAgent, text,
           undefined,
-          linkedReq?.id,
+          undefined,
           activeSessionId
         );
-        if (linkedReq) {
-          await updateRequirement(linkedReq.id, {
-            linkedSessionId: session.id,
-            updatedAt: new Date().toISOString(),
-          });
-        }
         selectSession(session.id);
       } else {
         const agent = selectedAgent || getDefaultAgent();
@@ -151,7 +145,7 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to send:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project, spawnAgent, activeSessionId, displaySession, requirements, newConversation, getDefaultAgent, selectSession, updateRequirement, buildFullPrompt]);
+  }, [selectedAgent, prompt, runningSession, project, spawnAgent, activeSessionId, displaySession, newConversation, getDefaultAgent, selectSession, buildFullPrompt]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;

@@ -142,6 +142,9 @@ export function OrchestrateView() {
                     style={{ background: STATUS_COLOR[state.status] }}
                   />
                   <span className="dag-node-status">{STATUS_LABEL[state.status]}</span>
+                  {state.streamingOutput && (
+                    <pre className="dag-node-stream">{state.streamingOutput.slice(-500)}</pre>
+                  )}
                   {state.error && <pre className="dag-node-error">{state.error}</pre>}
                 </div>
               );
@@ -197,7 +200,31 @@ function formatEvent(event: WorkflowProgressPayload['event']): string {
       return `■ workflow 失败: ${event.error}`;
     case 'approval_required':
       return `? ${event.node} 等待审批`;
-    default:
-      return `· ${event.kind}`;
+    case 'node_output': {
+      // Streaming agent chunk — show a short preview (real agents emit text;
+      // mock/test executors emit {partial}). Without this case the chunk fell
+      // through to the default branch and was rendered as "· node_output",
+      // silently discarding the agent's live output.
+      const c = event.chunk;
+      let text: string;
+      if (typeof c === 'string') {
+        text = c;
+      } else if (c && typeof c === 'object' && 'partial' in c) {
+        text = String((c as { partial: unknown }).partial);
+      } else {
+        text = JSON.stringify(c);
+      }
+      const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+      return `  ▸ ${event.node}: ${preview}`;
+    }
+    default: {
+      // Exhaustiveness guard: if a new WorkflowProgressEvent kind is added
+      // without a case above, `event` is no longer `never` and this line
+      // errors — forcing the author to handle it instead of silently falling
+      // through. Previously this read `event.kind`, which only compiled when
+      // the switch was *not* exhaustive.
+      const _exhaustive: never = event;
+      return `· unhandled: ${JSON.stringify(_exhaustive)}`;
+    }
   }
 }

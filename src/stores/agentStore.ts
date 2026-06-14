@@ -59,15 +59,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  refreshRequirements: async () => {
-    try {
-      const result = await invoke<Requirement[]>('load_requirements');
-      set({ requirements: result });
-    } catch (e) {
-      console.error('Failed to load requirements:', e);
-    }
-  },
-
   spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId) => {
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
@@ -84,24 +75,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   stopAgent: async (sessionId) => {
     await invoke('stop_agent_session', { sessionId });
     await get().refreshSessions();
-  },
-
-  addRequirement: async (req) => {
-    await invoke('add_requirement', { req });
-    await
-    return get().requirements;
-  },
-
-  updateRequirement: async (id, patch) => {
-    await invoke('update_requirement', { id, patch });
-    await
-    return get().requirements;
-  },
-
-  removeRequirement: async (id) => {
-    await invoke('remove_requirement', { id });
-    await
-    return get().requirements;
   },
 
   getSessionsForProject: (projectPath) => {
@@ -209,15 +182,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const sessionId = event.payload.sessionId;
       // Auto-fetch quality report for completed sessions
       get().fetchQualityReport(sessionId);
-      const sessions = get().sessions;
-      const session = sessions.find((s) => s.id === sessionId);
-      if (session?.linkedRequirementId && session.status === 'completed') {
-        await invoke('update_requirement', {
-          id: session.linkedRequirementId,
-          patch: { status: 'done', updatedAt: new Date().toISOString() },
-        });
-        await refreshRequirements();
-      }
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     const p3 = listen<{ sessionId: string; data: number[] }>('pty:output', (event) => {
@@ -225,7 +189,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Initial load
-    Promise.all([get().refreshAgents(), refreshSessions())])
+    Promise.all([get().refreshAgents(), refreshSessions()])
       .finally(() => set({ loading: false }));
 
     return () => {

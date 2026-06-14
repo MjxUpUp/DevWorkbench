@@ -5,6 +5,9 @@ import type { WorkflowProgressEvent } from '../types';
 export type NodeState = {
   status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval';
   error?: string;
+  /** Live-streamed agent output (accumulated `node_output` Delta chunks).
+   * Populated only for agent nodes; null/undefined otherwise. */
+  streamingOutput?: string;
 };
 
 interface OrchestrateState {
@@ -69,9 +72,30 @@ export const useOrchestrateStore = create<OrchestrateState>((set) => ({
           return {
             nodes: {
               ...state.nodes,
-              [event.node]: { status: event.status, error: event.error },
+              [event.node]: {
+                // Preserve streamingOutput (and any prior fields) — node_end
+                // carries status, not the accumulated text.
+                ...state.nodes[event.node],
+                status: event.status,
+                error: event.error,
+              },
             },
           };
+        case 'node_output': {
+          // Gap-④ wiring: accumulate each streaming Delta chunk onto the node so
+          // the canvas can render live agent output. The Final chunk arrives
+          // separately via node_end/graph_done (the node's logical output).
+          const prev = state.nodes[event.node];
+          return {
+            nodes: {
+              ...state.nodes,
+              [event.node]: {
+                ...(prev ?? { status: 'running' as const }),
+                streamingOutput: (prev?.streamingOutput ?? '') + formatChunk(event.chunk),
+              },
+            },
+          };
+        }
         case 'approval_required':
           return {
             nodes: { ...state.nodes, [event.node]: { status: 'waiting_approval' } },
@@ -119,4 +143,25 @@ export function parseNodeIds(yaml: string): string[] {
     }
   }
   return ids;
+}
+
+/** Render a `node_output` chunk to displayable text.
+ *
+ * The kernel emits two chunk shapes:
+ * - Real agents (ReactAgent/OpaqueAgent): `AgentChunk::Delta(Value::String(t))`
+ *   → the JSON value is a plain string.
+ * - Test/mock executors: `AgentChunk::Delta(json!({"partial": ...}))` → an
+ *   object with a `partial` field.
+ *
+ * Anything else falls back to JSON for visibility (never silently dropped). */
+function formatChunk(chunk: unknown): string {
+  if (typeof chunk === 'string') return chunk;
+  if (chunk && typeof chunk === 'object' && 'partial' in (chunk as Record<string, unknown>)) {
+    return String((chunk as { partial: unknown }).partial);
+  }
+  try {
+    return JSON.stringify(chunk);
+  } catch {
+    return String(chunk);
+  }
 }
