@@ -40,7 +40,8 @@ pub struct AppSettings {
 }
 
 fn default_theme() -> String {
-    "obsidian".to_string()
+    // Must match the TS union "light" | "dark" | "auto".
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

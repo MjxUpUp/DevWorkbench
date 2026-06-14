@@ -296,8 +296,7 @@ fn try_spawn_pty(
     let session_id = uuid::Uuid::new_v4().to_string();
     processes
         .processes
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .insert(
             session_id.clone(),
             TrackedProcess::Pty(PtyHandles {
@@ -573,8 +572,7 @@ fn spawn_pipe_fallback(
 
     processes
         .processes
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .insert(session_id.clone(), TrackedProcess::Pipe(pid));
 
     // Capture pre-diff in background — agent won't modify files in the first

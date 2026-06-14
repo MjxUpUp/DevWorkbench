@@ -3,19 +3,35 @@ use rusqlite::Connection;
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
-/// Number of connections in the pool. SQLite in WAL mode allows concurrent
-/// readers + one writer; a small pool removes the global lock contention that
-/// previously serialized UI / spawn / wait-thread / watcher DB access.
+/// Pool capacity. SQLite WAL allows concurrent readers + one writer; this pool
+/// removes the global-lock contention that previously serialized all DB access.
 const POOL_SIZE: usize = 8;
+/// How long `get()` blocks waiting for a connection before erroring.
+const GET_TIMEOUT_SECS: u64 = 30;
 
-/// A pooled SQLite connection. Returns to the pool on drop.
-/// `Deref`s to `rusqlite::Connection`, so existing `conn.execute(...) /
-/// conn.query_*` call sites work unchanged after `db.get()`.
+/// Internal pool state: the idle connections + how many are checked out (for
+/// replenishment accounting). Shared behind a Mutex + Condvar pair so `get()`
+/// can block until a connection is returned.
+struct PoolInner {
+    idle: VecDeque<Connection>,
+    /// Total connections ever handed out (idle + in-flight). Capped at POOL_SIZE.
+    in_use: usize,
+    db_path: std::path::PathBuf,
+}
+
+struct Pool {
+    inner: Mutex<PoolInner>,
+    cvar: Condvar,
+}
+
+/// A pooled SQLite connection. Returns to the pool on drop; `Deref`s to
+/// `rusqlite::Connection` so existing call sites (`conn.execute(...)`,
+/// `conn.query_*`) work unchanged.
 pub struct PooledConn {
     conn: Option<Connection>,
-    pool: Arc<Mutex<VecDeque<Connection>>>,
+    pool: Arc<Pool>,
 }
 
 impl Deref for PooledConn {
@@ -28,30 +44,25 @@ impl Deref for PooledConn {
 impl Drop for PooledConn {
     fn drop(&mut self) {
         if let Some(c) = self.conn.take() {
-            if let Ok(mut deque) = self.pool.lock() {
-                deque.push_back(c);
-            }
-            // If the pool lock fails we just drop the connection (pool shrinks);
-            // it will be reopened on next open if empty -?but we keep it simple
-            // and let the connection be lost (acceptable; pool self-heals on restart).
+            // Poison-tolerant: force-recover the lock if a thread panicked.
+            let mut guard = self.pool.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.idle.push_back(c);
+            drop(guard);
+            // Wake one waiter.
+            self.pool.cvar.notify_one();
         }
     }
 }
 
-/// Error returned when the pool is exhausted (all connections in use) -?kept as
-/// a String so callers can map it to their error type uniformly.
 type PoolError = String;
 
-/// Managed state wrapping a SQLite **connection pool**.
+/// Managed state wrapping a SQLite connection pool with blocking `get()`.
 ///
-/// Previously this held a single `Arc<Mutex<Connection>>`, which serialized
-/// every DB operation behind one lock. The 2s/15s/600s defensive timeouts in
-/// `agents/pty.rs` existed to defend against that lock. A pool lets each
-/// operation take its own connection.
-///
-/// `.0` is `Arc<Mutex<VecDeque<Connection>>>`. `.get()` returns a `PooledConn`
-/// which `Deref`s to `Connection`. Call sites: `db.get()` -?`db.get()`.
-pub struct DbState(pub Arc<Mutex<VecDeque<Connection>>>);
+/// Previously held a single `Arc<Mutex<Connection>>` (serialized all access) or
+/// a bare `VecDeque` (exhausted -> immediate error). Now uses a Condvar so
+/// `get()` blocks up to GET_TIMEOUT_SECS for a free connection, and replenishes
+/// a connection if the pool was drained (capped at POOL_SIZE).
+pub struct DbState(pub Arc<Pool>);
 
 impl Clone for DbState {
     fn clone(&self) -> Self {
@@ -60,38 +71,71 @@ impl Clone for DbState {
 }
 
 impl DbState {
-    /// Open a pool of `POOL_SIZE` connections over the DB file, running schema
-    /// init + pragmas on each. WAL mode enables concurrent readers.
+    /// Open a pool of `POOL_SIZE` connections, running schema + pragmas on each.
     pub fn open(db_path: &Path) -> Result<Self, AppError> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut deque = VecDeque::with_capacity(POOL_SIZE);
+        let mut idle = VecDeque::with_capacity(POOL_SIZE);
         for _ in 0..POOL_SIZE {
-            let conn = Connection::open(db_path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-            conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-            // Run schema idempotently on each (CREATE TABLE IF NOT EXISTS is safe).
-            conn.execute_batch(SCHEMA)?;
-            deque.push_back(conn);
+            let conn = Self::make_conn(db_path)?;
+            idle.push_back(conn);
         }
-        Ok(DbState(Arc::new(Mutex::new(deque))))
+        Ok(DbState(Arc::new(Pool {
+            inner: Mutex::new(PoolInner {
+                idle,
+                in_use: 0,
+                db_path: db_path.to_path_buf(),
+            }),
+            cvar: Condvar::new(),
+        })))
     }
 
-    /// Take a connection from the pool. Returns it on drop.
-    /// Errors if the pool is exhausted (all connections checked out).
+    fn make_conn(db_path: &Path) -> Result<Connection, AppError> {
+        let conn = Connection::open(db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(conn)
+    }
+
+    /// Take a connection. Blocks up to GET_TIMEOUT_SECS for a free one; if the
+    /// pool is below capacity, opens a fresh connection (replenishment). Errors
+    /// only if the timeout elapses with nothing available.
     pub fn get(&self) -> Result<PooledConn, PoolError> {
-        let conn = self
+        let mut guard = self
             .0
+            .inner
             .lock()
-            .map_err(|e| format!("pool lock: {e}"))?
-            .pop_front();
-        match conn {
-            Some(c) => Ok(PooledConn {
-                conn: Some(c),
-                pool: self.0.clone(),
-            }),
-            None => Err("DB pool exhausted (all connections in use)".into()),
+            .unwrap_or_else(|e| e.into_inner());
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(GET_TIMEOUT_SECS);
+        loop {
+            if let Some(c) = guard.idle.pop_front() {
+                guard.in_use += 1;
+                return Ok(PooledConn { conn: Some(c), pool: self.0.clone() });
+            }
+            // Replenish: if total (idle+in_use) < POOL_SIZE, open a new conn.
+            if guard.in_use + guard.idle.len() < POOL_SIZE {
+                let path = guard.db_path.clone();
+                // Release lock while opening (I/O).
+                drop(guard);
+                let conn = Self::make_conn(&path).map_err(|e| format!("replenish: {e}"))?;
+                guard = self.0.inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.in_use += 1;
+                return Ok(PooledConn { conn: Some(conn), pool: self.0.clone() });
+            }
+            // Wait for a connection to be returned.
+            let g = self.0.cvar
+                .wait_timeout(guard, std::time::Duration::from_secs(1))
+                .unwrap_or_else(|e| e.into_inner()).0;
+            guard = g;
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "DB pool exhausted after {}s ({} in use)",
+                    GET_TIMEOUT_SECS, guard.in_use
+                ));
+            }
         }
     }
 }
