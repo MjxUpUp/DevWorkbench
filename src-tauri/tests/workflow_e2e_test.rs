@@ -11,8 +11,9 @@
 //! and that the v1.0 "Orchestrate" surface has a working engine under it.
 
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use futures::StreamExt;
-use kernel_compose::graph::{AgentNodeSpec, Executor, GateNode};
+use kernel_compose::graph::{AgentChunk, AgentNodeSpec, Executor, GateNode};
 use kernel_compose::{GraphEvent, WorkflowDef};
 use serde_json::{json, Value};
 
@@ -20,23 +21,29 @@ struct MockExecutor;
 
 #[async_trait]
 impl Executor for MockExecutor {
-    async fn run_agent(
+    fn run_agent(
         &self,
         spec: &AgentNodeSpec,
         input: Value,
         _working_dir: Option<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<BoxStream<'static, Result<AgentChunk, String>>, String> {
         let task = spec
             .prompt
             .clone()
             .or_else(|| input.as_str().map(String::from))
             .unwrap_or_default();
         // Echo the task upper-cased, tagged with the agent name — a deterministic
-        // stand-in for a real agent's output.
-        Ok(json!({
+        // stand-in for a real agent's output. Emit one Delta (forwarded as
+        // NodeOutput) then the Final (becomes the node's output value).
+        let final_val = json!({
             "agent": spec.agent,
             "output": task.to_uppercase(),
-        }))
+        });
+        let chunks: Vec<Result<AgentChunk, String>> = vec![
+            Ok(AgentChunk::Delta(json!({ "partial": task.to_uppercase() }))),
+            Ok(AgentChunk::Final(final_val)),
+        ];
+        Ok(Box::pin(futures::stream::iter(chunks)))
     }
 
     async fn run_gate(

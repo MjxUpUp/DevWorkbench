@@ -26,6 +26,9 @@ pub struct SkillTool {
     description: String,
     /// The full SKILL.md body (returned on invoke, so the agent reads it).
     body: String,
+    /// Source SKILL.md path (provenance for future reload/diagnostics; not
+    /// read on the current invoke path).
+    #[allow(dead_code)]
     path: PathBuf,
 }
 

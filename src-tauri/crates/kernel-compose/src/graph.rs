@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use futures::stream::BoxStream;
 use kernel_core::AgentInput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -175,19 +176,44 @@ pub struct Edge {
 // Executor — injected capability for Agent/Gate nodes
 // ---------------------------------------------------------------------------
 
+/// One chunk of a streaming agent run.
+///
+/// Agents (opaque CLI or transparent ReactAgent) emit incremental output as
+/// they work. The executor maps the kernel-core `AgentEvent` stream onto this
+/// two-variant chunk so the runner can forward `Delta`s to the frontend (as
+/// `GraphEvent::NodeOutput`) and treat the single `Final` as the node's output
+/// value (propagated to successors).
+///
+/// - `Delta` — incremental output (an agent token chunk). May be emitted many
+///   times; the runner forwards each as a `NodeOutput` event but does NOT use
+///   it as the node's logical output.
+/// - `Final` — the terminal value. Emitted exactly once, last, and becomes the
+///   node's output (what successors receive). For agents this is typically the
+///   completed textual answer (opaque: session output_summary; transparent:
+///   final assistant message).
+#[derive(Debug, Clone)]
+pub enum AgentChunk {
+    Delta(Value),
+    Final(Value),
+}
+
 /// The capability the host application provides to run capability-bearing
 /// nodes. Keeping this as a trait (rather than the graph holding `Box<dyn
 /// Agent>` directly) decouples kernel-compose from any concrete implementation
 /// and from kernel-core's `Agent` trait object lifetime concerns.
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
-    /// Run an agent node. Returns the agent's final textual output.
-    async fn run_agent(
+    /// Run an agent node as a STREAM of chunks. The stream must yield zero or
+    /// more `Delta` chunks followed by exactly one `Final` (the node's output
+    /// value); an `Err` item aborts the node. This is non-async because
+    /// constructing the stream is synchronous (the underlying kernel-core
+    /// `Agent::run` returns a stream directly); the caller drives the stream.
+    fn run_agent(
         &self,
         spec: &AgentNodeSpec,
         input: Value,
         working_dir: Option<String>,
-    ) -> Result<Value, String>;
+    ) -> Result<BoxStream<'static, Result<AgentChunk, String>>, String>;
 
     /// Run a quality gate. Returns a report as JSON.
     async fn run_gate(

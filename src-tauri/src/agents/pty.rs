@@ -1,8 +1,8 @@
 use crate::models::{AgentType, ContextSnapshot, Session, SessionStatus};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex};
 use std::sync::LazyLock;
 use tauri::Emitter;
 
@@ -20,16 +20,9 @@ static EXE_CACHE: LazyLock<Mutex<HashMap<String, PathBuf>>> =
 // Tracked process types
 // ---------------------------------------------------------------------------
 
-/// Handles for a PTY-backed session: master (resize), writer (input), killer (stop).
-struct PtyHandles {
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-}
-
-/// A tracked process — either a real PTY or a pipe-based fallback.
+/// A tracked process. PTY support has been removed — all target CLIs run in
+/// non-interactive pipe mode, so every session holds the spawned child PID.
 enum TrackedProcess {
-    Pty(PtyHandles),
     Pipe(u32),
 }
 
@@ -795,45 +788,23 @@ fn spawn_pipe_fallback(
 // Interactive I/O (real for PTY, no-op for pipe)
 // ---------------------------------------------------------------------------
 
-/// Write data to the agent's stdin (via PTY writer). No-op for pipe sessions.
+/// Write data to the agent's stdin. Pipe sessions close stdin right after
+/// delivering the prompt, so interactive writes are not supported (no-op).
 pub fn pty_write(
-    processes: &Arc<AgentProcesses>,
-    session_id: &str,
-    data: &str,
+    _processes: &Arc<AgentProcesses>,
+    _session_id: &str,
+    _data: &str,
 ) -> Result<(), String> {
-    let mut map = processes.processes.lock().map_err(|e| format!("进程表锁失败: {}", e))?;
-    if let Some(TrackedProcess::Pty(ref mut handles)) = map.get_mut(session_id) {
-        handles
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|e| format!("PTY write 失败: {}", e))?;
-        handles
-            .writer
-            .flush()
-            .map_err(|e| format!("PTY flush 失败: {}", e))?;
-    }
     Ok(())
 }
 
-/// Resize the PTY terminal. No-op for pipe sessions.
+/// Resize the terminal. Pipe sessions have no PTY to resize (no-op).
 pub fn pty_resize(
-    processes: &Arc<AgentProcesses>,
-    session_id: &str,
-    cols: u16,
-    rows: u16,
+    _processes: &Arc<AgentProcesses>,
+    _session_id: &str,
+    _cols: u16,
+    _rows: u16,
 ) -> Result<(), String> {
-    let map = processes.processes.lock().map_err(|e| format!("进程表锁失败: {}", e))?;
-    if let Some(TrackedProcess::Pty(ref handles)) = map.get(session_id) {
-        handles
-            .master
-            .resize(portable_pty::PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| format!("PTY resize 失败: {}", e))?;
-    }
     Ok(())
 }
 
@@ -845,12 +816,6 @@ pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(
     };
 
     match tracked {
-        Some(TrackedProcess::Pty(mut handles)) => {
-            handles
-                .killer
-                .kill()
-                .map_err(|e| format!("PTY kill 失败: {}", e))?;
-        }
         Some(TrackedProcess::Pipe(pid)) => {
             #[cfg(target_os = "windows")]
             {

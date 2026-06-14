@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::events::NodeStatus;
 use crate::graph::{
-    CompiledGraph, Executor, MergeStrategy, Node, NodeId, TransformNode,
+    AgentChunk, CompiledGraph, Executor, MergeStrategy, Node, NodeId, TransformNode,
 };
 use crate::GraphEvent;
 
@@ -154,7 +154,40 @@ fn build_run_stream(
             let result: Result<Value, String> = match &node {
                 Node::Prompt(p) => Ok(Value::String(p.text.clone())),
                 Node::Agent(spec) => {
-                    executor.run_agent(spec, incoming.clone(), working_dir.clone()).await
+                    // Streamed: drive the chunk stream, forwarding each Delta as
+                    // a `NodeOutput` event and collecting the single `Final` as
+                    // this node's output value. An `Err` chunk (or a failed
+                    // stream construction) fails the node immediately.
+                    match executor.run_agent(spec, incoming.clone(), working_dir.clone()) {
+                        Ok(chunk_stream) => {
+                            use futures::StreamExt;
+                            let mut s = chunk_stream;
+                            let mut final_val = Value::Null;
+                            let mut agent_err: Option<String> = None;
+                            while let Some(chunk_res) = s.next().await {
+                                match chunk_res {
+                                    Ok(AgentChunk::Delta(chunk)) => {
+                                        yield GraphEvent::NodeOutput {
+                                            node: nid.clone(),
+                                            chunk,
+                                        };
+                                    }
+                                    Ok(AgentChunk::Final(v)) => {
+                                        final_val = v;
+                                    }
+                                    Err(e) => {
+                                        agent_err = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                            match agent_err {
+                                Some(e) => Err(e),
+                                None => Ok(final_val),
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 Node::Gate(gate) => {
                     executor.run_gate(gate, incoming.clone(), working_dir.clone()).await
@@ -331,9 +364,22 @@ mod tests {
     struct MockExec;
     #[async_trait::async_trait]
     impl crate::graph::Executor for MockExec {
-        async fn run_agent(&self, spec: &crate::graph::AgentNodeSpec, input: Value, _wd: Option<String>) -> Result<Value, String> {
-            let t = spec.prompt.clone().or_else(|| input.as_str().map(String::from)).unwrap_or_default();
-            Ok(json!({ "agent": spec.agent, "out": t.to_uppercase() }))
+        fn run_agent(
+            &self,
+            spec: &crate::graph::AgentNodeSpec,
+            input: Value,
+            _wd: Option<String>,
+        ) -> Result<futures::stream::BoxStream<'static, Result<crate::graph::AgentChunk, String>>, String> {
+            let t = spec.prompt.clone()
+                .or_else(|| input.as_str().map(String::from))
+                .unwrap_or_default();
+            let final_val = json!({ "agent": spec.agent, "out": t.to_uppercase() });
+            // Emit one Delta (observable in stream-forwarding tests) then Final.
+            let chunks: Vec<Result<crate::graph::AgentChunk, String>> = vec![
+                Ok(crate::graph::AgentChunk::Delta(json!({ "partial": t.to_uppercase() }))),
+                Ok(crate::graph::AgentChunk::Final(final_val)),
+            ];
+            Ok(Box::pin(futures::stream::iter(chunks)))
         }
         async fn run_gate(&self, gate: &crate::graph::GateNode, input: Value, _wd: Option<String>) -> Result<Value, String> {
             Ok(json!({ "gate": gate.gate, "passed": true, "saw": input }))
@@ -400,24 +446,16 @@ mod tests {
         // H1 regression test: two predecessors both fire into a Merge(Concat);
         // the merge output must contain BOTH values (not empty/null).
         use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, MergeStrategy, Node};
+        // Diamond: prompt fans out to two agents, both merge into one node.
+        // Collect strategy gathers both predecessor outputs into an array.
         let g = GraphBuilder::new()
-            .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), model: None, prompt: Some("alpha".into()), resume_from: None }))
-            .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), model: None, prompt: Some("beta".into()), resume_from: None }))
-            .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Concat }))
-            .edge("a1", "m").edge("a2", "m")
-            .start("a1").end("m").build().unwrap();
-        // NOTE: this graph has two start-able nodes (a1, a2 have no preds) but
-        // only "a1" is declared start. We need both to run. Use a prompt fan-out:
-        // Actually GraphBuilder.start sets one entry. For a true diamond we need
-        // a common source. Let's use a prompt -> {a1,a2} -> merge.
-        let g2 = GraphBuilder::new()
             .node("p", Node::Prompt(crate::graph::PromptNode { text: "go".into(), vars: std::collections::HashMap::new() }))
             .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), model: None, prompt: Some("alpha".into()), resume_from: None }))
             .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), model: None, prompt: Some("beta".into()), resume_from: None }))
             .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Collect }))
             .edge("p", "a1").edge("p", "a2").edge("a1", "m").edge("a2", "m")
             .start("p").end("m").build().unwrap();
-        let compiled = g2.compile().unwrap();
+        let compiled = g.compile().unwrap();
         let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
         let done = events.iter().find_map(|e| match e {
             GraphEvent::GraphDone { output } => Some(output.clone()), _ => None,
@@ -429,6 +467,88 @@ mod tests {
         if let Some(arr) = done.as_array() {
             assert_eq!(arr.len(), 2, "Collect should have 2 preds: {arr:?}");
         }
+    }
+
+    /// Gap-④ proof: an agent node must emit `NodeOutput` events for each Delta
+    /// chunk (previously NodeOutput was emitted nowhere), and its Final chunk
+    /// must become the node's output value.
+    #[tokio::test]
+    async fn agent_node_forwards_delta_chunks_as_node_output() {
+        use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, MergeStrategy, Node};
+        let g = GraphBuilder::new()
+            .node("p", Node::Prompt(crate::graph::PromptNode {
+                text: "seed".into(),
+                vars: std::collections::HashMap::new(),
+            }))
+            .node("a", Node::Agent(AgentNodeSpec {
+                agent: "mock".into(),
+                model: None,
+                prompt: Some("hello".into()),
+                resume_from: None,
+            }))
+            // LastWins picks the agent's Final (a JSON object) — Concat would
+            // drop non-string values and yield empty, which is what made the
+            // first version of this test fail spuriously.
+            .node("e", Node::Merge(MergeNode { strategy: MergeStrategy::LastWins }))
+            .edge("p", "a").edge("a", "e")
+            .start("p").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+
+        // NodeOutput for node "a" must have been emitted (Delta forwarded).
+        let outputs: Vec<&GraphEvent> = events
+            .iter()
+            .filter(|e| matches!(e, GraphEvent::NodeOutput { node, .. } if node == "a"))
+            .collect();
+        assert!(!outputs.is_empty(), "agent node should emit NodeOutput deltas: {events:?}");
+
+        // Final chunk becomes the node output → reaches GraphDone.
+        let done = events.iter().find_map(|e| match e {
+            GraphEvent::GraphDone { output } => Some(output.clone()),
+            _ => None,
+        }).expect("graph must complete");
+        assert_eq!(done["out"], "HELLO", "Final chunk must propagate as node output: {done}");
+    }
+
+    /// An agent stream that yields an `Err` chunk fails the node and the graph.
+    #[tokio::test]
+    async fn agent_stream_error_fails_the_node() {
+        use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, Node};
+        struct FailExec;
+        #[async_trait::async_trait]
+        impl crate::graph::Executor for FailExec {
+            fn run_agent(
+                &self,
+                _spec: &crate::graph::AgentNodeSpec,
+                _input: Value,
+                _wd: Option<String>,
+            ) -> Result<futures::stream::BoxStream<'static, Result<crate::graph::AgentChunk, String>>, String> {
+                let chunks: Vec<Result<crate::graph::AgentChunk, String>> = vec![
+                    Ok(crate::graph::AgentChunk::Delta(json!("partial"))),
+                    Err("simulated agent failure".into()),
+                ];
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            }
+            async fn run_gate(&self, _gate: &crate::graph::GateNode, _input: Value, _wd: Option<String>) -> Result<Value, String> {
+                Ok(Value::Null)
+            }
+        }
+        let g = GraphBuilder::new()
+            .node("a", Node::Agent(AgentNodeSpec {
+                agent: "fail".into(),
+                model: None,
+                prompt: Some("x".into()),
+                resume_from: None,
+            }))
+            .node("e", Node::Merge(MergeNode::default()))
+            .edge("a", "e")
+            .start("a").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(FailExec))).await;
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::GraphFailed { .. })),
+            "agent Err chunk must fail the graph: {events:?}"
+        );
     }
 
 }

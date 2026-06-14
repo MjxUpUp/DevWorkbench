@@ -21,7 +21,7 @@ struct PoolInner {
     db_path: std::path::PathBuf,
 }
 
-struct Pool {
+pub struct Pool {
     inner: Mutex<PoolInner>,
     cvar: Condvar,
 }
