@@ -2,10 +2,11 @@ import { useState, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { Session, QualityReport } from '../../types';
+import type { Session, QualityReport, ChatStreamEvent } from '../../types';
 import { useAgentStore } from '../../stores/agentStore';
 import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
+import { BlocksView } from './BlocksView';
 import { IconEdit, IconCpu, IconStar, IconX, IconStop } from '../Icons';
 
 interface AgentMessageProps {
@@ -16,6 +17,10 @@ interface AgentMessageProps {
 }
 
 const ICON_SIZE = 14;
+// Stable empty array so the blocks selector returns the SAME reference when a
+// session has no blocks yet — otherwise `?? []` mints a fresh array every render
+// and Zustand treats it as a state change → infinite re-render loop.
+const EMPTY_BLOCKS: ChatStreamEvent[] = [];
 
 export function AgentMessage({ session, running, qualityReport, elapsed }: AgentMessageProps) {
   const [chainCollapsed, setChainCollapsed] = useState(false);
@@ -30,10 +35,21 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   const statusDot = running ? 'running' : session.status === 'completed' ? 'completed' : 'failed';
   const statusLabel = running ? '运行中' : session.status === 'completed' ? '已完成' : '失败';
 
+  // Structured agent output blocks (from `agent:event`). When present, the
+  // output area renders BlocksView instead of the terminal/markdown path —
+  // this is the chat-blocks UI for claude (and later ReactAgent). Raw agents
+  // (pi) emit no agent:event, so they keep the existing terminal/markdown path.
+  // Declared before the fullOutput effect below, which short-circuits on it.
+  const blocks = useAgentStore((s) => s.sessionBlocks.get(session.id) ?? EMPTY_BLOCKS);
+  const useBlocks = blocks.length > 0;
+
   // Completed session → load the full reply text once. Falls back to the
   // (truncated) outputSummary if the log file is gone, so something always shows.
   useEffect(() => {
-    if (running) {
+    // BlocksView handles display when structured blocks are in memory; skip the
+    // full-output load (blocks are in-memory only, never persisted — historical
+    // claude sessions have no blocks and fall through to the log read below).
+    if (running || useBlocks) {
       setFullOutput(null);
       return;
     }
@@ -48,7 +64,7 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         setFullOutput(session.outputSummary);
       });
     return () => { cancelled = true; };
-  }, [session.id, session.outputSummary, running]);
+  }, [session.id, session.outputSummary, running, useBlocks]);
 
   // pty 缓存是否含本会话输出。区分"刚完成的当前会话"（缓存仍在，可作占位）
   // 与"历史会话重新加载"（缓存空，用 loading 占位，不显示空 terminal）。
@@ -145,7 +161,19 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
             xterm canvas 无残留空间，杜绝"一闪而过的 terminal"。
           - 完整输出就绪：Markdown 渲染（完整、未截断）
           - 历史会话（无 pty 缓存）未就绪：loading 占位 */}
-      {showTerminal ? (
+      {useBlocks ? (
+        <div className="agent-block">
+          <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
+            <span className="agent-block-title">输出</span>
+            <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
+          </div>
+          {!terminalCollapsed && (
+            <div className="agent-block-body agent-output">
+              <BlocksView events={blocks} running={running} />
+            </div>
+          )}
+        </div>
+      ) : showTerminal ? (
         <div className="agent-block">
           <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
             <span className="agent-block-title">{running ? 'Terminal Output' : '输出'}</span>

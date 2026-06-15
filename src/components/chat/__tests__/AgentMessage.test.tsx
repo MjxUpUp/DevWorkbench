@@ -38,6 +38,9 @@ const noReport: QualityReport | null = null;
 describe('AgentMessage — completed-session output', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset only the in-memory block map (new in this change). ptyOutput is
+    // left untouched to preserve the existing tests' assumptions.
+    useAgentStore.setState({ sessionBlocks: new Map() } as never);
   });
 
   it('renders the FULL output from read_session_output_cmd, not the truncated summary', async () => {
@@ -96,5 +99,27 @@ describe('AgentMessage — completed-session output', () => {
 
     // Output not ready yet (promise pending) → terminal placeholder must be mounted.
     expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
+  });
+
+  it('renders BlocksView when structured blocks are in store (chat-blocks path)', () => {
+    // claude (and later ReactAgent) stream via `agent:event`; the accumulated
+    // blocks drive BlocksView, NOT the terminal/markdown path. And because
+    // blocks are authoritative here, the full-output fetch must be skipped.
+    useAgentStore.setState({
+      sessionBlocks: new Map([
+        ['s1', [
+          { kind: 'text', content: 'block reply' },
+          { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } },
+        ]],
+      ]),
+    } as never);
+    vi.mocked(invoke).mockResolvedValue('should-not-load');
+
+    render(<AgentMessage session={base} running={false} qualityReport={noReport} />);
+
+    expect(screen.getByText('block reply')).toBeInTheDocument();
+    expect(screen.getByText('Read')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-stub')).not.toBeInTheDocument();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
   });
 });

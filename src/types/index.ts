@@ -300,3 +300,16 @@ export interface WorkflowProgressPayload {
   runId: string;
   event: WorkflowProgressEvent;
 }
+
+// ---- Chat block stream types ----
+
+/** Wire-level structured event from the `agent:event` channel — one per parsed
+ *  block of an agent's output (claude stream-json today; ReactAgent later).
+ *  The chat UI folds these into block cards (text / tool call / tool result /
+ *  result). Mirrors the Rust `ChatStreamEvent` serde schema exactly: tag is
+ *  "kind", field names are verbatim (snake_case, NO camelCase). */
+export type ChatStreamEvent =
+  | { kind: 'text'; content: string }
+  | { kind: 'tool_use'; name: string; input: unknown }
+  | { kind: 'tool_result'; content: string; is_error: boolean }
+  | { kind: 'result'; is_error: boolean; secs: number };

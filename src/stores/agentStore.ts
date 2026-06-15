@@ -3,7 +3,7 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, AgentType, Conversation, QualityReport } from '../types';
+import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent } from '../types';
 
 interface AgentState {
   agents: AgentInfo[];
@@ -14,6 +14,10 @@ interface AgentState {
   conversations: Conversation[];
   loading: boolean;
   ptyOutput: Map<string, Uint8Array[]>;
+  /** Structured agent output blocks per session, from the `agent:event` channel.
+   *  In-memory only (not persisted) — completed historical sessions fall back to
+   *  the full-output log via read_session_output_cmd. */
+  sessionBlocks: Map<string, ChatStreamEvent[]>;
   qualityReports: Map<string, QualityReport>;
 
   refreshAgents: () => Promise<void>;
@@ -53,6 +57,8 @@ interface AgentState {
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
   clearPtyOutput: (sessionId: string) => void;
+  appendBlock: (sessionId: string, event: ChatStreamEvent) => void;
+  clearBlocks: (sessionId: string) => void;
   initEventListeners: () => () => void;
 }
 
@@ -62,6 +68,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   conversations: [],
   loading: true,
   ptyOutput: new Map(),
+  sessionBlocks: new Map(),
   qualityReports: new Map(),
 
   refreshAgents: async () => {
@@ -235,6 +242,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     });
   },
 
+  appendBlock: (sessionId, event) => {
+    set((s) => {
+      const next = new Map(s.sessionBlocks);
+      const existing = next.get(sessionId) ?? [];
+      next.set(sessionId, [...existing, event]);
+      return { sessionBlocks: next };
+    });
+  },
+
+  clearBlocks: (sessionId) => {
+    set((s) => {
+      const next = new Map(s.sessionBlocks);
+      next.delete(sessionId);
+      return { sessionBlocks: next };
+    });
+  },
+
   initEventListeners: () => {
     const { refreshSessions } = get();
 
@@ -291,6 +315,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().appendPtyOutput(event.payload.sessionId, new Uint8Array(event.payload.data));
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
+    // Structured agent output — one ChatStreamEvent per parsed block of the
+    // agent's stream (claude stream-json today; ReactAgent later). The chat UI
+    // folds these into block cards via BlocksView. Raw agents (pi) emit no
+    // agent:event, so they keep the TerminalView/Markdown path unchanged.
+    const p4 = listen<{ sessionId: string; event: ChatStreamEvent }>('agent:event', (event) => {
+      get().appendBlock(event.payload.sessionId, event.payload.event);
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+
     // Initial load
     Promise.all([get().refreshAgents(), refreshSessions()])
       .finally(() => set({ loading: false }));
@@ -301,7 +333,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // callbacks will call fn() immediately to clean up.
       unlisteners.forEach((fn) => fn());
       // Also await pending promises to ensure no listeners leak
-      Promise.all([p1, p2, p3]).catch(() => {});
+      Promise.all([p1, p2, p3, p4]).catch(() => {});
     };
   },
 }));
