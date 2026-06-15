@@ -2,6 +2,7 @@ use crate::models::{AgentType, ContextSnapshot, FileDiff, Session, SessionStatus
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::LazyLock;
 use tauri::Emitter;
@@ -10,7 +11,30 @@ use tauri::Emitter;
 const OUTPUT_SUMMARY_MAX_CHARS: usize = 2000;
 
 /// Maximum time a pipe session may run before being force-killed.
-const PIPE_SESSION_TIMEOUT_SECS: u64 = 600; // 10 minutes
+/// Kill a session that produces NO output for this many seconds. A healthy long
+/// task streams continuously (stream-json events / tool output) and never idles
+/// out; only a truly hung process (zero stdout+stderr) trips this. Override via
+/// the DEVWORKBENCH_SESSION_IDLE_TIMEOUT_SECS env var; 0 disables the timeout
+/// entirely (the agent runs until it exits on its own).
+const DEFAULT_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Resolve the idle timeout from the env override, falling back to the default.
+fn session_idle_timeout_secs() -> u64 {
+    std::env::var("DEVWORKBENCH_SESSION_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SESSION_IDLE_TIMEOUT_SECS)
+}
+
+/// Wall-clock millis for the idle tracker. SystemTime (not Instant) because the
+/// value is shared across threads via AtomicU64; a non-monotonic clock jump is
+/// harmless for an "is it still producing output" heuristic.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Cache resolved agent exe paths to avoid repeated PATH scanning.
 static EXE_CACHE: LazyLock<Mutex<HashMap<String, PathBuf>>> =
@@ -878,7 +902,13 @@ fn spawn_pipe_fallback(
     let app_reader = app.clone();
     let sid_reader = session_id.clone();
     let processes_reader = processes.clone();
+    // Shared idle tracker: reader stamps it per output chunk; the wait thread
+    // kills the process if it stays quiet past the idle timeout. Replaces the
+    // fixed 600s wall-clock kill that chopped down healthy streaming long tasks.
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
+
     let output_mode = config.output_mode; // Copy — drives stdout interpretation
+    let last_activity_reader = last_activity.clone();
     std::thread::spawn(move || {
         let mut output_log: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
@@ -892,6 +922,7 @@ fn spawn_pipe_fallback(
                             Ok(n) => {
                                 let data = &buf[..n];
                                 output_log.extend_from_slice(data);
+                                last_activity_reader.store(now_millis(), Ordering::Relaxed);
                                 let _ = app_reader.emit(
                                     "pty:output",
                                     serde_json::json!({
@@ -918,6 +949,7 @@ fn spawn_pipe_fallback(
                         };
                         if let Some(text) = render_claude_stream_event(&line) {
                             output_log.extend_from_slice(text.as_bytes());
+                            last_activity_reader.store(now_millis(), Ordering::Relaxed);
                             let _ = app_reader.emit(
                                 "pty:output",
                                 serde_json::json!({
@@ -937,6 +969,7 @@ fn spawn_pipe_fallback(
                     Ok(n) => {
                         let data = &buf[..n];
                         output_log.extend_from_slice(data);
+                        last_activity_reader.store(now_millis(), Ordering::Relaxed);
                         let _ = app_reader.emit(
                             "pty:output",
                             serde_json::json!({
@@ -961,16 +994,19 @@ fn spawn_pipe_fallback(
         }
     });
 
-    // Wait thread — with timeout to prevent hung processes from blocking forever
+    // Wait thread — kills the process only if it goes IDLE (no output) past the
+    // idle timeout. Unlike a fixed wall-clock kill, a task that keeps streaming
+    // (healthy long runs) never trips this; only a truly hung process does.
     let app_exit = app.clone();
     let sid_exit = session_id.clone();
     let project_path_exit = project_path.to_string();
     let db_conn_exit = db_conn.clone();
     let agent_type_exit = agent_type.clone();
     let processes_kill = processes.clone();
+    let last_activity_wait = last_activity.clone();
     std::thread::spawn(move || {
-        log::info!("[PIPE wait] Waiting for session {} to exit (timeout={}s)", sid_exit, PIPE_SESSION_TIMEOUT_SECS);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(PIPE_SESSION_TIMEOUT_SECS);
+        let idle_secs = session_idle_timeout_secs();
+        log::info!("[PIPE wait] Waiting for session {} (idle_timeout={}s, 0=disabled)", sid_exit, idle_secs);
         let mut timed_out = false;
         let (exit_code, session_status) = loop {
             match child.try_wait() {
@@ -984,12 +1020,19 @@ fn spawn_pipe_fallback(
                     break (code, st);
                 }
                 Ok(None) => {
-                    if std::time::Instant::now() > deadline {
-                        log::warn!("[PIPE wait] Session {} timed out after {}s, killing", sid_exit, PIPE_SESSION_TIMEOUT_SECS);
-                        timed_out = true;
-                        // Force-kill the process tree
-                        let _ = stop_agent(&processes_kill, &sid_exit);
-                        break (None, SessionStatus::Failed);
+                    if idle_secs > 0 {
+                        let idle_ms = now_millis()
+                            .saturating_sub(last_activity_wait.load(Ordering::Relaxed));
+                        if idle_ms > idle_secs * 1000 {
+                            log::warn!(
+                                "[PIPE wait] Session {} idle {}ms (>{}s, no output) — killing",
+                                sid_exit, idle_ms, idle_secs,
+                            );
+                            timed_out = true;
+                            // Force-kill the process tree
+                            let _ = stop_agent(&processes_kill, &sid_exit);
+                            break (None, SessionStatus::Failed);
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
@@ -1006,7 +1049,7 @@ fn spawn_pipe_fallback(
         // Read output summary FIRST so key_output can be derived from it.
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if timed_out {
-                Some(format!("(Session timed out after {}s and was killed)", PIPE_SESSION_TIMEOUT_SECS))
+                Some(format!("(Session killed: no output for {}s — likely hung)", idle_secs))
             } else if exit_code.unwrap_or(-1) == 0 {
                 Some("(Agent completed with no text output)".to_string())
             } else {
@@ -1797,5 +1840,28 @@ mod tests {
         // Malformed / non-JSON line → None (must not panic, never break stream).
         assert_eq!(render_claude_stream_event("not json at all"), None);
         assert_eq!(render_claude_stream_event(""), None);
+    }
+
+    #[test]
+    fn session_idle_timeout_defaults_to_300_when_env_unset() {
+        // The idle timeout replaces the old fixed 600s wall-clock kill. Default
+        // is 300s of NO output — a streaming long task never trips it; only a
+        // hung process (zero output) does. (Env override path verified manually:
+        // DEVWORKBENCH_SESSION_IDLE_TIMEOUT_SECS=0 disables, =N sets N seconds.)
+        std::env::remove_var("DEVWORKBENCH_SESSION_IDLE_TIMEOUT_SECS");
+        assert_eq!(
+            session_idle_timeout_secs(),
+            DEFAULT_SESSION_IDLE_TIMEOUT_SECS,
+            "without the env override the idle timeout is the default",
+        );
+        assert_eq!(DEFAULT_SESSION_IDLE_TIMEOUT_SECS, 300);
+    }
+
+    #[test]
+    fn now_millis_is_nonzero_and_non_decreasing() {
+        let a = now_millis();
+        let b = now_millis();
+        assert!(a > 0, "epoch millis must be nonzero: {a}");
+        assert!(b >= a, "successive reads must not go backwards: {a} -> {b}");
     }
 }
