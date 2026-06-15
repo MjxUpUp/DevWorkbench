@@ -120,7 +120,6 @@ export function ChatView() {
   }, [projectSessions]);
 
   const isContinuing = !!displaySession && displaySession.status !== 'running';
-  const hasConversation = !!(activeSessionId || runningSession);
   const canSend = !!project && !!selectedAgent && !!prompt.trim() && !runningSession;
 
   // Build full prompt with attached files — use absolute paths so backend can read them
@@ -210,8 +209,13 @@ export function ChatView() {
     );
   }
 
-  // Empty state — project selected but no sessions
-  if (!hasConversation && !runningSession) {
+  // Empty state — project selected, no sessions AND nothing running.
+  // Must key off messageSessions (actual session content), NOT activeSessionId:
+  // selectProject clears selectedSessionId on every project switch, so a project
+  // that has completed history would otherwise render as the empty state when
+  // revisited — which is exactly why "history never shows" and why a running
+  // session that finished while you were on another project looked "covered up".
+  if (!runningSession && messageSessions.length === 0) {
     return (
       <div className="chat-view">
         <ChatHeader
