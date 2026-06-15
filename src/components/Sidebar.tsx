@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import type { Project } from '../types';
 import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate, IconTrash } from './Icons';
 import type { IconProps } from './Icons';
@@ -135,9 +135,23 @@ function ConversationList({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
-  const getConversationsForProject = useAgentStore((s) => s.getConversationsForProject);
+  // Subscribe to the raw conversations array so the list re-renders when
+  // refreshConversations populates it. Calling getConversationsForProject as a
+  // method selector returns a stable function reference and does NOT subscribe
+  // to the underlying data — so an async refresh that fills store.conversations
+  // never triggered a re-render, and the list stayed "暂无对话" forever.
+  const allConversations = useAgentStore((s) => s.conversations);
   const refreshConversations = useAgentStore((s) => s.refreshConversations);
-  const conversations = getConversationsForProject(projectPath);
+  const conversations = useMemo(
+    () =>
+      allConversations
+        .filter((c) => c.projectPath === projectPath)
+        .sort((a, b) => {
+          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+          return new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime();
+        }),
+    [allConversations, projectPath],
+  );
 
   // Load the conversation list whenever this project becomes active. The store
   // keeps a global pool, but a freshly-switched project may not be populated

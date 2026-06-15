@@ -26,10 +26,22 @@ const projects = [
   { id: 'p3', name: 'ZCode Adapter', description: '', path: 'E:/ZCodeAdapter', tags: [], cover_image: null, open_count: 3, last_opened_at: null, starred: false, created_at: '2025-05-01T00:00:00.000Z', last_opened_tools: [], workspace_tools: [] },
 ];
 
+// Conversations = the topic containers (Claude-Code "session" semantics). c1 is
+// a cross-agent thread (claude → codex) so the P3 agent-switch divider renders;
+// c2 is a single claude turn. Both under p1 so the sidebar list shows them when
+// p1 is active.
+const conversations = [
+  { id: 'c1', projectPath: 'E:/DevWorkbench', title: '重构 providers 设置页交互', lastAgent: 'codex', status: 'active', startedAt: '2025-06-14T10:00:00.000Z', lastActivityAt: '2025-06-15T09:00:00.000Z', pinned: false },
+  { id: 'c2', projectPath: 'E:/DevWorkbench', title: '修复 OpaqueAgent honesty 审计', lastAgent: 'claude_code', status: 'active', startedAt: '2025-06-13T14:00:00.000Z', lastActivityAt: '2025-06-13T15:30:00.000Z', pinned: true },
+];
+
+// Sessions = turns. c1 has two turns by DIFFERENT agents (the divider case); the
+// running turn (s3) belongs to c1 too. All Session required fields populated so
+// the TS contract (and AgentMessage rendering) doesn't read undefined.
 const sessions = [
-  { id: 's1', prompt: '重构 providers 设置页交互', agentType: 'claude_code', status: 'completed', projectId: 'p1', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-14T10:00:00.000Z', finishedAt: '2025-06-14T11:00:00.000Z', outputPath: null, exitCode: 0, model: 'sonnet', costUsd: 0.12, tokenUsage: null },
-  { id: 's2', prompt: '修复 OpaqueAgent honesty 审计', agentType: 'claude_code', status: 'completed', projectId: 'p1', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-13T14:00:00.000Z', finishedAt: '2025-06-13T15:30:00.000Z', outputPath: null, exitCode: 0, model: 'sonnet', costUsd: 0.08, tokenUsage: null },
-  { id: 's3', prompt: 'DAG Human 节点审批闭环', agentType: 'codex', status: 'running', projectId: 'p1', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-15T09:00:00.000Z', finishedAt: null, outputPath: null, exitCode: null, model: null, costUsd: null, tokenUsage: null },
+  { id: 's1', prompt: '重构 providers 设置页交互', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-14T10:00:00.000Z', finishedAt: '2025-06-14T11:00:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '完成了 providers 设置页交互重构：拆分为三栏布局…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c1' },
+  { id: 's2', prompt: '修复 OpaqueAgent honesty 审计', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-13T14:00:00.000Z', finishedAt: '2025-06-13T15:30:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '修复了 OpaqueAgent honesty 审计的断言弱化检测…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c2' },
+  { id: 's3', prompt: '改用 codex 复核并补测试', agentType: 'codex', status: 'running', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-15T09:00:00.000Z', finishedAt: null, model: null, exitCode: null, outputSummary: null, contextSnapshot: null, linkedRequirementId: null, parentSessionId: 's1', conversationId: 'c1' },
 ];
 
 const knowledge = (q: string) => [
@@ -53,6 +65,12 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   load_projects: () => projects,
   get_sessions_for_project: () => sessions,
   load_sessions: () => sessions,
+  list_conversations: (args) => {
+    const projectPath = String(args.projectPath ?? '');
+    return conversations.filter((c) => c.projectPath === projectPath);
+  },
+  update_conversation: () => null,
+  read_session_output_cmd: () => null,
   search_knowledge: (args) => knowledge(String(args.query ?? '')),
   get_knowledge_for_project: () => [],
   list_workflows: () => workflows,
