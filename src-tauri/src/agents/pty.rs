@@ -259,74 +259,173 @@ fn build_spawn_config(
     })
 }
 
-/// Render one `claude --output-format stream-json` line into human-readable,
-/// ANSI-styled text for the terminal. Returns None for events with no
-/// user-facing content (e.g. system/api_retry noise) so the reader skips them.
-///
-/// Parsed with `serde_json::Value` rather than a full struct schema: claude's
-/// event shapes vary across versions and we need only a couple of fields per
-/// type, so a tolerant parse + `.get()` chain degrades gracefully (unknown or
-/// missing fields ⇒ skip, never panic) instead of failing the whole stream on
-/// one odd line.
-fn render_claude_stream_event(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let ty = v.get("type").and_then(|s| s.as_str())?;
+// ---------------------------------------------------------------------------
+// claude stream-json parsing
+// ---------------------------------------------------------------------------
+//
+// claude `--output-format stream-json` emits one JSON event per line in
+// realtime (vs its default text mode, which buffers everything until exit when
+// stdout is a non-TTY pipe). The old monolithic renderer is split into two
+// passes so the structured blocks can ALSO feed a future `agent:event`
+// channel for chat-style block rendering — not just the ANSI terminal text:
+//
+//   parse_claude_line(line) -> Vec<ClaudeBlock>   (structured, lossless)
+//   render_blocks(&blocks)  -> Option<String>     (ANSI text, byte-identical
+//                                                  to the old single-pass render)
+//
+// Parsed with `serde_json::Value` rather than a full struct schema: claude's
+// event shapes vary across versions and we need only a couple of fields per
+// type, so a tolerant parse + `.get()` chain degrades gracefully (unknown or
+// missing fields ⇒ skip, never panic) instead of failing the whole stream on
+// one odd line.
+
+/// One structured piece of a `claude --output-format stream-json` event line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaudeBlock {
+    /// assistant text content (non-empty).
+    Text { content: String },
+    /// assistant tool_use: tool name + its raw input object. `None` when claude
+    /// omits `input`, so render stays byte-identical to the legacy preview.
+    ToolUse {
+        name: String,
+        input: Option<serde_json::Value>,
+    },
+    /// a user tool_result turn. `content` is the raw result value; `is_error`
+    /// is best-effort (claude sometimes omits the flag).
+    ToolResult {
+        tool_use_id: Option<String>,
+        content: Option<serde_json::Value>,
+        is_error: Option<bool>,
+    },
+    /// terminal result event. `is_error` is the synthesized verdict
+    /// (`is_error || subtype != "success"`), matching the legacy render branch.
+    Result { is_error: bool, secs: u64 },
+}
+
+/// Parse one `claude --output-format stream-json` line into zero or more
+/// structured blocks. Returns an empty Vec for events with no user-facing
+/// content (system / api_retry) or malformed lines — never panics, so one odd
+/// line never breaks the stream.
+pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let ty = match v.get("type").and_then(|s| s.as_str()) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
     match ty {
         "assistant" => {
-            let content = v
-                .get("message")?
-                .get("content")?
-                .as_array()?;
-            let mut out = String::new();
+            let content = match v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                Some(c) => c,
+                None => return Vec::new(),
+            };
+            let mut blocks = Vec::new();
             for block in content {
                 match block.get("type").and_then(|s| s.as_str()).unwrap_or("") {
                     "text" => {
                         if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
                             if !t.is_empty() {
-                                out.push_str(t);
-                                out.push('\n');
+                                blocks.push(ClaudeBlock::Text { content: t.to_string() });
                             }
                         }
                     }
                     "tool_use" => {
-                        let name = block.get("name").and_then(|s| s.as_str()).unwrap_or("tool");
-                        let preview = json_preview(block.get("input"), 80);
-                        out.push_str(&format!("\x1b[36m🔧 {} \x1b[90m{}\x1b[0m\n", name, preview));
+                        let name = block
+                            .get("name")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        let input = block.get("input").cloned();
+                        blocks.push(ClaudeBlock::ToolUse { name, input });
                     }
                     _ => {}
                 }
             }
-            if out.is_empty() { None } else { Some(out) }
+            blocks
         }
         "user" => {
             // tool_result turns — a short result preview proves the tool
             // returned and the agent is making progress.
-            let content = v
+            let content = match v
                 .get("message")
                 .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())?;
-            let mut out = String::new();
+                .and_then(|c| c.as_array())
+            {
+                Some(c) => c,
+                None => return Vec::new(),
+            };
+            let mut blocks = Vec::new();
             for block in content {
                 if block.get("type").and_then(|s| s.as_str()) == Some("tool_result") {
-                    let preview = json_preview(block.get("content"), 120);
-                    out.push_str(&format!("\x1b[90m  ↳ {}\x1b[0m\n", preview));
+                    let tool_use_id = block
+                        .get("tool_use_id")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                    let content = block.get("content").cloned();
+                    let is_error = block.get("is_error").and_then(|b| b.as_bool());
+                    blocks.push(ClaudeBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    });
                 }
             }
-            if out.is_empty() { None } else { Some(out) }
+            blocks
         }
         "result" => {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
             let dur_ms = v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
             let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
             let secs = dur_ms / 1000;
-            if is_error || subtype != "success" {
-                Some(format!("\x1b[31m✗ 失败 ({}s)\x1b[0m\n", secs))
-            } else {
-                Some(format!("\x1b[32m✓ 完成 ({}s)\x1b[0m\n", secs))
-            }
+            vec![ClaudeBlock::Result {
+                is_error: is_error || subtype != "success",
+                secs,
+            }]
         }
         // "system" (init / api_retry) carries no user-facing progress — skip.
-        _ => None,
+        _ => Vec::new(),
+    }
+}
+
+/// Render parsed blocks into ANSI-styled text for the terminal. Returns None
+/// when there is nothing to show (zero blocks). Output is byte-identical to
+/// the old single-pass renderer — the render contract the terminal replay and
+/// `{sid}.log` depend on is preserved exactly (see the golden test).
+pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
+    let mut out = String::new();
+    for block in blocks {
+        match block {
+            ClaudeBlock::Text { content } => {
+                out.push_str(content);
+                out.push('\n');
+            }
+            ClaudeBlock::ToolUse { name, input } => {
+                let preview = json_preview(input.as_ref(), 80);
+                out.push_str(&format!("\x1b[36m🔧 {} \x1b[90m{}\x1b[0m\n", name, preview));
+            }
+            ClaudeBlock::ToolResult { content, .. } => {
+                let preview = json_preview(content.as_ref(), 120);
+                out.push_str(&format!("\x1b[90m  ↳ {}\x1b[0m\n", preview));
+            }
+            ClaudeBlock::Result { is_error, secs } => {
+                if *is_error {
+                    out.push_str(&format!("\x1b[31m✗ 失败 ({}s)\x1b[0m\n", secs));
+                } else {
+                    out.push_str(&format!("\x1b[32m✓ 完成 ({}s)\x1b[0m\n", secs));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -955,7 +1054,8 @@ fn spawn_pipe_fallback(
                             Ok(l) => l,
                             Err(_) => break,
                         };
-                        if let Some(text) = render_claude_stream_event(&line) {
+                        let blocks = parse_claude_line(&line);
+                        if let Some(text) = render_blocks(&blocks) {
                             output_log.extend_from_slice(text.as_bytes());
                             last_activity_reader.store(now_millis(), Ordering::Relaxed);
                             let _ = app_reader.emit(
@@ -1819,35 +1919,123 @@ mod tests {
     }
 
     #[test]
-    fn render_claude_stream_event_extracts_text_tools_and_result() {
-        // assistant text block → the text, verbatim.
+    fn parse_claude_line_assistant_text() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::Text { content: "hello world".to_string() }],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_assistant_text_and_tool_use() {
+        // One assistant line can carry text + a tool call — both survive as
+        // ordered blocks (order matters for the terminal render).
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"reading"},{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![
+                ClaudeBlock::Text { content: "reading".to_string() },
+                ClaudeBlock::ToolUse {
+                    name: "Read".to_string(),
+                    input: Some(serde_json::json!({"file_path":"src/main.rs"})),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_multiple_tool_use() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a"}},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let blocks = parse_claude_line(line);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], ClaudeBlock::ToolUse { ref name, .. } if name == "Read"));
+        assert!(matches!(blocks[1], ClaudeBlock::ToolUse { ref name, .. } if name == "Bash"));
+    }
+
+    #[test]
+    fn parse_claude_line_tool_use_without_input_field() {
+        // claude occasionally omits `input`; render must still match the legacy
+        // empty-preview output (not "null"), so input is parsed as Option.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"WebSearch"}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::ToolUse {
+                name: "WebSearch".to_string(),
+                input: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_tool_result() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"42 lines","is_error":false}]}}"#;
+        let blocks = parse_claude_line(line);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ClaudeBlock::ToolResult { tool_use_id, is_error, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("t1"));
+                assert_eq!(*is_error, Some(false));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_claude_line_result_success_and_error() {
+        let ok = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":45000}"#;
+        assert_eq!(
+            parse_claude_line(ok),
+            vec![ClaudeBlock::Result { is_error: false, secs: 45 }],
+        );
+        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
+        assert_eq!(
+            parse_claude_line(err),
+            vec![ClaudeBlock::Result { is_error: true, secs: 1 }],
+        );
+        // subtype != success also counts as failure even without is_error.
+        let bad = r#"{"type":"result","subtype":"error_during_execution","is_error":false,"duration_ms":500}"#;
+        assert_eq!(
+            parse_claude_line(bad),
+            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_system_and_malformed_are_empty() {
+        // system (init / api_retry) carries no user-facing content.
+        assert!(parse_claude_line(r#"{"type":"system","subtype":"init","session_id":"x"}"#).is_empty());
+        // Malformed / non-JSON / empty → empty (must not panic, never break stream).
+        assert!(parse_claude_line("not json at all").is_empty());
+        assert!(parse_claude_line("").is_empty());
+    }
+
+    #[test]
+    fn render_blocks_is_byte_identical_to_legacy_output() {
+        // Golden snapshots: render_blocks(parse(line)) must equal the exact
+        // ANSI text the old single-pass renderer produced. Locks the render
+        // contract so the terminal replay and {sid}.log stay byte-identical.
         let assistant = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
         assert_eq!(
-            render_claude_stream_event(assistant),
+            render_blocks(&parse_claude_line(assistant)),
             Some("hello world\n".to_string()),
         );
-        // assistant tool_use → 🔧 with the tool name + a short input preview.
         let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
-        let rendered = render_claude_stream_event(tool).expect("tool_use renders");
-        assert!(rendered.contains("🔧 Read"), "tool name shown: {rendered}");
-        assert!(rendered.contains("file_path"), "input preview shown: {rendered}");
-        // result success → green ✓ with duration in seconds.
+        let rendered = render_blocks(&parse_claude_line(tool)).expect("tool_use renders");
+        assert_eq!(rendered, "\x1b[36m🔧 Read \x1b[90m{\"file_path\":\"src/main.rs\"}\x1b[0m\n");
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":45000}"#;
-        let rendered = render_claude_stream_event(ok).expect("result renders");
-        assert!(rendered.contains("✓ 完成"), "success marker: {rendered}");
-        assert!(rendered.contains("45s"), "duration in seconds: {rendered}");
-        // result error → red ✗.
-        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
-        let rendered = render_claude_stream_event(err).expect("error result renders");
-        assert!(rendered.contains("✗ 失败"), "failure marker: {rendered}");
-        // system events (init / api_retry) → None (no user-facing content).
         assert_eq!(
-            render_claude_stream_event(r#"{"type":"system","subtype":"init","session_id":"x"}"#),
-            None,
+            render_blocks(&parse_claude_line(ok)),
+            Some("\x1b[32m✓ 完成 (45s)\x1b[0m\n".to_string()),
         );
-        // Malformed / non-JSON line → None (must not panic, never break stream).
-        assert_eq!(render_claude_stream_event("not json at all"), None);
-        assert_eq!(render_claude_stream_event(""), None);
+        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
+        assert_eq!(
+            render_blocks(&parse_claude_line(err)),
+            Some("\x1b[31m✗ 失败 (1s)\x1b[0m\n".to_string()),
+        );
+        // Zero blocks (system / malformed) → None, not an empty string.
+        assert_eq!(render_blocks(&parse_claude_line(r#"{"type":"system","subtype":"init"}"#)), None);
+        assert_eq!(render_blocks(&parse_claude_line("not json")), None);
     }
 
     #[test]
