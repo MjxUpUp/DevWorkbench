@@ -167,8 +167,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
-CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id);
-
+-- NOTE: idx_sessions_conversation is NOT in the static SCHEMA. The
+-- conversation_id column is added by migrate_v9_to_v10 via ALTER TABLE; on a
+-- pre-v10 database the sessions table exists WITHOUT that column, so a
+-- CREATE INDEX ... ON sessions(conversation_id) here would run BEFORE the
+-- migration (make_conn runs SCHEMA first, migrations second) and abort the
+-- whole execute_batch with `no such column: conversation_id` -- crashing the
+-- app on every launch of an upgraded install. The index is created in the
+-- migration (and guarded there for fresh DBs too).
 -- Conversation = multi-turn dialogue container (= a Claude Code session). Holds
 -- N sessions (turns), possibly by different agents. Built by migrate_v9_to_v10
 -- from existing parent_session_id chains; new turns attach via spawn.

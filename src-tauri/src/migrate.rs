@@ -272,11 +272,17 @@ pub fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
         .is_ok();
     if !col_exists {
         tx.execute("ALTER TABLE sessions ADD COLUMN conversation_id TEXT", [])?;
-        tx.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id)",
-            [],
-        )?;
     }
+    // Index creation is OUTSIDE the `if !col_exists` branch. A fresh DB has the
+    // column already (from the static SCHEMA's CREATE TABLE), so it skips the
+    // ALTER — and previously skipped the index too, leaving the column
+    // un-indexed forever. CREATE INDEX IF NOT EXISTS is idempotent, so running
+    // it unconditionally is safe for old-DB, fresh-DB, and re-run cases alike.
+    // (The index deliberately does NOT live in the static SCHEMA: see db.rs.)
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id)",
+        [],
+    )?;
 
     // 3. Load the parent-chain structure of every session.
     struct Row {
@@ -489,5 +495,76 @@ mod tests {
         migrate_v9_to_v10(&g.conn).unwrap(); // second run
 
         assert_eq!(conversation_count(&g.conn), 1);
+    }
+
+    /// Regression: a pre-v10 database has a `sessions` table WITHOUT the
+    /// conversation_id column. The old static SCHEMA created
+    /// `idx_sessions_conversation ON sessions(conversation_id)` *before* any
+    /// migration ran, so opening such a DB aborted the whole SCHEMA batch with
+    /// `no such column: conversation_id` and the app panicked on every launch.
+    /// This builds that exact old-schema DB, re-opens it (which re-runs SCHEMA
+    /// + migration the way lib.rs does), and asserts it survives with the
+    /// column + index present and the existing session backfilled.
+    #[test]
+    fn pre_v10_db_without_conversation_id_column_opens_and_migrates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("old.db");
+
+        // 1. Build a pre-v10 DB by hand: schema_version at 9, a sessions table
+        //    whose CREATE matches the OLD shape (no conversation_id column),
+        //    and one real row. This is exactly what an upgraded install has on
+        //    disk before this fix.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_version (version, applied_at) VALUES (9, '2026-01-01T00:00:00Z');
+                 CREATE TABLE sessions (
+                     id TEXT PRIMARY KEY,
+                     project_path TEXT NOT NULL,
+                     agent_type TEXT NOT NULL,
+                     status TEXT NOT NULL DEFAULT 'running',
+                     prompt TEXT NOT NULL,
+                     model TEXT,
+                     started_at TEXT NOT NULL,
+                     finished_at TEXT,
+                     exit_code INTEGER,
+                     output_summary TEXT,
+                     context_snapshot TEXT,
+                     linked_requirement_id TEXT,
+                     parent_session_id TEXT
+                 );
+                 INSERT INTO sessions (id, project_path, agent_type, status, prompt, model,
+                     started_at, finished_at, exit_code, output_summary, context_snapshot,
+                     linked_requirement_id, parent_session_id)
+                 VALUES ('legacy1', '/p', 'claude_code', 'completed', 'old prompt',
+                     NULL, '2026-01-01T00:00:00Z', NULL, 0, NULL, NULL, NULL, NULL);",
+            )
+            .unwrap();
+        }
+
+        // 2. Re-open exactly like the app does: init_db runs the full SCHEMA
+        //    (which previously included the offending index), then migrations
+        //    run. Before the fix this line panicked.
+        let conn = db::init_db(&path).expect("re-opening a pre-v10 DB must not panic");
+        migrate_v9_to_v10(&conn).expect("v9→v10 migration on a pre-v10 DB must succeed");
+
+        // 3. The column now exists, the index is in place, and the legacy
+        //    session was backfilled into a conversation.
+        let has_col: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='conversation_id'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_col, 1, "conversation_id column must be added");
+
+        let conv_id: Option<String> = conn
+            .query_row("SELECT conversation_id FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(conv_id.is_some(), "legacy session must be backfilled into a conversation");
+
+        // The index must exist (fresh-DB path used to skip it).
+        let idx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_conversation'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(idx_count, 1, "idx_sessions_conversation must be created");
     }
 }

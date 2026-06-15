@@ -32,6 +32,7 @@ fn make_session(id: &str) -> Session {
         context_snapshot: None,
         linked_requirement_id: None,
         parent_session_id: None,
+        conversation_id: None,
     }
 }
 
