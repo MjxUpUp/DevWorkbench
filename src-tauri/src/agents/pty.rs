@@ -171,7 +171,7 @@ fn build_spawn_config(
     // the other CLIs fall back to argv but switch to stdin when the prompt is
     // large (Windows CLI ~32K limit, and injected file content easily exceeds it).
     const STDIN_PROMPT_THRESHOLD: usize = 4096;
-    let use_stdin = matches!(agent_type, AgentType::ClaudeCode)
+    let use_stdin = matches!(agent_type, AgentType::ClaudeCode | AgentType::Pi)
         || prompt.len() > STDIN_PROMPT_THRESHOLD;
     let stdin_prompt = if use_stdin { Some(prompt.to_string()) } else { None };
 
@@ -233,8 +233,16 @@ fn build_spawn_config(
             args.push(prompt.to_string());
         }
         AgentType::Pi => {
-            args.push("--prompt".to_string());
-            args.push(prompt.to_string());
+            // pi CLI: `pi --print` (-p) is non-interactive and reads the prompt
+            // from STDIN (verified against pi 0.79.3 — `echo x | pi -p` replies;
+            // `pi --prompt x` dies "Unknown option: --prompt"). The prompt is
+            // delivered via stdin (see use_stdin above), NEVER as a --prompt flag
+            // or positional argv. This mirrors how ClaudeCode is invoked.
+            args.push("--print".to_string());
+            if let Some(m) = model {
+                args.push("--model".to_string());
+                args.push(m.to_string());
+            }
         }
     }
 
@@ -1863,5 +1871,40 @@ mod tests {
         let b = now_millis();
         assert!(a > 0, "epoch millis must be nonzero: {a}");
         assert!(b >= a, "successive reads must not go backwards: {a} -> {b}");
+    }
+
+    #[test]
+    fn pi_spawn_uses_print_and_stdin_not_prompt_flag() {
+        // Regression: pi CLI (v0.79.3) has NO --prompt option. The old code did
+        // `pi --prompt "<text>"` and pi died with "Unknown option: --prompt" —
+        // pi never ran at all (the "调用pi不起作用" symptom). Correct call is
+        // `pi --print` with the prompt on stdin, exactly like claude --print.
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("pi".to_string(), std::path::PathBuf::from("pi"));
+        }
+        let cfg = build_spawn_config(&AgentType::Pi, "/p", "hello", None)
+            .expect("build_spawn_config for Pi");
+        assert!(
+            cfg.args.contains(&"--print".to_string()),
+            "Pi must use --print (non-interactive stdin mode): {:?}",
+            cfg.args,
+        );
+        assert!(
+            !cfg.args.contains(&"--prompt".to_string()),
+            "Pi must NOT pass --prompt (pi errors 'Unknown option'): {:?}",
+            cfg.args,
+        );
+        assert!(
+            cfg.stdin_prompt.is_some(),
+            "Pi prompt must go via stdin (like claude), not argv: {:?}",
+            cfg.args,
+        );
+        // The prompt must NOT leak into argv (would double-deliver alongside stdin).
+        assert!(
+            !cfg.args.contains(&"hello".to_string()),
+            "Pi prompt leaked into positional argv: {:?}",
+            cfg.args,
+        );
     }
 }
