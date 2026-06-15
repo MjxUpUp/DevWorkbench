@@ -92,6 +92,7 @@ pub fn run() {
         )))
         .manage(mcp::registry::McpRegistry::new())
         .manage(commands::workflows::ApprovalState::default())
+        .manage(agents::kernel_tasks::KernelTasks::new())
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,

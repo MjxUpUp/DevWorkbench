@@ -244,6 +244,14 @@ fn build_spawn_config(
                 args.push(m.to_string());
             }
         }
+        // Defensive: a kernel agent is never spawned as a CLI subprocess —
+        // spawn_agent_session routes kernel=true to react_chat_driver before
+        // build_spawn_config is reached, and resolve_agent_exe_cached would
+        // already error on command_name="". This arm only keeps the match
+        // exhaustive; reaching it is a routing bug.
+        AgentType::ReactKernel => {
+            return Err("ReactKernel agent must not reach the pty spawn path".into());
+        }
     }
 
     Ok(SpawnConfig {
@@ -915,6 +923,190 @@ fn try_spawn_pty(
 // Pipe fallback path
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Session lifecycle helpers (shared by pipe spawn + kernel react-chat driver)
+// Extracted verbatim from spawn_pipe_fallback so the ReactAgent chat path can
+// reuse the exact same conversation resolution + completion bookkeeping. The
+// pipe path now calls these — behavior is byte-identical to the prior inline
+// code; only the structure changed.
+// ---------------------------------------------------------------------------
+
+/// Resolve the conversation this turn belongs to. `None` ⇒ first turn of a
+/// brand-new conversation (create it, title = prompt head). `Some` ⇒ attach
+/// (the row already exists; the caller touches last_activity on register).
+pub(crate) fn resolve_or_create_conversation(
+    db_conn: &crate::db::DbState,
+    conversation_id: Option<&str>,
+    project_path: &str,
+    prompt: &str,
+    agent_type: &AgentType,
+) -> Result<String, String> {
+    let conn = db_conn.get().map_err(|e| e.to_string())?;
+    let resolved_conv_id: String = match conversation_id {
+        Some(id) => id.to_string(),
+        None => {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Local::now().to_rfc3339();
+            let title: String = prompt.chars().take(40).collect();
+            let conv = crate::models::Conversation {
+                id: new_id.clone(),
+                project_path: project_path.to_string(),
+                title,
+                last_agent: Some(agent_type.clone()),
+                status: "active".to_string(),
+                started_at: now.clone(),
+                last_activity_at: now,
+                pinned: false,
+            };
+            crate::agents::session::insert_conversation_db(&conn, &conv)
+                .map_err(|e| e.to_string())?;
+            new_id
+        }
+    };
+    Ok(resolved_conv_id)
+}
+
+/// Build a `Running` Session row ready for `insert_session_db`. Does not write.
+pub(crate) fn build_running_session_row(
+    session_id: &str,
+    project_path: &str,
+    agent_type: &AgentType,
+    prompt: &str,
+    model: Option<&str>,
+    conversation_id: &str,
+    linked_requirement_id: Option<&str>,
+    parent_session_id: Option<&str>,
+) -> Session {
+    Session {
+        id: session_id.to_string(),
+        project_path: project_path.to_string(),
+        agent_type: agent_type.clone(),
+        status: SessionStatus::Running,
+        prompt: prompt.to_string(),
+        model: model.map(|m| m.to_string()),
+        started_at: chrono::Local::now().to_rfc3339(),
+        finished_at: None,
+        exit_code: None,
+        output_summary: None,
+        context_snapshot: None,
+        linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
+        parent_session_id: parent_session_id.map(|s| s.to_string()),
+        conversation_id: Some(conversation_id.to_string()),
+    }
+}
+
+/// Insert the session row, touch the conversation's last_activity (when
+/// attaching), record a `session_started` activity event, and emit
+/// `agent:started`. This is the synchronous setup half of spawn — it must
+/// complete before the caller hands the session back to the UI.
+pub(crate) fn register_running_session(
+    db_conn: &crate::db::DbState,
+    app: &tauri::AppHandle,
+    session: &Session,
+    conversation_id: Option<&str>,
+    resolved_conv_id: &str,
+    project_path: &str,
+    agent_type: &AgentType,
+) -> Result<(), String> {
+    let conn = db_conn.get().map_err(|e| e.to_string())?;
+    crate::agents::session::insert_session_db(&conn, session)
+        .map_err(|e| e.to_string())?;
+
+    if conversation_id.is_some() {
+        let now = chrono::Local::now().to_rfc3339();
+        let patch = serde_json::json!({
+            "lastAgent": serde_json::to_string(agent_type).unwrap_or_default().trim_matches('"'),
+            "lastActivityAt": now,
+        });
+        let _ = crate::agents::session::update_conversation_db(&conn, resolved_conv_id, patch);
+    }
+
+    let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
+        &session.id,
+        project_path,
+        agent_type,
+        "session_started",
+        &format!("{} session started", agent_type.display_name()),
+        None,
+        None,
+    ));
+    let _ = app.emit("agent:started", session);
+    Ok(())
+}
+
+/// Write the final session state: status/finishedAt/exit/context/summary patch,
+/// a `session_completed`/`session_failed` activity event (carrying the changed
+/// file list), and emit `agent:completed`. Then kick off the post-session hooks
+/// (knowledge collection, quality gate) on a background thread. The caller
+/// prepares `output_summary` + `context_snapshot`; this fn only persists the
+/// terminal state — so the ReactAgent driver can call it with the same shape the
+/// pipe wait-thread does.
+pub(crate) fn finalize_session(
+    db_conn: &crate::db::DbState,
+    app: &tauri::AppHandle,
+    session_id: &str,
+    project_path: &str,
+    agent_type: &AgentType,
+    session_status: SessionStatus,
+    exit_code: Option<i32>,
+    output_summary: Option<String>,
+    context_snapshot: Option<ContextSnapshot>,
+) {
+    let files_for_activity = context_snapshot.as_ref().map(|s| s.files_changed.clone());
+
+    let mut patch = serde_json::json!({
+        "status": session_status.as_str(),
+        "finishedAt": chrono::Local::now().to_rfc3339(),
+    });
+    if let Some(code) = exit_code {
+        patch["exitCode"] = code.into();
+    }
+    if let Some(snap) = context_snapshot {
+        patch["contextSnapshot"] = serde_json::to_value(snap).unwrap();
+    }
+    if let Some(summary) = output_summary {
+        patch["outputSummary"] = serde_json::Value::String(summary);
+    }
+
+    log::info!("[completion] Session {} locking DB for completion update...", session_id);
+    if let Ok(conn) = db_conn.get() {
+        log::info!("[completion] Session {} DB locked, writing completion...", session_id);
+        let _ = crate::agents::session::update_session_db(&conn, session_id, patch);
+        let event_type = match session_status {
+            SessionStatus::Completed => "session_completed",
+            _ => "session_failed",
+        };
+        let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
+            session_id,
+            project_path,
+            agent_type,
+            event_type,
+            &format!("{} session {}", agent_type.display_name(), session_status.as_str()),
+            None,
+            files_for_activity,
+        ));
+    } else {
+        log::error!("[finalize] Failed to lock DB for session {} completion update", session_id);
+    }
+    log::info!("[finalize] Emitting agent:completed for session {}", session_id);
+    let _ = app.emit(
+        "agent:completed",
+        serde_json::json!({
+            "sessionId": session_id,
+            "status": session_status.as_str(),
+            "exitCode": exit_code,
+        }),
+    );
+
+    run_post_session_hooks(
+        db_conn.clone(),
+        project_path.to_string(),
+        session_id.to_string(),
+        agent_type.clone(),
+        session_status,
+    );
+}
+
 fn spawn_pipe_fallback(
     app: &tauri::AppHandle,
     processes: Arc<AgentProcesses>,
@@ -985,74 +1177,16 @@ fn spawn_pipe_fallback(
             .ok();
     }
 
-    let session = {
-        // Resolve the conversation this turn belongs to. None ⇒ first turn of
-        // a brand-new conversation (create it, title = prompt head). Some ⇒
-        // attach + touch last_agent/last_activity so the list stays fresh.
-        let conn = db_conn.get().map_err(|e| e.to_string())?;
-        let resolved_conv_id: String = match conversation_id {
-            Some(id) => id.to_string(),
-            None => {
-                let new_id = uuid::Uuid::new_v4().to_string();
-                let now = chrono::Local::now().to_rfc3339();
-                let title: String = prompt.chars().take(40).collect();
-                let conv = crate::models::Conversation {
-                    id: new_id.clone(),
-                    project_path: project_path.to_string(),
-                    title,
-                    last_agent: Some(agent_type.clone()),
-                    status: "active".to_string(),
-                    started_at: now.clone(),
-                    last_activity_at: now,
-                    pinned: false,
-                };
-                crate::agents::session::insert_conversation_db(&conn, &conv)
-                    .map_err(|e| e.to_string())?;
-                new_id
-            }
-        };
-
-        let session = Session {
-            id: session_id.clone(),
-            project_path: project_path.to_string(),
-            agent_type: agent_type.clone(),
-            status: SessionStatus::Running,
-            prompt: prompt.to_string(),
-            model: model.map(|m| m.to_string()),
-            started_at: chrono::Local::now().to_rfc3339(),
-            finished_at: None,
-            exit_code: None,
-            output_summary: None,
-            context_snapshot: None,
-            linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
-            parent_session_id: parent_session_id.map(|s| s.to_string()),
-            conversation_id: Some(resolved_conv_id.clone()),
-        };
-
-        crate::agents::session::insert_session_db(&conn, &session)
-            .map_err(|e| e.to_string())?;
-
-        if conversation_id.is_some() {
-            let now = chrono::Local::now().to_rfc3339();
-            let patch = serde_json::json!({
-                "lastAgent": serde_json::to_string(agent_type).unwrap_or_default().trim_matches('"'),
-                "lastActivityAt": now,
-            });
-            let _ = crate::agents::session::update_conversation_db(&conn, &resolved_conv_id, patch);
-        }
-
-        let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
-            &session_id,
-            project_path,
-            agent_type,
-            "session_started",
-            &format!("{} session started", agent_type.display_name()),
-            None,
-            None,
-        ));
-        session
-    };
-    let _ = app.emit("agent:started", &session);
+    let resolved_conv_id = resolve_or_create_conversation(
+        &db_conn, conversation_id, project_path, prompt, agent_type,
+    )?;
+    let session = build_running_session_row(
+        &session_id, project_path, agent_type, prompt, model,
+        &resolved_conv_id, linked_requirement_id, parent_session_id,
+    );
+    register_running_session(
+        &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
+    )?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1244,58 +1378,16 @@ fn spawn_pipe_fallback(
             snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0),
             snapshot.as_ref().map(|s| s.key_output.chars().count()).unwrap_or(0)
         );
-        let files_for_activity = snapshot.as_ref().map(|s| s.files_changed.clone());
-
-        let mut patch = serde_json::json!({
-            "status": session_status.as_str(),
-            "finishedAt": chrono::Local::now().to_rfc3339(),
-        });
-        if let Some(code) = exit_code {
-            patch["exitCode"] = code.into();
-        }
-        if let Some(snap) = snapshot {
-            patch["contextSnapshot"] = serde_json::to_value(snap).unwrap();
-        }
-        if let Some(summary) = output_summary {
-            patch["outputSummary"] = serde_json::Value::String(summary);
-        }
-
-        log::info!("[completion] Session {} locking DB for completion update...", sid_exit);
-        if let Ok(conn) = db_conn_exit.get() {
-            log::info!("[completion] Session {} DB locked, writing completion...", sid_exit);
-            let _ = crate::agents::session::update_session_db(&conn, &sid_exit, patch);
-            let event_type = match session_status {
-                SessionStatus::Completed => "session_completed",
-                _ => "session_failed",
-            };
-            let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
-                &sid_exit,
-                &project_path_exit,
-                &agent_type_exit,
-                event_type,
-                &format!("{} session {}", agent_type_exit.display_name(), session_status.as_str()),
-                None,
-                files_for_activity,
-            ));
-        } else {
-            log::error!("[PIPE wait] Failed to lock DB for session {} completion update", sid_exit);
-        }
-        log::info!("[PIPE wait] Emitting agent:completed for session {}", sid_exit);
-        let _ = app_exit.emit(
-            "agent:completed",
-            serde_json::json!({
-                "sessionId": sid_exit,
-                "status": session_status.as_str(),
-                "exitCode": exit_code,
-            }),
-        );
-
-        run_post_session_hooks(
-            db_conn_exit.clone(),
-            project_path_exit.clone(),
-            sid_exit.to_string(),
-            agent_type_exit.clone(),
+        finalize_session(
+            &db_conn_exit,
+            &app_exit,
+            &sid_exit,
+            &project_path_exit,
+            &agent_type_exit,
             session_status,
+            exit_code,
+            output_summary,
+            snapshot,
         );
     });
 

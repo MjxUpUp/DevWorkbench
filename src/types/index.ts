@@ -60,7 +60,8 @@ export type AgentType =
   | 'gemini_cli'
   | 'copilot'
   | 'qwen_code'
-  | 'pi';
+  | 'pi'
+  | 'react_kernel';
 
 export type SessionStatus = 'running' | 'completed' | 'failed';
 

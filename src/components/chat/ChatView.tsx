@@ -147,10 +147,13 @@ export function ChatView() {
     if (!selectedAgent || !prompt.trim() || runningSession || !project) return;
     const text = buildFullPrompt();
     try {
+      // Kernel agents (self-hosted ReactAgent) route through react_chat_driver
+      // instead of a CLI subprocess — flagged by kernel=true.
+      const kernel = selectedAgent === 'react_kernel';
       if (activeConversationId && !runningSession) {
         // Follow-up turn on the existing conversation. The agent may differ
         // from the previous turn — that's the conversation-container model.
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent);
+        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel);
         // continueConversation attaches to the already-selected conversation;
         // selection is already correct, no need to re-select.
         void session;
@@ -160,7 +163,7 @@ export function ChatView() {
         // the main view binds to the new container.
         const agent = selectedAgent || getDefaultAgent();
         if (agent) {
-          const session = await createConversation(project.path, text, agent);
+          const session = await createConversation(project.path, text, agent, kernel);
           selectConversation(session.conversationId);
         }
       }

@@ -39,6 +39,9 @@ export function ChatHeader({
             {agent.displayName}
           </option>
         ))}
+        {/* Self-hosted ReactAgent — always available (no CLI to discover), runs
+            in-process via the kernel react_chat driver. */}
+        <option value="react_kernel">Kernel Agent (GLM)</option>
       </select>
 
       <ModeSelector value={agentMode} onChange={onModeChange} />

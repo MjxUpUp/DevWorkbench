@@ -5,7 +5,12 @@ use crate::db::DbState;
 use crate::error::AppError;
 use crate::models::{AgentType, Conversation, Session};
 use std::sync::Arc;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
+use crate::agents::kernel_tasks::KernelTasks;
+use crate::agents::react_chat;
+use crate::kernel_impl::executor;
+use crate::models::SessionStatus;
+use kernel_core::{Agent, AgentEvent, AgentInput, AgentRunStatus};
 
 /// Tauri managed state wrapping AgentProcesses (PTY-based)
 pub struct AgentState(pub Arc<pty::AgentProcesses>);
@@ -49,12 +54,14 @@ pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, App
     Ok(pty::read_full_session_output(&session_id))
 }
 
-// Agent process lifecycle commands (PTY-based)
+// Agent process lifecycle commands (PTY-based for CLI agents + kernel for the
+// self-hosted ReactAgent).
 #[tauri::command]
 pub fn spawn_agent_session(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
     db: State<'_, DbState>,
+    kernel_tasks: State<'_, KernelTasks>,
     project_path: String,
     agent_type: AgentType,
     prompt: String,
@@ -62,7 +69,27 @@ pub fn spawn_agent_session(
     linked_requirement_id: Option<String>,
     parent_session_id: Option<String>,
     conversation_id: Option<String>,
+    kernel: bool,
 ) -> Result<Session, AppError> {
+    if kernel {
+        // Self-hosted ReactAgent path: no child process, no PTY. The agent runs
+        // as a tokio task driving a BoxStream<AgentEvent>, mapped to the SAME
+        // `agent:event` wire schema claude uses (see react_chat). This is the B
+        // plan's core payoff — one chat-block presentation layer for both CLI
+        // and self-hosted agents.
+        return Ok(react_chat_driver(
+            &app,
+            db.inner().clone(),
+            kernel_tasks.inner(),
+            &project_path,
+            &agent_type,
+            &prompt,
+            model.as_deref(),
+            linked_requirement_id.as_deref(),
+            parent_session_id.as_deref(),
+            conversation_id.as_deref(),
+        )?);
+    }
     Ok(pty::spawn_pty_agent(
         &app,
         state.0.clone(),
@@ -75,6 +102,146 @@ pub fn spawn_agent_session(
         parent_session_id.as_deref(),
         conversation_id.as_deref(),
     )?)
+}
+
+/// Drive a self-hosted ReactAgent on a background tokio task, mirroring the pty
+/// spawn shape: build the Running session row synchronously (so the UI gets a
+/// session id + `agent:started` immediately), then stream AgentEvents →
+/// ChatStreamEvents → `agent:event`, and finalize on completion/error.
+///
+/// The driver task is registered in `KernelTasks` so `stop_agent_session` can
+/// abort it. Aborting drops the future — the driver's own finalize does NOT run
+/// — so stop must write the failed status itself, which it does.
+///
+/// MVP constraints (explicitly deferred, see plan §"阶段 E 后续"):
+/// empty ToolRegistry (no real tools yet), non-streaming `generate()` (Token is
+/// the whole message, not chunked), single-turn (resume_from ignored).
+fn react_chat_driver(
+    app: &tauri::AppHandle,
+    db_conn: crate::db::DbState,
+    kernel_tasks: &KernelTasks,
+    project_path: &str,
+    agent_type: &AgentType,
+    prompt: &str,
+    model: Option<&str>,
+    linked_requirement_id: Option<&str>,
+    parent_session_id: Option<&str>,
+    conversation_id: Option<&str>,
+) -> Result<Session, String> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let resolved_conv_id = pty::resolve_or_create_conversation(
+        &db_conn, conversation_id, project_path, prompt, agent_type,
+    )?;
+    let session = pty::build_running_session_row(
+        &session_id, project_path, agent_type, prompt, model,
+        &resolved_conv_id, linked_requirement_id, parent_session_id,
+    );
+    pty::register_running_session(
+        &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
+    )?;
+
+    let started = std::time::Instant::now();
+    let app_drv = app.clone();
+    let sid_drv = session_id.clone();
+    let db_drv = db_conn.clone();
+    let pp_drv = project_path.to_string();
+    let at_drv = agent_type.clone();
+    let model_drv = model.map(|m| m.to_string());
+    let prompt_drv = prompt.to_string();
+
+    let handle = tokio::spawn(async move {
+        let agent = match executor::build_react_agent(model_drv.as_deref()) {
+            Ok(a) => a,
+            Err(e) => {
+                log::error!("[react_chat] build_react_agent failed for {}: {e}", sid_drv);
+                pty::finalize_session(
+                    &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
+                    SessionStatus::Failed, None,
+                    Some(format!("Agent init failed: {e}")), None,
+                );
+                return;
+            }
+        };
+        let input = AgentInput {
+            prompt: prompt_drv,
+            working_dir: Some(pp_drv.clone()),
+            model: None,
+            resume_from: None,
+        };
+        let mut stream = match agent.run(input) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("[react_chat] agent.run failed for {}: {e}", sid_drv);
+                pty::finalize_session(
+                    &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
+                    SessionStatus::Failed, None,
+                    Some(format!("Agent run failed: {e}")), None,
+                );
+                return;
+            }
+        };
+
+        use futures::StreamExt;
+        let mut final_status = SessionStatus::Completed;
+        let mut final_exit: Option<i32> = Some(0);
+        let mut final_output = String::new();
+        while let Some(ev_res) = stream.next().await {
+            let secs = started.elapsed().as_secs();
+            let ev = match ev_res {
+                Ok(e) => e,
+                Err(e) => {
+                    log::error!("[react_chat] stream error for {}: {e}", sid_drv);
+                    let summary = if final_output.is_empty() {
+                        Some(format!("Agent error: {e}"))
+                    } else {
+                        Some(final_output.clone())
+                    };
+                    pty::finalize_session(
+                        &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
+                        SessionStatus::Failed, None, summary, None,
+                    );
+                    return;
+                }
+            };
+            // Track terminal status/exit/output from Done; accumulate Token text
+            // as a fallback summary (Done.output_summary is authoritative when set).
+            match &ev {
+                AgentEvent::Token(t) => final_output.push_str(t),
+                AgentEvent::Done(outcome) => {
+                    final_status = match outcome.status {
+                        AgentRunStatus::Completed => SessionStatus::Completed,
+                        _ => SessionStatus::Failed,
+                    };
+                    final_exit = outcome.exit_code;
+                    if let Some(s) = &outcome.output_summary {
+                        final_output = s.clone();
+                    }
+                }
+                _ => {}
+            }
+            for wire in react_chat::map_agent_event(ev, secs) {
+                let _ = app_drv.emit(
+                    "agent:event",
+                    serde_json::json!({ "sessionId": &sid_drv, "event": wire }),
+                );
+            }
+        }
+
+        // Stream ended (ReactAgent always yields Done before ending — this is the
+        // normal completion path). Remove from the stop table so a later stop on
+        // this completed session doesn't touch a dead handle, then persist state.
+        if let Some(kt) = app_drv.try_state::<KernelTasks>() {
+            kt.remove(&sid_drv);
+        }
+        let summary = if final_output.is_empty() { None } else { Some(final_output) };
+        pty::finalize_session(
+            &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
+            final_status, final_exit, summary, None,
+        );
+    });
+
+    kernel_tasks.insert(&session_id, handle);
+    Ok(session)
 }
 
 // ---- Conversation commands ----
@@ -104,10 +271,19 @@ pub fn stop_agent_session(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
     db: State<'_, DbState>,
+    kernel_tasks: State<'_, KernelTasks>,
     session_id: String,
 ) -> Result<(), AppError> {
-    // Best-effort kill; process may already be dead (stale session)
-    let _ = pty::stop_agent(&state.0, &session_id);
+    // Kernel agents have no PID — abort their driver task. Returns true iff this
+    // session was a kernel task, in which case we skip the pty/PID kill below.
+    let was_kernel = kernel_tasks.abort(&session_id);
+    if !was_kernel {
+        // Best-effort PID kill; process may already be dead (stale session)
+        let _ = pty::stop_agent(&state.0, &session_id);
+    }
+    // Aborting a kernel task drops its future — the driver's own finalize does
+    // NOT run. So we always write the failed status + emit agent:completed
+    // here (same as the pty path), regardless of agent kind.
 
     // Always update session status so UI reflects the stop immediately
     let patch = serde_json::json!({

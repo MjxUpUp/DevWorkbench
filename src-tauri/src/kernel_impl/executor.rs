@@ -139,7 +139,7 @@ impl Executor for KernelExecutor {
 /// model: the agent still CONSTRUCTS (so the graph run doesn't crash), but GLM
 /// calls fail at request time with 401 — the honest signal that Settings →
 /// Providers needs a key.
-fn build_react_agent(model: Option<&str>) -> Result<ReactAgent, String> {
+pub(crate) fn build_react_agent(model: Option<&str>) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
     let (endpoint, api_key, resolved_model) =

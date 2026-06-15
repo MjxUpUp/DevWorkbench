@@ -73,6 +73,12 @@ pub enum AgentType { // NOTE: do NOT derive Copy — contains variants without t
     Copilot,
     QwenCode,
     Pi,
+    /// Self-hosted ReactAgent (kernel layer). NOT a CLI — never discovered, never
+    /// spawned as a subprocess. spawn_agent_session routes kernel=true to the
+    /// react_chat driver. Exists as a variant so the DB/session/activity layer
+    /// can record + render it like any other agent. Deliberately absent from
+    /// all()/from_spec so discovery + workflow dispatch stay CLI-only.
+    ReactKernel,
 }
 
 impl AgentType {
@@ -85,6 +91,10 @@ impl AgentType {
             Self::Copilot => "github-copilot-cli",
             Self::QwenCode => "qwen",
             Self::Pi => "pi",
+            // No CLI binary — ReactKernel runs in-process via the react_chat
+            // driver, never as a subprocess. Empty so resolve_agent_exe fails
+            // fast if a ReactKernel is ever misrouted to the pty spawn path.
+            Self::ReactKernel => "",
         }
     }
 
@@ -114,6 +124,7 @@ impl AgentType {
             Self::Copilot => "GitHub Copilot",
             Self::QwenCode => "Qwen Code",
             Self::Pi => "Pi",
+            Self::ReactKernel => "Kernel Agent (GLM)",
         }
     }
 
