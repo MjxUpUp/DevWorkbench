@@ -130,4 +130,52 @@ describe('Sidebar', () => {
     await user.click(screen.getByText('newer topic'));
     expect(useNavigationStore.getState().selectedConversationId).toBe('c-new');
   });
+
+  it('does not flash the empty state while the first conversation refresh is in flight', () => {
+    // Regression for the "加载闪动" symptom: on first project click, refresh
+    // is still in flight and conversations is empty. Rendering the empty state
+    // there flashes it for a frame before the list pops in. ConversationList
+    // must render NOTHING until the first refresh resolves, then decide.
+    const proj = makeProject('p1', 'Alpha', 'E:/Alpha');
+    useProjectStore.setState({ projects: [proj], loading: false, error: null });
+    useNavigationStore.setState({
+      activeProject: proj,
+      activeView: 'task',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    // Pin refresh to a never-resolving promise so loadedPaths is never marked —
+    // this is exactly the in-flight window where the flash used to occur.
+    useAgentStore.setState({
+      conversations: [],
+      refreshConversations: () => new Promise<void>(() => {}),
+    } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
+
+    render(<Sidebar />);
+
+    // No empty-state text while the first load is still pending.
+    expect(screen.queryByText('暂无对话')).toBeNull();
+  });
+
+  it('shows the empty state once the first refresh resolves with zero conversations', async () => {
+    // After the first refresh resolves and the project genuinely has zero
+    // conversations, the empty state is legitimate and must appear.
+    const proj = makeProject('p1', 'Alpha', 'E:/Alpha');
+    useProjectStore.setState({ projects: [proj], loading: false, error: null });
+    useNavigationStore.setState({
+      activeProject: proj,
+      activeView: 'task',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    // Resolve immediately so loadedPaths is marked on the first effect tick.
+    useAgentStore.setState({
+      conversations: [],
+      refreshConversations: () => Promise.resolve(),
+    } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
+
+    render(<Sidebar />);
+
+    expect(await screen.findByText('暂无对话')).toBeInTheDocument();
+  });
 });

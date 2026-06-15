@@ -156,12 +156,25 @@ function ConversationList({
   // Load the conversation list whenever this project becomes active. The store
   // keeps a global pool, but a freshly-switched project may not be populated
   // until this fetch runs.
+  //
+  // Track which projects have finished their FIRST refresh. Before it resolves,
+  // `conversations` is empty — rendering the "暂无对话" empty state there would
+  // flash it for a frame before the list pops in (the flicker on first project
+  // click). So render nothing during the first load, and only show the empty
+  // state once we've confirmed the project genuinely has zero conversations.
+  const [loadedPaths, setLoadedPaths] = useState<Set<string>>(new Set());
   useEffect(() => {
-    void refreshConversations(projectPath);
+    void refreshConversations(projectPath).then(() => {
+      setLoadedPaths((prev) =>
+        prev.has(projectPath) ? prev : new Set(prev).add(projectPath),
+      );
+    });
   }, [projectPath, refreshConversations]);
 
   if (conversations.length === 0) {
-    return <div className="left-column-conversations-empty">暂无对话</div>;
+    return loadedPaths.has(projectPath) ? (
+      <div className="left-column-conversations-empty">暂无对话</div>
+    ) : null;
   }
 
   return (
