@@ -30,6 +30,7 @@ const base: Session = {
   contextSnapshot: null,
   linkedRequirementId: null,
   parentSessionId: null,
+  conversationId: null,
 };
 
 const noReport: QualityReport | null = null;

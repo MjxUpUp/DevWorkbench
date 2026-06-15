@@ -3,17 +3,22 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, AgentType, QualityReport } from '../types';
+import type { AgentInfo, Session, AgentType, Conversation, QualityReport } from '../types';
 
 interface AgentState {
   agents: AgentInfo[];
+  /** All turns (sessions) across every project. A turn is one user prompt →
+   *  one agent run; turns group into conversations via `conversationId`. */
   sessions: Session[];
+  /** All conversation containers, across every project. */
+  conversations: Conversation[];
   loading: boolean;
   ptyOutput: Map<string, Uint8Array[]>;
   qualityReports: Map<string, QualityReport>;
 
   refreshAgents: () => Promise<void>;
   refreshSessions: () => Promise<void>;
+  refreshConversations: (projectPath: string) => Promise<void>;
   spawnAgent: (
     projectPath: string,
     agentType: AgentType,
@@ -21,13 +26,30 @@ interface AgentState {
     model?: string,
     linkedRequirementId?: string,
     parentSessionId?: string,
+    conversationId?: string,
   ) => Promise<Session>;
   stopAgent: (sessionId: string) => Promise<void>;
   getSessionsForProject: (projectPath: string) => Session[];
+  /** Turns of one conversation, oldest-first. */
+  getTurnsForConversation: (conversationId: string) => Session[];
+  /** Conversations belonging to a project, newest-activity-first. */
+  getConversationsForProject: (projectPath: string) => Conversation[];
+  /** Resolve the conversation a turn belongs to (for activity→conversation jumps). */
+  getConversationForSession: (sessionId: string) => Conversation | null;
+  updateConversation: (id: string, patch: Record<string, unknown>) => Promise<void>;
   recommendAgent: (tags: string[]) => Promise<AgentType | null>;
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
-  newConversation: (projectPath: string, title: string, agentType: AgentType) => Promise<Session>;
+  /** First turn of a brand-new conversation (no conversation_id yet). */
+  createConversation: (projectPath: string, prompt: string, agentType: AgentType) => Promise<Session>;
+  /** Append a follow-up turn to an existing conversation. The agent may differ
+   *  from prior turns — that's the whole point of the conversation container. */
+  continueConversation: (
+    projectPath: string,
+    conversationId: string,
+    prompt: string,
+    agentType: AgentType,
+  ) => Promise<Session>;
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
   clearPtyOutput: (sessionId: string) => void;
@@ -37,6 +59,7 @@ interface AgentState {
 export const useAgentStore = create<AgentState>((set, get) => ({
   agents: [],
   sessions: [],
+  conversations: [],
   loading: true,
   ptyOutput: new Map(),
   qualityReports: new Map(),
@@ -72,7 +95,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId) => {
+  refreshConversations: async (projectPath) => {
+    try {
+      const result = await invoke<Conversation[]>('list_conversations', { projectPath });
+      set((s) => {
+        // Same merge rationale as refreshSessions: a just-spawned turn may
+        // have created a conversation the backend list_conversations read
+        // doesn't surface yet (WAL lag). Preserve local-only conversations.
+        const dbIds = new Set(result.map((r) => r.id));
+        const localOnly = s.conversations.filter((c) => !dbIds.has(c.id));
+        return { conversations: [...result, ...localOnly] };
+      });
+    } catch (e) {
+      console.error('Failed to load conversations:', e);
+    }
+  },
+
+  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId) => {
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
       agentType,
@@ -80,8 +119,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       model: model || null,
       linkedRequirementId: linkedRequirementId || null,
       parentSessionId: parentSessionId || null,
+      conversationId: conversationId || null,
     });
     set((s) => ({ sessions: [...s.sessions, session] }));
+    // If this turn created/attached a conversation, refresh that project's
+    // conversation list so the sidebar shows it. Derive the project from the
+    // turn we just spawned (covers both create + continue).
+    void get().refreshConversations(session.projectPath);
     return session;
   },
 
@@ -94,6 +138,37 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().sessions.filter((s) => s.projectPath === projectPath);
   },
 
+  getTurnsForConversation: (conversationId) => {
+    return get()
+      .sessions.filter((s) => s.conversationId === conversationId)
+      .sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+  },
+
+  getConversationsForProject: (projectPath) => {
+    // pinned first, then most-recent activity. Mirrors the backend's
+    // load_conversations_for_project_db ORDER BY.
+    return get()
+      .conversations
+      .filter((c) => c.projectPath === projectPath)
+      .sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime();
+      });
+  },
+
+  getConversationForSession: (sessionId) => {
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session?.conversationId) return null;
+    return get().conversations.find((c) => c.id === session.conversationId) ?? null;
+  },
+
+  updateConversation: async (id, patch) => {
+    await invoke('update_conversation', { id, patch });
+    // Optimistically mirror into local state; the next refreshConversations reconciles.
+    set((s) => ({
+      conversations: s.conversations.map((c) => (c.id === id ? { ...c, ...patch } as Conversation : c)),
+    }));
+  },
 
   recommendAgent: async (tags) => {
     return invoke<AgentType | null>('recommend_agent_for_project', { tags });
@@ -120,14 +195,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().qualityReports.get(sessionId) ?? null;
   },
 
-  newConversation: async (projectPath, title, agentType) => {
+  createConversation: async (projectPath, prompt, agentType) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
-    // Dialogue IS the task — spawn a session directly, no separate requirement.
-    return await get().spawnAgent(projectPath, agentType, title, undefined, undefined, undefined);
+    // No conversation_id → backend creates a new container and attaches this
+    // turn as its first. The returned session carries the new conversationId.
+    return get().spawnAgent(projectPath, agentType, prompt);
   },
 
+  continueConversation: async (projectPath, conversationId, prompt, agentType) => {
+    if (!agentType) {
+      throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
+    }
+    // conversation_id present → backend attaches this as a follow-up turn of
+    // the existing container and touches its last_agent / last_activity_at.
+    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, conversationId);
+  },
 
   getDefaultAgent: () => {
     const installed = get().agents.filter(a => a.installed);
@@ -182,6 +266,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
       // Full sync from DB in background (picks up outputSummary, contextSnapshot, etc.)
       get().refreshSessions();
+      // A turn completing means its conversation's last_activity_at moved;
+      // refresh that project's conversation list so the sidebar reorders.
+      const doneSession = get().sessions.find((s) => s.id === completedId);
+      if (doneSession) {
+        void get().refreshConversations(doneSession.projectPath);
+      }
 
       // Refresh activity timeline so new events show up immediately
       const { loadForProject, loadRecent } = useActivityStore.getState();

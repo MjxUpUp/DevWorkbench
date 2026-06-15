@@ -128,15 +128,15 @@ function App() {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+N: New conversation
+      // Ctrl+N: New conversation — clear the active selection and focus the task
+      // view so the user types the first turn. The conversation container is
+      // created lazily on send (createConversation), not eagerly here, so we
+      // don't spawn a garbage turn with a placeholder prompt.
       if (e.key === 'n' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        const activeProject = useNavigationStore.getState().activeProject;
-        if (activeProject) {
-          const agent = useAgentStore.getState().getDefaultAgent();
-          if (agent) {
-            useAgentStore.getState().newConversation(activeProject.path, '新对话', agent);
-          }
+        if (useNavigationStore.getState().activeProject) {
+          useNavigationStore.getState().selectConversation(null);
+          useNavigationStore.getState().setActiveView('task');
         }
       }
 

@@ -5,7 +5,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentStore } from './agentStore';
-import type { Session } from '../types';
+import type { Session, Conversation } from '../types';
 
 const base: Session = {
   id: 's1',
@@ -21,6 +21,7 @@ const base: Session = {
   contextSnapshot: null,
   linkedRequirementId: null,
   parentSessionId: null,
+  conversationId: null,
 };
 const mk = (over: Partial<Session> = {}): Session => ({ ...base, ...over });
 
@@ -61,5 +62,63 @@ describe('agentStore.refreshSessions — merge (regression: running session wipe
 
     const ids = useAgentStore.getState().sessions.map((s) => s.id).sort();
     expect(ids).toEqual(['db', 'mem']);
+  });
+});
+
+describe('agentStore — conversation selectors', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ sessions: [], conversations: [] });
+  });
+
+  const conv = (id: string, over: Partial<Conversation> = {}): Conversation => ({
+    id,
+    projectPath: '/p',
+    title: `t-${id}`,
+    lastAgent: 'claude_code',
+    status: 'active',
+    startedAt: '2026-01-01T00:00:00Z',
+    lastActivityAt: '2026-01-01T00:00:00Z',
+    pinned: false,
+    ...over,
+  });
+
+  it('getTurnsForConversation returns only that conversation\'s turns, oldest-first', () => {
+    useAgentStore.setState({
+      sessions: [
+        mk({ id: 'b', conversationId: 'c1', startedAt: '2026-01-02T00:00:00Z' }),
+        mk({ id: 'x', conversationId: 'other' }),
+        mk({ id: 'a', conversationId: 'c1', startedAt: '2026-01-01T00:00:00Z' }),
+        mk({ id: 'c', conversationId: 'c1', startedAt: '2026-01-03T00:00:00Z' }),
+      ],
+    });
+
+    const turns = useAgentStore.getState().getTurnsForConversation('c1');
+    expect(turns.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('getConversationsForProject sorts pinned first then by last activity desc', () => {
+    useAgentStore.setState({
+      conversations: [
+        conv('old', { lastActivityAt: '2026-01-01T00:00:00Z' }),
+        conv('new', { lastActivityAt: '2026-02-01T00:00:00Z' }),
+        conv('pinned', { lastActivityAt: '2026-01-15T00:00:00Z', pinned: true }),
+        conv('other-proj', { projectPath: '/q' }),
+      ],
+    });
+
+    const list = useAgentStore.getState().getConversationsForProject('/p');
+    // pinned floats above newer activity; then newest-first.
+    expect(list.map((c) => c.id)).toEqual(['pinned', 'new', 'old']);
+  });
+
+  it('getConversationForSession resolves the container of a turn', () => {
+    useAgentStore.setState({
+      sessions: [mk({ id: 'turn1', conversationId: 'c1' })],
+      conversations: [conv('c1')],
+    });
+    expect(useAgentStore.getState().getConversationForSession('turn1')?.id).toBe('c1');
+    // A turn with no conversation_id (pre-migration orphan) resolves to null.
+    useAgentStore.setState({ sessions: [mk({ id: 'orphan', conversationId: null })] });
+    expect(useAgentStore.getState().getConversationForSession('orphan')).toBeNull();
   });
 });

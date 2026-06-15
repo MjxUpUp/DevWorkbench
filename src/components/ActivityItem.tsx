@@ -1,5 +1,6 @@
 import type { ActivityEvent } from '../types';
 import { useNavigationStore } from '../stores/navigationStore';
+import { useAgentStore } from '../stores/agentStore';
 
 interface ActivityItemProps {
   event: ActivityEvent;
@@ -15,11 +16,15 @@ const EVENT_ICONS: Record<string, string> = {
 export function ActivityItem({ event }: ActivityItemProps) {
   const icon = EVENT_ICONS[event.eventType] || '○';
   const time = new Date(event.timestamp).toLocaleString();
-  const selectSession = useNavigationStore((s) => s.selectSession);
+  const selectConversation = useNavigationStore((s) => s.selectConversation);
+  const getConversationForSession = useAgentStore((s) => s.getConversationForSession);
 
   const handleSessionClick = () => {
+    // An activity event is tied to a turn (session). Jump to the conversation
+    // that turn belongs to — the conversation is the navigable unit now.
     if (event.sessionId) {
-      selectSession(event.sessionId);
+      const conv = getConversationForSession(event.sessionId);
+      if (conv) selectConversation(conv.id);
     }
   };
 

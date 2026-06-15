@@ -4,7 +4,7 @@ import { useAgentStore } from '../stores/agentStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useKnowledgeStore } from '../stores/knowledgeStore';
 
-type ResultKind = 'command' | 'project' | 'session' | 'knowledge';
+type ResultKind = 'command' | 'project' | 'conversation' | 'knowledge';
 
 interface ResultItem {
   kind: ResultKind;
@@ -30,9 +30,9 @@ export function CommandPalette() {
   const setOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
   const selectProject = useNavigationStore((s) => s.selectProject);
-  const selectSession = useNavigationStore((s) => s.selectSession);
+  const selectConversation = useNavigationStore((s) => s.selectConversation);
 
-  const sessions = useAgentStore((s) => s.sessions);
+  const conversations = useAgentStore((s) => s.conversations);
   const projects = useProjectStore((s) => s.projects);
   const knowledgeResults = useKnowledgeStore((s) => s.searchResults);
   const searchKnowledge = useKnowledgeStore((s) => s.search);
@@ -90,22 +90,27 @@ export function CommandPalette() {
     secondary: p.path,
     action: () => {
       selectProject(p);
-      selectSession(null);
+      selectConversation(null);
       setActiveView('task');
       close();
     },
   }));
 
-  const sessionItems: ResultItem[] = (q
-    ? sessions.filter((s) => s.prompt.toLowerCase().includes(q))
-    : sessions
-  ).slice(0, 5).map((s) => ({
-    kind: 'session' as const,
-    label: s.prompt.slice(0, 40),
-    secondary: `${s.agentType} · ${s.status}`,
+  // Conversations are the navigable unit — dedup from the flat turn list.
+  const conversationItems: ResultItem[] = (q
+    ? conversations.filter((c) => c.title.toLowerCase().includes(q))
+    : conversations
+  ).slice(0, 5).map((c) => ({
+    kind: 'conversation' as const,
+    label: c.title,
+    secondary: `${c.lastAgent ?? ''} · ${c.status}`,
     action: () => {
+      // Selecting a conversation requires its project to be active first,
+      // otherwise the sidebar/ChatView scope won't match.
+      const proj = projects.find((p) => p.path === c.projectPath);
+      if (proj) selectProject(proj);
       setActiveView('task');
-      selectSession(s.id);
+      selectConversation(c.id);
       close();
     },
   }));
@@ -121,7 +126,7 @@ export function CommandPalette() {
   const grouped: { kind: ResultKind; title: string; items: ResultItem[] }[] = [];
   if (commandItems.length) grouped.push({ kind: 'command', title: '操作', items: commandItems });
   if (projectItems.length) grouped.push({ kind: 'project', title: '项目', items: projectItems });
-  if (sessionItems.length) grouped.push({ kind: 'session', title: '对话', items: sessionItems });
+  if (conversationItems.length) grouped.push({ kind: 'conversation', title: '对话', items: conversationItems });
   if (knowledgeItems.length) grouped.push({ kind: 'knowledge', title: '知识', items: knowledgeItems });
 
   const flat = grouped.flatMap((g) => g.items);

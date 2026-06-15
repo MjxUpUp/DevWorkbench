@@ -4,8 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { Sidebar } from '../Sidebar';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { invoke } from '@tauri-apps/api/core';
-import type { Project } from '../../types';
+import type { Project, Conversation } from '../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -26,6 +27,18 @@ const makeProject = (id: string, name: string, path: string): Project => ({
   workspace_tools: [],
 });
 
+const makeConversation = (id: string, title: string, projectPath: string, over: Partial<Conversation> = {}): Conversation => ({
+  id,
+  projectPath,
+  title,
+  lastAgent: 'claude_code',
+  status: 'active',
+  startedAt: '2026-01-01T00:00:00.000Z',
+  lastActivityAt: '2026-01-02T00:00:00.000Z',
+  pinned: false,
+  ...over,
+});
+
 describe('Sidebar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -34,7 +47,7 @@ describe('Sidebar', () => {
       activeProject: null,
       activeView: 'task',
       sidebarOpen: true,
-      selectedSessionId: null,
+      selectedConversationId: null,
     });
     useProjectStore.setState({
       projects: [],
@@ -85,5 +98,36 @@ describe('Sidebar', () => {
     // The search entry pops the centered palette modal rather than switching views.
     expect(useNavigationStore.getState().commandPaletteOpen).toBe(true);
     expect(useNavigationStore.getState().activeView).toBe('task');
+  });
+
+  it('lists the active project\'s conversations and selects one on click', async () => {
+    const user = userEvent.setup();
+    const proj = makeProject('p1', 'Alpha', 'E:/Alpha');
+    useProjectStore.setState({ projects: [proj], loading: false, error: null });
+    useNavigationStore.setState({
+      activeProject: proj,
+      activeView: 'task',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    // Seed the store: two conversations under Alpha, newest-activity first is
+    // enforced by getConversationsForProject (we feed them pre-sorted so the
+    // selector's sort is a no-op here).
+    useAgentStore.setState({
+      conversations: [
+        makeConversation('c-new', 'newer topic', 'E:/Alpha', { lastActivityAt: '2026-02-01T00:00:00.000Z' }),
+        makeConversation('c-old', 'older topic', 'E:/Alpha', { lastActivityAt: '2026-01-01T00:00:00.000Z' }),
+      ],
+    } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
+
+    render(<Sidebar />);
+
+    // Both conversations render under the active project.
+    expect(screen.getByText('newer topic')).toBeInTheDocument();
+    expect(screen.getByText('older topic')).toBeInTheDocument();
+
+    // Clicking selects it in navigation state.
+    await user.click(screen.getByText('newer topic'));
+    expect(useNavigationStore.getState().selectedConversationId).toBe('c-new');
   });
 });

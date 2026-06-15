@@ -8,8 +8,10 @@ interface NavigationState {
   activeView: ViewId;
   /** Currently selected project (single source of truth) */
   activeProject: Project | null;
-  /** Currently selected session ID */
-  selectedSessionId: string | null;
+  /** Currently selected conversation ID (the topic container). The main task
+   *  view renders the turns of THIS conversation. Selecting a project clears it;
+   *  sending the first message creates + selects one. */
+  selectedConversationId: string | null;
   /** Currently expanded project ID in sidebar */
   expandedProjectId: string | null;
   /** Command palette open */
@@ -23,7 +25,7 @@ interface NavigationState {
 
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
-  selectSession: (id: string | null) => void;
+  selectConversation: (id: string | null) => void;
   toggleProjectExpand: (projectId: string) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -35,7 +37,7 @@ interface NavigationState {
 export const useNavigationStore = create<NavigationState>((set) => ({
   activeView: 'task',
   activeProject: null,
-  selectedSessionId: null,
+  selectedConversationId: null,
   expandedProjectId: null,
   commandPaletteOpen: false,
   addProjectOpen: false,
@@ -43,10 +45,12 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   sidebarOpen: true,
 
   setActiveView: (view) => set({ activeView: view }),
-  selectProject: (project) => set({ activeProject: project, selectedSessionId: null }),
-  selectSession: (id) => set({
-    selectedSessionId: id,
-    // Switch to the task view when selecting a session; stay on current view when deselecting
+  // Switching project resets the active conversation — a conversation belongs to
+  // exactly one project, so the old selection is meaningless in the new scope.
+  selectProject: (project) => set({ activeProject: project, selectedConversationId: null }),
+  selectConversation: (id) => set({
+    selectedConversationId: id,
+    // Switch to the task view when selecting a conversation.
     ...(id ? { activeView: 'task' as ViewId } : {}),
   }),
   toggleProjectExpand: (projectId) => set((s) => ({

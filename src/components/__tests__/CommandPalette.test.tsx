@@ -31,7 +31,7 @@ describe('CommandPalette', () => {
     vi.mocked(invoke).mockResolvedValue([]);
     useNavigationStore.setState({
       commandPaletteOpen: true, activeView: 'task', activeProject: null,
-      selectedSessionId: null,
+      selectedConversationId: null,
     });
     useProjectStore.setState({ projects: [], loading: false, error: null });
     useAgentStore.setState({ sessions: [] } as Partial<ReturnType<typeof useAgentStore.getState>> as never);

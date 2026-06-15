@@ -5,15 +5,15 @@ import type { IconProps } from './Icons';
 import type { ViewId } from '../stores/navigationStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
+import { useAgentStore } from '../stores/agentStore';
 
 /**
  * Primary navigation — aligns to the target layout:
- *   创建任务 / 搜索 / 技能 → 工作区 (flat project
- *   list, no conversation tree) → 用户资料 (opens a menu with 设置).
+ *   创建任务 / 搜索 / 技能 → 工作区 (project list; the active project expands to
+ *   show its conversations — the topic containers) → 用户资料 (设置 menu).
  *
- * The conversation tree that used to live here is removed: sessions are now
- * managed in the main task view. "新建" (Ctrl+N) lives in the task empty-state
- * and the user menu.
+ * A conversation is the Claude-Code "session": a multi-turn topic. Selecting one
+ * loads its turns in the main task view.
  */
 const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
   { id: 'task', label: '创建任务', Icon: IconPlus },
@@ -27,7 +27,8 @@ export function Sidebar() {
   const removeProject = useProjectStore((s) => s.removeProject);
   const activeProject = useNavigationStore((s) => s.activeProject);
   const selectProject = useNavigationStore((s) => s.selectProject);
-  const selectSession = useNavigationStore((s) => s.selectSession);
+  const selectConversation = useNavigationStore((s) => s.selectConversation);
+  const selectedConversationId = useNavigationStore((s) => s.selectedConversationId);
   const activeView = useNavigationStore((s) => s.activeView);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
   const setCommandPaletteOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
@@ -35,8 +36,7 @@ export function Sidebar() {
   const handleSelectProject = (project: Project) => {
     if (activeProject?.id === project.id) return;
     selectProject(project);
-    selectSession(null);
-    // Picking a project implies working on a task.
+    // selectProject already clears selectedConversationId.
     if (activeView !== 'task') setActiveView('task');
   };
 
@@ -69,7 +69,7 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Workspace — flat project list (conversations live in the main view now) */}
+      {/* Workspace — project list; the active project shows its conversations. */}
       <div className="left-column-section-header">
         <span>工作区</span>
       </div>
@@ -78,30 +78,40 @@ export function Sidebar() {
           <div className="left-column-projects-empty">暂无项目</div>
         )}
         {projects.map((project) => (
-          <div
-            key={project.id}
-            className={`left-column-project ${activeProject?.id === project.id ? 'active' : ''}`}
-            onClick={() => handleSelectProject(project)}
-            title={project.path}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                handleSelectProject(project);
-              }
-            }}
-          >
-            <span className="left-column-project-name">{project.name}</span>
-            <button
-              className="left-column-project-remove"
-              onClick={(e) => { e.stopPropagation(); handleRemoveProject(project); }}
-              title="移除项目"
-              aria-label={`移除 ${project.name}`}
-              type="button"
+          <div key={project.id}>
+            <div
+              className={`left-column-project ${activeProject?.id === project.id ? 'active' : ''}`}
+              onClick={() => handleSelectProject(project)}
+              title={project.path}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleSelectProject(project);
+                }
+              }}
             >
-              <IconTrash size={14} />
-            </button>
+              <span className="left-column-project-name">{project.name}</span>
+              <button
+                className="left-column-project-remove"
+                onClick={(e) => { e.stopPropagation(); handleRemoveProject(project); }}
+                title="移除项目"
+                aria-label={`移除 ${project.name}`}
+                type="button"
+              >
+                <IconTrash size={14} />
+              </button>
+            </div>
+            {/* Expand the active project's conversations inline. This is the
+                topic list — selecting one loads its turns in the main view. */}
+            {activeProject?.id === project.id && (
+              <ConversationList
+                projectPath={project.path}
+                selectedId={selectedConversationId}
+                onSelect={selectConversation}
+              />
+            )}
           </div>
         ))}
       </div>
@@ -109,6 +119,52 @@ export function Sidebar() {
       {/* Footer — user profile with a settings menu */}
       <UserMenu />
     </aside>
+  );
+}
+
+/**
+ * The conversation (topic) list under the active project. Newest activity first;
+ * pinned float to the top — both enforced by getConversationsForProject.
+ */
+function ConversationList({
+  projectPath,
+  selectedId,
+  onSelect,
+}: {
+  projectPath: string;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const getConversationsForProject = useAgentStore((s) => s.getConversationsForProject);
+  const refreshConversations = useAgentStore((s) => s.refreshConversations);
+  const conversations = getConversationsForProject(projectPath);
+
+  // Load the conversation list whenever this project becomes active. The store
+  // keeps a global pool, but a freshly-switched project may not be populated
+  // until this fetch runs.
+  useEffect(() => {
+    void refreshConversations(projectPath);
+  }, [projectPath, refreshConversations]);
+
+  if (conversations.length === 0) {
+    return <div className="left-column-conversations-empty">暂无对话</div>;
+  }
+
+  return (
+    <div className="left-column-conversations">
+      {conversations.map((c) => (
+        <button
+          key={c.id}
+          className={`left-column-conversation ${selectedId === c.id ? 'active' : ''}`}
+          onClick={() => onSelect(c.id)}
+          title={c.title}
+          type="button"
+        >
+          {c.pinned && <span className="left-column-conversation-pin">📌</span>}
+          <span className="left-column-conversation-title">{c.title}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 

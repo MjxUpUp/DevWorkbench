@@ -101,8 +101,30 @@ export interface Session {
   contextSnapshot: ContextSnapshot | null;
   linkedRequirementId: string | null;
   parentSessionId: string | null;
+  /** The multi-turn conversation this turn (session) belongs to. A conversation
+   *  is the Claude-Code-style "topic" container; a session is now one turn of
+   *  it. Backfilled for pre-v1.1 data by migrate_v9_to_v10. */
+  conversationId: string | null;
   tokenUsage?: number;
   estimatedCost?: number;
+}
+
+/**
+ * A conversation = the multi-turn topic container (one Claude-Code "session").
+ * A `Session` is now one turn inside it. Conversations live under a project;
+ * turns inside a conversation may switch agents (claude → codex → …).
+ */
+export interface Conversation {
+  id: string;
+  projectPath: string;
+  title: string;
+  /** The agent of the most recent turn. Null only if the conversation has no
+   *  turns yet (shouldn't happen in practice — creating one always spawns turn 1). */
+  lastAgent: AgentType | null;
+  status: string;
+  startedAt: string;
+  lastActivityAt: string;
+  pinned: boolean;
 }
 
 // ---- Activity types ----
