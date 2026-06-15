@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Session, QualityReport } from '../../types';
+import { useAgentStore } from '../../stores/agentStore';
 import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
 import { IconEdit, IconCpu, IconStar, IconX, IconStop } from '../Icons';
@@ -25,7 +26,6 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   // the terminal. For completed sessions we instead load the FULL output via
   // read_session_output_cmd (ANSI-stripped, untruncated) and render that.
   const [fullOutput, setFullOutput] = useState<string | null>(null);
-  const [fullOutputLoading, setFullOutputLoading] = useState(false);
 
   const statusDot = running ? 'running' : session.status === 'completed' ? 'completed' : 'failed';
   const statusLabel = running ? '运行中' : session.status === 'completed' ? '已完成' : '失败';
@@ -38,7 +38,6 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
       return;
     }
     let cancelled = false;
-    setFullOutputLoading(true);
     invoke<string | null>('read_session_output_cmd', { sessionId: session.id })
       .then((full) => {
         if (cancelled) return;
@@ -47,12 +46,25 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
       .catch(() => {
         if (cancelled) return;
         setFullOutput(session.outputSummary);
-      })
-      .finally(() => {
-        if (!cancelled) setFullOutputLoading(false);
       });
     return () => { cancelled = true; };
   }, [session.id, session.outputSummary, running]);
+
+  // pty 缓存是否含本会话输出。区分"刚完成的当前会话"（缓存仍在，可作占位）
+  // 与"历史会话重新加载"（缓存空，用 loading 占位，不显示空 terminal）。
+  const hasCachedPty = useAgentStore((s) => {
+    const chunks = s.ptyOutput.get(session.id);
+    return !!(chunks && chunks.length > 0);
+  });
+
+  // 输出区三态互斥（避免完成瞬间 terminal 卸载残留造成的"一闪"）：
+  //   running                             → Terminal 实时流式
+  //   刚完成 + pty 缓存仍在 + 输出未就绪    → Terminal 占位（不卸载，直到 Markdown 同帧替换）
+  //   完整输出就绪                         → Markdown 渲染
+  //   历史会话 + 输出未就绪                → loading 占位
+  const showTerminal = running || (!running && !fullOutput && hasCachedPty);
+  const showMarkdown = !running && !!fullOutput;
+  const showOutputLoading = !running && !fullOutput && !hasCachedPty;
 
   // Build decision chain steps from session data
   const chainSteps = useMemo(() => {
@@ -125,37 +137,18 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         </div>
       )}
 
-      {/* Completed session: the agent's full reply, rendered as Markdown.
-          Reads the COMPLETE output via read_session_output_cmd (the same log
-          the terminal used), not the tail-truncated outputSummary — so it's
-          neither cut off nor duplicated by the terminal block below. */}
-      {!running && (fullOutput || fullOutputLoading) && (
-        <div className="agent-block">
-          <div className="agent-block-header">
-            <span className="agent-block-title">输出</span>
-            {fullOutputLoading && (
-              <span className="agent-block-badge" style={{ color: 'var(--text-tertiary)' }}>加载中…</span>
-            )}
-          </div>
-          <div className="agent-block-body agent-output">
-            {fullOutput ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {fullOutput}
-              </ReactMarkdown>
-            ) : (
-              <span style={{ color: 'var(--text-tertiary)' }}>（无输出记录）</span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Running session: live terminal stream. For completed sessions the full
-          reply is already rendered as Markdown above, so we don't show the raw
-          terminal again — that was the duplicated "two replies" symptom. */}
-      {running && (
+      {/* 输出区（三态互斥）：
+          - running：Terminal 实时流式
+          - 刚完成 + pty 缓存仍在 + 完整输出未就绪：保留 Terminal 作占位。关键在于
+            这里 NOT 卸载 TerminalView —— 完成→就绪之间它继续渲染 pty 缓存最后画面，
+            等 fullOutput 一就绪，卸载 terminal 与挂载 markdown 在同一 React commit，
+            xterm canvas 无残留空间，杜绝"一闪而过的 terminal"。
+          - 完整输出就绪：Markdown 渲染（完整、未截断）
+          - 历史会话（无 pty 缓存）未就绪：loading 占位 */}
+      {showTerminal ? (
         <div className="agent-block">
           <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
-            <span className="agent-block-title">Terminal Output</span>
+            <span className="agent-block-title">{running ? 'Terminal Output' : '输出'}</span>
             <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
           </div>
           {!terminalCollapsed && (
@@ -164,7 +157,25 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
             </div>
           )}
         </div>
-      )}
+      ) : (showMarkdown || showOutputLoading) ? (
+        <div className="agent-block">
+          <div className="agent-block-header">
+            <span className="agent-block-title">输出</span>
+            {showOutputLoading && (
+              <span className="agent-block-badge" style={{ color: 'var(--text-tertiary)' }}>加载中…</span>
+            )}
+          </div>
+          <div className="agent-block-body agent-output">
+            {showMarkdown ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {fullOutput}
+              </ReactMarkdown>
+            ) : (
+              <span style={{ color: 'var(--text-tertiary)' }}>（加载中…）</span>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {/* File Changes block */}
       {fileChanges.length > 0 && !running && (

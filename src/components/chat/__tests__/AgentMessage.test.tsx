@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AgentMessage } from '../AgentMessage';
+import { useAgentStore } from '../../../stores/agentStore';
 import type { Session, QualityReport } from '../../../types';
 
 // Mock invoke so we can assert the completed-session path loads the FULL output
@@ -75,6 +76,24 @@ describe('AgentMessage — completed-session output', () => {
 
     // Running sessions stream via TerminalView; the full-output fetch must NOT fire.
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
+    expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
+  });
+
+  it('keeps the terminal as a placeholder while the full output loads (no flash)', async () => {
+    // Regression: the moment a session completes, `running` flips false but the
+    // full-output invoke hasn't resolved yet. Previously TerminalView was torn
+    // down at that instant, leaving an xterm canvas residue that flashed before
+    // markdown arrived. With pty cache present the terminal must STAY mounted as
+    // a placeholder until markdown is ready (same-commit swap, no flash).
+    useAgentStore.setState({
+      ptyOutput: new Map([['s1', [new Uint8Array([0x78, 0x74, 0x65, 0x72, 0x6d])]]]),
+    } as never);
+    // Never-resolving promise simulates the load window.
+    vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
+
+    render(<AgentMessage session={base} running={false} qualityReport={noReport} />);
+
+    // Output not ready yet (promise pending) → terminal placeholder must be mounted.
     expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
   });
 });
