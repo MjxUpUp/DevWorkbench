@@ -2,6 +2,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::models::{AppSettings, Project, Session};
 use rusqlite::Connection;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
 
@@ -223,4 +224,270 @@ pub fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
         log::info!("Migrated schema from v8 to v9");
     }
     Ok(())
+}
+
+/// Migrate v9 → v10: introduce the `conversations` table and backfill every
+/// existing session into a conversation by collapsing `parent_session_id`
+/// chains.
+///
+/// Each parent-chain (root + all descendants) becomes ONE conversation; an
+/// isolated session (no parent, no children) becomes its own conversation. A
+/// dangling parent (points at an id not in the table) is treated as a root, so
+/// history is never silently dropped. Transactional — on failure nothing is
+/// written, so a re-run starts clean. Idempotent via schema_version >= 10.
+pub fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 10 {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+
+    // 1. conversations table + indexes (idempotent; also in SCHEMA for fresh DBs).
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            project_path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            last_agent TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            started_at TEXT NOT NULL,
+            last_activity_at TEXT NOT NULL,
+            pinned INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_path);
+        CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity_at DESC);",
+    )?;
+
+    // 2. sessions.conversation_id column. rusqlite has no ADD COLUMN IF NOT
+    //    EXISTS, so probe by preparing a statement that references the column.
+    let col_exists = tx
+        .prepare("SELECT conversation_id FROM sessions LIMIT 0")
+        .is_ok();
+    if !col_exists {
+        tx.execute("ALTER TABLE sessions ADD COLUMN conversation_id TEXT", [])?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id)",
+            [],
+        )?;
+    }
+
+    // 3. Load the parent-chain structure of every session.
+    struct Row {
+        id: String,
+        project_path: String,
+        prompt: String,
+        agent_type: String,
+        started_at: String,
+        parent_session_id: Option<String>,
+    }
+    let rows: Vec<Row> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, project_path, prompt, agent_type, started_at, parent_session_id
+             FROM sessions",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok(Row {
+            id: r.get(0)?,
+            project_path: r.get(1)?,
+            prompt: r.get(2)?,
+            agent_type: r.get(3)?,
+            started_at: r.get(4)?,
+            parent_session_id: r.get(5)?,
+        }))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let by_id: HashMap<&str, &Row> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
+    // parent_id → child ids (reverse index).
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for r in &rows {
+        if let Some(p) = r.parent_session_id.as_deref() {
+            children.entry(p).or_default().push(r.id.as_str());
+        }
+    }
+
+    // Roots: parent is None, OR points at an id absent from the table (dangling
+    // — treated as a root rather than skipped, so the chain is still preserved).
+    let roots: Vec<&str> = rows
+        .iter()
+        .filter(|r| match r.parent_session_id.as_deref() {
+            None => true,
+            Some(p) => !by_id.contains_key(p),
+        })
+        .map(|r| r.id.as_str())
+        .collect();
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut conversations_made = 0usize;
+    for root_id in roots {
+        // BFS the whole chain from this root.
+        let mut chain: Vec<&Row> = Vec::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        queue.push_back(root_id);
+        while let Some(id) = queue.pop_front() {
+            if let Some(r) = by_id.get(id) {
+                chain.push(r);
+                if let Some(kids) = children.get(id) {
+                    for k in kids {
+                        queue.push_back(k);
+                    }
+                }
+            }
+        }
+        if chain.is_empty() {
+            continue;
+        }
+        // Order by started_at so title comes from the earliest turn and
+        // last_agent from the latest.
+        chain.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        let first = chain.first().unwrap();
+        let last = chain.last().unwrap();
+        let title: String = first.prompt.chars().take(40).collect();
+        let conv_id = uuid::Uuid::new_v4().to_string();
+
+        tx.execute(
+            "INSERT OR IGNORE INTO conversations
+                (id, project_path, title, last_agent, status, started_at, last_activity_at, pinned)
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, 0)",
+            rusqlite::params![
+                conv_id,
+                first.project_path,
+                title,
+                last.agent_type,
+                first.started_at,
+                last.started_at,
+            ],
+        )?;
+        for r in &chain {
+            tx.execute(
+                "UPDATE sessions SET conversation_id = ?1 WHERE id = ?2",
+                rusqlite::params![conv_id, r.id],
+            )?;
+        }
+        conversations_made += 1;
+    }
+
+    tx.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (10, ?1)",
+        [now],
+    )?;
+    tx.commit()?;
+    log::info!(
+        "v9→v10 migration: created {} conversations from {} sessions",
+        conversations_made,
+        rows.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::session::insert_session_db;
+    use crate::models::{AgentType, Session, SessionStatus};
+
+    struct TempDb {
+        _tmp: tempfile::TempDir,
+        conn: Connection,
+    }
+    impl TempDb {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let path = tmp.path().join("test.db");
+            let conn = db::init_db(&path).unwrap();
+            Self { _tmp: tmp, conn }
+        }
+    }
+
+    /// Build a completed session. `started_at` is derived from the id length so
+    /// a chain A→B→C has a stable increasing order for title/last_agent tests.
+    fn mk(id: &str, project: &str, parent: Option<&str>) -> Session {
+        Session {
+            id: id.to_string(),
+            project_path: project.to_string(),
+            agent_type: AgentType::ClaudeCode,
+            status: SessionStatus::Completed,
+            prompt: format!("prompt-{}", id),
+            model: None,
+            started_at: format!("2026-01-01T00:00:0{}Z", id.len()),
+            finished_at: None,
+            exit_code: None,
+            output_summary: None,
+            context_snapshot: None,
+            linked_requirement_id: None,
+            parent_session_id: parent.map(|s| s.to_string()),
+            conversation_id: None,
+        }
+    }
+
+    fn conversation_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn distinct_conversation_ids(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(DISTINCT conversation_id) FROM sessions WHERE conversation_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parent_chain_collapses_into_one_conversation() {
+        let g = TempDb::new();
+        insert_session_db(&g.conn, &mk("A", "/p", None)).unwrap();
+        insert_session_db(&g.conn, &mk("BB", "/p", Some("A"))).unwrap();
+        insert_session_db(&g.conn, &mk("CCC", "/p", Some("BB"))).unwrap();
+
+        migrate_v9_to_v10(&g.conn).unwrap();
+
+        assert_eq!(conversation_count(&g.conn), 1);
+        // All three turns share the single conversation.
+        assert_eq!(distinct_conversation_ids(&g.conn), 1);
+    }
+
+    #[test]
+    fn isolated_sessions_each_become_their_own_conversation() {
+        let g = TempDb::new();
+        insert_session_db(&g.conn, &mk("X", "/p", None)).unwrap();
+        insert_session_db(&g.conn, &mk("Y", "/p", None)).unwrap();
+
+        migrate_v9_to_v10(&g.conn).unwrap();
+
+        assert_eq!(conversation_count(&g.conn), 2);
+        assert_eq!(distinct_conversation_ids(&g.conn), 2);
+    }
+
+    #[test]
+    fn dangling_parent_is_treated_as_a_root_not_dropped() {
+        // B claims parent "GONE" which isn't in the table — B must still be
+        // backfilled into its own conversation, never silently dropped.
+        let g = TempDb::new();
+        insert_session_db(&g.conn, &mk("B", "/p", Some("GONE"))).unwrap();
+
+        migrate_v9_to_v10(&g.conn).unwrap();
+
+        assert_eq!(conversation_count(&g.conn), 1);
+        assert_eq!(distinct_conversation_ids(&g.conn), 1);
+    }
+
+    #[test]
+    fn idempotent_second_run_is_a_noop() {
+        let g = TempDb::new();
+        insert_session_db(&g.conn, &mk("A", "/p", None)).unwrap();
+        insert_session_db(&g.conn, &mk("BB", "/p", Some("A"))).unwrap();
+
+        migrate_v9_to_v10(&g.conn).unwrap();
+        migrate_v9_to_v10(&g.conn).unwrap(); // second run
+
+        assert_eq!(conversation_count(&g.conn), 1);
+    }
 }

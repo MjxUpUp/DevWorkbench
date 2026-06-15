@@ -138,6 +138,7 @@ impl Agent for OpaqueAgent {
                         model.as_deref(),
                         None,
                         resume_from.as_deref(),
+                        None,
                     )
                 })
                 .await

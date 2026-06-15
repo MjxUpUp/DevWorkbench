@@ -204,6 +204,7 @@ pub fn spawn_pty_agent(
     model: Option<&str>,
     linked_requirement_id: Option<&str>,
     parent_session_id: Option<&str>,
+    conversation_id: Option<&str>,
 ) -> Result<Session, String> {
     // Inject project knowledge context into the prompt — run in background thread
     // with a 2-second timeout to avoid blocking the UI on slow DB queries.
@@ -216,7 +217,7 @@ pub fn spawn_pty_agent(
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
     // all target CLIs support non-interactive --print/exec pipe mode.
-    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, prompt, model)
+    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, conversation_id, prompt, model)
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +516,7 @@ fn spawn_pipe_fallback(
     project_path: &str,
     linked_requirement_id: Option<&str>,
     parent_session_id: Option<&str>,
+    conversation_id: Option<&str>,
     prompt: &str,
     model: Option<&str>,
 ) -> Result<Session, String> {
@@ -575,26 +577,62 @@ fn spawn_pipe_fallback(
             .ok();
     }
 
-    let session = Session {
-        id: session_id.clone(),
-        project_path: project_path.to_string(),
-        agent_type: agent_type.clone(),
-        status: SessionStatus::Running,
-        prompt: prompt.to_string(),
-        model: model.map(|m| m.to_string()),
-        started_at: chrono::Local::now().to_rfc3339(),
-        finished_at: None,
-        exit_code: None,
-        output_summary: None,
-        context_snapshot: None,
-        linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
-        parent_session_id: parent_session_id.map(|s| s.to_string()),
-    };
-
-    {
+    let session = {
+        // Resolve the conversation this turn belongs to. None ⇒ first turn of
+        // a brand-new conversation (create it, title = prompt head). Some ⇒
+        // attach + touch last_agent/last_activity so the list stays fresh.
         let conn = db_conn.get().map_err(|e| e.to_string())?;
+        let resolved_conv_id: String = match conversation_id {
+            Some(id) => id.to_string(),
+            None => {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let now = chrono::Local::now().to_rfc3339();
+                let title: String = prompt.chars().take(40).collect();
+                let conv = crate::models::Conversation {
+                    id: new_id.clone(),
+                    project_path: project_path.to_string(),
+                    title,
+                    last_agent: Some(agent_type.clone()),
+                    status: "active".to_string(),
+                    started_at: now.clone(),
+                    last_activity_at: now,
+                    pinned: false,
+                };
+                crate::agents::session::insert_conversation_db(&conn, &conv)
+                    .map_err(|e| e.to_string())?;
+                new_id
+            }
+        };
+
+        let session = Session {
+            id: session_id.clone(),
+            project_path: project_path.to_string(),
+            agent_type: agent_type.clone(),
+            status: SessionStatus::Running,
+            prompt: prompt.to_string(),
+            model: model.map(|m| m.to_string()),
+            started_at: chrono::Local::now().to_rfc3339(),
+            finished_at: None,
+            exit_code: None,
+            output_summary: None,
+            context_snapshot: None,
+            linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
+            parent_session_id: parent_session_id.map(|s| s.to_string()),
+            conversation_id: Some(resolved_conv_id.clone()),
+        };
+
         crate::agents::session::insert_session_db(&conn, &session)
             .map_err(|e| e.to_string())?;
+
+        if conversation_id.is_some() {
+            let now = chrono::Local::now().to_rfc3339();
+            let patch = serde_json::json!({
+                "lastAgent": serde_json::to_string(agent_type).unwrap_or_default().trim_matches('"'),
+                "lastActivityAt": now,
+            });
+            let _ = crate::agents::session::update_conversation_db(&conn, &resolved_conv_id, patch);
+        }
+
         let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
             &session_id,
             project_path,
@@ -604,7 +642,8 @@ fn spawn_pipe_fallback(
             None,
             None,
         ));
-    }
+        session
+    };
     let _ = app.emit("agent:started", &session);
 
     let stdout = child.stdout.take();

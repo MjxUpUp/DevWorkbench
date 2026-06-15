@@ -56,6 +56,8 @@ pub fn run() {
                     .expect("Failed to run projects/settings migration");
                 migrate::migrate_v8_to_v9(&conn)
                     .expect("Failed to run v8 to v9 schema migration");
+                migrate::migrate_v9_to_v10(&conn)
+                    .expect("Failed to run v9 to v10 conversation migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -116,6 +118,8 @@ pub fn run() {
             commands::agents::get_sessions_for_project,
             commands::agents::update_session,
             commands::agents::read_session_output_cmd,
+            commands::agents::list_conversations,
+            commands::agents::update_conversation,
                                                                         commands::agents::pty_write_cmd,
             commands::agents::pty_resize_cmd,
             commands::agents::get_project_activity,

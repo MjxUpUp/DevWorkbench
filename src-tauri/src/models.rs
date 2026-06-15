@@ -164,6 +164,28 @@ pub struct Session {
     pub context_snapshot: Option<ContextSnapshot>,
     pub linked_requirement_id: Option<String>,
     pub parent_session_id: Option<String>,
+    /// Which conversation this turn belongs to. None on sessions created before
+    /// the v9→v10 migration (backfilled by migrate_v9_to_v10).
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+/// A conversation — a multi-turn dialogue container, the equivalent of a Claude
+/// Code session. Holds N [`Session`]s (turns), each potentially by a different
+/// agent. Replaces the old flat per-project session list so a coherent dialogue
+/// (and agent hand-offs within it) is one resumable unit, not N loose bubbles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: String,
+    pub project_path: String,
+    pub title: String,
+    pub last_agent: Option<AgentType>,
+    /// "active" | "archived"
+    pub status: String,
+    pub started_at: String,
+    pub last_activity_at: String,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

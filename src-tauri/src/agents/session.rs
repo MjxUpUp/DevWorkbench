@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{AgentType, ContextSnapshot, Session, SessionStatus};
+use crate::models::{AgentType, ContextSnapshot, Conversation, Session, SessionStatus};
 use rusqlite::params;
 use std::path::PathBuf;
 
@@ -22,7 +22,8 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
     let mut stmt = conn.prepare(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
-                context_snapshot, linked_requirement_id, parent_session_id
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id
          FROM sessions ORDER BY started_at DESC"
     )?;
 
@@ -58,6 +59,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             context_snapshot,
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
         })
     })?;
 
@@ -104,8 +106,9 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
         "INSERT OR IGNORE INTO sessions
             (id, project_path, agent_type, status, prompt, model,
              started_at, finished_at, exit_code, output_summary,
-             context_snapshot, linked_requirement_id, parent_session_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             context_snapshot, linked_requirement_id, parent_session_id,
+             conversation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             s.id,
             s.project_path,
@@ -120,6 +123,7 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
             snapshot_json,
             s.linked_requirement_id,
             s.parent_session_id,
+            s.conversation_id,
         ],
     )?;
     Ok(())
@@ -157,6 +161,12 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
         set_clauses.push("context_snapshot = ?".to_string());
         param_values.push(Box::new(snap_json));
     }
+    if let Some(conv) = patch.get("conversationId").or_else(|| patch.get("conversation_id")) {
+        set_clauses.push("conversation_id = ?".to_string());
+        // null → unset the conversation; otherwise the conversation id string.
+        let v = conv.as_str().map(|s| s.to_string());
+        param_values.push(Box::new(v));
+    }
 
     if set_clauses.is_empty() {
         return Ok(());
@@ -177,7 +187,8 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
     let mut stmt = conn.prepare(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
-                context_snapshot, linked_requirement_id, parent_session_id
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id
          FROM sessions WHERE project_path = ?1 ORDER BY started_at DESC"
     )?;
 
@@ -213,6 +224,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             context_snapshot,
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
         })
     })?;
 
@@ -221,6 +233,109 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
         result.push(s?);
     }
     Ok(result)
+}
+
+// ---- Conversation CRUD ----
+//
+// A Conversation is the multi-turn container (= a Claude Code session). Turns
+// (sessions) attach via conversation_id. These helpers cover insert / load /
+// patch; the v9→v10 migration backfills conversations from existing
+// parent_session_id chains.
+
+pub fn insert_conversation_db(conn: &rusqlite::Connection, c: &Conversation) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO conversations
+            (id, project_path, title, last_agent, status, started_at, last_activity_at, pinned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            c.id,
+            c.project_path,
+            c.title,
+            c.last_agent.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default().trim_matches('"').to_string()),
+            c.status,
+            c.started_at,
+            c.last_activity_at,
+            c.pinned as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_agent_type(s: Option<String>) -> Option<AgentType> {
+    s.and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok())
+}
+
+pub fn load_conversations_for_project_db(
+    conn: &rusqlite::Connection,
+    project_path: &str,
+) -> Result<Vec<Conversation>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_path, title, last_agent, status, started_at, last_activity_at, pinned
+         FROM conversations WHERE project_path = ?1
+         ORDER BY pinned DESC, last_activity_at DESC"
+    )?;
+    let rows = stmt.query_map(params![project_path], |row| {
+        let last_agent_str: Option<String> = row.get(3)?;
+        Ok(Conversation {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            title: row.get(2)?,
+            last_agent: parse_agent_type(last_agent_str),
+            status: row.get(4)?,
+            started_at: row.get(5)?,
+            last_activity_at: row.get(6)?,
+            pinned: row.get::<_, i32>(7)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Patch a conversation by id. Supports title / status / pinned / lastAgent /
+/// lastActivityAt. Mirrors update_session_db's dynamic-SET style.
+pub fn update_conversation_db(
+    conn: &rusqlite::Connection,
+    id: &str,
+    patch: serde_json::Value,
+) -> Result<(), AppError> {
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
+        set_clauses.push("title = ?".to_string());
+        param_values.push(Box::new(title.to_string()));
+    }
+    if let Some(status) = patch.get("status").and_then(|v| v.as_str()) {
+        set_clauses.push("status = ?".to_string());
+        param_values.push(Box::new(status.to_string()));
+    }
+    if let Some(pinned) = patch.get("pinned").and_then(|v| v.as_bool()) {
+        set_clauses.push("pinned = ?".to_string());
+        param_values.push(Box::new(pinned as i32));
+    }
+    if let Some(last_agent) = patch.get("lastAgent").and_then(|v| v.as_str()) {
+        set_clauses.push("last_agent = ?".to_string());
+        param_values.push(Box::new(last_agent.to_string()));
+    }
+    if let Some(last_activity) = patch.get("lastActivityAt").or_else(|| patch.get("last_activity_at")).and_then(|v| v.as_str()) {
+        set_clauses.push("last_activity_at = ?".to_string());
+        param_values.push(Box::new(last_activity.to_string()));
+    }
+
+    if set_clauses.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("UPDATE conversations SET {} WHERE id = ?", set_clauses.join(", "));
+    param_values.push(Box::new(id.to_string()));
+    let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let rows = conn.execute(&sql, params.as_slice())?;
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Conversation {} 不存在", id)));
+    }
+    Ok(())
 }
 
 // ---- Legacy helpers (still used by pty output logging) ----
@@ -278,6 +393,7 @@ mod tests {
             context_snapshot: None,
             linked_requirement_id: None,
             parent_session_id: None,
+            conversation_id: None,
         }
     }
 

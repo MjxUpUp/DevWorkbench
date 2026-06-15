@@ -162,10 +162,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     output_summary TEXT,
     context_snapshot TEXT,
     linked_requirement_id TEXT,
-    parent_session_id TEXT
+    parent_session_id TEXT,
+    conversation_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id);
+
+-- Conversation = multi-turn dialogue container (= a Claude Code session). Holds
+-- N sessions (turns), possibly by different agents. Built by migrate_v9_to_v10
+-- from existing parent_session_id chains; new turns attach via spawn.
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    project_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    last_agent TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    started_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_path);
+CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity_at DESC);
 
 CREATE TABLE IF NOT EXISTS requirements (
     id TEXT PRIMARY KEY,

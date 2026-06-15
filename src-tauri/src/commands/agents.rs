@@ -1,8 +1,9 @@
 use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
 use crate::agents::pty;
+use crate::agents::session;
 use crate::db::DbState;
 use crate::error::AppError;
-use crate::models::{AgentType, Session};
+use crate::models::{AgentType, Conversation, Session};
 use std::sync::Arc;
 use tauri::{Emitter, State};
 
@@ -60,6 +61,7 @@ pub fn spawn_agent_session(
     model: Option<String>,
     linked_requirement_id: Option<String>,
     parent_session_id: Option<String>,
+    conversation_id: Option<String>,
 ) -> Result<Session, AppError> {
     Ok(pty::spawn_pty_agent(
         &app,
@@ -71,7 +73,30 @@ pub fn spawn_agent_session(
         model.as_deref(),
         linked_requirement_id.as_deref(),
         parent_session_id.as_deref(),
+        conversation_id.as_deref(),
     )?)
+}
+
+// ---- Conversation commands ----
+//
+// A conversation is the multi-turn container. spawn_agent_session attaches a
+// turn (creating the conversation when conversation_id is None); these commands
+// cover listing / renaming / archiving for the sidebar.
+
+#[tauri::command]
+pub fn list_conversations(db: State<'_, DbState>, project_path: String) -> Result<Vec<Conversation>, AppError> {
+    let conn = db.get()?;
+    session::load_conversations_for_project_db(&conn, &project_path).map_err(AppError::from)
+}
+
+#[tauri::command]
+pub fn update_conversation(
+    db: State<'_, DbState>,
+    id: String,
+    patch: serde_json::Value,
+) -> Result<(), AppError> {
+    let conn = db.get()?;
+    session::update_conversation_db(&conn, &id, patch).map_err(AppError::from)
 }
 
 #[tauri::command]
