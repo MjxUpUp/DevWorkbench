@@ -119,10 +119,8 @@ fn build_spawn_config(
     project_path: &str,
     prompt: &str,
     model: Option<&str>,
-    parent_session_id: Option<&str>,
 ) -> Result<SpawnConfig, String> {
     let exe = resolve_agent_exe_cached(agent_type)?;
-    let is_continue = parent_session_id.is_some();
     let mut args: Vec<String> = Vec::new();
 
     // Prompt delivery: `claude --print` reads the prompt from stdin. Passing it
@@ -139,9 +137,16 @@ fn build_spawn_config(
     match agent_type {
         AgentType::ClaudeCode => {
             args.push("--print".to_string());
-            if is_continue {
-                args.push("--continue".to_string());
-            }
+            // No `--continue`/`--resume`: claude's bare `--continue` resumes the
+            // "most recent conversation in [cwd]" — a claude-internal notion of
+            // "recent" that does NOT correspond to this DevWorkbench conversation.
+            // With users switching across conversations/projects, `--continue`
+            // resumes an unrelated session and the agent answers off-topic (the
+            // "答非所问" symptom). Continuity is provided instead by
+            // inject_conversation_context (a summary of THIS conversation's prior
+            // turns), which is consistent for same-agent AND cross-agent turns.
+            // To restore claude's native full context later: store claude's session
+            // id (parse --output-format json) and use `--resume <id>`.
             // Prompt is delivered via stdin (see use_stdin above) — never as argv.
             if let Some(m) = model {
                 args.push("--model".to_string());
@@ -208,18 +213,20 @@ pub fn spawn_pty_agent(
 ) -> Result<Session, String> {
     // Context bridge: when this turn continues an existing conversation, inject a
     // summary of the prior turns so the new agent inherits the thread of work.
-    // Same-agent continuation ALSO gets parent_session_id below (→ ClaudeCode
-    // --continue), but external CLIs other than Claude have no native resume, so
-    // the injected summary is the only continuity mechanism across an agent switch.
+    // This injected summary is the SOLE continuity mechanism — we deliberately do
+    // NOT pass claude `--continue` (it resumes claude's cwd-recent session, which
+    // is unrelated to this conversation; see build_spawn_config). Same-agent and
+    // cross-agent turns are therefore continuous the same way.
     let prior_turns = match conversation_id {
         Some(cid) => load_prior_turns(&db_conn, cid),
         None => Vec::new(),
     };
 
-    // Resolve parent_session_id for same-agent CLI resume. P2's continueConversation
-    // passes conversation_id but not parent_session_id, so derive it: link to the
-    // last prior turn (only when it's the same agent — a different agent has no CLI
-    // session to resume from, and forcing --continue onto it would be misleading).
+    // Resolve parent_session_id for the DB record (DevWorkbench parent/child turn
+    // relationship — NOT for claude CLI resume). P2's continueConversation passes
+    // conversation_id but not parent_session_id, so derive it: link to the last
+    // prior turn of the SAME agent. A different agent has no meaningful parent, so
+    // we don't fabricate a cross-agent parent link.
     let parent_for_resume = if parent_session_id.is_some() {
         parent_session_id
     } else {
@@ -234,7 +241,7 @@ pub fn spawn_pty_agent(
     );
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
-    let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model, parent_for_resume)?;
+    let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
     // all target CLIs support non-interactive --print/exec pipe mode.
@@ -1495,6 +1502,38 @@ mod tests {
             parent_session_id: None,
             conversation_id: Some("c1".to_string()),
         }
+    }
+
+    // ---- Spawn config (no bare --continue) ----
+
+    #[test]
+    fn claude_spawn_never_injects_bare_continue() {
+        // Regression: claude's bare `--continue`/`-c` resumes "the most recent
+        // conversation in [cwd]" — a claude-internal notion of "recent" that does
+        // NOT correspond to this DevWorkbench conversation. With users switching
+        // across conversations/projects, `--continue` resumed an unrelated session
+        // and the agent answered off-topic (the "答非所问" symptom). We removed
+        // --continue entirely; continuity now comes from inject_conversation_context.
+        // This test locks the removal so it isn't reintroduced.
+        //
+        // Pre-fill the EXE cache so build_spawn_config skips the PATH scan — keeps
+        // the test logic-only (no real claude install required on the runner).
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("claude".to_string(), std::path::PathBuf::from("claude"));
+        }
+        let cfg = build_spawn_config(&AgentType::ClaudeCode, "/p", "hello", None)
+            .expect("build_spawn_config for ClaudeCode");
+        assert!(
+            cfg.args.contains(&"--print".to_string()),
+            "ClaudeCode must use --print: {:?}",
+            cfg.args,
+        );
+        assert!(
+            !cfg.args.iter().any(|a| a == "--continue" || a == "-c"),
+            "ClaudeCode must NOT inject bare --continue/-c (causes cwd-recent session bleed): {:?}",
+            cfg.args,
+        );
     }
 
     #[test]
