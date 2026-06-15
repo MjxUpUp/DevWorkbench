@@ -83,7 +83,7 @@ impl AgentType {
             Self::CursorAgent => "cursor-agent",
             Self::GeminiCli => "gemini",
             Self::Copilot => "github-copilot-cli",
-            Self::QwenCode => "qwen-code",
+            Self::QwenCode => "qwen",
             Self::Pi => "pi",
         }
     }

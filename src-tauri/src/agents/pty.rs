@@ -1907,4 +1907,30 @@ mod tests {
             cfg.args,
         );
     }
+
+    #[test]
+    fn qwen_resolves_to_qwen_command_not_qwen_code() {
+        // Regression: command_name was "qwen-code", but the installed CLI is
+        // `qwen` (qwen-code is NOT in PATH). resolve_agent_exe could never find
+        // it, so QwenCode never spawned at all. The command MUST be "qwen".
+        assert_eq!(AgentType::QwenCode.command_name(), "qwen");
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("qwen".to_string(), std::path::PathBuf::from("qwen"));
+        }
+        let cfg = build_spawn_config(&AgentType::QwenCode, "/p", "hello", None)
+            .expect("build_spawn_config for QwenCode must resolve the 'qwen' command");
+        assert_eq!(
+            cfg.program,
+            std::path::PathBuf::from("qwen"),
+            "program must be the resolved qwen exe, not a phantom qwen-code",
+        );
+        // qwen passes --prompt (deprecated but functional per `qwen --help`; -p/--prompt
+        // is the documented non-interactive flag). The real fix is the command name above.
+        assert!(
+            cfg.args.contains(&"--prompt".to_string()),
+            "QwenCode passes --prompt: {:?}",
+            cfg.args,
+        );
+    }
 }
