@@ -429,6 +429,59 @@ pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
     }
 }
 
+/// Wire-level structured event for the `agent:event` channel — what the chat
+/// frontend renders into block cards. Decoupled from kernel-core's `AgentEvent`
+/// (which has no serde derives) so this schema can evolve with the UI without
+/// touching the kernel trait layer. Serialized with `kind` as the discriminator
+/// tag so the TS union narrows on it.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum ChatStreamEvent {
+    #[serde(rename = "text")]
+    Text { content: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { name: String, input: serde_json::Value },
+    #[serde(rename = "tool_result")]
+    ToolResult { content: String, is_error: bool },
+    #[serde(rename = "result")]
+    Result { is_error: bool, secs: u64 },
+}
+
+impl ClaudeBlock {
+    /// Map a parsed block to its wire event form for the `agent:event` channel.
+    pub fn to_event(&self) -> ChatStreamEvent {
+        match self {
+            ClaudeBlock::Text { content } => ChatStreamEvent::Text { content: content.clone() },
+            ClaudeBlock::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+                name: name.clone(),
+                input: input.clone().unwrap_or(serde_json::Value::Null),
+            },
+            // ToolResult: collapse the raw content value into a readable string.
+            // Longer than the 120-char terminal preview — the chat card folds it,
+            // so give it more room to stay useful.
+            ClaudeBlock::ToolResult { content, is_error, .. } => ChatStreamEvent::ToolResult {
+                content: json_preview(content.as_ref(), 500),
+                is_error: is_error.unwrap_or(false),
+            },
+            ClaudeBlock::Result { is_error, secs } => ChatStreamEvent::Result {
+                is_error: *is_error,
+                secs: *secs,
+            },
+        }
+    }
+}
+
+/// Parse a claude stream-json line into the wire events the chat frontend
+/// consumes. Pure + testable (no Tauri handle). The reader thread drives the
+/// same parse once and emits BOTH this structured channel and the rendered
+/// `pty:output` text from the same `blocks` (no double-parse).
+pub fn claude_line_to_events(line: &str) -> Vec<ChatStreamEvent> {
+    parse_claude_line(line)
+        .iter()
+        .map(ClaudeBlock::to_event)
+        .collect()
+}
+
 /// One-line preview of a JSON value: serialized, newlines collapsed to spaces,
 /// truncated to `max` chars so it fits on a single terminal row.
 fn json_preview(value: Option<&serde_json::Value>, max: usize) -> String {
@@ -1043,10 +1096,14 @@ fn spawn_pipe_fallback(
                     }
                 }
                 OutputMode::ClaudeStreamJson => {
-                    // Each stdout line is one claude event. Parse and render
-                    // human-readable text; emit only the rendered text (raw JSON
-                    // is noise to the user). output_log keeps the rendered text so
-                    // the post-run replay reads exactly as it did live.
+                    // Each stdout line is one claude event. Parse it ONCE into
+                    // structured blocks, then fan out TWO channels from the same
+                    // parse (no double-parse):
+                    //   - agent:event : structured ChatStreamEvent per block, for
+                    //     the chat block-card UI (text / tool_use / tool_result /
+                    //     result). Raw JSON never reaches the user.
+                    //   - pty:output   : the rendered ANSI text, for the terminal
+                    //     fallback view AND the {sid}.log replay file.
                     use std::io::BufRead;
                     let reader = std::io::BufReader::new(out);
                     for line in reader.lines() {
@@ -1055,9 +1112,24 @@ fn spawn_pipe_fallback(
                             Err(_) => break,
                         };
                         let blocks = parse_claude_line(&line);
+                        if blocks.is_empty() {
+                            continue; // system / api_retry noise — neither channel cares
+                        }
+                        // claude produced output → it's alive, reset the idle timer.
+                        last_activity_reader.store(now_millis(), Ordering::Relaxed);
+                        // Structured channel first (the chat UI consumes only this).
+                        for event in blocks.iter().map(ClaudeBlock::to_event) {
+                            let _ = app_reader.emit(
+                                "agent:event",
+                                serde_json::json!({
+                                    "sessionId": sid_reader,
+                                    "event": event,
+                                }),
+                            );
+                        }
+                        // Rendered text channel (terminal fallback + log replay).
                         if let Some(text) = render_blocks(&blocks) {
                             output_log.extend_from_slice(text.as_bytes());
-                            last_activity_reader.store(now_millis(), Ordering::Relaxed);
                             let _ = app_reader.emit(
                                 "pty:output",
                                 serde_json::json!({
@@ -2036,6 +2108,86 @@ mod tests {
         // Zero blocks (system / malformed) → None, not an empty string.
         assert_eq!(render_blocks(&parse_claude_line(r#"{"type":"system","subtype":"init"}"#)), None);
         assert_eq!(render_blocks(&parse_claude_line("not json")), None);
+    }
+
+    #[test]
+    fn chat_stream_event_serializes_with_kind_tag() {
+        // The wire schema must carry `kind` as the discriminator tag so the TS
+        // union narrows on it. Verify each variant's serialized shape.
+        let text = ChatStreamEvent::Text { content: "hi".to_string() };
+        let v = serde_json::to_value(&text).unwrap();
+        assert_eq!(v["kind"], "text");
+        assert_eq!(v["content"], "hi");
+
+        let tool = ChatStreamEvent::ToolUse {
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path":"a.rs"}),
+        };
+        let v = serde_json::to_value(&tool).unwrap();
+        assert_eq!(v["kind"], "tool_use");
+        assert_eq!(v["name"], "Read");
+        assert_eq!(v["input"]["file_path"], "a.rs");
+
+        let res_ok = ChatStreamEvent::Result { is_error: false, secs: 12 };
+        let v = serde_json::to_value(&res_ok).unwrap();
+        assert_eq!(v["kind"], "result");
+        assert_eq!(v["is_error"], false);
+        assert_eq!(v["secs"], 12);
+    }
+
+    #[test]
+    fn claude_line_to_events_maps_each_block_kind() {
+        // text → [Text]
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        let evs = claude_line_to_events(line);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0], ChatStreamEvent::Text { content: "hello".to_string() });
+
+        // text + tool_use → [Text, ToolUse], order preserved
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let evs = claude_line_to_events(line);
+        assert_eq!(evs.len(), 2);
+        assert!(matches!(&evs[0], ChatStreamEvent::Text { content } if content == "thinking"));
+        assert!(matches!(&evs[1], ChatStreamEvent::ToolUse { name, .. } if name == "Bash"));
+
+        // tool_result → [ToolResult]
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"done","is_error":false}]}}"#;
+        let evs = claude_line_to_events(line);
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(&evs[0], ChatStreamEvent::ToolResult { is_error, .. } if !is_error));
+
+        // result → [Result]
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":3000}"#;
+        let evs = claude_line_to_events(line);
+        assert_eq!(evs, vec![ChatStreamEvent::Result { is_error: false, secs: 3 }]);
+
+        // system → []
+        assert!(claude_line_to_events(r#"{"type":"system","subtype":"init"}"#).is_empty());
+    }
+
+    #[test]
+    fn claude_line_to_events_emits_full_ordered_sequence() {
+        // A realistic 5-line claude run: text → tool_use → tool_result → text →
+        // result. The agent:event channel must emit exactly this ordered
+        // sequence — the chat UI renders blocks in arrival order.
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"let me check"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"pkg.json"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"deps here","is_error":false}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"found it"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":5000}"#,
+        ];
+        let seq: Vec<ChatStreamEvent> = lines.iter().flat_map(|l| claude_line_to_events(l)).collect();
+        let kinds: Vec<&str> = seq
+            .iter()
+            .map(|e| match e {
+                ChatStreamEvent::Text { .. } => "text",
+                ChatStreamEvent::ToolUse { .. } => "tool_use",
+                ChatStreamEvent::ToolResult { .. } => "tool_result",
+                ChatStreamEvent::Result { .. } => "result",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "tool_use", "tool_result", "text", "result"]);
     }
 
     #[test]
