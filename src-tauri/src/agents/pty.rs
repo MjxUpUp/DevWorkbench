@@ -89,6 +89,22 @@ fn resolve_agent_exe(agent_type: &AgentType) -> Result<PathBuf, String> {
 // Command building
 // ---------------------------------------------------------------------------
 
+/// How the reader thread should interpret the agent's stdout.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OutputMode {
+    /// Raw byte stream — emitted verbatim to the terminal. Used by every CLI
+    /// whose non-interactive mode already streams human-readable text
+    /// (codex/gemini/pi/etc.).
+    Raw,
+    /// `claude --output-format stream-json`: each stdout line is one JSON event.
+    /// The reader parses each event and renders human-readable text (assistant
+    /// text, tool calls, results) so the user watches progress live. claude's
+    /// DEFAULT text mode buffers all output until process exit when stdout is a
+    /// non-TTY pipe — so without stream-json the terminal shows only
+    /// "Agent 运行中，等待输出..." for the entire run.
+    ClaudeStreamJson,
+}
+
 /// Resolved spawn parameters for an agent.
 struct SpawnConfig {
     program: PathBuf,
@@ -96,6 +112,7 @@ struct SpawnConfig {
     cwd: PathBuf,
     /// If set, the prompt is delivered via stdin instead of as a CLI arg.
     stdin_prompt: Option<String>,
+    output_mode: OutputMode,
 }
 
 /// Cached version of `resolve_agent_exe`. Avoids PATH scanning on every spawn.
@@ -137,6 +154,17 @@ fn build_spawn_config(
     match agent_type {
         AgentType::ClaudeCode => {
             args.push("--print".to_string());
+            // stream-json: emit one JSON event per line in REALTIME (system init,
+            // assistant text, tool_use, tool_result, final result) instead of
+            // buffering the entire run and dumping it at exit — which is what
+            // claude's default text mode does when stdout is a non-TTY pipe. The
+            // reader thread parses each line and renders human-readable text, so
+            // the user watches the agent work instead of staring at
+            // "Agent 运行中，等待输出..." for minutes. --verbose is required by
+            // stream-json (surfaces tool calls + intermediate user/tool turns).
+            args.push("--output-format".to_string());
+            args.push("stream-json".to_string());
+            args.push("--verbose".to_string());
             // No `--continue`/`--resume`: claude's bare `--continue` resumes the
             // "most recent conversation in [cwd]" — a claude-internal notion of
             // "recent" that does NOT correspond to this DevWorkbench conversation.
@@ -191,7 +219,94 @@ fn build_spawn_config(
         args,
         cwd: PathBuf::from(project_path),
         stdin_prompt,
+        output_mode: if matches!(agent_type, AgentType::ClaudeCode) {
+            OutputMode::ClaudeStreamJson
+        } else {
+            OutputMode::Raw
+        },
     })
+}
+
+/// Render one `claude --output-format stream-json` line into human-readable,
+/// ANSI-styled text for the terminal. Returns None for events with no
+/// user-facing content (e.g. system/api_retry noise) so the reader skips them.
+///
+/// Parsed with `serde_json::Value` rather than a full struct schema: claude's
+/// event shapes vary across versions and we need only a couple of fields per
+/// type, so a tolerant parse + `.get()` chain degrades gracefully (unknown or
+/// missing fields ⇒ skip, never panic) instead of failing the whole stream on
+/// one odd line.
+fn render_claude_stream_event(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let ty = v.get("type").and_then(|s| s.as_str())?;
+    match ty {
+        "assistant" => {
+            let content = v
+                .get("message")?
+                .get("content")?
+                .as_array()?;
+            let mut out = String::new();
+            for block in content {
+                match block.get("type").and_then(|s| s.as_str()).unwrap_or("") {
+                    "text" => {
+                        if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
+                            if !t.is_empty() {
+                                out.push_str(t);
+                                out.push('\n');
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let name = block.get("name").and_then(|s| s.as_str()).unwrap_or("tool");
+                        let preview = json_preview(block.get("input"), 80);
+                        out.push_str(&format!("\x1b[36m🔧 {} \x1b[90m{}\x1b[0m\n", name, preview));
+                    }
+                    _ => {}
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+        "user" => {
+            // tool_result turns — a short result preview proves the tool
+            // returned and the agent is making progress.
+            let content = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())?;
+            let mut out = String::new();
+            for block in content {
+                if block.get("type").and_then(|s| s.as_str()) == Some("tool_result") {
+                    let preview = json_preview(block.get("content"), 120);
+                    out.push_str(&format!("\x1b[90m  ↳ {}\x1b[0m\n", preview));
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+        "result" => {
+            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+            let dur_ms = v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
+            let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
+            let secs = dur_ms / 1000;
+            if is_error || subtype != "success" {
+                Some(format!("\x1b[31m✗ 失败 ({}s)\x1b[0m\n", secs))
+            } else {
+                Some(format!("\x1b[32m✓ 完成 ({}s)\x1b[0m\n", secs))
+            }
+        }
+        // "system" (init / api_retry) carries no user-facing progress — skip.
+        _ => None,
+    }
+}
+
+/// One-line preview of a JSON value: serialized, newlines collapsed to spaces,
+/// truncated to `max` chars so it fits on a single terminal row.
+fn json_preview(value: Option<&serde_json::Value>, max: usize) -> String {
+    let s = match value {
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+        None => String::new(),
+    };
+    let collapsed: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    collapsed.chars().take(max).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -763,26 +878,55 @@ fn spawn_pipe_fallback(
     let app_reader = app.clone();
     let sid_reader = session_id.clone();
     let processes_reader = processes.clone();
+    let output_mode = config.output_mode; // Copy — drives stdout interpretation
     std::thread::spawn(move || {
         let mut output_log: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
 
         if let Some(mut out) = stdout {
-            loop {
-                match out.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let data = &buf[..n];
-                        output_log.extend_from_slice(data);
-                        let _ = app_reader.emit(
-                            "pty:output",
-                            serde_json::json!({
-                                "sessionId": sid_reader,
-                                "data": data.to_vec(),
-                            }),
-                        );
+            match output_mode {
+                OutputMode::Raw => {
+                    loop {
+                        match out.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                let data = &buf[..n];
+                                output_log.extend_from_slice(data);
+                                let _ = app_reader.emit(
+                                    "pty:output",
+                                    serde_json::json!({
+                                        "sessionId": sid_reader,
+                                        "data": data.to_vec(),
+                                    }),
+                                );
+                            }
+                            Err(_) => break,
+                        }
                     }
-                    Err(_) => break,
+                }
+                OutputMode::ClaudeStreamJson => {
+                    // Each stdout line is one claude event. Parse and render
+                    // human-readable text; emit only the rendered text (raw JSON
+                    // is noise to the user). output_log keeps the rendered text so
+                    // the post-run replay reads exactly as it did live.
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(out);
+                    for line in reader.lines() {
+                        let line = match line {
+                            Ok(l) => l,
+                            Err(_) => break,
+                        };
+                        if let Some(text) = render_claude_stream_event(&line) {
+                            output_log.extend_from_slice(text.as_bytes());
+                            let _ = app_reader.emit(
+                                "pty:output",
+                                serde_json::json!({
+                                    "sessionId": sid_reader,
+                                    "data": text.into_bytes(),
+                                }),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1583,5 +1727,75 @@ mod tests {
         let t = tail("一二三四五六", 4);
         assert!(t.starts_with("..."));
         assert!("一二三四五六".ends_with(t.trim_start_matches('.')));
+    }
+
+    #[test]
+    fn claude_spawn_uses_stream_json_for_live_output() {
+        // Regression for the "Agent 运行中，等待输出" UX problem: claude's
+        // DEFAULT text mode buffers all output until process exit when stdout is
+        // a non-TTY pipe. We force stream-json so the reader sees realtime
+        // events. Lock the flags + the reader-side output_mode together.
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("claude".to_string(), std::path::PathBuf::from("claude"));
+        }
+        let cfg = build_spawn_config(&AgentType::ClaudeCode, "/p", "hello", None)
+            .expect("build_spawn_config for ClaudeCode");
+        assert!(
+            cfg.args.contains(&"--output-format".to_string())
+                && cfg.args.contains(&"stream-json".to_string()),
+            "ClaudeCode must emit stream-json for realtime output: {:?}",
+            cfg.args,
+        );
+        assert!(
+            cfg.args.contains(&"--verbose".to_string()),
+            "stream-json requires --verbose: {:?}",
+            cfg.args,
+        );
+        assert_eq!(
+            cfg.output_mode,
+            OutputMode::ClaudeStreamJson,
+            "reader must parse claude stdout as stream-json events",
+        );
+        // Other agents stay on raw byte streaming.
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("codex".to_string(), std::path::PathBuf::from("codex"));
+        }
+        let cfg_codex = build_spawn_config(&AgentType::Codex, "/p", "hello", None)
+            .expect("build_spawn_config for Codex");
+        assert_eq!(cfg_codex.output_mode, OutputMode::Raw);
+    }
+
+    #[test]
+    fn render_claude_stream_event_extracts_text_tools_and_result() {
+        // assistant text block → the text, verbatim.
+        let assistant = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(
+            render_claude_stream_event(assistant),
+            Some("hello world\n".to_string()),
+        );
+        // assistant tool_use → 🔧 with the tool name + a short input preview.
+        let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
+        let rendered = render_claude_stream_event(tool).expect("tool_use renders");
+        assert!(rendered.contains("🔧 Read"), "tool name shown: {rendered}");
+        assert!(rendered.contains("file_path"), "input preview shown: {rendered}");
+        // result success → green ✓ with duration in seconds.
+        let ok = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":45000}"#;
+        let rendered = render_claude_stream_event(ok).expect("result renders");
+        assert!(rendered.contains("✓ 完成"), "success marker: {rendered}");
+        assert!(rendered.contains("45s"), "duration in seconds: {rendered}");
+        // result error → red ✗.
+        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
+        let rendered = render_claude_stream_event(err).expect("error result renders");
+        assert!(rendered.contains("✗ 失败"), "failure marker: {rendered}");
+        // system events (init / api_retry) → None (no user-facing content).
+        assert_eq!(
+            render_claude_stream_event(r#"{"type":"system","subtype":"init","session_id":"x"}"#),
+            None,
+        );
+        // Malformed / non-JSON line → None (must not panic, never break stream).
+        assert_eq!(render_claude_stream_event("not json at all"), None);
+        assert_eq!(render_claude_stream_event(""), None);
     }
 }
