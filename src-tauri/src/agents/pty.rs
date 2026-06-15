@@ -206,18 +206,120 @@ pub fn spawn_pty_agent(
     parent_session_id: Option<&str>,
     conversation_id: Option<&str>,
 ) -> Result<Session, String> {
+    // Context bridge: when this turn continues an existing conversation, inject a
+    // summary of the prior turns so the new agent inherits the thread of work.
+    // Same-agent continuation ALSO gets parent_session_id below (→ ClaudeCode
+    // --continue), but external CLIs other than Claude have no native resume, so
+    // the injected summary is the only continuity mechanism across an agent switch.
+    let prior_turns = match conversation_id {
+        Some(cid) => load_prior_turns(&db_conn, cid),
+        None => Vec::new(),
+    };
+
+    // Resolve parent_session_id for same-agent CLI resume. P2's continueConversation
+    // passes conversation_id but not parent_session_id, so derive it: link to the
+    // last prior turn (only when it's the same agent — a different agent has no CLI
+    // session to resume from, and forcing --continue onto it would be misleading).
+    let parent_for_resume = if parent_session_id.is_some() {
+        parent_session_id
+    } else {
+        prior_turns.last().filter(|t| t.agent_type == agent_type).map(|t| t.id.as_str())
+    };
+
+    let injected_prompt = inject_conversation_context(prompt, &prior_turns, &agent_type);
     // Inject project knowledge context into the prompt — run in background thread
     // with a 2-second timeout to avoid blocking the UI on slow DB queries.
     let injected_prompt = inject_knowledge_with_timeout(
-        &db_conn, &agent_type, project_path, prompt,
+        &db_conn, &agent_type, project_path, &injected_prompt,
     );
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
-    let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model, parent_session_id)?;
+    let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model, parent_for_resume)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
     // all target CLIs support non-interactive --print/exec pipe mode.
-    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_session_id, conversation_id, prompt, model)
+    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_for_resume, conversation_id, prompt, model)
+}
+
+// ---------------------------------------------------------------------------
+// Conversation context bridge (cross-agent history injection)
+// ---------------------------------------------------------------------------
+
+/// Load the completed prior turns of a conversation (oldest-first), best-effort.
+/// The currently-spawning turn isn't in the DB yet, so it's naturally excluded.
+/// A DB failure degrades to "no prior history" rather than blocking the spawn.
+fn load_prior_turns(db_conn: &crate::db::DbState, conversation_id: &str) -> Vec<crate::models::Session> {
+    let Ok(conn) = db_conn.get() else {
+        return Vec::new();
+    };
+    crate::agents::session::load_turns_for_conversation_db(&conn, conversation_id)
+        .unwrap_or_default()
+}
+
+/// Max chars of prior-turn output to include per turn in the injected summary.
+/// Keeps the bridge bounded — a long conversation won't blow the prompt budget.
+const CONTEXT_BRIDGE_OUTPUT_MAX_CHARS: usize = 1200;
+/// Hard cap on total injected history across all prior turns.
+const CONTEXT_BRIDGE_TOTAL_MAX_CHARS: usize = 8000;
+
+/// Build the injected conversation-history prefix for a follow-up turn.
+///
+/// Each prior turn contributes its agent + user prompt + a tail-truncated slice
+/// of its output summary. The whole block is capped at
+/// [`CONTEXT_BRIDGE_TOTAL_MAX_CHARS`]; if it exceeds that, only the most recent
+/// turns that fit are kept (oldest dropped first) so the immediate thread of
+/// work is always preserved. Returns the original prompt unchanged when there
+/// is no prior history (first turn of a conversation).
+fn inject_conversation_context(
+    prompt: &str,
+    prior_turns: &[crate::models::Session],
+    _current_agent: &AgentType,
+) -> String {
+    if prior_turns.is_empty() {
+        return prompt.to_string();
+    }
+
+    // Render each turn into a compact block, then trim from the front until the
+    // total fits the cap (keep the newest — the active thread of work).
+    let blocks: Vec<String> = prior_turns
+        .iter()
+        .map(|t| {
+            let output = t
+                .output_summary
+                .as_deref()
+                .map(|s| tail(s, CONTEXT_BRIDGE_OUTPUT_MAX_CHARS))
+                .unwrap_or_default();
+            format!(
+                "[Turn — agent: {}]\nUser: {}\nAssistant:\n{}",
+                t.agent_type.display_name(),
+                t.prompt.trim(),
+                output.trim(),
+            )
+        })
+        .collect();
+
+    let mut selected: Vec<String> = blocks.iter().cloned().collect();
+    while selected.iter().map(|b| b.len()).sum::<usize>() > CONTEXT_BRIDGE_TOTAL_MAX_CHARS && selected.len() > 1 {
+        selected.remove(0);
+    }
+
+    let history = selected.join("\n\n");
+    format!(
+        "You are continuing an existing conversation. Prior turns (for context — do not repeat their work):\n\n{history}\n\n--- Current request ---\n{prompt}",
+    )
+}
+
+/// Keep the tail of `s` up to `max` chars, snapped to a UTF-8 boundary and
+/// `...`-prefixed. Mirrors truncate_tail but operates on an already-decoded str.
+fn tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...{}", &s[start..])
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,5 +1474,75 @@ mod tests {
     fn strip_ansi_removes_escape_sequences() {
         let raw = b"\x1b[1mbold\x1b[0m and \x1b[90mgray\x1b[0m";
         assert_eq!(strip_ansi(raw), "bold and gray");
+    }
+
+    // ---- Conversation context bridge ----
+
+    fn mk_turn(agent: AgentType, prompt: &str, output: Option<&str>) -> crate::models::Session {
+        crate::models::Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_path: "/p".to_string(),
+            agent_type: agent,
+            status: crate::models::SessionStatus::Completed,
+            prompt: prompt.to_string(),
+            model: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            exit_code: Some(0),
+            output_summary: output.map(|s| s.to_string()),
+            context_snapshot: None,
+            linked_requirement_id: None,
+            parent_session_id: None,
+            conversation_id: Some("c1".to_string()),
+        }
+    }
+
+    #[test]
+    fn inject_context_first_turn_is_unchanged() {
+        // No prior turns ⇒ the prompt must come back verbatim (no preamble).
+        let out = inject_conversation_context("do the thing", &[], &AgentType::ClaudeCode);
+        assert_eq!(out, "do the thing");
+    }
+
+    #[test]
+    fn inject_context_includes_prior_turn_prompt_and_output() {
+        let prior = vec![mk_turn(
+            AgentType::ClaudeCode,
+            "add a login page",
+            Some("created src/Login.tsx"),
+        )];
+        let out = inject_conversation_context("now add validation", &prior, &AgentType::Codex);
+        assert!(out.contains("add a login page"), "prior user prompt injected: {out}");
+        assert!(out.contains("created src/Login.tsx"), "prior output injected: {out}");
+        assert!(out.contains("now add validation"), "current request appended: {out}");
+        assert!(out.contains("Claude Code"), "prior agent named in bridge: {out}");
+    }
+
+    #[test]
+    fn inject_context_caps_total_and_keeps_newest() {
+        // 20 turns each producing a big block — total must stay under the cap,
+        // and the MOST RECENT turn's content must survive the trim.
+        let big = "x".repeat(CONTEXT_BRIDGE_OUTPUT_MAX_CHARS);
+        let prior: Vec<_> = (0..20)
+            .map(|i| mk_turn(AgentType::ClaudeCode, &format!("turn-{i}"), Some(&format!("{big} marker-{i}"))))
+            .collect();
+        let out = inject_conversation_context("current", &prior, &AgentType::ClaudeCode);
+        assert!(
+            out.len() < CONTEXT_BRIDGE_TOTAL_MAX_CHARS + 4096,
+            "injected history must stay near the cap; got {} bytes",
+            out.len()
+        );
+        // The newest turn's marker must be present; the oldest should have been dropped.
+        assert!(out.contains("marker-19"), "newest turn preserved: {out}");
+        assert!(!out.contains("marker-0"), "oldest turn dropped to fit cap");
+    }
+
+    #[test]
+    fn tail_keeps_suffix_and_snaps_to_char_boundary() {
+        assert_eq!(tail("hello", 10), "hello");
+        // 6 CJK chars = 18 bytes; tail to 4 bytes snaps to a char boundary.
+        let t = tail("一二三四五六", 4);
+        assert!(t.starts_with("..."));
+        assert!("一二三四五六".ends_with(t.trim_start_matches('.')));
     }
 }

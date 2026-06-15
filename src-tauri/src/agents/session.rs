@@ -338,6 +338,60 @@ pub fn update_conversation_db(
     Ok(())
 }
 
+/// Load the turns (sessions) of one conversation, oldest-first. Used by the
+/// context bridge to inject prior-turn history into a follow-up turn of the
+/// same conversation — especially when the follow-up switches agents, where the
+/// new agent has no native way to inherit the prior agent's internal state.
+pub fn load_turns_for_conversation_db(
+    conn: &rusqlite::Connection,
+    conversation_id: &str,
+) -> Result<Vec<Session>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_path, agent_type, status, prompt, model,
+                started_at, finished_at, exit_code, output_summary,
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id
+         FROM sessions WHERE conversation_id = ?1 ORDER BY started_at ASC"
+    )?;
+    let sessions = stmt.query_map(params![conversation_id], |row| {
+        let agent_type_str: String = row.get(2)?;
+        let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
+            .unwrap_or(AgentType::ClaudeCode);
+        let status_str: String = row.get(3)?;
+        let status = match status_str.as_str() {
+            "running" => SessionStatus::Running,
+            "completed" => SessionStatus::Completed,
+            "failed" => SessionStatus::Failed,
+            _ => SessionStatus::Failed,
+        };
+        let snapshot_str: Option<String> = row.get(10)?;
+        let context_snapshot: Option<ContextSnapshot> = snapshot_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        Ok(Session {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            agent_type,
+            status,
+            prompt: row.get(4)?,
+            model: row.get(5)?,
+            started_at: row.get(6)?,
+            finished_at: row.get(7)?,
+            exit_code: row.get(8)?,
+            output_summary: row.get(9)?,
+            context_snapshot,
+            linked_requirement_id: row.get(11)?,
+            parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for s in sessions {
+        out.push(s?);
+    }
+    Ok(out)
+}
+
 // ---- Legacy helpers (still used by pty output logging) ----
 
 pub(crate) fn agents_dir() -> Result<PathBuf, String> {
@@ -452,5 +506,34 @@ mod tests {
         let result = update_session_db(&conn, "s1", patch);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("无效 status"));
+    }
+
+    #[test]
+    fn load_turns_returns_conversation_turns_oldest_first() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        // Three turns of one conversation, inserted out of time-order to prove
+        // the ORDER BY started_at ASC sort (not insert order) drives the result.
+        let mut mid = make_session("mid", "/p", SessionStatus::Completed);
+        mid.conversation_id = Some("c1".to_string());
+        mid.started_at = "2026-01-02T00:00:00Z".to_string();
+        let mut last = make_session("last", "/p", SessionStatus::Completed);
+        last.conversation_id = Some("c1".to_string());
+        last.started_at = "2026-01-03T00:00:00Z".to_string();
+        let mut first = make_session("first", "/p", SessionStatus::Completed);
+        first.conversation_id = Some("c1".to_string());
+        first.started_at = "2026-01-01T00:00:00Z".to_string();
+        // A turn of a DIFFERENT conversation must not leak in.
+        let mut other = make_session("other", "/p", SessionStatus::Completed);
+        other.conversation_id = Some("c2".to_string());
+
+        for s in [&mid, &last, &first, &other] {
+            insert_session_db(&conn, s).unwrap();
+        }
+
+        let turns = load_turns_for_conversation_db(&conn, "c1").unwrap();
+        let ids: Vec<&str> = turns.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["first", "mid", "last"], "oldest-first within c1 only");
     }
 }

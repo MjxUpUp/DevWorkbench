@@ -85,6 +85,13 @@ export function ChatView() {
     });
   }, [project, agents, installedAgents, selectedAgent, recommendAgent]);
 
+  // Map an agent type to its display name (falls back to the raw type). Used by
+  // the agent-switch divider between turns of different agents.
+  const agentDisplayName = useCallback(
+    (t: AgentType) => agents.find((a) => a.agentType === t)?.displayName ?? t.replace(/_/g, ' '),
+    [agents],
+  );
+
   // When the selected conversation already has turns, default the agent picker
   // to the last turn's agent so a follow-up feels continuous (user can still
   // change it — switching agents mid-conversation is the point).
@@ -269,17 +276,35 @@ export function ChatView() {
         onClear={handleClear}
       />
       <div className="message-list" ref={messageListRef}>
-        {turns.map((session) => (
-          <div key={session.id}>
-            <UserMessage content={session.prompt} />
-            <AgentMessage
-              session={session}
-              running={runningSession?.id === session.id}
-              qualityReport={qualityReports.get(session.id) ?? null}
-              elapsed={runningSession?.id === session.id ? elapsed : undefined}
-            />
-          </div>
-        ))}
+        {turns.map((session, i) => {
+          // Insert a divider before a turn whose agent differs from the previous
+          // turn — this is the visible cue that the conversation switched agents
+          // (e.g. claude → codex). The first turn never gets one.
+          const prev = i > 0 ? turns[i - 1] : null;
+          const switchedFrom = prev && prev.agentType !== session.agentType
+            ? prev.agentType
+            : null;
+          return (
+            <div key={session.id}>
+              {switchedFrom && (
+                <div className="agent-switch-divider" role="separator" aria-label="切换 Agent">
+                  <span className="agent-switch-divider-line" />
+                  <span className="agent-switch-divider-label">
+                    {agentDisplayName(switchedFrom)} → {agentDisplayName(session.agentType)}
+                  </span>
+                  <span className="agent-switch-divider-line" />
+                </div>
+              )}
+              <UserMessage content={session.prompt} />
+              <AgentMessage
+                session={session}
+                running={runningSession?.id === session.id}
+                qualityReport={qualityReports.get(session.id) ?? null}
+                elapsed={runningSession?.id === session.id ? elapsed : undefined}
+              />
+            </div>
+          );
+        })}
       </div>
       <Composer
         prompt={prompt}
