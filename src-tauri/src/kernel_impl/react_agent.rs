@@ -25,6 +25,10 @@ use serde_json::{json, Value};
 
 use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
 use crate::cost::sink::CostSink;
+use crate::kernel_impl::llm_recovery::{
+    classify_llm_error, fatal_user_message, retry_delay, should_retry, FatalReason, LlmErrorKind,
+    MAX_ATTEMPTS,
+};
 use crate::kernel_impl::hooks::HookManager;
 
 // ---------------------------------------------------------------------------
@@ -828,6 +832,11 @@ impl kernel_core::Agent for ReactAgent {
             history.push(Message::user(&task));
             let opts = ModelOptions { model: model_opt, thinking, ..Default::default() };
             let mut final_output = String::new();
+            // C7: track why the loop ended so the terminal Done is honest —
+            // converged (model gave a final answer), degraded (unrecoverable
+            // LLM error → graceful message), or neither (hit max_steps).
+            let mut converged = false;
+            let mut degraded: Option<FatalReason> = None;
 
             for _step in 0..max_steps {
                 // Real streaming: consume the model's SSE stream, yielding each
@@ -836,13 +845,60 @@ impl kernel_core::Agent for ReactAgent {
                 // + input_json_delta events. Text + tool_calls are reassembled
                 // into one assistant Message for coherent next-turn history.
                 use futures::StreamExt;
-                let mut turn_stream = bound.stream(&history, &opts).map_err(Error::from)?;
+                // C7 tool-call recovery: retry transient LLM send failures
+                // (network/5xx/429) with exponential backoff; fatal errors
+                // (circuit open / quota / auth / 4xx) degrade at once. The
+                // breaker inside GlmChatModel records each attempt, so a run
+                // of retries naturally trips the circuit.
+                let mut attempt = 1u32;
+                let turn_stream = loop {
+                    match bound.stream(&history, &opts) {
+                        Ok(s) => break Ok(s),
+                        Err(e) => {
+                            let err = Error::from(e);
+                            if should_retry(&err, attempt) {
+                                log::warn!(
+                                    "[ReactAgent] transient LLM error, retry {}/{}: {}",
+                                    attempt,
+                                    MAX_ATTEMPTS,
+                                    err
+                                );
+                                tokio::time::sleep(retry_delay(attempt)).await;
+                                attempt += 1;
+                                continue;
+                            }
+                            break Err(match classify_llm_error(&err) {
+                                LlmErrorKind::Fatal(r) => r,
+                                LlmErrorKind::Retryable => FatalReason::Generic,
+                            });
+                        }
+                    }
+                };
+                let mut turn_stream = match turn_stream {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        degraded = Some(reason);
+                        break;
+                    }
+                };
                 let mut turn_text = String::new();
                 let mut turn_reasoning = String::new();
                 let mut turn_tool_calls: Vec<kernel_core::ToolCall> = Vec::new();
                 let mut turn_sig: Option<String> = None;
                 while let Some(msg_res) = turn_stream.next().await {
-                    let msg = msg_res.map_err(Error::from)?;
+                    let msg = match msg_res {
+                        Ok(m) => m,
+                        Err(e) => {
+                            // Mid-stream drop: tokens already emitted, can't
+                            // cleanly retry the partial turn → degrade.
+                            let err = Error::from(e);
+                            degraded = Some(match classify_llm_error(&err) {
+                                LlmErrorKind::Fatal(r) => r,
+                                LlmErrorKind::Retryable => FatalReason::Generic,
+                            });
+                            break;
+                        }
+                    };
                     if !msg.content.is_empty() {
                         turn_text.push_str(&msg.content);
                         yield AgentEvent::Token(msg.content.clone());
@@ -861,6 +917,9 @@ impl kernel_core::Agent for ReactAgent {
                         turn_sig = Some(s.clone());
                     }
                 }
+                if degraded.is_some() {
+                    break;
+                }
                 history.push(Message {
                     role: Role::Assistant,
                     content: turn_text.clone(),
@@ -875,6 +934,7 @@ impl kernel_core::Agent for ReactAgent {
                 });
                 if turn_tool_calls.is_empty() {
                     final_output = turn_text;
+                    converged = true;
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
@@ -944,16 +1004,39 @@ impl kernel_core::Agent for ReactAgent {
                     });
                 }
             }
-            yield AgentEvent::Done(AgentOutcome {
-                status: AgentRunStatus::Completed,
-                files_changed: Vec::new(),
-                exit_code: Some(0),
-                output_summary: Some(final_output),
-                // Transparent agent: honesty is enforced at the call level via
-                // HookManager (each tool invocation inspectable before commit),
-                // not via post-hoc diff audit. OpaqueAgent fills this instead.
-                honesty: None,
-            });
+            // Honest terminal status: degraded (graceful LLM failure), max-steps
+            // (no convergence), or completed (model gave a final answer). Never
+            // report Completed when the run actually failed.
+            if let Some(reason) = degraded {
+                yield AgentEvent::Done(AgentOutcome {
+                    status: AgentRunStatus::Failed,
+                    files_changed: Vec::new(),
+                    exit_code: Some(1),
+                    output_summary: Some(fatal_user_message(reason).to_string()),
+                    honesty: None,
+                });
+            } else if !converged {
+                yield AgentEvent::Done(AgentOutcome {
+                    status: AgentRunStatus::Failed,
+                    files_changed: Vec::new(),
+                    exit_code: Some(1),
+                    output_summary: Some(format!(
+                        "Reached the {max_steps}-step tool-call limit without a final answer.",
+                    )),
+                    honesty: None,
+                });
+            } else {
+                yield AgentEvent::Done(AgentOutcome {
+                    status: AgentRunStatus::Completed,
+                    files_changed: Vec::new(),
+                    exit_code: Some(0),
+                    output_summary: Some(final_output),
+                    // Transparent agent: honesty is enforced at the call level via
+                    // HookManager (each tool invocation inspectable before commit),
+                    // not via post-hoc diff audit. OpaqueAgent fills this instead.
+                    honesty: None,
+                });
+            }
         };
         Ok(Box::pin(s))
     }
@@ -1196,6 +1279,143 @@ mod tests {
         // EchoTool.invoke returns `echo:{args}` — the event must carry that real
         // output, proving the v1.1 fill (not the old empty-status placeholder).
         assert_eq!(succeeded.as_deref(), Some(r#"echo:{"text":"hi"}"#));
+    }
+
+    // --- v1.1: C7 tool-call recovery (LLM retry + graceful degradation) ---
+
+    /// Mock whose stream() always fails with a fixed error — drives the C7
+    /// fatal-degradation path without a live LLM.
+    struct ErrorModel {
+        make: Arc<dyn Fn() -> Error + Send + Sync>,
+    }
+    #[async_trait]
+    impl ChatModel for ErrorModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err((self.make)())
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            Err((self.make)())
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(ErrorModel {
+                make: self.make.clone(),
+            }))
+        }
+    }
+
+    /// Mock that fails the first `fails` stream attempts with a Network error
+    /// (Retryable), then succeeds — drives the C7 retry-then-recover path.
+    #[derive(Clone)]
+    struct RetryingModel {
+        fails: usize,
+        call: Arc<std::sync::atomic::AtomicUsize>,
+        ok: Message,
+    }
+    #[async_trait]
+    impl ChatModel for RetryingModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err(Error::Unsupported("RetryingModel: drive via stream()".into()))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if idx < self.fails {
+                Err(Error::Network("transient blip".into()))
+            } else {
+                let msg = self.ok.clone();
+                Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
+            }
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    /// Drain a run stream and return the terminal Done outcome.
+    async fn collect_outcome<S>(mut s: S) -> Option<kernel_core::AgentOutcome>
+    where
+        S: futures::Stream<Item = Result<kernel_core::AgentEvent, Error>> + Unpin,
+    {
+        use futures::StreamExt;
+        while let Some(ev) = s.next().await {
+            if let Ok(kernel_core::AgentEvent::Done(o)) = ev {
+                return Some(o);
+            }
+        }
+        None
+    }
+
+    fn go_input() -> kernel_core::AgentInput {
+        kernel_core::AgentInput {
+            prompt: "go".into(),
+            working_dir: None,
+            model: None,
+            resume_from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_degrades_on_fatal_auth_error() {
+        use kernel_core::Agent;
+        // 401 is Fatal::Auth — no retry, graceful Done with the auth message.
+        let model = ErrorModel {
+            make: Arc::new(|| Error::Model("GLM failed: 401 unauthorized".into())),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("degraded summary");
+        assert!(summary.contains("API key"), "auth message: {summary}");
+    }
+
+    #[tokio::test]
+    async fn run_retries_transient_then_completes() {
+        use kernel_core::Agent;
+        // First stream() call fails with Network (Retryable); the second
+        // succeeds with bare text. Proves the run loop backs off (~1s real
+        // sleep) and recovers instead of dying on the first blip. Single retry
+        // keeps the cost to ~1s (tokio test-util/pause isn't enabled here).
+        let model = RetryingModel {
+            fails: 1,
+            call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ok: Message::assistant("recovered"),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        assert_eq!(outcome.output_summary.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn run_reports_step_limit_when_never_converging() {
+        use kernel_core::Agent;
+        // Every turn emits a tool_call → the loop never sees an empty-tool_calls
+        // turn, so it must hit max_steps and report Failed (not the old
+        // dishonest Completed with a stale/empty summary).
+        let loop_msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![kernel_core::ToolCall {
+                id: "c".into(),
+                call_type: "function".into(),
+                function: kernel_core::FunctionCall {
+                    name: "echo".into(),
+                    arguments: r#"{"text":"x"}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let model = ScriptedModel::new(vec![loop_msg; 16]);
+        let reg = ToolRegistry::new().with(EchoTool);
+        let agent = ReactAgent::new(model, reg, "sys").with_max_steps(3);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("step-limit summary");
+        assert!(summary.contains("step"), "step-limit message: {summary}");
     }
 
     // --- v1.1: reasoning 双协议贯通 (GLM Interleaved + Preserved Thinking) ---
