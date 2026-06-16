@@ -245,6 +245,13 @@ pub(crate) fn build_react_agent(
         .with_history(history)
         .with_thinking(2048)
         .with_max_verify(1)
+        // T9 per-step routing: rule-based glm-4-flash for low-stakes turns
+        // (tool-result echoes, confirmations), glm-4.6 for planning/reasoning.
+        // Same Z.AI provider → endpoint/key constant; route_step is a no-op for
+        // non-GLM base models.
+        .with_model_router(Arc::new(
+            crate::kernel_impl::model_router::route_step,
+        ))
         .with_hooks(Arc::new(hooks)))
 }
 

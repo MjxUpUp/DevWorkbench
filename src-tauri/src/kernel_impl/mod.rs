@@ -8,6 +8,7 @@ pub mod hooks;
 pub mod honesty;
 pub mod llm_recovery;
 pub mod mcp_tool;
+pub mod model_router;
 pub mod opaque_agent;
 pub mod react_agent;
 pub mod retriever;

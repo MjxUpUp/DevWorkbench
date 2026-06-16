@@ -642,6 +642,11 @@ pub struct ReactAgent {
     /// Injectable audit fn (tests stub it; production leaves None → uses
     /// honesty::audit_project). Signature matches audit_project.
     audit_fn: Option<Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>>,
+    /// Per-step model router (v1.2 T9). If set, before each `stream` call the
+    /// loop asks it `(&history, base_model) -> model_id` and overrides
+    /// `opts.model`. Same-provider routing (glm-4.6 ↔ glm-4-flash), so
+    /// endpoint/key stay constant. None = single fixed model (the old behavior).
+    model_router: Option<Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>>,
     system_prompt: String,
     /// Context passed to every tool invocation. Defaults to empty
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
@@ -670,6 +675,7 @@ impl ReactAgent {
             max_steps: 12,
             max_verify: 0,
             audit_fn: None,
+            model_router: None,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
@@ -732,6 +738,19 @@ impl ReactAgent {
         f: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>,
     ) -> Self {
         self.audit_fn = Some(f);
+        self
+    }
+
+    /// Enable per-step model routing (v1.2 T9). Before each turn, the router is
+    /// called with the current history + base model and its return value
+    /// overrides `opts.model` for that turn. Production wires
+    /// [`crate::kernel_impl::model_router::route_step`] (rule-based glm-4-flash
+    /// for low-stakes turns); tests inject a stub.
+    pub fn with_model_router(
+        mut self,
+        f: Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>,
+    ) -> Self {
+        self.model_router = Some(f);
         self
     }
 
@@ -841,6 +860,7 @@ impl kernel_core::Agent for ReactAgent {
         let thinking = self.thinking;
         let max_verify = self.max_verify;
         let audit_fn = self.audit_fn.clone();
+        let model_router = self.model_router.clone();
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -859,7 +879,13 @@ impl kernel_core::Agent for ReactAgent {
             history.push(Message::system(&system_prompt));
             history.extend(prior_history.iter().cloned());
             history.push(Message::user(&task));
-            let opts = ModelOptions { model: model_opt, thinking, ..Default::default() };
+            // T9: base model for per-step routing. opts.model is overridden each
+            // turn when a router is wired; base_model is the "no routing" default
+            // (also what route_step falls back to when the turn is high-stakes).
+            let base_model = model_opt
+                .clone()
+                .unwrap_or_else(|| crate::kernel_impl::model_router::STRONG_MODEL.to_string());
+            let mut opts = ModelOptions { model: model_opt, thinking, ..Default::default() };
             let mut final_output = String::new();
             // C7: track why the loop ended so the terminal Done is honest —
             // converged (model gave a final answer), degraded (unrecoverable
@@ -870,6 +896,13 @@ impl kernel_core::Agent for ReactAgent {
             let mut verify_count = 0u32;
 
             for _step in 0..max_steps {
+                // T9 per-step routing: ask the router (if wired) which model fits
+                // this turn given the conversation so far, and override opts.model
+                // for this single stream call. Same provider → endpoint/key are
+                // constant; only the model id in the request body changes.
+                if let Some(router) = model_router.as_ref() {
+                    opts.model = Some(router(&history, &base_model));
+                }
                 // Real streaming: consume the model's SSE stream, yielding each
                 // text delta as a Token (chat renders token-by-token) while the
                 // stream() helper accumulates tool_calls from content_block_start
@@ -1317,6 +1350,62 @@ mod tests {
         fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
             Ok(Box::new(self.clone()))
         }
+    }
+
+    /// A ChatModel that records the `opts.model` of each `stream()` call and
+    /// emits a fixed reply — lets a test assert the ReactAgent loop routed each
+    /// turn (T9).
+    #[derive(Clone)]
+    struct RecordingModel {
+        reply: Message,
+        seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl RecordingModel {
+        fn new(reply: Message) -> Self {
+            Self {
+                reply,
+                seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatModel for RecordingModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err(Error::Unsupported("RecordingModel: drive via stream()".into()))
+        }
+        fn stream(&self, _: &[Message], opts: &ModelOptions) -> Result<MessageStream, Error> {
+            self.seen.lock().unwrap().push(opts.model.clone());
+            let msg = self.reply.clone();
+            Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_per_step_router_overrides_opts_model() {
+        use kernel_core::Agent;
+        // Router always returns a sentinel; the recording model must see it as
+        // opts.model on the (single, converging) turn. Proves the loop honors the
+        // router before each stream call.
+        let model = RecordingModel::new(Message::assistant("done"));
+        let seen = model.seen.clone();
+        let router: Arc<dyn Fn(&[Message], &str) -> String + Send + Sync> =
+            Arc::new(|_, _| "routed-sentinel".to_string());
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys").with_model_router(router);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one stream call on a converging turn: {seen:?}");
+        assert_eq!(
+            seen[0].as_deref(),
+            Some("routed-sentinel"),
+            "router must override opts.model: {seen:?}"
+        );
     }
 
     #[tokio::test]
