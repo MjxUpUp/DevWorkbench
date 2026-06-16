@@ -13,6 +13,7 @@
 //!   listen("agent:completed", filter sid) 鈫?AgentEvent::Done(AgentOutcome)
 //!   stream dropped / cancelled           鈫?stop_agent (Ctrl-C semantics)
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,8 +33,11 @@ use crate::models::AgentType;
 /// (so they cannot run the blocking honesty audit); they send a lightweight
 /// signal and the async main loop does the heavy work (audit + Done).
 enum AgentMsg {
-    /// A chunk of CLI stdout (pty:output).
+    /// A chunk of CLI stdout (pty:output) — raw agents only.
     Token(String),
+    /// A structured agent event reverse-mapped from claude's `agent:event`
+    /// wire blocks (via `chat_event_to_agent_events`) — ClaudeCode only.
+    Structured(AgentEvent),
     /// The CLI process exited (agent:completed). Carries just the parsed
     /// status/exit-code; the main loop attaches files_changed + honesty audit.
     Completed {
@@ -114,6 +118,7 @@ impl Agent for OpaqueAgent {
         let processes = self.processes.clone();
         let db = self.db.clone();
         let agent_type = self.agent_type.clone();
+        let is_claude = matches!(agent_type, AgentType::ClaudeCode);
         let working_dir = input
             .working_dir
             .clone()
@@ -154,24 +159,65 @@ impl Agent for OpaqueAgent {
             //    does the heavy work (honesty audit + building the outcome).
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentMsg>(64);
 
-            // pty:output -> AgentMsg::Token (decode bytes lossily as UTF-8;
-            // ANSI escapes are preserved — the frontend renders them).
-            let tx_out = tx.clone();
-            let sid_for_output = session_id.clone();
-            let output_id = app.listen("pty:output", move |event| {
-                let payload = event.payload();
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    if v.get("sessionId").and_then(|s| s.as_str()) == Some(&sid_for_output) {
-                        if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
-                            let bytes: Vec<u8> = data.iter()
-                                .filter_map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
-                                .collect();
-                            let text = String::from_utf8_lossy(&bytes).into_owned();
-                            let _ = tx_out.try_send(AgentMsg::Token(text));
+            // Dual-channel dispatch by agent_type. ClaudeCode runs in
+            // OutputMode::ClaudeStreamJson (pty.rs:262), whose reader thread
+            // emits STRUCTURED ChatStreamEvent blocks on `agent:event` (plus
+            // rendered ANSI text on `pty:output`). We listen the structured
+            // channel and reverse-map it back to kernel-core AgentEvent so the
+            // workflow path's tool_use/tool_result cards render — listening
+            // `pty:output` here would give ANSI text only (the G2 gap). All
+            // other opaque CLIs (codex/gemini/qwen/cursor/pi) run in Raw mode
+            // and emit ONLY bytes on `pty:output`; for them the structured path
+            // does not exist, so they keep the text Token path. `pending` pairs
+            // ToolUse↔ToolResult positionally (no tool_call_id on the wire).
+            let pending: Arc<std::sync::Mutex<VecDeque<(String, String)>>> =
+                Arc::new(std::sync::Mutex::new(VecDeque::new()));
+            let mut listener_ids: Vec<tauri::EventId> = Vec::new();
+
+            if is_claude {
+                // ClaudeCode: structured agent:event → reverse-mapped AgentEvent.
+                let tx_ev = tx.clone();
+                let sid_ev = session_id.clone();
+                let pending_ev = pending.clone();
+                let ev_id = app.listen("agent:event", move |event| {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
+                    if v.get("sessionId").and_then(|s| s.as_str()) != Some(&sid_ev) {
+                        return;
+                    }
+                    let Some(event_val) = v.get("event") else { return };
+                    let Ok(wire) = serde_json::from_value::<crate::agents::pty::ChatStreamEvent>(
+                        event_val.clone(),
+                    ) else { return };
+                    let mut guard = match pending_ev.lock() {
+                        Ok(g) => g,
+                        Err(_) => return, // poisoned — drop this event, never panic the listener
+                    };
+                    for ae in crate::agents::react_chat::chat_event_to_agent_events(&wire, &mut *guard) {
+                        let _ = tx_ev.try_send(AgentMsg::Structured(ae));
+                    }
+                });
+                listener_ids.push(ev_id);
+            } else {
+                // Raw agent (codex/gemini/qwen/cursor/pi): pty:output → Token.
+                // Decode bytes lossily as UTF-8; ANSI escapes are preserved.
+                let tx_out = tx.clone();
+                let sid_for_output = session_id.clone();
+                let output_id = app.listen("pty:output", move |event| {
+                    let payload = event.payload();
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                        if v.get("sessionId").and_then(|s| s.as_str()) == Some(&sid_for_output) {
+                            if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
+                                let bytes: Vec<u8> = data.iter()
+                                    .filter_map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
+                                    .collect();
+                                let text = String::from_utf8_lossy(&bytes).into_owned();
+                                let _ = tx_out.try_send(AgentMsg::Token(text));
+                            }
                         }
                     }
-                }
-            });
+                });
+                listener_ids.push(output_id);
+            }
 
             // agent:completed -> AgentMsg::Completed. The listener only parses
             // status/exit-code; the main loop attaches files_changed + runs the
@@ -204,11 +250,15 @@ impl Agent for OpaqueAgent {
             //    diff for assertion weakening + sanity-check the env *after* it
             //    exits, then emit Done with the audit attached.
             //    ListenerGuard ensures unlisten runs even on early stream drop.
-            let _listener_guard = ListenerGuard::new(app.clone(), vec![output_id, done_id]);
+            listener_ids.push(done_id);
+            let _listener_guard = ListenerGuard::new(app.clone(), listener_ids);
             while let Some(msg) = rx.recv().await {
                 match msg {
                     AgentMsg::Token(text) => {
                         yield AgentEvent::Token(text);
+                    }
+                    AgentMsg::Structured(ae) => {
+                        yield ae;
                     }
                     AgentMsg::Completed { status, exit_code } => {
                         let audit_dir = working_dir.clone();
