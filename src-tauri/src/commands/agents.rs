@@ -58,7 +58,7 @@ pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, App
 // Agent process lifecycle commands (PTY-based for CLI agents + kernel for the
 // self-hosted ReactAgent).
 #[tauri::command]
-pub fn spawn_agent_session(
+pub async fn spawn_agent_session(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
     db: State<'_, DbState>,
@@ -72,6 +72,14 @@ pub fn spawn_agent_session(
     conversation_id: Option<String>,
     kernel: bool,
 ) -> Result<Session, AppError> {
+    // MUST be `async`: react_chat_driver calls `tokio::spawn`, which requires a
+    // current Tokio runtime context. A sync Tauri command runs on the main
+    // thread (NO runtime context) → `tokio::spawn` panics with "there is no
+    // reactor running", and because that panic is on the main thread it can't
+    // unwind across the Tauri/webview FFI boundary → process aborts (闪退). The
+    // async command body is driven on Tauri's tokio runtime, so the runtime
+    // context is present and `tokio::spawn` succeeds. The CLI path
+    // (spawn_pty_agent) uses `std::thread::spawn` and never had this issue.
     if kernel {
         // Self-hosted ReactAgent path: no child process, no PTY. The agent runs
         // as a tokio task driving a BoxStream<AgentEvent>, mapped to the SAME
@@ -130,6 +138,9 @@ fn react_chat_driver(
     conversation_id: Option<&str>,
 ) -> Result<Session, String> {
     let session_id = uuid::Uuid::new_v4().to_string();
+    log::info!(
+        "[react_chat] driver START sid={session_id} agent={agent_type:?} model={model:?} conv={conversation_id:?}"
+    );
     let resolved_conv_id = pty::resolve_or_create_conversation(
         &db_conn, conversation_id, project_path, prompt, agent_type,
     )?;
@@ -165,6 +176,7 @@ fn react_chat_driver(
     let conv_drv = resolved_conv_id.clone();
 
     let handle = tokio::spawn(async move {
+        log::info!("[react_chat] task ENTERED sid={sid_drv}");
         let mcp = app_drv.try_state::<McpRegistry>();
         let agent = match executor::build_react_agent(
             model_drv.as_deref(),
@@ -184,6 +196,7 @@ fn react_chat_driver(
                 return;
             }
         };
+        log::info!("[react_chat] build_react_agent OK sid={sid_drv}");
         let input = AgentInput {
             prompt: prompt_drv,
             working_dir: Some(pp_drv.clone()),
@@ -202,6 +215,7 @@ fn react_chat_driver(
                 return;
             }
         };
+        log::info!("[react_chat] agent.run OK, streaming sid={sid_drv}");
 
         use futures::StreamExt;
         let mut final_status = SessionStatus::Completed;
@@ -258,6 +272,10 @@ fn react_chat_driver(
         // Stream ended (ReactAgent always yields Done before ending — this is the
         // normal completion path). Remove from the stop table so a later stop on
         // this completed session doesn't touch a dead handle, then persist state.
+        log::info!(
+            "[react_chat] stream ENDED sid={sid_drv} status={final_status:?} blocks={}",
+            final_blocks.len()
+        );
         if let Some(kt) = app_drv.try_state::<KernelTasks>() {
             kt.remove(&sid_drv);
         }

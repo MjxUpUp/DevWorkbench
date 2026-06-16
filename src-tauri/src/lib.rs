@@ -18,6 +18,56 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Global panic hook — captures EVERY panic (main thread + tokio worker)
+    // with its file:line:col location, payload message, and a forced backtrace,
+    // and writes it to the app log. This is the only way to localize a panic
+    // that doesn't surface as an error string (e.g. an unwinding tokio task that
+    // leaves a session stuck in Running, or a hard process exit on the main
+    // thread). Installed before the builder so it covers the whole app lifetime;
+    // log::error! resolves at panic time, by which point tauri_plugin_log is up.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let bt = std::backtrace::Backtrace::force_capture();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = format!(
+            "[{secs}] [PANIC] thread panicked at {location}: {msg}\nbacktrace:\n{bt}"
+        );
+        log::error!("{line}");
+        eprintln!("{line}");
+        // Flush-safe mirror of the panic to a dedicated file — the buffered
+        // tauri_plugin_log target can lose its last line on a hard crash (panic
+        // on a thread that can't unwind, e.g. across the Tauri/webview FFI
+        // boundary, which aborts the process). The hook fires BEFORE the abort,
+        // so this flush() captures the panic even then. This is what made the
+        // Kernel-Agent 闪退 ("there is no reactor running" at a sync-command
+        // tokio::spawn) diagnosable in the first place.
+        let diag = crate::commands::projects::dirs_home()
+            .join(".dev-workbench")
+            .join("panic.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&diag)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+            let _ = f.flush();
+        }
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
