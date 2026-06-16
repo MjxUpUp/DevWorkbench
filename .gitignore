@@ -8,6 +8,10 @@ build/
 # Rust / Cargo
 src-tauri/target/
 
+# Playwright E2E run artifacts (configs + specs under e2e/ are committed)
+test-results/
+playwright-report/
+
 # IDE
 .vscode/
 .idea/

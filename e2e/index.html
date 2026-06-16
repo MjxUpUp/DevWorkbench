@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>FileChanges E2E harness</title>
+    <!--
+      Tauri IPC shim. Runs as a classic <head> script BEFORE the deferred
+      type=module entry, so @tauri-apps/api/core sees __TAURI_INTERNALS__ by the
+      time FileChanges calls invoke(). Playwright drives the responses through
+      window.__MOCK_INVOKE__ (set via addInitScript, which runs even earlier)
+      and every call is recorded into window.__INVOKE_CALLS__ for assertions.
+    -->
+    <script>
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args) => {
+          (window.__INVOKE_CALLS__ = window.__INVOKE_CALLS__ || []).push({ cmd, args });
+          const mock = window.__MOCK_INVOKE__;
+          if (mock && Object.prototype.hasOwnProperty.call(mock, cmd)) {
+            const v = mock[cmd];
+            return typeof v === 'function' ? v(args) : v;
+          }
+          return null;
+        },
+        transformCallback: () => 0,
+        unregisterCallback: () => {},
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
