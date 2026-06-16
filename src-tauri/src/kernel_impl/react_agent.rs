@@ -635,6 +635,13 @@ pub struct ReactAgent {
     tools: ToolRegistry,
     hooks: Option<Arc<HookManager>>,
     max_steps: usize,
+    /// Max self-verify attempts (v1.2 T7): after convergence, run an honesty
+    /// audit (cargo check + assertion weakening); on failure, feed findings
+    /// back and let the agent self-repair, up to this many times. 0 = off.
+    max_verify: usize,
+    /// Injectable audit fn (tests stub it; production leaves None → uses
+    /// honesty::audit_project). Signature matches audit_project.
+    audit_fn: Option<Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>>,
     system_prompt: String,
     /// Context passed to every tool invocation. Defaults to empty
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
@@ -661,6 +668,8 @@ impl ReactAgent {
             tools,
             hooks: None,
             max_steps: 12,
+            max_verify: 0,
+            audit_fn: None,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
@@ -705,6 +714,24 @@ impl ReactAgent {
     /// honor it; a model that doesn't may 400, so leave it unset then.
     pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
         self.thinking = Some(kernel_core::ThinkingConfig { budget_tokens });
+        self
+    }
+
+    /// Enable post-convergence self-verification (v1.2 T7). On each convergence
+    /// up to `n` times, run the honesty audit; failure feeds findings back and
+    /// the agent self-repairs on the next loop iteration. 0 (default) = off.
+    pub fn with_max_verify(mut self, n: usize) -> Self {
+        self.max_verify = n;
+        self
+    }
+
+    /// Inject a custom audit function (tests). Production leaves this unset so
+    /// the agent uses `honesty::audit_project`.
+    pub fn with_audit_fn(
+        mut self,
+        f: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>,
+    ) -> Self {
+        self.audit_fn = Some(f);
         self
     }
 
@@ -812,6 +839,8 @@ impl kernel_core::Agent for ReactAgent {
         let task = input.prompt;
         let model_opt = input.model;
         let thinking = self.thinking;
+        let max_verify = self.max_verify;
+        let audit_fn = self.audit_fn.clone();
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -837,6 +866,8 @@ impl kernel_core::Agent for ReactAgent {
             // LLM error → graceful message), or neither (hit max_steps).
             let mut converged = false;
             let mut degraded: Option<FatalReason> = None;
+            // T7 self-verify: how many audit-and-feed-back cycles have run.
+            let mut verify_count = 0u32;
 
             for _step in 0..max_steps {
                 // Real streaming: consume the model's SSE stream, yielding each
@@ -934,6 +965,58 @@ impl kernel_core::Agent for ReactAgent {
                 });
                 if turn_tool_calls.is_empty() {
                     final_output = turn_text;
+                    // T7 self-verify gate: after convergence, run the honesty
+                    // audit (cargo check + assertion weakening). On failure,
+                    // feed the findings back as a user turn so the agent
+                    // self-repairs on the next loop iteration (bounded by
+                    // max_verify). spawn_blocking keeps the blocking cargo
+                    // check off the async stream driver.
+                    if (verify_count as usize) < max_verify {
+                        if let Some(pp) = ctx.working_dir.as_ref() {
+                            let pp_path = std::path::PathBuf::from(pp);
+                            let claim = final_output.clone();
+                            let audit_fn_clone = audit_fn.clone();
+                            let audit_val = tokio::task::spawn_blocking(move || {
+                                match audit_fn_clone {
+                                    Some(f) => f(&pp_path, &claim),
+                                    None => crate::kernel_impl::honesty::audit_project(
+                                        &pp_path, &claim,
+                                    ),
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|_| serde_json::json!({"status": "passed"}));
+                            let passed = audit_val
+                                .get("status")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == "passed")
+                                .unwrap_or(true);
+                            if !passed {
+                                verify_count += 1;
+                                let findings = audit_val
+                                    .get("findings")
+                                    .map(|f| f.to_string())
+                                    .unwrap_or_else(|| audit_val.to_string());
+                                history.push(Message {
+                                    role: Role::User,
+                                    content: format!(
+                                        "自验证发现问题（cargo check / 断言弱化），请修复后重新完成：\n{findings}"
+                                    ),
+                                    tool_calls: Vec::new(),
+                                    tool_call_id: None,
+                                    reasoning: None,
+                                    reasoning_signature: None,
+                                });
+                                // Don't set converged: continue the for-loop so
+                                // the next iteration re-streams with the fed-back
+                                // user turn now appended to history. (A `break`
+                                // here would wrongly terminate the run — there is
+                                // no enclosing stream-consumption loop at this
+                                // point; the inner while already ended.)
+                                continue;
+                            }
+                        }
+                    }
                     converged = true;
                     yield AgentEvent::TurnBoundary;
                     break;
@@ -1416,6 +1499,78 @@ mod tests {
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
         let summary = outcome.output_summary.expect("step-limit summary");
         assert!(summary.contains("step"), "step-limit message: {summary}");
+    }
+
+    // --- v1.2 T7: self-verify gate (audit feeds back → self-repair) ---
+
+    #[tokio::test]
+    async fn run_self_verify_feeds_back_failure_then_completes() {
+        use kernel_core::Agent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // turn 0: bare "done"; turn 1 (after feed-back): bare "fixed".
+        let model = ScriptedModel::new(vec![
+            Message::assistant("done"),
+            Message::assistant("fixed"),
+        ]);
+        // Audit stub: always reports failed. max_verify=1 → the first
+        // convergence feeds back; the second convergence skips verification
+        // (verify_count == max_verify) and completes.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fn = calls.clone();
+        let audit_fn: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync> =
+            Arc::new(move |_, _| {
+                calls_for_fn.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({
+                    "status": "failed",
+                    "findings": [{"rule": "test", "severity": "error", "message": "broken"}]
+                })
+            });
+        let ctx = kernel_core::ToolContext {
+            working_dir: Some("/tmp/nonexistent".into()),
+            conversation_id: None,
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
+            .with_max_verify(1)
+            .with_audit_fn(audit_fn)
+            .with_context(ctx);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        // The second turn's answer is the final output (after self-repair).
+        assert_eq!(outcome.output_summary.as_deref(), Some("fixed"));
+        // Audit ran exactly once (first convergence); second skipped.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_self_verify_disabled_when_max_verify_zero() {
+        use kernel_core::Agent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let model = ScriptedModel::new(vec![Message::assistant("done")]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fn = calls.clone();
+        let audit_fn: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync> =
+            Arc::new(move |_, _| {
+                calls_for_fn.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({"status": "failed"})
+            });
+        let ctx = kernel_core::ToolContext {
+            working_dir: Some("/tmp/nonexistent".into()),
+            conversation_id: None,
+        };
+        // max_verify defaults to 0 → no verification, audit never called.
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
+            .with_audit_fn(audit_fn)
+            .with_context(ctx);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        assert_eq!(outcome.output_summary.as_deref(), Some("done"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "audit must not run when max_verify=0"
+        );
     }
 
     // --- v1.1: reasoning 双协议贯通 (GLM Interleaved + Preserved Thinking) ---

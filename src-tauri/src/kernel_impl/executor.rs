@@ -177,6 +177,18 @@ pub(crate) fn build_react_agent(
                 model_id,
             ),
         };
+    // T7 experience flywheel: prepend prior quality-failure lessons so the
+    // agent avoids repeating them. Computed before `db` moves into the cost
+    // sink. Best-effort — a DB read failure just yields the bare prompt.
+    let mut sys_prompt = String::from(
+        "You are a Dev Workbench kernel agent. Complete the task concisely.",
+    );
+    if let Some(dbs) = db.as_ref() {
+        if let Ok(conn) = dbs.get() {
+            let hash = crate::activity::hash_project_path(working_dir);
+            sys_prompt.push_str(&experience_prompt_suffix(&conn, &hash));
+        }
+    }
     let chat = GlmChatModel::new(endpoint, api_key, resolved_model)
         // P0 model orchestration: a process-wide breaker so a down GLM endpoint
         // fails fast instead of every session retrying into it, plus a cost sink
@@ -228,15 +240,35 @@ pub(crate) fn build_react_agent(
     let mut hooks = crate::kernel_impl::hooks::HookManager::new().with_mode(mode);
     hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
     hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
-    Ok(ReactAgent::new(
-        chat,
-        registry,
-        "You are a Dev Workbench kernel agent. Complete the task concisely.",
-    )
-    .with_context(ctx)
-    .with_history(history)
-    .with_thinking(2048)
-    .with_hooks(Arc::new(hooks)))
+    Ok(ReactAgent::new(chat, registry, sys_prompt)
+        .with_context(ctx)
+        .with_history(history)
+        .with_thinking(2048)
+        .with_max_verify(1)
+        .with_hooks(Arc::new(hooks)))
+}
+
+/// Build the experience-flywheel suffix for the system prompt (v1.2 T7): up
+/// to 3 prior `quality_failure` lessons from this project, so the agent avoids
+/// repeating them. Empty when there are none (or the DB read fails) → no prompt
+/// bloat.
+fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> String {
+    let entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
+        .unwrap_or_default();
+    let failures: Vec<_> = entries
+        .iter()
+        .filter(|e| e.category == "quality_failure")
+        .take(3)
+        .collect();
+    if failures.is_empty() {
+        return String::new();
+    }
+    let body = failures
+        .iter()
+        .map(|e| format!("- {}", e.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\n历史质量经验（避免重蹈覆辙）：\n{body}")
 }
 
 /// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s.
@@ -307,6 +339,37 @@ mod tests {
 
     fn kind_of(v: &Value) -> Option<&str> {
         v.get("kind").and_then(|k| k.as_str())
+    }
+
+    #[test]
+    fn experience_prompt_suffix_lists_quality_failures_only() {
+        use crate::db;
+        use crate::knowledge::store::add_entry;
+        use crate::models::{AgentType, KnowledgeEntry};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let mk = |id: &str, cat: &str, title: &str| KnowledgeEntry {
+            id: id.into(),
+            project_hash: "h".into(),
+            category: cat.into(),
+            title: title.into(),
+            content: "c".into(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: None,
+            source_type: "self_verify".into(),
+            confidence: 0.8,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            access_count: 0,
+        };
+        add_entry(&conn, &mk("k1", "quality_failure", "t.Fatal 被降级为 t.Log")).unwrap();
+        add_entry(&conn, &mk("k2", "insight", "用 thiserror")).unwrap();
+        let suffix = experience_prompt_suffix(&conn, "h");
+        assert!(suffix.contains("t.Fatal"), "quality_failure must surface: {suffix}");
+        assert!(
+            !suffix.contains("thiserror"),
+            "non-failure category excluded: {suffix}"
+        );
     }
 
     #[tokio::test]
