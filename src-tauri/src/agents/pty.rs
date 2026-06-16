@@ -458,8 +458,15 @@ pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
     };
     match ty {
         "message" => {
-            // content is a FLAT string (NOT an array like claude). Both user
-            // echoes and assistant text arrive as message events.
+            // content is a FLAT string (NOT an array like claude). gemini
+            // echoes the user's prompt back as role:"user" — rendering that
+            // would duplicate the prompt already shown in the chat input. Skip
+            // role:"user" ONLY; do NOT assume the assistant role value (gemini
+            // may use "model"/"assistant"/…), so every non-user role renders.
+            let role = v.get("role").and_then(|s| s.as_str()).unwrap_or("");
+            if role == "user" {
+                return Vec::new();
+            }
             match v.get("content").and_then(|c| c.as_str()) {
                 Some(t) if !t.is_empty() => vec![ClaudeBlock::Text { content: t.to_string() }],
                 _ => Vec::new(),
@@ -2509,16 +2516,27 @@ mod tests {
 
     #[test]
     fn parse_gemini_line_message_text() {
-        // gemini's `message.content` is a FLAT STRING (not an array like claude)
-        // — captured from a real gemini 0.18.4 stream-json run. role:user echo
-        // and assistant text both arrive this way.
-        let line = r#"{"type":"message","timestamp":"2026-06-16T10:26:52.645Z","role":"user","content":"reply with exactly the two letters: ok"}"#;
+        // gemini's `message.content` is a FLAT STRING (not an array like claude).
+        // Assistant text arrives as a message event (gemini uses role:"model"
+        // for the assistant turn) and renders as a Text block.
+        let line = r#"{"type":"message","timestamp":"2026-06-16T10:26:52.645Z","role":"model","content":"here is the reply"}"#;
         assert_eq!(
             parse_gemini_line(line),
             vec![ClaudeBlock::Text {
-                content: "reply with exactly the two letters: ok".to_string(),
+                content: "here is the reply".to_string(),
             }],
         );
+    }
+
+    #[test]
+    fn parse_gemini_line_message_user_echo_skipped() {
+        // gemini echoes the user's prompt back as role:"user" with the prompt as
+        // content (captured from a real gemini run). Rendering it would
+        // duplicate the prompt already shown in the chat input — skip it. The
+        // skip keys on role=="user" only, so any other role value (model/
+        // assistant/…) still renders.
+        let line = r#"{"type":"message","timestamp":"2026-06-16T10:26:52.645Z","role":"user","content":"reply with exactly the two letters: ok"}"#;
+        assert!(parse_gemini_line(line).is_empty());
     }
 
     #[test]

@@ -203,7 +203,7 @@ impl Agent for OpaqueAgent {
                 });
                 listener_ids.push(ev_id);
             } else {
-                // Raw agent (codex/cursor/pi): pty:output → Token.
+                // Raw agent (codex/cursor/copilot/pi): pty:output → Token.
                 // The sessionId filter + `data` byte-array decode + lossy UTF-8
                 // live in the pure `decode_pty_output_payload` helper so they're
                 // unit-testable without an AppHandle (symmetric to the claude
