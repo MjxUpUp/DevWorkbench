@@ -118,7 +118,10 @@ impl Agent for OpaqueAgent {
         let processes = self.processes.clone();
         let db = self.db.clone();
         let agent_type = self.agent_type.clone();
-        let is_claude = matches!(agent_type, AgentType::ClaudeCode);
+        let is_structured = matches!(
+            agent_type,
+            AgentType::ClaudeCode | AgentType::GeminiCli | AgentType::QwenCode
+        );
         let working_dir = input
             .working_dir
             .clone()
@@ -159,23 +162,24 @@ impl Agent for OpaqueAgent {
             //    does the heavy work (honesty audit + building the outcome).
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentMsg>(64);
 
-            // Dual-channel dispatch by agent_type. ClaudeCode runs in
-            // OutputMode::ClaudeStreamJson (pty.rs:262), whose reader thread
-            // emits STRUCTURED ChatStreamEvent blocks on `agent:event` (plus
-            // rendered ANSI text on `pty:output`). We listen the structured
-            // channel and reverse-map it back to kernel-core AgentEvent so the
-            // workflow path's tool_use/tool_result cards render — listening
-            // `pty:output` here would give ANSI text only (the G2 gap). All
-            // other opaque CLIs (codex/gemini/qwen/cursor/pi) run in Raw mode
-            // and emit ONLY bytes on `pty:output`; for them the structured path
-            // does not exist, so they keep the text Token path. `pending` pairs
-            // ToolUse↔ToolResult positionally (no tool_call_id on the wire).
+            // Dual-channel dispatch by agent_type. Structured CLIs
+            // (claude/gemini/qwen) run in OutputMode::StructuredJson
+            // (pty.rs:262), whose reader thread emits STRUCTURED ChatStreamEvent
+            // blocks on `agent:event` (plus rendered ANSI text on `pty:output`).
+            // We listen the structured channel and reverse-map it back to
+            // kernel-core AgentEvent so the workflow path's tool_use/tool_result
+            // cards render — listening `pty:output` here would give ANSI text
+            // only (the G2 gap). The remaining opaque CLIs (codex/cursor/pi)
+            // run in Raw mode and emit ONLY bytes on `pty:output`; for them the
+            // structured path does not exist, so they keep the text Token path.
+            // `pending` pairs ToolUse↔ToolResult positionally (no tool_call_id
+            // on the wire).
             let pending: Arc<std::sync::Mutex<VecDeque<(String, String)>>> =
                 Arc::new(std::sync::Mutex::new(VecDeque::new()));
             let mut listener_ids: Vec<tauri::EventId> = Vec::new();
 
-            if is_claude {
-                // ClaudeCode: structured agent:event → reverse-mapped AgentEvent.
+            if is_structured {
+                // Structured CLIs (claude/gemini/qwen): agent:event → reverse-mapped AgentEvent.
                 let tx_ev = tx.clone();
                 let sid_ev = session_id.clone();
                 let pending_ev = pending.clone();
@@ -199,7 +203,7 @@ impl Agent for OpaqueAgent {
                 });
                 listener_ids.push(ev_id);
             } else {
-                // Raw agent (codex/gemini/qwen/cursor/pi): pty:output → Token.
+                // Raw agent (codex/cursor/pi): pty:output → Token.
                 // The sessionId filter + `data` byte-array decode + lossy UTF-8
                 // live in the pure `decode_pty_output_payload` helper so they're
                 // unit-testable without an AppHandle (symmetric to the claude

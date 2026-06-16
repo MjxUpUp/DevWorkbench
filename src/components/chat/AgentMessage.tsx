@@ -47,15 +47,21 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   // still renders its block cards instead of the raw terminal log.
   const blocks = liveBlocks.length > 0 ? liveBlocks : (session.blocks ?? EMPTY_BLOCKS);
   const useBlocks = blocks.length > 0;
-  // Structured agents (claude_code / react_kernel) emit `agent:event` blocks and
-  // must NEVER render the terminal form — even before the first block arrives
-  // (e.g. the model gateway is holding its response). Without this gate, claude
-  // showed a terminal box "等待输出" during that running-but-empty window,
-  // contradicting the B-plan goal of eliminating the terminal form for
-  // structured agents. Raw agents (pi/codex/…) emit only pty:output bytes, so
-  // they keep the terminal path. `showBlocks` drives the render branch below;
-  // BlocksView itself renders a chat-blocks "waiting" hint when empty + running.
-  const isStructured = session.agentType === 'claude_code' || session.agentType === 'react_kernel';
+  // Structured agents (claude_code / react_kernel / gemini_cli / qwen_code) emit
+  // `agent:event` blocks and must NEVER render the terminal form — even before
+  // the first block arrives (e.g. the model gateway is holding its response).
+  // Without this gate, claude showed a terminal box "等待输出" during that
+  // running-but-empty window, contradicting the B-plan goal of eliminating the
+  // terminal form for structured agents. gemini_cli/qwen_code run in
+  // `-o stream-json` (same structured reader path as claude), so they join here.
+  // Raw agents (pi/codex/…) emit only pty:output bytes, so they keep the
+  // terminal path. `showBlocks` drives the render branch below; BlocksView
+  // itself renders a chat-blocks "waiting" hint when empty + running.
+  const isStructured =
+    session.agentType === 'claude_code' ||
+    session.agentType === 'react_kernel' ||
+    session.agentType === 'gemini_cli' ||
+    session.agentType === 'qwen_code';
   const showBlocks = useBlocks || (isStructured && running);
 
   // Completed session → load the full reply text once. Falls back to the

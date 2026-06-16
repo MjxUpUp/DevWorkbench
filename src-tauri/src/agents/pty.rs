@@ -117,16 +117,18 @@ fn resolve_agent_exe(agent_type: &AgentType) -> Result<PathBuf, String> {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum OutputMode {
     /// Raw byte stream — emitted verbatim to the terminal. Used by every CLI
-    /// whose non-interactive mode already streams human-readable text
-    /// (codex/gemini/pi/etc.).
+    /// whose non-interactive mode already streams human-readable text and has
+    /// no structured stream-json mode (codex/cursor/copilot/pi).
     Raw,
-    /// `claude --output-format stream-json`: each stdout line is one JSON event.
-    /// The reader parses each event and renders human-readable text (assistant
-    /// text, tool calls, results) so the user watches progress live. claude's
-    /// DEFAULT text mode buffers all output until process exit when stdout is a
-    /// non-TTY pipe — so without stream-json the terminal shows only
-    /// "Agent 运行中，等待输出..." for the entire run.
-    ClaudeStreamJson,
+    /// `-o stream-json` (claude/qwen/gemini): each stdout line is one JSON
+    /// event. The reader selects a parser by agent_type — claude+qwen share
+    /// `parse_claude_line` (near-identical Anthropic-style schema), gemini uses
+    /// `parse_gemini_line` (a distinct flat schema) — then renders
+    /// human-readable text (assistant text, tool calls, results) so the user
+    /// watches progress live. Without stream-json these CLIs buffer their
+    /// non-interactive output (claude) or emit plain text with no structured
+    /// blocks (gemini/qwen), so the terminal shows no tool cards.
+    StructuredJson,
 }
 
 /// Resolved spawn parameters for an agent.
@@ -216,6 +218,14 @@ fn build_spawn_config(
         AgentType::GeminiCli => {
             args.push("--prompt".to_string());
             args.push(prompt.to_string());
+            // stream-json (verified on gemini 0.18.4: `-o`/`--output-format`
+            // with choices text/json/stream-json). Each stdout line is one flat
+            // top-level JSON event (init/message/tool_use/tool_result/result),
+            // parsed by `parse_gemini_line` — a schema distinct from claude's
+            // message.content[] array. Without it gemini's non-interactive
+            // output is plain text with no structured blocks / tool cards.
+            args.push("-o".to_string());
+            args.push("stream-json".to_string());
         }
         AgentType::CursorAgent => {
             args.push("agent".to_string());
@@ -231,6 +241,15 @@ fn build_spawn_config(
         AgentType::QwenCode => {
             args.push("--prompt".to_string());
             args.push(prompt.to_string());
+            // stream-json (verified on qwen 0.14.3: same `-o` flag as claude).
+            // qwen's schema is Anthropic-SDK-style and near-identical to
+            // claude's (type/subtype/is_error/duration_ms + extra uuid/
+            // num_turns/usage), so it reuses `parse_claude_line`. We do NOT add
+            // `--include-partial-messages`: that switches qwen to per-token
+            // deltas (content_block_delta) needing a separate accumulator —
+            // without it each message arrives whole, same shape as claude.
+            args.push("-o".to_string());
+            args.push("stream-json".to_string());
         }
         AgentType::Pi => {
             // pi CLI: `pi --print` (-p) is non-interactive and reads the prompt
@@ -259,8 +278,11 @@ fn build_spawn_config(
         args,
         cwd: PathBuf::from(project_path),
         stdin_prompt,
-        output_mode: if matches!(agent_type, AgentType::ClaudeCode) {
-            OutputMode::ClaudeStreamJson
+        output_mode: if matches!(
+            agent_type,
+            AgentType::ClaudeCode | AgentType::GeminiCli | AgentType::QwenCode
+        ) {
+            OutputMode::StructuredJson
         } else {
             OutputMode::Raw
         },
@@ -397,6 +419,95 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
             }]
         }
         // "system" (init / api_retry) carries no user-facing progress — skip.
+        _ => Vec::new(),
+    }
+}
+
+/// Parse one `gemini -o stream-json` line into zero or more structured blocks.
+///
+/// gemini's stream-json schema (verified on 0.18.4 by capturing real events) is
+/// a FLAT top-level event per line — fundamentally different from claude's
+/// `message.content[]` array:
+///   - `init`        → session/model bootstrap, no user-facing content → []
+///   - `message`     → `content` is a FLAT STRING (not an array); `role` marks
+///                     user vs assistant turns. Both user echo and assistant
+///                     text flow through here as Text blocks.
+///   - `tool_use`    → top-level event with `tool_name` / `parameters` /
+///                     `tool_id` (NOT nested in message.content, NOT named
+///                     `name`/`input` like claude).
+///   - `tool_result` → top-level event with `tool_id` / `output` / `status`.
+///   - `result`      → terminal event; `status: "success"|"error"` (NOT
+///                     `subtype`), NO `is_error` field (verdict = status !=
+///                     "success"), and `duration_ms` is NESTED under `stats`
+///                     (NOT top-level like claude).
+///   - `error`       → pre-result API failure → [] (the following `result`
+///                     event carries the terminal verdict; emitting here would
+///                     double it).
+///
+/// Tolerant like `parse_claude_line`: a `Value` + `.get()` chain degrades
+/// gracefully — unknown/missing fields ⇒ skip, never panic — so one odd line
+/// never breaks the stream.
+pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let ty = match v.get("type").and_then(|s| s.as_str()) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    match ty {
+        "message" => {
+            // content is a FLAT string (NOT an array like claude). Both user
+            // echoes and assistant text arrive as message events.
+            match v.get("content").and_then(|c| c.as_str()) {
+                Some(t) if !t.is_empty() => vec![ClaudeBlock::Text { content: t.to_string() }],
+                _ => Vec::new(),
+            }
+        }
+        "tool_use" => {
+            let name = v
+                .get("tool_name")
+                .and_then(|s| s.as_str())
+                .unwrap_or("tool")
+                .to_string();
+            let input = v.get("parameters").cloned();
+            vec![ClaudeBlock::ToolUse { name, input }]
+        }
+        "tool_result" => {
+            let tool_use_id = v
+                .get("tool_id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            let content = v.get("output").cloned();
+            // status is a string ("success"/"error"); map to Option<bool>.
+            let is_error = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .map(|s| s == "error");
+            vec![ClaudeBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            }]
+        }
+        "result" => {
+            // gemini nests duration_ms under `stats` (verified) and uses
+            // `status` as the verdict discriminator (no is_error field):
+            // success vs anything else (error / interrupted / …).
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            let dur_ms = v
+                .get("stats")
+                .and_then(|s| s.get("duration_ms"))
+                .and_then(|d| d.as_u64())
+                .unwrap_or(0);
+            vec![ClaudeBlock::Result {
+                is_error: status != "success",
+                secs: dur_ms / 1000,
+            }]
+        }
+        // init (bootstrap) / error (pre-result API failure — the result event
+        // carries the terminal verdict) / unknown future event types: skip.
         _ => Vec::new(),
     }
 }
@@ -1275,6 +1386,10 @@ fn spawn_pipe_fallback(
     let session_blocks = Arc::new(std::sync::Mutex::new(Vec::<ChatStreamEvent>::new()));
 
     let output_mode = config.output_mode; // Copy — drives stdout interpretation
+    // agent_type selects the StructuredJson parser (claude+qwen reuse
+    // parse_claude_line; gemini uses parse_gemini_line). Captured by value into
+    // the reader closure, the same way output_mode is above.
+    let agent_type_reader = agent_type.clone();
     let last_activity_reader = last_activity.clone();
     let session_blocks_reader = Arc::clone(&session_blocks);
     std::thread::spawn(move || {
@@ -1303,23 +1418,31 @@ fn spawn_pipe_fallback(
                         }
                     }
                 }
-                OutputMode::ClaudeStreamJson => {
-                    // Each stdout line is one claude event. Parse it ONCE into
-                    // structured blocks, then fan out TWO channels from the same
-                    // parse (no double-parse):
+                OutputMode::StructuredJson => {
+                    // Each stdout line is one structured event. Parse it ONCE
+                    // into ClaudeBlocks — selecting the parser by agent_type
+                    // (claude+qwen share parse_claude_line for their
+                    // near-identical Anthropic-style schema; gemini uses
+                    // parse_gemini_line for its flat schema) — then fan out TWO
+                    // channels from the same parse (no double-parse):
                     //   - agent:event : structured ChatStreamEvent per block, for
                     //     the chat block-card UI (text / tool_use / tool_result /
                     //     result). Raw JSON never reaches the user.
                     //   - pty:output   : the rendered ANSI text, for the terminal
                     //     fallback view AND the {sid}.log replay file.
                     use std::io::BufRead;
+                    let parse_fn: fn(&str) -> Vec<ClaudeBlock> = match agent_type_reader {
+                        AgentType::GeminiCli => parse_gemini_line,
+                        // claude + qwen share the Anthropic-style parser.
+                        _ => parse_claude_line,
+                    };
                     let reader = std::io::BufReader::new(out);
                     for line in reader.lines() {
                         let line = match line {
                             Ok(l) => l,
                             Err(_) => break,
                         };
-                        let blocks = parse_claude_line(&line);
+                        let blocks = parse_fn(&line);
                         if blocks.is_empty() {
                             continue; // system / api_retry noise — neither channel cares
                         }
@@ -2225,7 +2348,7 @@ mod tests {
         );
         assert_eq!(
             cfg.output_mode,
-            OutputMode::ClaudeStreamJson,
+            OutputMode::StructuredJson,
             "reader must parse claude stdout as stream-json events",
         );
         // Other agents stay on raw byte streaming.
@@ -2236,6 +2359,60 @@ mod tests {
         let cfg_codex = build_spawn_config(&AgentType::Codex, "/p", "hello", None)
             .expect("build_spawn_config for Codex");
         assert_eq!(cfg_codex.output_mode, OutputMode::Raw);
+    }
+
+    #[test]
+    fn gemini_spawn_uses_stream_json() {
+        // gemini 0.18.4 supports `-o stream-json` (verified via `gemini --help`,
+        // choices text/json/stream-json). Without it gemini emits plain text — no
+        // structured blocks, no tool cards. Lock the flag + StructuredJson mode.
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("gemini".to_string(), std::path::PathBuf::from("gemini"));
+        }
+        let cfg = build_spawn_config(&AgentType::GeminiCli, "/p", "hello", None)
+            .expect("build_spawn_config for GeminiCli");
+        assert!(
+            cfg.args.contains(&"-o".to_string())
+                && cfg.args.contains(&"stream-json".to_string()),
+            "GeminiCli must emit -o stream-json for structured output: {:?}",
+            cfg.args,
+        );
+        assert_eq!(
+            cfg.output_mode,
+            OutputMode::StructuredJson,
+            "reader must parse gemini stdout as stream-json (parse_gemini_line)",
+        );
+    }
+
+    #[test]
+    fn qwen_spawn_uses_stream_json() {
+        // qwen 0.14.3 supports the same `-o stream-json` flag as claude (verified
+        // via `qwen --help`). Its schema is Anthropic-style and reuses
+        // parse_claude_line, so output_mode is StructuredJson. We deliberately do
+        // NOT add --include-partial-messages (would need a delta accumulator).
+        {
+            let mut cache = EXE_CACHE.lock().unwrap();
+            cache.insert("qwen".to_string(), std::path::PathBuf::from("qwen"));
+        }
+        let cfg = build_spawn_config(&AgentType::QwenCode, "/p", "hello", None)
+            .expect("build_spawn_config for QwenCode");
+        assert!(
+            cfg.args.contains(&"-o".to_string())
+                && cfg.args.contains(&"stream-json".to_string()),
+            "QwenCode must emit -o stream-json for structured output: {:?}",
+            cfg.args,
+        );
+        assert!(
+            !cfg.args.contains(&"--include-partial-messages".to_string()),
+            "QwenCode must NOT pass --include-partial-messages (per-token deltas need a separate accumulator): {:?}",
+            cfg.args,
+        );
+        assert_eq!(
+            cfg.output_mode,
+            OutputMode::StructuredJson,
+            "reader must parse qwen stdout as stream-json (reuses parse_claude_line)",
+        );
     }
 
     #[test]
@@ -2328,6 +2505,161 @@ mod tests {
         // Malformed / non-JSON / empty → empty (must not panic, never break stream).
         assert!(parse_claude_line("not json at all").is_empty());
         assert!(parse_claude_line("").is_empty());
+    }
+
+    #[test]
+    fn parse_gemini_line_message_text() {
+        // gemini's `message.content` is a FLAT STRING (not an array like claude)
+        // — captured from a real gemini 0.18.4 stream-json run. role:user echo
+        // and assistant text both arrive this way.
+        let line = r#"{"type":"message","timestamp":"2026-06-16T10:26:52.645Z","role":"user","content":"reply with exactly the two letters: ok"}"#;
+        assert_eq!(
+            parse_gemini_line(line),
+            vec![ClaudeBlock::Text {
+                content: "reply with exactly the two letters: ok".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn parse_gemini_line_message_empty_content_is_empty() {
+        // Empty or missing content → no block (mirrors claude's empty-text skip).
+        assert!(parse_gemini_line(r#"{"type":"message","role":"assistant","content":""}"#).is_empty());
+        assert!(parse_gemini_line(r#"{"type":"message","role":"assistant"}"#).is_empty());
+    }
+
+    #[test]
+    fn parse_gemini_line_tool_use() {
+        // gemini's tool fields are `tool_name` / `parameters` (NOT claude's
+        // nested name/input inside message.content).
+        let line = r#"{"type":"tool_use","tool_name":"read_file","parameters":{"path":"src/main.rs"},"tool_id":"t1"}"#;
+        assert_eq!(
+            parse_gemini_line(line),
+            vec![ClaudeBlock::ToolUse {
+                name: "read_file".to_string(),
+                input: Some(serde_json::json!({"path":"src/main.rs"})),
+            }],
+        );
+    }
+
+    #[test]
+    fn parse_gemini_line_tool_use_without_parameters() {
+        // Missing parameters → input:None (render stays byte-identical to the
+        // legacy empty-preview, never "null").
+        let line = r#"{"type":"tool_use","tool_name":"list_dir","tool_id":"t2"}"#;
+        assert_eq!(
+            parse_gemini_line(line),
+            vec![ClaudeBlock::ToolUse {
+                name: "list_dir".to_string(),
+                input: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn parse_gemini_line_tool_result_status_map() {
+        // gemini `status` is a string ("success"/"error") → maps to Option<bool>.
+        // output may be an object on error — content keeps the raw Value.
+        let ok = r#"{"type":"tool_result","tool_id":"t1","output":"42 lines","status":"success"}"#;
+        let blocks = parse_gemini_line(ok);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ClaudeBlock::ToolResult { tool_use_id, is_error, content } => {
+                assert_eq!(tool_use_id.as_deref(), Some("t1"));
+                assert_eq!(*is_error, Some(false));
+                assert_eq!(content.as_ref().and_then(|c| c.as_str()), Some("42 lines"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        let err = r#"{"type":"tool_result","tool_id":"t1","output":{"error":"denied"},"status":"error"}"#;
+        let blocks = parse_gemini_line(err);
+        match &blocks[0] {
+            ClaudeBlock::ToolResult { is_error, content, .. } => {
+                assert_eq!(*is_error, Some(true));
+                assert!(content.as_ref().map(|c| c.is_object()).unwrap_or(false));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gemini_line_result_uses_nested_stats_duration() {
+        // KEY gemini difference: `status` (not `subtype`), no `is_error` field
+        // (verdict = status != "success"), and `duration_ms` NESTED under
+        // `stats`. Both shapes captured from a real gemini run.
+        let err = r#"{"type":"result","timestamp":"2026-06-16T10:26:53.368Z","status":"error","error":{"type":"Error","message":"auth"},"stats":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"duration_ms":0,"tool_calls":0}}"#;
+        assert_eq!(
+            parse_gemini_line(err),
+            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+        );
+        let ok = r#"{"type":"result","status":"success","stats":{"duration_ms":45000,"total_tokens":100}}"#;
+        assert_eq!(
+            parse_gemini_line(ok),
+            vec![ClaudeBlock::Result { is_error: false, secs: 45 }],
+        );
+        // status missing → treated as failure (never silently "success").
+        let no_status = r#"{"type":"result","stats":{"duration_ms":1000}}"#;
+        assert_eq!(
+            parse_gemini_line(no_status),
+            vec![ClaudeBlock::Result { is_error: true, secs: 1 }],
+        );
+    }
+
+    #[test]
+    fn parse_gemini_line_init_error_unknown_are_empty() {
+        // init (bootstrap) / error (pre-result API failure — the result event
+        // carries the verdict) / malformed / unknown future types → skip, never
+        // panic (forward-compat: gemini adding a new event type can't break us).
+        assert!(parse_gemini_line(r#"{"type":"init","session_id":"x","model":"auto"}"#).is_empty());
+        assert!(parse_gemini_line(r#"{"type":"error","error":{"message":"boom"}}"#).is_empty());
+        assert!(parse_gemini_line("not json at all").is_empty());
+        assert!(parse_gemini_line("").is_empty());
+        assert!(parse_gemini_line(r#"{"type":"plan","content":"some future event"}"#).is_empty());
+    }
+
+    #[test]
+    fn render_blocks_on_gemini_blocks_matches_claude_contract() {
+        // gemini parses into the SAME ClaudeBlock variants, so render_blocks is
+        // reused unchanged — verify the golden output for a message + result.
+        let msg = r#"{"type":"message","role":"assistant","content":"hello world"}"#;
+        assert_eq!(
+            render_blocks(&parse_gemini_line(msg)),
+            Some("hello world\n".to_string()),
+        );
+        let ok = r#"{"type":"result","status":"success","stats":{"duration_ms":45000}}"#;
+        assert_eq!(
+            render_blocks(&parse_gemini_line(ok)),
+            Some("\x1b[32m✓ 完成 (45s)\x1b[0m\n".to_string()),
+        );
+        // Zero blocks (init/malformed) → None.
+        assert_eq!(render_blocks(&parse_gemini_line(r#"{"type":"init"}"#)), None);
+    }
+
+    #[test]
+    fn parse_claude_line_handles_qwen_thinking_block() {
+        // qwen reuses parse_claude_line (Anthropic-style schema). Its assistant
+        // turns can carry a `thinking` block + extra `uuid` field — thinking is
+        // skipped (only text/tool_use are parsed), uuid is ignored. Only the
+        // text block survives.
+        let line = r#"{"type":"assistant","uuid":"u1","message":{"content":[{"type":"thinking","thinking":"reasoning here"},{"type":"text","text":"the answer"}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::Text { content: "the answer".to_string() }],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_handles_qwen_result_with_extra_fields() {
+        // The REAL qwen 0.14.3 result event (captured): same type/subtype/
+        // is_error/duration_ms fields as claude, PLUS uuid/num_turns/usage/
+        // duration_api_ms/permission_denials — all ignored by parse_claude_line.
+        // subtype != "success" + is_error:true → failure. Verifies qwen reuses
+        // the claude parser end-to-end with zero changes.
+        let line = r#"{"type":"result","subtype":"error_during_execution","uuid":"7cec5b38","session_id":"8421a91e","is_error":true,"duration_ms":0,"duration_api_ms":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0},"permission_denials":[],"error":{"message":"No auth type is selected."}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+        );
     }
 
     #[test]
