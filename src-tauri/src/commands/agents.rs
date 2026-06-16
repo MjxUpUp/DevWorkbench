@@ -184,6 +184,7 @@ fn react_chat_driver(
             &pp_drv,
             Some(conv_drv.as_str()),
             history_drv,
+            Some(db_drv.clone()),
         ) {
             Ok(a) => a,
             Err(e) => {

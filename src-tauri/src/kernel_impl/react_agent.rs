@@ -23,6 +23,8 @@ use kernel_core::{
 };
 use serde_json::{json, Value};
 
+use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
+use crate::cost::sink::CostSink;
 use crate::kernel_impl::hooks::HookManager;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +39,13 @@ pub struct GlmChatModel {
     model: String,
     client: reqwest::Client,
     bound_tools: Vec<ToolInfo>,
+    /// Shared upstream circuit breaker. When Some, every request is gated +
+    /// its outcome recorded, so a failing GLM endpoint trips open instead of
+    /// every agent turn hammering it. None = unprotected (tests / offline).
+    circuit: Option<Arc<CircuitBreaker>>,
+    /// Optional cost sink — records token usage + cost per completed request.
+    /// None = untracked (tests / ad-hoc agents without a session).
+    cost_sink: Option<Arc<dyn CostSink>>,
 }
 
 impl GlmChatModel {
@@ -51,11 +60,27 @@ impl GlmChatModel {
             model: model.into(),
             client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap_or_else(|_| reqwest::Client::new()),
             bound_tools: Vec::new(),
+            circuit: None,
+            cost_sink: None,
         }
     }
 
     pub fn bigmodel(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new("https://open.bigmodel.cn/api/anthropic", api_key, model)
+    }
+
+    /// Attach a shared circuit breaker. The same breaker should be shared
+    /// across every GlmChatModel instance that targets the same upstream, so a
+    /// trip in one agent is observed by all (see `shared_glm_circuit` below).
+    pub fn with_circuit(mut self, circuit: Arc<CircuitBreaker>) -> Self {
+        self.circuit = Some(circuit);
+        self
+    }
+
+    /// Attach a cost sink that records token usage + cost per request.
+    pub fn with_cost_sink(mut self, sink: Arc<dyn CostSink>) -> Self {
+        self.cost_sink = Some(sink);
+        self
     }
 
     fn build_body(&self, model: &str, messages: &[Message], opts: &ModelOptions, stream: bool) -> Value {
@@ -177,6 +202,13 @@ impl GlmChatModel {
 impl ChatModel for GlmChatModel {
     async fn generate(&self, messages: &[Message], opts: &ModelOptions) -> Result<Message, Error> {
         let model = opts.model.clone().unwrap_or_else(|| self.model.clone());
+        // Circuit breaker: gate the call and record the outcome.
+        if let Some(cb) = &self.circuit {
+            if !cb.allow_request(&self.base_url) {
+                return Err(Error::Model(format!("upstream circuit open: {}", self.base_url)));
+            }
+            cb.on_attempt(&self.base_url);
+        }
         let body = self.build_body(&model, messages, opts, false);
         let resp = self
             .client
@@ -185,16 +217,42 @@ impl ChatModel for GlmChatModel {
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()
-            .await
-            .map_err(|e| Error::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-                Err(Error::Model(format!("GLM stream failed: {status}")))?;
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(cb) = &self.circuit {
+                    cb.record_failure(&self.base_url);
+                }
+                return Err(Error::Network(e.to_string()));
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            if should_failover(Some(status.as_u16()), false) {
+                if let Some(cb) = &self.circuit {
+                    cb.record_failure(&self.base_url);
+                }
+            }
+            return Err(Error::Model(format!("GLM stream failed: {status}")));
         }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Model(format!("decode: {e}")))?;
+        let v: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(cb) = &self.circuit {
+                    cb.record_failure(&self.base_url);
+                }
+                return Err(Error::Model(format!("decode: {e}")));
+            }
+        };
+        if let Some(cb) = &self.circuit {
+            cb.record_success(&self.base_url);
+        }
+        // Cost: record token usage; cost is derived in the sink when 0.
+        if let Some(sink) = &self.cost_sink {
+            let (input, output) = usage_from_response(&v);
+            sink.record(&model, input, output, 0.0);
+        }
         decode_anthropic_message(&v)
     }
 
@@ -204,6 +262,13 @@ impl ChatModel for GlmChatModel {
         let opts = opts.clone();
         let s = async_stream::try_stream! {
             let model_name = opts.model.clone().unwrap_or_else(|| model_clone.model.clone());
+            // Circuit breaker gate.
+            if let Some(cb) = &model_clone.circuit {
+                if !cb.allow_request(&model_clone.base_url) {
+                    Err(Error::Model(format!("upstream circuit open: {}", model_clone.base_url)))?;
+                }
+                cb.on_attempt(&model_clone.base_url);
+            }
             let body = model_clone.build_body(&model_name, &messages, &opts, true);
             let resp = model_clone.client
                 .post(format!("{}/v1/messages", model_clone.base_url))
@@ -211,10 +276,19 @@ impl ChatModel for GlmChatModel {
                 .header("anthropic-version", "2023-06-01")
                 .json(&body)
                 .send()
-                .await
-                .map_err(|e| Error::Network(e.to_string()))?;
-            if !resp.status().is_success() {
-                let status = resp.status();
+                .await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
+                    Err(Error::Network(e.to_string()))?
+                }
+            };
+            let status = resp.status();
+            if !status.is_success() {
+                if should_failover(Some(status.as_u16()), false) {
+                    if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
+                }
                 Err(Error::Model(format!("GLM stream failed: {status}")))?;
             }
             use futures::StreamExt;
@@ -229,16 +303,35 @@ impl ChatModel for GlmChatModel {
             // chunks arrive out of band from the thinking_delta reasoning text).
             // Reset per request — one stream() call == one assistant turn.
             let mut sig_buf = String::new();
+            // Accumulate token usage from message_start/message_delta so the
+            // turn's cost is recorded when the stream completes.
+            let mut usage_in: u32 = 0;
+            let mut usage_out: u32 = 0;
             while let Some(chunk_res) = byte_stream.next().await {
-                let bytes = chunk_res.map_err(|e| Error::Network(e.to_string()))?;
+                let bytes = match chunk_res {
+                    Ok(b) => b,
+                    Err(e) => {
+                        if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
+                        Err(Error::Network(e.to_string()))?
+                    }
+                };
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
+                    if let Some((i, o)) = parse_usage(&line) {
+                        usage_in = usage_in.saturating_add(i);
+                        usage_out = usage_out.saturating_add(o);
+                    }
                     if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
                         yield msg;
                     }
                 }
+            }
+            // Stream consumed cleanly → upstream healthy + record the turn's cost.
+            if let Some(cb) = &model_clone.circuit { cb.record_success(&model_clone.base_url); }
+            if let Some(sink) = &model_clone.cost_sink {
+                sink.record(&model_name, usage_in, usage_out, 0.0);
             }
         };
         Ok(Box::pin(s))
@@ -249,6 +342,65 @@ impl ChatModel for GlmChatModel {
         clone.bound_tools = tools.to_vec();
         Ok(Box::new(clone))
     }
+}
+
+/// Process-wide shared circuit breaker for GLM (Anthropic-compatible)
+/// endpoints. Every ReactAgent built via `build_react_agent` taps the same
+/// breaker so a sustained upstream outage trips the circuit for all sessions
+/// at once, rather than each session rediscovering the failure and flooding a
+/// down endpoint. State is keyed by base_url inside the breaker, so distinct
+/// endpoints coexist under one instance. Lazily initialized on first use.
+pub fn shared_glm_circuit() -> Arc<CircuitBreaker> {
+    static CIRCUIT: std::sync::OnceLock<Arc<CircuitBreaker>> = std::sync::OnceLock::new();
+    CIRCUIT
+        .get_or_init(|| {
+            Arc::new(CircuitBreaker::new(
+                crate::cost::circuit_breaker::CircuitBreakerConfig::default(),
+            ))
+        })
+        .clone()
+}
+
+/// Extract token usage from an Anthropic SSE line. `message_start` carries
+/// `usage.input_tokens`; `message_delta` carries the cumulative
+/// `usage.output_tokens`. Non-usage lines (and non-`data:` lines) return None.
+/// Used to meter cost on the streaming path.
+fn parse_usage(line: &str) -> Option<(u32, u32)> {
+    let data = line.trim().strip_prefix("data: ")?;
+    let ev: Value = serde_json::from_str(data).ok()?;
+    match ev.get("type").and_then(|t| t.as_str())? {
+        "message_start" => {
+            let input = ev
+                .get("message")
+                .and_then(|m| m.get("usage"))
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            Some((input, 0))
+        }
+        "message_delta" => {
+            let output = ev
+                .get("usage")
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            Some((0, output))
+        }
+        _ => None,
+    }
+}
+
+/// Extract usage from a non-streaming Anthropic response
+/// (`usage.input_tokens` / `usage.output_tokens`). Returns (0, 0) if absent —
+/// the sink still records the call with a derived/zero cost.
+fn usage_from_response(v: &Value) -> (u32, u32) {
+    let u = match v.get("usage") {
+        Some(u) => u,
+        None => return (0, 0),
+    };
+    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    (input, output)
 }
 
 fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
@@ -1090,6 +1242,55 @@ mod tests {
         let m2 = decode_anthropic_message(&v2).unwrap();
         assert_eq!(m2.reasoning.as_deref(), Some("unsigned"));
         assert!(m2.reasoning_signature.is_none());
+    }
+
+    // --- v1.1 Task 3: model orchestration (usage extraction → cost) ---
+
+    #[test]
+    fn parse_usage_extracts_message_start_input_and_delta_output() {
+        let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}"#;
+        assert_eq!(parse_usage(start), Some((42, 0)));
+        let delta = r#"data: {"type":"message_delta","usage":{"output_tokens":128}}"#;
+        assert_eq!(parse_usage(delta), Some((0, 128)));
+        // Non-usage event types → None.
+        assert_eq!(parse_usage(r#"data: {"type":"content_block_delta"}"#), None);
+        // Non-data lines → None.
+        assert_eq!(parse_usage("event: ping"), None);
+        assert_eq!(parse_usage(""), None);
+    }
+
+    #[test]
+    fn usage_from_response_reads_usage_object() {
+        let v = json!({"usage":{"input_tokens":10,"output_tokens":20}});
+        assert_eq!(usage_from_response(&v), (10, 20));
+        // Missing usage → (0, 0), not an error.
+        let v2 = json!({"content":[]});
+        assert_eq!(usage_from_response(&v2), (0, 0));
+    }
+
+    #[test]
+    fn glm_model_attaches_circuit_and_cost_sink_builders() {
+        use crate::cost::circuit_breaker::CircuitBreakerConfig;
+        use crate::cost::sink::NullCostSink;
+        use std::time::Duration;
+        let m = GlmChatModel::bigmodel("k", "glm-4.6")
+            .with_circuit(std::sync::Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+                failure_threshold: 1,
+                cooldown: Duration::from_secs(60),
+                half_open_max: 1,
+            })))
+            .with_cost_sink(std::sync::Arc::new(NullCostSink));
+        assert!(m.circuit.is_some());
+        assert!(m.cost_sink.is_some());
+    }
+
+    #[test]
+    fn shared_glm_circuit_returns_same_instance() {
+        // The breaker must be a process-wide singleton so a trip in one agent
+        // is observed by all — two calls must hand back the *same* Arc.
+        let a = shared_glm_circuit();
+        let b = shared_glm_circuit();
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]

@@ -82,6 +82,7 @@ impl Executor for KernelExecutor {
                     &project_path,
                     None,
                     Vec::new(),
+                    Some(self.db.clone()),
                 )?)
             }
         };
@@ -158,6 +159,7 @@ pub(crate) fn build_react_agent(
     working_dir: &str,
     conversation_id: Option<&str>,
     history: Vec<kernel_core::Message>,
+    db: Option<DbState>,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -173,7 +175,17 @@ pub(crate) fn build_react_agent(
                 model_id,
             ),
         };
-    let chat = GlmChatModel::new(endpoint, api_key, resolved_model);
+    let chat = GlmChatModel::new(endpoint, api_key, resolved_model)
+        // P0 model orchestration: a process-wide breaker so a down GLM endpoint
+        // fails fast instead of every session retrying into it, plus a cost sink
+        // that records token usage + derived cost per request (conversation_id
+        // acts as the session_id for cost attribution).
+        .with_circuit(crate::kernel_impl::react_agent::shared_glm_circuit())
+        .with_cost_sink(crate::cost::sink::optional_shared(
+            db,
+            "react_kernel",
+            conversation_id.map(|s| s.to_string()),
+        ));
 
     // Build the tool registry: skills (always, from ~/.dev-workbench/skills) +
     // MCP tools (when a registry is available). An empty registry leaves the
