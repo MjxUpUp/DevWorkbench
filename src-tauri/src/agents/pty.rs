@@ -479,6 +479,62 @@ impl ClaudeBlock {
     }
 }
 
+/// Fold consecutive `Text` events into one (same semantics as the frontend's
+/// `appendBlock` merge). Persisted blocks should match what the live in-memory
+/// Map held — not one entry per streaming token delta — otherwise a reloaded
+/// session renders N tiny text cards instead of the single merged paragraph.
+pub(crate) fn merge_consecutive_text(events: Vec<ChatStreamEvent>) -> Vec<ChatStreamEvent> {
+    let mut out: Vec<ChatStreamEvent> = Vec::with_capacity(events.len());
+    for ev in events {
+        match (&ev, out.last_mut()) {
+            (ChatStreamEvent::Text { content: incoming }, Some(ChatStreamEvent::Text { content: acc })) => {
+                acc.push_str(incoming);
+            }
+            _ => out.push(ev),
+        }
+    }
+    out
+}
+
+/// Cap every string value nested inside a JSON value to `max_chars` (appending
+/// "…") — recursing through objects and arrays. Used to shrink ToolUse.input
+/// for the persisted copy while keeping the JSON structure intact so the
+/// frontend still renders it.
+fn cap_json_string_values(value: serde_json::Value, max_chars: usize) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.chars().count() > max_chars {
+                let capped: String = s.chars().take(max_chars).collect();
+                serde_json::Value::String(format!("{}…", capped))
+            } else {
+                serde_json::Value::String(s)
+            }
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.into_iter().map(|v| cap_json_string_values(v, max_chars)).collect(),
+        ),
+        serde_json::Value::Object(obj) => serde_json::Value::Object(
+            obj.into_iter().map(|(k, v)| (k, cap_json_string_values(v, max_chars))).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Apply persistence caps to a block list: only `ToolUse.input` strings are
+/// capped. Live emit is NOT capped — only the DB-bound replica. Prevents a
+/// giant Edit `new_string` from ballooning the row. Text is the user-facing
+/// answer (left whole), Result carries no payload, and ToolResult.content was
+/// already preview-capped at emit time.
+pub(crate) fn cap_blocks_for_persist(events: Vec<ChatStreamEvent>, max_chars: usize) -> Vec<ChatStreamEvent> {
+    events.into_iter().map(|ev| match ev {
+        ChatStreamEvent::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+            name,
+            input: cap_json_string_values(input, max_chars),
+        },
+        other => other,
+    }).collect()
+}
+
 /// Parse a claude stream-json line into the wire events the chat frontend
 /// consumes. Pure + testable (no Tauri handle). The reader thread drives the
 /// same parse once and emits BOTH this structured channel and the rendered
@@ -737,6 +793,7 @@ fn try_spawn_pty(
         context_snapshot: None,
         linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
         parent_session_id: parent_session_id.map(|s| s.to_string()),
+        blocks: None,
     };
 
     {
@@ -992,6 +1049,7 @@ pub(crate) fn build_running_session_row(
         linked_requirement_id: linked_requirement_id.map(|s| s.to_string()),
         parent_session_id: parent_session_id.map(|s| s.to_string()),
         conversation_id: Some(conversation_id.to_string()),
+        blocks: None,
     }
 }
 
@@ -1051,6 +1109,7 @@ pub(crate) fn finalize_session(
     exit_code: Option<i32>,
     output_summary: Option<String>,
     context_snapshot: Option<ContextSnapshot>,
+    blocks: Option<Vec<ChatStreamEvent>>,
 ) {
     let files_for_activity = context_snapshot.as_ref().map(|s| s.files_changed.clone());
 
@@ -1066,6 +1125,16 @@ pub(crate) fn finalize_session(
     }
     if let Some(summary) = output_summary {
         patch["outputSummary"] = serde_json::Value::String(summary);
+    }
+    if let Some(blocks) = blocks {
+        // Persist the chat blocks so a finalized session replays via BlocksView
+        // instead of falling back to the raw terminal log. Merge consecutive
+        // text deltas (match the live Map's shape) and cap giant ToolUse inputs
+        // before serializing — live emit is untouched.
+        let persisted = cap_blocks_for_persist(merge_consecutive_text(blocks), 8000);
+        if let Ok(val) = serde_json::to_value(persisted) {
+            patch["blocks"] = val;
+        }
     }
 
     log::info!("[completion] Session {} locking DB for completion update...", session_id);
@@ -1200,9 +1269,14 @@ fn spawn_pipe_fallback(
     // kills the process if it stays quiet past the idle timeout. Replaces the
     // fixed 600s wall-clock kill that chopped down healthy streaming long tasks.
     let last_activity = Arc::new(AtomicU64::new(now_millis()));
+    // Accumulated wire events mirrored from the agent:event emits, so the
+    // finalized session can be persisted and replayed via BlocksView. Shared
+    // between the reader thread (push) and the wait thread (take at finalize).
+    let session_blocks = Arc::new(std::sync::Mutex::new(Vec::<ChatStreamEvent>::new()));
 
     let output_mode = config.output_mode; // Copy — drives stdout interpretation
     let last_activity_reader = last_activity.clone();
+    let session_blocks_reader = Arc::clone(&session_blocks);
     std::thread::spawn(move || {
         let mut output_log: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
@@ -1253,6 +1327,11 @@ fn spawn_pipe_fallback(
                         last_activity_reader.store(now_millis(), Ordering::Relaxed);
                         // Structured channel first (the chat UI consumes only this).
                         for event in blocks.iter().map(ClaudeBlock::to_event) {
+                            // Mirror into the persistence accumulator (cloned —
+                            // `event` is also moved into the emit below).
+                            if let Ok(mut buf) = session_blocks_reader.lock() {
+                                buf.push(event.clone());
+                            }
                             let _ = app_reader.emit(
                                 "agent:event",
                                 serde_json::json!({
@@ -1318,6 +1397,7 @@ fn spawn_pipe_fallback(
     let agent_type_exit = agent_type.clone();
     let processes_kill = processes.clone();
     let last_activity_wait = last_activity.clone();
+    let session_blocks_wait = session_blocks.clone();
     std::thread::spawn(move || {
         let idle_secs = session_idle_timeout_secs();
         log::info!("[PIPE wait] Waiting for session {} (idle_timeout={}s, 0=disabled)", sid_exit, idle_secs);
@@ -1378,6 +1458,16 @@ fn spawn_pipe_fallback(
             snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0),
             snapshot.as_ref().map(|s| s.key_output.chars().count()).unwrap_or(0)
         );
+        // Drain the accumulated blocks for persistence. A poisoned lock (panic
+        // in the reader thread) falls back to None → terminal replay, never
+        // panics the wait thread. Empty vec → None (raw agent / no agent:event).
+        let blocks_snapshot = session_blocks_wait
+            .lock()
+            .ok()
+            .and_then(|mut buf| {
+                let taken = std::mem::take(&mut *buf);
+                if taken.is_empty() { None } else { Some(taken) }
+            });
         finalize_session(
             &db_conn_exit,
             &app_exit,
@@ -1388,6 +1478,7 @@ fn spawn_pipe_fallback(
             exit_code,
             output_summary,
             snapshot,
+            blocks_snapshot,
         );
     });
 
@@ -1842,6 +1933,70 @@ fn run_post_session_hooks(
 mod tests {
     use super::*;
 
+    #[test]
+    fn merge_consecutive_text_folds_runs_and_leaves_others() {
+        let evs = vec![
+            ChatStreamEvent::Text { content: "a".into() },
+            ChatStreamEvent::Text { content: "b".into() },
+            ChatStreamEvent::ToolUse { name: "Read".into(), input: serde_json::json!({"file_path": "/x"}) },
+            ChatStreamEvent::Text { content: "c".into() },
+        ];
+        let merged = merge_consecutive_text(evs);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0], ChatStreamEvent::Text { content: "ab".into() });
+        assert_eq!(merged[2], ChatStreamEvent::Text { content: "c".into() });
+    }
+
+    #[test]
+    fn merge_consecutive_text_empty_and_single() {
+        assert!(merge_consecutive_text(vec![]).is_empty());
+        let one = vec![ChatStreamEvent::Text { content: "solo".into() }];
+        assert_eq!(merge_consecutive_text(one), vec![ChatStreamEvent::Text { content: "solo".into() }]);
+    }
+
+    #[test]
+    fn merge_consecutive_text_all_tool_use_unchanged() {
+        let evs = vec![
+            ChatStreamEvent::ToolUse { name: "A".into(), input: serde_json::Value::Null },
+            ChatStreamEvent::ToolUse { name: "B".into(), input: serde_json::Value::Null },
+        ];
+        let merged = merge_consecutive_text(evs.clone());
+        assert_eq!(merged, evs);
+    }
+
+    #[test]
+    fn cap_blocks_for_persist_truncates_long_tool_use_input_strings() {
+        let big = "x".repeat(10_000);
+        let evs = vec![ChatStreamEvent::ToolUse {
+            name: "Edit".into(),
+            input: serde_json::json!({ "file_path": "/p", "new_string": big }),
+        }];
+        let capped = cap_blocks_for_persist(evs, 8000);
+        match &capped[0] {
+            ChatStreamEvent::ToolUse { input, .. } => {
+                let new_string = input.get("new_string").unwrap().as_str().unwrap();
+                assert!(new_string.ends_with('…'));
+                // 8000 kept chars + 1 ellipsis char.
+                assert_eq!(new_string.chars().count(), 8001);
+                // Short sibling field untouched.
+                assert_eq!(input.get("file_path").unwrap().as_str(), Some("/p"));
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn cap_blocks_for_persist_leaves_text_result_and_short_input() {
+        let evs = vec![
+            ChatStreamEvent::Text { content: "answer".into() },
+            ChatStreamEvent::ToolUse { name: "Read".into(), input: serde_json::json!({"file_path": "/short"}) },
+            ChatStreamEvent::ToolResult { content: "ok".into(), is_error: false },
+            ChatStreamEvent::Result { is_error: false, secs: 1 },
+        ];
+        let capped = cap_blocks_for_persist(evs.clone(), 8000);
+        assert_eq!(capped, evs);
+    }
+
     /// `capture_git_diff_names` must return tracked files modified in the
     /// working tree. Guards the timeout wrapper added to stop the completion
     /// event from stalling on slow `git diff` in large/dirty repos.
@@ -1960,6 +2115,7 @@ mod tests {
             linked_requirement_id: None,
             parent_session_id: None,
             conversation_id: Some("c1".to_string()),
+            blocks: None,
         }
     }
 

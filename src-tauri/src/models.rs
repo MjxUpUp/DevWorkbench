@@ -179,6 +179,14 @@ pub struct Session {
     /// the v9→v10 migration (backfilled by migrate_v9_to_v10).
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Persisted chat blocks (text/tool_use/tool_result) as a JSON array,
+    /// written at finalize so a historical session replays via BlocksView
+    /// instead of falling back to the raw terminal log. None for raw agents
+    /// (no agent:event stream → no blocks) or aborted sessions. The runtime
+    /// in-memory `sessionBlocks` map is the live source during a run; this DB
+    /// column is the source of truth once the session is finalized.
+    #[serde(default)]
+    pub blocks: Option<serde_json::Value>,
 }
 
 /// A conversation — a multi-turn dialogue container, the equivalent of a Claude

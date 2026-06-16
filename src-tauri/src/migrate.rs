@@ -392,6 +392,45 @@ pub fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Migrate v10 → v11: add the `blocks` column to `sessions`.
+///
+/// `blocks` stores the persisted chat blocks (a JSON array of
+/// text/tool_use/tool_result events) written at finalize, so a historical
+/// session replays via BlocksView instead of falling back to the raw terminal
+/// log. For fresh DBs the column is already in the static SCHEMA; this only
+/// ALTERs existing v10 databases. Idempotent via schema_version >= 11, with a
+/// column-presence probe (same idiom as v9→v10's conversation_id probe) so a
+/// fresh DB that already has the column skips the ALTER.
+pub fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 11 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
+    // that references the column (same idiom as v9→v10's conversation_id probe).
+    // A fresh DB already has `blocks` from the static SCHEMA and skips the ALTER.
+    let col_exists = conn
+        .prepare("SELECT blocks FROM sessions LIMIT 0")
+        .is_ok();
+    if !col_exists {
+        conn.execute("ALTER TABLE sessions ADD COLUMN blocks TEXT", [])?;
+        log::info!("Migrated schema v10→v11: added sessions.blocks column");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (11, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +468,7 @@ mod tests {
             linked_requirement_id: None,
             parent_session_id: parent.map(|s| s.to_string()),
             conversation_id: None,
+            blocks: None,
         }
     }
 
@@ -566,5 +606,118 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_conversation'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(idx_count, 1, "idx_sessions_conversation must be created");
+    }
+
+    /// A pre-v11 database has a `sessions` table WITHOUT the `blocks` column.
+    /// This builds that exact old-schema DB (schema_version at 10), runs the
+    /// v10→v11 migration, and asserts the column is added, existing data
+    /// survives, and the version bumps to 11.
+    #[test]
+    fn migrate_v10_to_v11_adds_blocks_column_to_pre_v11_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("v10.db");
+
+        // 1. Build a pre-v11 DB by hand: schema_version at 10, a sessions table
+        //    WITHOUT the blocks column, and one real row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_version (version, applied_at) VALUES (10, '2026-01-01T00:00:00Z');
+                 CREATE TABLE sessions (
+                     id TEXT PRIMARY KEY,
+                     project_path TEXT NOT NULL,
+                     agent_type TEXT NOT NULL,
+                     status TEXT NOT NULL DEFAULT 'running',
+                     prompt TEXT NOT NULL,
+                     model TEXT,
+                     started_at TEXT NOT NULL,
+                     finished_at TEXT,
+                     exit_code INTEGER,
+                     output_summary TEXT,
+                     context_snapshot TEXT,
+                     linked_requirement_id TEXT,
+                     parent_session_id TEXT,
+                     conversation_id TEXT
+                 );
+                 INSERT INTO sessions (id, project_path, agent_type, status, prompt, model,
+                     started_at, finished_at, exit_code, output_summary, context_snapshot,
+                     linked_requirement_id, parent_session_id, conversation_id)
+                 VALUES ('legacy1', '/p', 'claude_code', 'completed', 'old prompt',
+                     NULL, '2026-01-01T00:00:00Z', NULL, 0, NULL, NULL, NULL, NULL, 'conv-1');",
+            )
+            .unwrap();
+        }
+
+        // 2. Run v10→v11.
+        let conn = Connection::open(&path).unwrap();
+        migrate_v10_to_v11(&conn).expect("v10→v11 must succeed on a pre-v11 DB");
+
+        // 3. blocks column added.
+        let has_blocks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='blocks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_blocks, 1, "blocks column must be added");
+
+        // Existing data survives.
+        let prompt: String = conn
+            .query_row("SELECT prompt FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(prompt, "old prompt", "existing data must survive the migration");
+
+        // Legacy session has no blocks (not backfilled — only newly finalized sessions write blocks).
+        let blocks: Option<String> = conn
+            .query_row("SELECT blocks FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(blocks.is_none(), "legacy session blocks must be NULL");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11, "schema_version must be 11");
+    }
+
+    /// Idempotent: running twice must not double-ALTER (which would abort) and
+    /// must leave exactly one `blocks` column.
+    #[test]
+    fn migrate_v10_to_v11_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("idem.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v8_to_v9(&conn).unwrap();
+        migrate_v9_to_v10(&conn).unwrap();
+        migrate_v10_to_v11(&conn).expect("first run must succeed");
+        // Second run short-circuits on version>=11 — no double ALTER, no error.
+        migrate_v10_to_v11(&conn).expect("second run (idempotent) must succeed");
+        let has_blocks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='blocks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_blocks, 1, "column must exist exactly once after two runs");
+    }
+
+    /// A fresh DB has `blocks` from the static SCHEMA already. The probe must
+    /// skip the ALTER (ALTERing an existing column would abort) but still bump
+    /// the version to 11.
+    #[test]
+    fn migrate_v10_to_v11_on_fresh_db_skips_alter_but_records_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v8_to_v9(&conn).unwrap();
+        migrate_v9_to_v10(&conn).unwrap();
+        migrate_v10_to_v11(&conn).expect("fresh DB v11 migration must succeed");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11, "version must be 11 on fresh DB");
     }
 }

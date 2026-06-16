@@ -106,6 +106,10 @@ export interface Session {
    *  is the Claude-Code-style "topic" container; a session is now one turn of
    *  it. Backfilled for pre-v1.1 data by migrate_v9_to_v10. */
   conversationId: string | null;
+  /** Persisted chat blocks (text/tool_use/tool_result) written at finalize so a
+   *  historical session replays via BlocksView instead of the raw terminal log.
+   *  null/undefined for raw agents (no agent:event stream) or pre-G1 sessions. */
+  blocks?: ChatStreamEvent[] | null;
   tokenUsage?: number;
   estimatedCost?: number;
 }

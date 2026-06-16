@@ -122,4 +122,60 @@ describe('AgentMessage — completed-session output', () => {
     expect(screen.queryByTestId('terminal-stub')).not.toBeInTheDocument();
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
   });
+
+  it('replays persisted session.blocks when the live Map is empty (history reload)', () => {
+    // After a reload or project-switch, the live in-memory Map is empty but the
+    // completed session carries its persisted blocks from the DB. Those must
+    // drive BlocksView — NOT the terminal/full-output log path.
+    useAgentStore.setState({ sessionBlocks: new Map() } as never);
+    vi.mocked(invoke).mockResolvedValue('should-not-load');
+
+    render(
+      <AgentMessage
+        session={{ ...base, blocks: [{ kind: 'text', content: 'persisted reply' }] }}
+        running={false}
+        qualityReport={noReport}
+      />
+    );
+
+    expect(screen.getByText('persisted reply')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-stub')).not.toBeInTheDocument();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
+  });
+
+  it('prefers live blocks over persisted session.blocks (running session shadowing)', () => {
+    // While a session runs, the live Map is authoritative even if a stale
+    // persisted snapshot exists (e.g. a re-run of an already-finalized turn).
+    useAgentStore.setState({
+      sessionBlocks: new Map([['s1', [{ kind: 'text', content: 'live stream' }]]]),
+    } as never);
+    vi.mocked(invoke).mockResolvedValue('should-not-load');
+
+    render(
+      <AgentMessage
+        session={{ ...base, blocks: [{ kind: 'text', content: 'stale persisted' }] }}
+        running={false}
+        qualityReport={noReport}
+      />
+    );
+
+    expect(screen.getByText('live stream')).toBeInTheDocument();
+    expect(screen.queryByText('stale persisted')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the terminal path for a raw agent with no blocks (pi/codex regression)', () => {
+    // Raw agents emit no agent:event → no live blocks AND no persisted blocks.
+    // They must keep the terminal/full-output path. Guards against the blocks
+    // refactor silently breaking pi/codex display.
+    useAgentStore.setState({ sessionBlocks: new Map() } as never);
+    vi.mocked(invoke).mockResolvedValue('raw agent full output');
+
+    render(
+      <AgentMessage session={{ ...base, blocks: null }} running={false} qualityReport={noReport} />
+    );
+
+    // No blocks → the terminal stub mounts (the full-output path), and the
+    // raw text is fetched + rendered.
+    expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
+  });
 });

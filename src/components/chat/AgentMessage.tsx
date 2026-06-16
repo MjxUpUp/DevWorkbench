@@ -40,15 +40,20 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   // this is the chat-blocks UI for claude (and later ReactAgent). Raw agents
   // (pi) emit no agent:event, so they keep the existing terminal/markdown path.
   // Declared before the fullOutput effect below, which short-circuits on it.
-  const blocks = useAgentStore((s) => s.sessionBlocks.get(session.id) ?? EMPTY_BLOCKS);
+  const liveBlocks = useAgentStore((s) => s.sessionBlocks.get(session.id) ?? EMPTY_BLOCKS);
+  // Live in-memory blocks win while a session is running; once finalized the
+  // live Map is cleared (agent:completed) and we fall back to the persisted
+  // session.blocks read from the DB — so a reloaded or switched-away session
+  // still renders its block cards instead of the raw terminal log.
+  const blocks = liveBlocks.length > 0 ? liveBlocks : (session.blocks ?? EMPTY_BLOCKS);
   const useBlocks = blocks.length > 0;
 
   // Completed session → load the full reply text once. Falls back to the
   // (truncated) outputSummary if the log file is gone, so something always shows.
   useEffect(() => {
-    // BlocksView handles display when structured blocks are in memory; skip the
-    // full-output load (blocks are in-memory only, never persisted — historical
-    // claude sessions have no blocks and fall through to the log read below).
+    // BlocksView handles display when structured blocks are available — either
+    // the live in-memory Map (running session) or the persisted session.blocks
+    // (finalized/reloaded). Skip the full-output log load in both cases.
     if (running || useBlocks) {
       setFullOutput(null);
       return;

@@ -14,9 +14,9 @@ interface AgentState {
   conversations: Conversation[];
   loading: boolean;
   ptyOutput: Map<string, Uint8Array[]>;
-  /** Structured agent output blocks per session, from the `agent:event` channel.
-   *  In-memory only (not persisted) — completed historical sessions fall back to
-   *  the full-output log via read_session_output_cmd. */
+  /** Live in-memory structured blocks per session, accumulated from the
+   *  `agent:event` channel while a session runs. Cleared on agent:completed —
+   *  finalized sessions replay from the persisted `session.blocks` column. */
   sessionBlocks: Map<string, ChatStreamEvent[]>;
   qualityReports: Map<string, QualityReport>;
 
@@ -303,8 +303,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         ),
       }));
 
-      // Full sync from DB in background (picks up outputSummary, contextSnapshot, etc.)
+      // Full sync from DB in background (picks up outputSummary, contextSnapshot,
+      // and the persisted blocks column so the completed turn replays via
+      // BlocksView after a reload/project-switch).
       get().refreshSessions();
+      // Drop the live in-memory blocks now that the session is finalized — the
+      // persisted session.blocks (read back above) is the source of truth for a
+      // completed turn, and a stale live snapshot would shadow it on re-render.
+      get().clearBlocks(completedId);
       // A turn completing means its conversation's last_activity_at moved;
       // refresh that project's conversation list so the sidebar reorders.
       const doneSession = get().sessions.find((s) => s.id === completedId);

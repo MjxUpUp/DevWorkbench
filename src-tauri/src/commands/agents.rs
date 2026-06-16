@@ -165,7 +165,7 @@ fn react_chat_driver(
                 pty::finalize_session(
                     &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
                     SessionStatus::Failed, None,
-                    Some(format!("Agent init failed: {e}")), None,
+                    Some(format!("Agent init failed: {e}")), None, None,
                 );
                 return;
             }
@@ -183,7 +183,7 @@ fn react_chat_driver(
                 pty::finalize_session(
                     &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
                     SessionStatus::Failed, None,
-                    Some(format!("Agent run failed: {e}")), None,
+                    Some(format!("Agent run failed: {e}")), None, None,
                 );
                 return;
             }
@@ -193,6 +193,10 @@ fn react_chat_driver(
         let mut final_status = SessionStatus::Completed;
         let mut final_exit: Option<i32> = Some(0);
         let mut final_output = String::new();
+        // Accumulate the wire events emitted to agent:event so the completed
+        // session can be persisted and replayed via BlocksView. Mirrors the
+        // pipe path's Arc<Mutex<Vec>> accumulation.
+        let mut final_blocks: Vec<pty::ChatStreamEvent> = Vec::new();
         while let Some(ev_res) = stream.next().await {
             let secs = started.elapsed().as_secs();
             let ev = match ev_res {
@@ -206,7 +210,7 @@ fn react_chat_driver(
                     };
                     pty::finalize_session(
                         &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
-                        SessionStatus::Failed, None, summary, None,
+                        SessionStatus::Failed, None, summary, None, None,
                     );
                     return;
                 }
@@ -227,12 +231,14 @@ fn react_chat_driver(
                 }
                 _ => {}
             }
-            for wire in react_chat::map_agent_event(ev, secs) {
+            let wires = react_chat::map_agent_event(ev, secs);
+            for wire in &wires {
                 let _ = app_drv.emit(
                     "agent:event",
                     serde_json::json!({ "sessionId": &sid_drv, "event": wire }),
                 );
             }
+            final_blocks.extend(wires);
         }
 
         // Stream ended (ReactAgent always yields Done before ending — this is the
@@ -245,6 +251,7 @@ fn react_chat_driver(
         pty::finalize_session(
             &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
             final_status, final_exit, summary, None,
+            Some(final_blocks),
         );
     });
 

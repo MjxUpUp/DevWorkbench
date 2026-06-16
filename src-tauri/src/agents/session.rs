@@ -23,7 +23,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id
+                conversation_id, blocks
          FROM sessions ORDER BY started_at DESC"
     )?;
 
@@ -45,6 +45,11 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -60,6 +65,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
+            blocks,
         })
     })?;
 
@@ -167,6 +173,19 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
         let v = conv.as_str().map(|s| s.to_string());
         param_values.push(Box::new(v));
     }
+    if let Some(blocks) = patch.get("blocks") {
+        // Persisted chat blocks (text/tool_use/tool_result JSON array). Written
+        // by finalize_session so history replays via BlocksView. null (Value::Null)
+        // → SQL NULL so load returns None (raw agent / explicit clear), matching
+        // the conversationId branch's null-handling — NOT the string "null".
+        let v = if blocks.is_null() {
+            None
+        } else {
+            Some(serde_json::to_string(blocks).unwrap_or_default())
+        };
+        set_clauses.push("blocks = ?".to_string());
+        param_values.push(Box::new(v));
+    }
 
     if set_clauses.is_empty() {
         return Ok(());
@@ -188,7 +207,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id
+                conversation_id, blocks
          FROM sessions WHERE project_path = ?1 ORDER BY started_at DESC"
     )?;
 
@@ -210,6 +229,11 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -225,6 +249,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
+            blocks,
         })
     })?;
 
@@ -350,7 +375,7 @@ pub fn load_turns_for_conversation_db(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id
+                conversation_id, blocks
          FROM sessions WHERE conversation_id = ?1 ORDER BY started_at ASC"
     )?;
     let sessions = stmt.query_map(params![conversation_id], |row| {
@@ -368,6 +393,10 @@ pub fn load_turns_for_conversation_db(
         let context_snapshot: Option<ContextSnapshot> = snapshot_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -383,6 +412,7 @@ pub fn load_turns_for_conversation_db(
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
+            blocks,
         })
     })?;
     let mut out = Vec::new();
@@ -448,6 +478,7 @@ mod tests {
             linked_requirement_id: None,
             parent_session_id: None,
             conversation_id: None,
+            blocks: None,
         }
     }
 
@@ -535,5 +566,56 @@ mod tests {
         let turns = load_turns_for_conversation_db(&conn, "c1").unwrap();
         let ids: Vec<&str> = turns.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["first", "mid", "last"], "oldest-first within c1 only");
+    }
+
+    /// blocks round-trip: update_session_db writes the persisted blocks JSON,
+    /// load_sessions_from_db reads it back as the same Value. This is the DB
+    /// half of the G1 persistence path (the merge+cap transformation is unit-
+    /// tested in pty::tests; finalize_session applies it before this write).
+    #[test]
+    fn blocks_round_trip_through_update_and_load() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_session_db(&conn, &make_session("s1", "/p", SessionStatus::Running)).unwrap();
+
+        let blocks = serde_json::json!([
+            { "kind": "text", "content": "hello" },
+            { "kind": "tool_use", "name": "Read", "input": { "file_path": "/x" } },
+            { "kind": "tool_result", "content": "file body", "is_error": false },
+        ]);
+        let mut patch = serde_json::json!({});
+        patch["blocks"] = blocks.clone();
+        update_session_db(&conn, "s1", patch).unwrap();
+
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        let s = loaded.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.blocks.as_ref().unwrap(),
+            &blocks,
+            "blocks must round-trip unchanged through the DB layer"
+        );
+    }
+
+    /// A raw agent (no agent:event stream) writes no blocks — load must return
+    /// None without error, and an explicit null patch must clear them. Guards
+    /// the fallback path: AgentMessage falls through to the terminal when blocks
+    /// is null/None.
+    #[test]
+    fn blocks_absent_is_none_and_null_clears() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        // No blocks written at all (raw agent / pre-G1 session).
+        insert_session_db(&conn, &make_session("raw", "/p", SessionStatus::Completed)).unwrap();
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        let s = loaded.iter().find(|s| s.id == "raw").unwrap();
+        assert!(s.blocks.is_none(), "no blocks written → None on load");
+
+        // Explicit null patch clears the column.
+        let mut patch = serde_json::json!({});
+        patch["blocks"] = serde_json::Value::Null;
+        update_session_db(&conn, "raw", patch).unwrap();
+        let loaded2 = load_sessions_from_db(&conn).unwrap();
+        let s2 = loaded2.iter().find(|s| s.id == "raw").unwrap();
+        assert!(s2.blocks.is_none(), "null blocks patch → None on load");
     }
 }

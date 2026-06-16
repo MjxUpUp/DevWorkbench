@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_snapshot TEXT,
     linked_requirement_id TEXT,
     parent_session_id TEXT,
-    conversation_id TEXT
+    conversation_id TEXT,
+    blocks TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);

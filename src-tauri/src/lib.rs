@@ -58,6 +58,8 @@ pub fn run() {
                     .expect("Failed to run v8 to v9 schema migration");
                 migrate::migrate_v9_to_v10(&conn)
                     .expect("Failed to run v9 to v10 conversation migration");
+                migrate::migrate_v10_to_v11(&conn)
+                    .expect("Failed to run v10 to v11 blocks column migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
