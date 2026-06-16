@@ -181,18 +181,19 @@ impl Agent for OpaqueAgent {
                 let pending_ev = pending.clone();
                 let ev_id = app.listen("agent:event", move |event| {
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
-                    if v.get("sessionId").and_then(|s| s.as_str()) != Some(&sid_ev) {
-                        return;
-                    }
-                    let Some(event_val) = v.get("event") else { return };
-                    let Ok(wire) = serde_json::from_value::<crate::agents::pty::ChatStreamEvent>(
-                        event_val.clone(),
-                    ) else { return };
+                    // poisoned lock → drop this event, never panic the listener. std Mutex
+                    // platform semantics; not unit-tested (synthesizing a poison needs a
+                    // panicking lock holder — cost > value for this branch).
                     let mut guard = match pending_ev.lock() {
                         Ok(g) => g,
-                        Err(_) => return, // poisoned — drop this event, never panic the listener
+                        Err(_) => return,
                     };
-                    for ae in crate::agents::react_chat::chat_event_to_agent_events(&wire, &mut *guard) {
+                    // sessionId filter + `event` decode + FIFO pairing live in the pure
+                    // `decode_agent_event_payload` helper so they're unit-testable without
+                    // an AppHandle. The lock spans the decode (pending IS the FIFO queue);
+                    // no contention in practice — each session owns its own pending and the
+                    // reader thread emits events serially.
+                    for ae in decode_agent_event_payload(&v, &sid_ev, &mut *guard) {
                         let _ = tx_ev.try_send(AgentMsg::Structured(ae));
                     }
                 });
@@ -311,6 +312,41 @@ fn read_session_files(app: &tauri::AppHandle, session_id: &str) -> Vec<String> {
     crate::utils::files_changed_from_snapshot(snap_str.as_deref())
 }
 
+/// Parse + sessionId-filter + reverse-map one `agent:event` payload into
+/// `AgentEvent`s for the OpaqueAgent stream. PURE (no I/O, no locking): the
+/// raw-payload `from_str` and `pending.lock()` stay in the listener — the
+/// caller passes an already-parsed `Value` + an already-locked `VecDeque`
+/// (lock scope preserved by passing `&mut`, NOT `Arc<Mutex>`, so no per-event
+/// re-lock). Returns empty (never panics) for: non-matching sessionId, missing
+/// `event` field, or a non-deserializable `ChatStreamEvent` — mirroring the
+/// listener's silent-skip contract.
+///
+/// Extracted from the `app.listen("agent:event", …)` closure so the
+/// sessionId-routing + decode logic is unit-testable without an `AppHandle`
+/// (the closure itself needs Tauri runtime + a real spawned CLI, which is why
+/// this layer had zero coverage after G4 — only the downstream pure
+/// `chat_event_to_agent_events` was tested). The sessionId filter is
+/// concurrency-critical: a workflow runs multiple claude nodes in parallel,
+/// each listening the SAME global `agent:event` channel filtered by its own sid.
+fn decode_agent_event_payload(
+    payload: &serde_json::Value,
+    session_id: &str,
+    pending: &mut VecDeque<(String, String)>,
+) -> Vec<AgentEvent> {
+    if payload.get("sessionId").and_then(|s| s.as_str()) != Some(session_id) {
+        return Vec::new();
+    }
+    let Some(event_val) = payload.get("event") else {
+        return Vec::new();
+    };
+    let Ok(wire) =
+        serde_json::from_value::<crate::agents::pty::ChatStreamEvent>(event_val.clone())
+    else {
+        return Vec::new();
+    };
+    crate::agents::react_chat::chat_event_to_agent_events(&wire, pending)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +412,185 @@ mod tests {
         assert!(caps.interruptible);
         assert!(caps.resumable);
         assert!(!caps.injectable_tools, "opaque agents reject injected tools");
+    }
+
+    // ---- decode_agent_event_payload (agent:event listener decode layer) ----
+    //
+    // These cover the sessionId-routing + event-decode glue that was inlined in
+    // the listener closure and had zero coverage after G4. The closure itself
+    // (from_str, pending.lock, try_send) stays untested — those are I/O / mutex
+    // boundaries; only the pure decode is tested here.
+
+    use kernel_core::ToolCallStatus;
+    use serde_json::json;
+
+    /// Assert an AgentEvent is a ToolCall with the given name + status.
+    fn assert_tool_event(ev: &AgentEvent, expected_name: &str, expected_status: ToolCallStatus) {
+        match ev {
+            AgentEvent::ToolCall(tc) => {
+                assert_eq!(tc.tool, expected_name, "tool name mismatch");
+                assert_eq!(tc.status, expected_status, "status mismatch");
+            }
+            other => panic!("expected ToolCall({expected_name}), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_text_payload_matching_session_emits_token() {
+        let payload = json!({
+            "sessionId": "s1",
+            "event": { "kind": "text", "content": "hi" },
+        });
+        let mut pending = VecDeque::new();
+        let out = decode_agent_event_payload(&payload, "s1", &mut pending);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentEvent::Token(s) => assert_eq!(s, "hi"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn decode_filters_other_session_id_and_leaves_pending_intact() {
+        // Concurrency guard: a workflow runs multiple claude nodes in parallel,
+        // each filtering the SAME global agent:event channel by its own sid. An
+        // event for ANOTHER session must drop WITHOUT touching our pending FIFO
+        // queue — otherwise a future refactor that moves pop_front above the sid
+        // check silently steals ToolResult pairing across sessions.
+        let mut pending = VecDeque::new();
+        pending.push_back(("A".to_string(), "{}".to_string()));
+        let payload = json!({
+            "sessionId": "other-session",
+            "event": { "kind": "tool_result", "content": "not ours", "is_error": false },
+        });
+        let out = decode_agent_event_payload(&payload, "s1", &mut pending);
+        assert!(out.is_empty(), "other-session event must be filtered");
+        assert_eq!(pending.len(), 1, "pending must be untouched for filtered events");
+        assert_eq!(pending.front().unwrap().0, "A");
+    }
+
+    #[test]
+    fn decode_missing_event_field_returns_empty() {
+        let payload = json!({ "sessionId": "s1" });
+        let mut pending = VecDeque::new();
+        let out = decode_agent_event_payload(&payload, "s1", &mut pending);
+        assert!(out.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn decode_malformed_event_returns_empty() {
+        // `event` present but not a deserializable ChatStreamEvent (a stray
+        // string). Must skip silently, never panic the listener.
+        let payload = json!({ "sessionId": "s1", "event": "not-an-object" });
+        let mut pending = VecDeque::new();
+        let out = decode_agent_event_payload(&payload, "s1", &mut pending);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn decode_null_event_returns_empty() {
+        // Defensive: pty.rs's reader never emits event:null today, but a null
+        // must degrade gracefully rather than panic.
+        let payload = json!({ "sessionId": "s1", "event": null });
+        let mut pending = VecDeque::new();
+        assert!(decode_agent_event_payload(&payload, "s1", &mut pending).is_empty());
+    }
+
+    #[test]
+    fn decode_session_id_non_string_returns_empty() {
+        // sessionId as number/bool/null — .as_str() returns None → filtered.
+        let cases = [
+            json!({ "sessionId": 123, "event": { "kind": "text", "content": "x" } }),
+            json!({ "sessionId": null, "event": { "kind": "text", "content": "x" } }),
+            json!({ "sessionId": true, "event": { "kind": "text", "content": "x" } }),
+        ];
+        for p in cases {
+            let mut pending = VecDeque::new();
+            assert!(
+                decode_agent_event_payload(&p, "s1", &mut pending).is_empty(),
+                "non-string sessionId must filter: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_non_object_payload_returns_empty() {
+        // Whole payload isn't an object — .get() returns None on non-objects,
+        // every branch falls through to empty. No panic.
+        let cases: Vec<serde_json::Value> = vec![
+            json!([1, 2, 3]),
+            json!("just a string"),
+            serde_json::Value::Null,
+            json!(42),
+        ];
+        for p in cases {
+            let mut pending = VecDeque::new();
+            assert!(
+                decode_agent_event_payload(&p, "s1", &mut pending).is_empty(),
+                "non-object payload must not panic: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_tool_use_then_result_pairs_fifo() {
+        // End-to-end through the decode layer: tool_use then tool_result pair
+        // positionally into Started + Succeeded ToolCalls.
+        let mut pending = VecDeque::new();
+        let started = decode_agent_event_payload(
+            &json!({
+                "sessionId": "s1",
+                "event": { "kind": "tool_use", "name": "Read", "input": { "file_path": "/x" } },
+            }),
+            "s1", &mut pending,
+        );
+        let succeeded = decode_agent_event_payload(
+            &json!({
+                "sessionId": "s1",
+                "event": { "kind": "tool_result", "content": "file body", "is_error": false },
+            }),
+            "s1", &mut pending,
+        );
+        assert_eq!(started.len(), 1);
+        assert_eq!(succeeded.len(), 1);
+        assert_tool_event(&started[0], "Read", ToolCallStatus::Started);
+        assert_tool_event(&succeeded[0], "Read", ToolCallStatus::Succeeded);
+        assert!(pending.is_empty(), "FIFO queue drained after pairing");
+    }
+
+    #[test]
+    fn decode_full_claude_turn_sequence() {
+        // A realistic claude turn: text + tool_use + tool_result + result.
+        // Decode yields [Token, ToolCall(Started), ToolCall(Succeeded)] — the
+        // Result block emits NOTHING (Done is owned by agent:completed, not the
+        // event stream; emitting here would double-end the OpaqueAgent stream).
+        let mut pending = VecDeque::new();
+        let text = decode_agent_event_payload(
+            &json!({ "sessionId": "s1", "event": { "kind": "text", "content": "reading" } }),
+            "s1", &mut pending,
+        );
+        let tool_use = decode_agent_event_payload(
+            &json!({ "sessionId": "s1", "event": { "kind": "tool_use", "name": "Read", "input": {} } }),
+            "s1", &mut pending,
+        );
+        let tool_res = decode_agent_event_payload(
+            &json!({ "sessionId": "s1", "event": { "kind": "tool_result", "content": "ok", "is_error": false } }),
+            "s1", &mut pending,
+        );
+        let result = decode_agent_event_payload(
+            &json!({ "sessionId": "s1", "event": { "kind": "result", "is_error": false, "secs": 3 } }),
+            "s1", &mut pending,
+        );
+        let all: Vec<AgentEvent> = [text, tool_use, tool_res].into_iter().flatten().collect();
+        assert_eq!(all.len(), 3, "text + tool_use + tool_result → 3 events");
+        assert!(result.is_empty(), "Result block must NOT emit (Done owned by agent:completed)");
+        match &all[0] {
+            AgentEvent::Token(s) => assert_eq!(s, "reading"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+        assert_tool_event(&all[1], "Read", ToolCallStatus::Started);
+        assert_tool_event(&all[2], "Read", ToolCallStatus::Succeeded);
     }
 }
