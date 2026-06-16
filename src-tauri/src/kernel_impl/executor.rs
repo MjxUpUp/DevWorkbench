@@ -189,6 +189,18 @@ pub(crate) fn build_react_agent(
             sys_prompt.push_str(&experience_prompt_suffix(&conn, &hash));
         }
     }
+    // T10 cost budget hard limit: clone the pool before db moves into the cost
+    // sink. Called at the top of every turn; if month-to-date spend has reached
+    // the configured budget, the agent halts gracefully. A DB read failure is
+    // treated as "not exhausted" — never block the run on a transient DB error.
+    let budget_db = db.clone();
+    let budget_check: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+        budget_db
+            .as_ref()
+            .and_then(|d| d.get().ok())
+            .map(|conn| crate::cost::agentfare::is_budget_exhausted(&conn).unwrap_or(false))
+            .unwrap_or(false)
+    });
     let chat = GlmChatModel::new(endpoint, api_key, resolved_model)
         // P0 model orchestration: a process-wide breaker so a down GLM endpoint
         // fails fast instead of every session retrying into it, plus a cost sink
@@ -252,6 +264,7 @@ pub(crate) fn build_react_agent(
         .with_model_router(Arc::new(
             crate::kernel_impl::model_router::route_step,
         ))
+        .with_budget_check(budget_check)
         .with_hooks(Arc::new(hooks)))
 }
 

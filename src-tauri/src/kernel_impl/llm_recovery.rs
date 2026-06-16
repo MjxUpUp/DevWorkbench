@@ -44,6 +44,9 @@ pub enum FatalReason {
     Circuit,
     /// Account out of quota / billing blocked — user action needed.
     Quota,
+    /// Monthly cost budget reached (v1.2 T10 hard limit) — the agent halts
+    /// before spending another turn rather than burning past the cap.
+    Budget,
     /// Bad/missing credentials — user action needed.
     Auth,
     /// Anything else not worth retrying (4xx other than 429, decode errors...).
@@ -165,6 +168,7 @@ pub fn fatal_user_message(reason: FatalReason) -> &'static str {
     match reason {
         FatalReason::Circuit => "The model provider is currently unavailable (circuit breaker engaged after repeated failures). Please wait a moment and try again.",
         FatalReason::Quota => "The model provider rejected the request: account out of quota or billing unavailable. Please check your provider account and retry.",
+        FatalReason::Budget => "Monthly cost budget reached — the agent halted before exceeding the spending cap. Raise the budget in Settings \u{2192} Cost to continue.",
         FatalReason::Auth => "The model provider rejected the request: authentication failed. Please check your API key in Settings \u{2192} Providers and retry.",
         FatalReason::Generic => "The model request failed and could not be recovered after retries. Please rephrase or retry.",
     }
@@ -268,6 +272,7 @@ mod tests {
     #[test]
     fn fatal_messages_are_distinct_and_specific() {
         assert!(fatal_user_message(FatalReason::Quota).contains("quota"));
+        assert!(fatal_user_message(FatalReason::Budget).contains("budget"));
         assert!(fatal_user_message(FatalReason::Auth).contains("API key"));
         assert!(fatal_user_message(FatalReason::Circuit).contains("circuit breaker"));
         assert!(fatal_user_message(FatalReason::Generic).contains("retries"));

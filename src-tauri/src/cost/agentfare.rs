@@ -128,6 +128,31 @@ pub fn check_budget_alert(conn: &Connection) -> Result<bool, AppError> {
     Ok(month_cost >= budget * settings.alert_threshold)
 }
 
+/// Month-to-date spend (USD). The window is `start of month` to now, matching
+/// `check_budget_alert`. Extracted so the hard-limit check below and the alert
+/// share one source of truth for "how much has been spent this month".
+pub fn monthly_cost(conn: &Connection) -> Result<f64, AppError> {
+    let month_cost: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_records WHERE recorded_at >= DATE('now', 'start of month')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(month_cost)
+}
+
+/// Hard budget limit (v1.2 T10): true when month-to-date spend has reached the
+/// configured monthly budget. Distinct from `check_budget_alert` (which trips at
+/// `alert_threshold`, e.g. 80%); this trips at 100% and is what the ReactAgent
+/// turn loop uses to halt before burning past the cap. No budget configured →
+/// never exhausted (unlimited).
+pub fn is_budget_exhausted(conn: &Connection) -> Result<bool, AppError> {
+    let budget = match load_budget_settings(conn)?.monthly_budget_usd {
+        Some(b) if b > 0.0 => b,
+        _ => return Ok(false),
+    };
+    Ok(monthly_cost(conn)? >= budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +173,12 @@ mod tests {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cost_usd REAL NOT NULL DEFAULT 0,
                 recorded_at TEXT NOT NULL
+            );
+            CREATE TABLE budget_settings (
+                id INTEGER PRIMARY KEY,
+                monthly_budget_usd REAL,
+                alert_threshold REAL DEFAULT 0.8,
+                updated_at TEXT NOT NULL
             );",
         )
         .unwrap();
@@ -205,5 +236,38 @@ mod tests {
             trend.iter().any(|p| (p.cost - 0.0026).abs() < 1e-9),
             "today's row missing from trend: {trend:?}"
         );
+    }
+
+    #[test]
+    fn is_budget_exhausted_trips_at_full_budget_not_threshold() {
+        let conn = test_conn();
+        // No budget set → never exhausted.
+        assert!(!is_budget_exhausted(&conn).unwrap());
+
+        // Spend $0.0026. Budget $1.00 → not exhausted (alert at 80% would also
+        // be false, but the point is the hard limit is at 100%).
+        insert_cost_record(&conn, &sample_record("b1")).unwrap();
+        save_budget_settings(
+            &conn,
+            &BudgetSettings { monthly_budget_usd: Some(1.0), alert_threshold: 0.8 },
+        )
+        .unwrap();
+        assert!(!is_budget_exhausted(&conn).unwrap());
+
+        // Lower the budget to just below the spend → now exhausted.
+        save_budget_settings(
+            &conn,
+            &BudgetSettings { monthly_budget_usd: Some(0.002), alert_threshold: 0.8 },
+        )
+        .unwrap();
+        assert!(is_budget_exhausted(&conn).unwrap());
+
+        // Budget cleared → unlimited again.
+        save_budget_settings(
+            &conn,
+            &BudgetSettings { monthly_budget_usd: None, alert_threshold: 0.8 },
+        )
+        .unwrap();
+        assert!(!is_budget_exhausted(&conn).unwrap());
     }
 }

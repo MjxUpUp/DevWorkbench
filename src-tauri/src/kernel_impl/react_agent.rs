@@ -647,6 +647,10 @@ pub struct ReactAgent {
     /// `opts.model`. Same-provider routing (glm-4.6 ↔ glm-4-flash), so
     /// endpoint/key stay constant. None = single fixed model (the old behavior).
     model_router: Option<Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>>,
+    /// Cost budget hard-limit check (v1.2 T10). If set, called at the top of
+    /// every turn; returning true halts the run gracefully
+    /// (`FatalReason::Budget`) before spending another LLM call. None = unlimited.
+    budget_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     system_prompt: String,
     /// Context passed to every tool invocation. Defaults to empty
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
@@ -676,6 +680,7 @@ impl ReactAgent {
             max_verify: 0,
             audit_fn: None,
             model_router: None,
+            budget_check: None,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
@@ -751,6 +756,15 @@ impl ReactAgent {
         f: Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>,
     ) -> Self {
         self.model_router = Some(f);
+        self
+    }
+
+    /// Enable the cost-budget hard limit (v1.2 T10). The closure is called at
+    /// the top of each turn; if it returns true the run halts gracefully with a
+    /// `FatalReason::Budget` message instead of making another LLM call.
+    /// Production wires `cost::agentfare::is_budget_exhausted` over the DB.
+    pub fn with_budget_check(mut self, f: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.budget_check = Some(f);
         self
     }
 
@@ -861,6 +875,7 @@ impl kernel_core::Agent for ReactAgent {
         let max_verify = self.max_verify;
         let audit_fn = self.audit_fn.clone();
         let model_router = self.model_router.clone();
+        let budget_check = self.budget_check.clone();
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -896,6 +911,13 @@ impl kernel_core::Agent for ReactAgent {
             let mut verify_count = 0u32;
 
             for _step in 0..max_steps {
+                // T10 hard budget limit: halt before spending another turn if the
+                // monthly budget is already exhausted. Fires on turn 0 too, so a
+                // run that starts over-budget never makes an LLM call.
+                if budget_check.as_ref().map(|c| c()).unwrap_or(false) {
+                    degraded = Some(FatalReason::Budget);
+                    break;
+                }
                 // T9 per-step routing: ask the router (if wired) which model fits
                 // this turn given the conversation so far, and override opts.model
                 // for this single stream call. Same provider → endpoint/key are
@@ -1405,6 +1427,28 @@ mod tests {
             seen[0].as_deref(),
             Some("routed-sentinel"),
             "router must override opts.model: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_halts_when_budget_exhausted() {
+        use kernel_core::Agent;
+        // Budget check always true → the agent degrades on turn 0 WITHOUT ever
+        // calling the model. Proves the hard limit fires before spending.
+        let model = RecordingModel::new(Message::assistant("done"));
+        let seen = model.seen.clone();
+        let check: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| true);
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys").with_budget_check(check);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("budget message");
+        assert!(summary.contains("budget"), "budget reason in summary: {summary}");
+        // No LLM call was made — the limit fired before the first turn.
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no stream call when budget exhausted: {:?}",
+            seen.lock().unwrap()
         );
     }
 
