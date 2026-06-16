@@ -105,6 +105,8 @@ export const useOrchestrateStore = create<OrchestrateState>((set, get) => ({
           const last = blocks[blocks.length - 1];
           if (block.kind === 'text' && last && last.kind === 'text') {
             blocks[blocks.length - 1] = { kind: 'text', content: last.content + block.content };
+          } else if (block.kind === 'thinking' && last && last.kind === 'thinking') {
+            blocks[blocks.length - 1] = { kind: 'thinking', content: last.content + block.content };
           } else {
             blocks.push(block);
           }

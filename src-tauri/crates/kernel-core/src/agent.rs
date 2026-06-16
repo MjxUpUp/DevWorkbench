@@ -65,6 +65,11 @@ pub struct AgentInput {
 pub enum AgentEvent {
     /// Incremental text output (a token chunk, or a parsed line of CLI stdout).
     Token(String),
+    /// Incremental reasoning/thinking trace from a thinking model (GLM
+    /// Interleaved Thinking). Yielded chunk-by-chunk as the model reasons,
+    /// typically BEFORE the visible answer tokens. Chat renders this as a
+    /// collapsible thinking block, separate from the answer text.
+    Reasoning(String),
     /// The agent invoked a tool. Opaque agents emit this best-effort by parsing
     /// CLI output; transparent agents emit it directly.
     ToolCall(ToolCallEvent),

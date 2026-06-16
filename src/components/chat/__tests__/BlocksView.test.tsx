@@ -54,6 +54,25 @@ describe('BlocksView', () => {
     expect(screen.getByText('pattern')).toBeInTheDocument();
   });
 
+  it('renders a thinking block as a collapsible card, collapsed by default', () => {
+    // GLM interleaved reasoning arrives as a Thinking wire event; BlocksView
+    // must render it under the thinking card class (distinct from tool/result
+    // cards) so the UI reads it as auxiliary reasoning, not model output.
+    const { container } = render(
+      <BlocksView events={[{ kind: 'thinking', content: 'let me reason about this' }]} running={false} />,
+    );
+    expect(container.querySelector('.chat-block-thinking')).not.toBeNull();
+    expect(screen.getByText('思考过程')).toBeInTheDocument();
+    // Collapsed by default → the trace is not yet in the document.
+    expect(screen.queryByText('let me reason about this')).not.toBeInTheDocument();
+  });
+
+  it('expands the thinking trace on click', () => {
+    render(<BlocksView events={[{ kind: 'thinking', content: 'step by step plan' }]} running={false} />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('step by step plan')).toBeInTheDocument();
+  });
+
   it('marks an errored tool result', () => {
     render(<BlocksView events={[{ kind: 'tool_result', content: 'boom', is_error: true }]} running={false} />);
     expect(screen.getByText('工具错误')).toBeInTheDocument();

@@ -125,6 +125,23 @@ describe('orchestrateStore', () => {
       ]);
     });
 
+    it('merges consecutive thinking chunks (reasoning trace stays one block)', () => {
+      // GLM interleaved thinking in a workflow agent node streams as multiple
+      // Thinking chunks; they must fold so the canvas renders one thinking card.
+      useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'thinking', content: 'step ' } as ChatStreamEvent,
+      });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'thinking', content: 'by step' } as ChatStreamEvent,
+      });
+      expect(useOrchestrateStore.getState().nodes['agent_1']?.blocks).toEqual([
+        { kind: 'thinking', content: 'step by step' },
+      ]);
+    });
+
     it('keeps tool_use and tool_result as separate blocks (no merge across kinds)', () => {
       useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
       useOrchestrateStore.getState().applyEvent({

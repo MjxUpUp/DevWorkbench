@@ -55,6 +55,12 @@ pub struct Message {
     /// Reasoning/thinking-model trace (e.g. DeepSeek-R1, GLM thinking). Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Cryptographic signature over `reasoning` (Anthropic `signature_delta`).
+    /// Required to *preserve* a thinking block across turns: Anthropic/GLM
+    /// reject a replayed thinking block whose signature is missing or tampered.
+    /// Present only when the model emitted one AND `reasoning` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_signature: Option<String>,
 }
 
 impl Message {
@@ -65,6 +71,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: None,
+            reasoning_signature: None,
         }
     }
 
@@ -75,6 +82,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: None,
+            reasoning_signature: None,
         }
     }
 
@@ -85,6 +93,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: None,
+            reasoning_signature: None,
         }
     }
 }
@@ -135,6 +144,7 @@ mod tests {
             }],
             tool_call_id: None,
             reasoning: None,
+            reasoning_signature: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();

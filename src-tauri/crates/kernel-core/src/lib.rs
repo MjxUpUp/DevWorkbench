@@ -32,5 +32,6 @@ pub use document::Document;
 pub use error::Error;
 pub use schema::{FunctionCall, Message, Role, ToolCall};
 pub use traits::{
-    ChatModel, MessageStream, ModelOptions, RetrieveOptions, Retriever, Tool, ToolContext, ToolInfo,
+    ChatModel, MessageStream, ModelOptions, RetrieveOptions, Retriever, ThinkingConfig, Tool,
+    ToolContext, ToolInfo,
 };

@@ -32,6 +32,21 @@ pub struct ModelOptions {
     pub max_tokens: Option<u32>,
     pub model: Option<String>,
     pub stop: Option<Vec<String>>,
+    /// Enable extended/interleaved thinking (Anthropic Messages protocol).
+    /// When set, the request carries `thinking: {type:"enabled", budget_tokens}`
+    /// and the model's thinking blocks are parsed into `Message.reasoning` +
+    /// surfaced as `AgentEvent::Reasoning`, then preserved across turns. None
+    /// = thinking off (the default; preserves current behavior).
+    pub thinking: Option<ThinkingConfig>,
+}
+
+/// Extended-thinking budget — Anthropic's `thinking.budget_tokens`. The model
+/// may spend up to this many tokens reasoning before its visible answer. The
+/// ChatModel raises `max_tokens` above this when thinking is enabled (Anthropic
+/// requires `max_tokens > budget_tokens`).
+#[derive(Debug, Clone, Copy)]
+pub struct ThinkingConfig {
+    pub budget_tokens: u32,
 }
 
 /// Tool declaration given to the model so it knows what it can call.

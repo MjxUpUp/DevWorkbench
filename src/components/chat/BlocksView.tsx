@@ -51,6 +51,8 @@ function BlockCard({ event }: { event: ChatStreamEvent }) {
       return <ToolUseCard name={event.name} input={event.input} />;
     case 'tool_result':
       return <ToolResultCard content={event.content} isError={event.is_error} />;
+    case 'thinking':
+      return <ThinkingCard content={event.content} />;
     case 'result':
       return (
         <div className={`chat-block chat-block-result ${event.is_error ? 'failed' : 'ok'}`}>
@@ -87,6 +89,25 @@ function ToolResultCard({ content, isError }: { content: string; isError: boolea
         <span className="chat-block-tool-toggle">{open ? '▾' : '▸'}</span>
       </button>
       {open && <pre className="chat-block-toolresult-content">{content}</pre>}
+    </div>
+  );
+}
+
+function ThinkingCard({ content }: { content: string }) {
+  // GLM interleaved thinking trace — collapsible, collapsed by default. Mirrors
+  // the ToolResultCard shape but with a distinct class (muted/italic) so the
+  // reasoning trace reads as auxiliary context, not model output. Collapsed by
+  // default keeps a long trace from swamping the answer (same convention as
+  // Claude/ChatGPT); open to inspect the reasoning.
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="chat-block chat-block-thinking">
+      <button type="button" className="chat-block-thinking-head" onClick={() => setOpen((v) => !v)}>
+        <span className="chat-block-thinking-mark" aria-hidden="true">✦</span>
+        <span>思考过程</span>
+        <span className="chat-block-tool-toggle">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && <pre className="chat-block-thinking-content">{content}</pre>}
     </div>
   );
 }

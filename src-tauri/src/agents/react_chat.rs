@@ -42,6 +42,7 @@ use std::collections::VecDeque;
 pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
     match ev {
         AgentEvent::Token(s) => vec![ChatStreamEvent::Text { content: s }],
+        AgentEvent::Reasoning(s) => vec![ChatStreamEvent::Thinking { content: s }],
         AgentEvent::ToolCall(tc) => match tc.status {
             ToolCallStatus::Started => vec![ChatStreamEvent::ToolUse {
                 name: tc.tool,
@@ -112,6 +113,7 @@ pub fn chat_event_to_agent_events(
 ) -> Vec<AgentEvent> {
     match ev {
         ChatStreamEvent::Text { content } => vec![AgentEvent::Token(content.clone())],
+        ChatStreamEvent::Thinking { content } => vec![AgentEvent::Reasoning(content.clone())],
         ChatStreamEvent::ToolUse { name, input } => {
             let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
             pending_tools.push_back((name.clone(), args.clone()));
@@ -292,11 +294,13 @@ fn blocks_to_assistant_and_tool_messages(
     text_cap: usize,
 ) -> Vec<Message> {
     let mut text_chunks: Vec<&str> = Vec::new();
+    let mut reasoning_chunks: Vec<&str> = Vec::new();
     let mut tool_uses: Vec<(&str, &Value)> = Vec::new();
     let mut tool_results: Vec<&str> = Vec::new();
     for ev in blocks {
         match ev {
             ChatStreamEvent::Text { content } => text_chunks.push(content.as_str()),
+            ChatStreamEvent::Thinking { content } => reasoning_chunks.push(content.as_str()),
             ChatStreamEvent::ToolUse { name, input } => tool_uses.push((name.as_str(), input)),
             ChatStreamEvent::ToolResult { content, .. } => tool_results.push(content.as_str()),
             ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
@@ -304,6 +308,10 @@ fn blocks_to_assistant_and_tool_messages(
     }
 
     let assistant_text = tail(&text_chunks.join(""), text_cap);
+    // Reassembled reasoning trace (opaque history that carried thinking blocks).
+    // No signature survives the wire round-trip, so a replayed thinking block is
+    // unsigned — only consequential once an opaque CLI actually emits thinking.
+    let assistant_reasoning = tail(&reasoning_chunks.join(""), text_cap);
     let tool_calls: Vec<ToolCall> = tool_uses
         .iter()
         .enumerate()
@@ -323,7 +331,12 @@ fn blocks_to_assistant_and_tool_messages(
         content: assistant_text,
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
-        reasoning: None,
+        reasoning: if assistant_reasoning.is_empty() {
+            None
+        } else {
+            Some(assistant_reasoning)
+        },
+        reasoning_signature: None,
     });
     // Pair each assistant tool_call with its result positionally. The id on the
     // tool message MUST match the assistant tool_call's id for correlation.
@@ -335,6 +348,7 @@ fn blocks_to_assistant_and_tool_messages(
             tool_calls: Vec::new(),
             tool_call_id: Some(id),
             reasoning: None,
+            reasoning_signature: None,
         });
     }
     out
@@ -354,6 +368,35 @@ mod tests {
             ChatStreamEvent::Text { content } => assert_eq!(content, "hello"),
             other => panic!("expected Text, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn reasoning_maps_to_thinking_block() {
+        // GLM Interleaved Thinking surfaces as AgentEvent::Reasoning; the chat
+        // layer maps it onto the Thinking wire block (collapsible UI), NOT Text.
+        let out = map_agent_event(AgentEvent::Reasoning("why".to_string()), 0);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ChatStreamEvent::Thinking { content } => assert_eq!(content, "why"),
+            other => panic!("expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thinking_wire_block_round_trips_to_reasoning_event() {
+        // Reverse map (opaque → kernel): a Thinking wire block becomes a
+        // Reasoning AgentEvent, independent of the tool-use pairing queue.
+        let mut pending = std::collections::VecDeque::new();
+        let evs = chat_event_to_agent_events(
+            &ChatStreamEvent::Thinking { content: "deliberation".into() },
+            &mut pending,
+        );
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::Reasoning(s) => assert_eq!(s, "deliberation"),
+            other => panic!("expected Reasoning, got {:?}", other),
+        }
+        assert!(pending.is_empty(), "thinking must not enqueue a tool pairing");
     }
 
     #[test]

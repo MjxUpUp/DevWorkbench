@@ -218,6 +218,7 @@ function formatEvent(event: WorkflowProgressPayload['event']): string {
           case 'tool_use': text = `🔧 ${ev.name}`; break;
           case 'tool_result': text = ev.content; break;
           case 'result': text = ev.is_error ? '✗ 失败' : '✓ 完成'; break;
+          case 'thinking': text = `💭 ${ev.content.slice(0, 40)}`; break;
           default: text = JSON.stringify(c);
         }
       } else if (typeof c === 'string') {

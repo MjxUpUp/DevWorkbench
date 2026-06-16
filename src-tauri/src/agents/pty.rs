@@ -565,6 +565,12 @@ pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
 pub enum ChatStreamEvent {
     #[serde(rename = "text")]
     Text { content: String },
+    /// Reasoning/thinking trace (GLM Interleaved Thinking, claude extended
+    /// thinking). Rendered as a collapsible thinking block, separate from the
+    /// answer text. Streamed chunk-by-chunk by the transparent ReactAgent;
+    /// opaque agents emit it when their CLI parser surfaces a thinking block.
+    #[serde(rename = "thinking")]
+    Thinking { content: String },
     #[serde(rename = "tool_use")]
     ToolUse { name: String, input: serde_json::Value },
     #[serde(rename = "tool_result")]
@@ -2780,6 +2786,7 @@ mod tests {
             .iter()
             .map(|e| match e {
                 ChatStreamEvent::Text { .. } => "text",
+                ChatStreamEvent::Thinking { .. } => "thinking",
                 ChatStreamEvent::ToolUse { .. } => "tool_use",
                 ChatStreamEvent::ToolResult { .. } => "tool_result",
                 ChatStreamEvent::Result { .. } => "result",

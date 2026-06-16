@@ -168,4 +168,27 @@ describe('agentStore.appendBlock — merge consecutive text deltas', () => {
     expect(useAgentStore.getState().sessionBlocks.get('a')).toEqual([{ kind: 'text', content: '13' }]);
     expect(useAgentStore.getState().sessionBlocks.get('b')).toEqual([{ kind: 'text', content: '2' }]);
   });
+
+  it('merges consecutive thinking deltas the same way as text', () => {
+    // GLM interleaved thinking streams as multiple Thinking deltas; they must
+    // fold into one block so a long reasoning trace renders as one card, not
+    // one card per token.
+    useAgentStore.getState().appendBlock('s1', { kind: 'thinking', content: 'first ' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'thinking', content: 'then ' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'thinking', content: 'last' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([{ kind: 'thinking', content: 'first then last' }]);
+  });
+
+  it('does not merge thinking into a preceding text block (different kinds stay separate)', () => {
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'answer' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'thinking', content: 'reasoning' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: ' more' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([
+      { kind: 'text', content: 'answer' },
+      { kind: 'thinking', content: 'reasoning' },
+      { kind: 'text', content: ' more' },
+    ]);
+  });
 });

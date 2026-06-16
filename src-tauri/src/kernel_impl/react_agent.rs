@@ -77,22 +77,54 @@ impl GlmChatModel {
                 }
                 Role::User => json!({ "role": "user", "content": m.content }),
                 _ => {
-                    // Assistant: include tool_calls as tool_use blocks if present.
-                    if m.tool_calls.is_empty() {
-                        json!({ "role": "assistant", "content": m.content })
-                    } else {
-                        let mut content: Vec<Value> = vec![json!({"type":"text","text":m.content})];
-                        for tc in &m.tool_calls {
-                            let input: Value = serde_json::from_str(&tc.function.arguments)
-                                .unwrap_or(json!({}));
-                            content.push(json!({
-                                "type": "tool_use",
-                                "id": tc.id,
-                                "name": tc.function.name,
-                                "input": input,
-                            }));
+                    // Assistant. When the prior turn carried reasoning, replay
+                    // it as a leading `thinking` block so the model can build on
+                    // it (Anthropic/GLM preserved thinking — the signature is
+                    // required or the replayed block is rejected). Turns with no
+                    // reasoning keep the original wire shape exactly.
+                    match (
+                        m.reasoning.as_ref().filter(|s| !s.is_empty()),
+                        m.tool_calls.is_empty(),
+                    ) {
+                        (None, true) => json!({ "role": "assistant", "content": m.content }),
+                        (None, false) => {
+                            let mut content: Vec<Value> = vec![json!({"type":"text","text":m.content})];
+                            for tc in &m.tool_calls {
+                                let input: Value = serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(json!({}));
+                                content.push(json!({
+                                    "type": "tool_use",
+                                    "id": tc.id,
+                                    "name": tc.function.name,
+                                    "input": input,
+                                }));
+                            }
+                            json!({ "role": "assistant", "content": content })
                         }
-                        json!({ "role": "assistant", "content": content })
+                        (Some(thinking), _) => {
+                            let mut content: Vec<Value> = Vec::new();
+                            let mut block = json!({"type":"thinking","thinking": thinking});
+                            if let Some(sig) =
+                                m.reasoning_signature.as_ref().filter(|s| !s.is_empty())
+                            {
+                                block["signature"] = json!(sig);
+                            }
+                            content.push(block);
+                            if !m.content.is_empty() {
+                                content.push(json!({"type":"text","text": m.content}));
+                            }
+                            for tc in &m.tool_calls {
+                                let input: Value = serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(json!({}));
+                                content.push(json!({
+                                    "type": "tool_use",
+                                    "id": tc.id,
+                                    "name": tc.function.name,
+                                    "input": input,
+                                }));
+                            }
+                            json!({ "role": "assistant", "content": content })
+                        }
                     }
                 }
             })
@@ -103,14 +135,26 @@ impl GlmChatModel {
             .map(|m| m.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
+        let mut max_tokens = opts.max_tokens.unwrap_or(4096);
+        // Anthropic requires max_tokens > thinking.budget_tokens. Raise the
+        // floor so a small caller-supplied max_tokens (or the 4096 default)
+        // can't make the request 400 when thinking is on.
+        if let Some(tc) = opts.thinking {
+            if max_tokens <= tc.budget_tokens {
+                max_tokens = tc.budget_tokens + 4096;
+            }
+        }
         let mut body = json!({
             "model": model,
             "messages": msgs,
-            "max_tokens": opts.max_tokens.unwrap_or(4096),
+            "max_tokens": max_tokens,
             "stream": stream,
         });
         if !system.is_empty() {
             body["system"] = Value::String(system);
+        }
+        if let Some(tc) = opts.thinking {
+            body["thinking"] = json!({"type":"enabled","budget_tokens": tc.budget_tokens});
         }
         if let Some(t) = opts.temperature {
             body["temperature"] = json!(t);
@@ -181,13 +225,17 @@ impl ChatModel for GlmChatModel {
             // deltas are yielded inline for real token-by-token streaming. The
             // per-line decision lives in handle_sse_line (unit-testable, no HTTP).
             let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
+            // Accumulates the thinking signature for THIS turn (signature_delta
+            // chunks arrive out of band from the thinking_delta reasoning text).
+            // Reset per request — one stream() call == one assistant turn.
+            let mut sig_buf = String::new();
             while let Some(chunk_res) = byte_stream.next().await {
                 let bytes = chunk_res.map_err(|e| Error::Network(e.to_string()))?;
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
-                    if let Some(msg) = handle_sse_line(&line, &mut tool_bufs) {
+                    if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
                         yield msg;
                     }
                 }
@@ -206,6 +254,8 @@ impl ChatModel for GlmChatModel {
 fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut signature_parts = Vec::new();
     if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
         for block in arr {
             match block.get("type").and_then(|t| t.as_str()) {
@@ -224,6 +274,16 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
                         function: kernel_core::FunctionCall { name, arguments: args },
                     });
                 }
+                Some("thinking") => {
+                    // GLM Interleaved Thinking content block. Capture the trace
+                    // + its signature (needed to preserve the block next turn).
+                    if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                        reasoning_parts.push(t.to_string());
+                    }
+                    if let Some(s) = block.get("signature").and_then(|s| s.as_str()) {
+                        signature_parts.push(s.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -233,7 +293,16 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
         content: text_parts.join(""),
         tool_calls,
         tool_call_id: None,
-        reasoning: None,
+        reasoning: if reasoning_parts.is_empty() {
+            None
+        } else {
+            Some(reasoning_parts.join(""))
+        },
+        reasoning_signature: if signature_parts.is_empty() {
+            None
+        } else {
+            Some(signature_parts.join(""))
+        },
     })
 }
 
@@ -247,6 +316,7 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
 fn handle_sse_line(
     line: &str,
     tool_bufs: &mut HashMap<u64, (String, String, String)>,
+    sig_buf: &mut String,
 ) -> Option<Message> {
     let data = line.trim().strip_prefix("data: ")?;
     let ev: Value = serde_json::from_str(data).ok()?;
@@ -281,13 +351,53 @@ fn handle_sse_line(
                     }
                 }
                 None
+            } else if dt == Some("thinking_delta") {
+                // Stream the reasoning trace chunk-by-chunk so chat renders it
+                // live. The caller reassembles the full reasoning from these
+                // chunks; the signature arrives as a separate signature_delta
+                // and is emitted once, on message_stop, via sig_buf.
+                ev.get("delta")
+                    .and_then(|d| d.get("thinking"))
+                    .and_then(|t| t.as_str())
+                    .map(|t| Message {
+                        role: Role::Assistant,
+                        content: String::new(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                        reasoning: Some(t.to_string()),
+                        reasoning_signature: None,
+                    })
+            } else if dt == Some("signature_delta") {
+                if let Some(s) = ev
+                    .get("delta")
+                    .and_then(|d| d.get("signature"))
+                    .and_then(|t| t.as_str())
+                {
+                    sig_buf.push_str(s);
+                }
+                None
             } else {
                 None
             }
         }
         "message_stop" => {
+            // Carry the turn's accumulated thinking signature out on the
+            // terminal message — even with no tool calls, so a pure
+            // reasoning+answer turn still preserves its signature for the next.
+            let sig = if sig_buf.is_empty() {
+                None
+            } else {
+                Some(sig_buf.clone())
+            };
             if tool_bufs.is_empty() {
-                return None;
+                return sig.map(|s| Message {
+                    role: Role::Assistant,
+                    content: String::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    reasoning: None,
+                    reasoning_signature: Some(s),
+                });
             }
             let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
             idxs.sort();
@@ -309,6 +419,7 @@ fn handle_sse_line(
                 tool_calls,
                 tool_call_id: None,
                 reasoning: None,
+                reasoning_signature: sig,
             })
         }
         _ => None,
@@ -378,6 +489,9 @@ pub struct ReactAgent {
     /// (single-turn); set via [`with_history`] when resuming a conversation so
     /// the model sees earlier user/assistant/tool turns as real `Message`s.
     history: Vec<Message>,
+    /// Extended-thinking budget for GLM Interleaved Thinking. None = thinking
+    /// off (the default for `new`); `build_react_agent` turns it on for glm-4.6.
+    thinking: Option<kernel_core::ThinkingConfig>,
 }
 
 impl ReactAgent {
@@ -394,6 +508,7 @@ impl ReactAgent {
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
+            thinking: None,
         }
     }
 
@@ -423,6 +538,17 @@ impl ReactAgent {
     /// only stores; the actual splice happens in `run`/`run_loop`.
     pub fn with_history(mut self, history: Vec<Message>) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Enable GLM Interleaved Thinking for this agent's runs. When set, every
+    /// model request carries `thinking: {enabled, budget_tokens}`, the
+    /// reasoning trace streams live as `AgentEvent::Reasoning`, and prior-turn
+    /// thinking is preserved across turns (signature replayed — see
+    /// `build_body`). Only models that support extended thinking (glm-4.6)
+    /// honor it; a model that doesn't may 400, so leave it unset then.
+    pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
+        self.thinking = Some(kernel_core::ThinkingConfig { budget_tokens });
         self
     }
 
@@ -459,6 +585,7 @@ impl ReactAgent {
                     tool_calls: Vec::new(),
                     tool_call_id: Some(call.id.clone()),
                     reasoning: None,
+                    reasoning_signature: None,
                 });
             }
         }
@@ -528,6 +655,7 @@ impl kernel_core::Agent for ReactAgent {
         let prior_history = self.history.clone();
         let task = input.prompt;
         let model_opt = input.model;
+        let thinking = self.thinking;
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -546,7 +674,7 @@ impl kernel_core::Agent for ReactAgent {
             history.push(Message::system(&system_prompt));
             history.extend(prior_history.iter().cloned());
             history.push(Message::user(&task));
-            let opts = ModelOptions { model: model_opt, ..Default::default() };
+            let opts = ModelOptions { model: model_opt, thinking, ..Default::default() };
             let mut final_output = String::new();
 
             for _step in 0..max_steps {
@@ -558,15 +686,27 @@ impl kernel_core::Agent for ReactAgent {
                 use futures::StreamExt;
                 let mut turn_stream = bound.stream(&history, &opts).map_err(Error::from)?;
                 let mut turn_text = String::new();
+                let mut turn_reasoning = String::new();
                 let mut turn_tool_calls: Vec<kernel_core::ToolCall> = Vec::new();
+                let mut turn_sig: Option<String> = None;
                 while let Some(msg_res) = turn_stream.next().await {
                     let msg = msg_res.map_err(Error::from)?;
                     if !msg.content.is_empty() {
                         turn_text.push_str(&msg.content);
                         yield AgentEvent::Token(msg.content.clone());
                     }
+                    // GLM Interleaved Thinking: stream the reasoning trace live
+                    // (each thinking_delta chunk), and reassemble the full trace
+                    // + its signature so the next turn can preserve the block.
+                    if let Some(r) = msg.reasoning.as_ref().filter(|s| !s.is_empty()) {
+                        turn_reasoning.push_str(r);
+                        yield AgentEvent::Reasoning(r.clone());
+                    }
                     if !msg.tool_calls.is_empty() {
                         turn_tool_calls = msg.tool_calls;
+                    }
+                    if let Some(s) = msg.reasoning_signature.as_ref().filter(|s| !s.is_empty()) {
+                        turn_sig = Some(s.clone());
                     }
                 }
                 history.push(Message {
@@ -574,7 +714,12 @@ impl kernel_core::Agent for ReactAgent {
                     content: turn_text.clone(),
                     tool_calls: turn_tool_calls.clone(),
                     tool_call_id: None,
-                    reasoning: None,
+                    reasoning: if turn_reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(turn_reasoning.clone())
+                    },
+                    reasoning_signature: turn_sig.clone(),
                 });
                 if turn_tool_calls.is_empty() {
                     final_output = turn_text;
@@ -643,6 +788,7 @@ impl kernel_core::Agent for ReactAgent {
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call.id.clone()),
                         reasoning: None,
+                        reasoning_signature: None,
                     });
                 }
             }
@@ -748,8 +894,9 @@ mod tests {
     #[test]
     fn sse_text_delta_yields_assistant_message() {
         let mut bufs = HashMap::new();
+        let mut sig = String::new();
         let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#;
-        let m = handle_sse_line(line, &mut bufs).unwrap();
+        let m = handle_sse_line(line, &mut bufs, &mut sig).unwrap();
         assert_eq!(m.content, "hi");
         assert!(m.tool_calls.is_empty());
         assert!(bufs.is_empty(), "text delta must not touch the tool accumulator");
@@ -758,16 +905,17 @@ mod tests {
     #[test]
     fn sse_accumulates_tool_use_across_split_json_deltas() {
         let mut bufs = HashMap::new();
+        let mut sig = String::new();
         // content_block_start opens a tool_use block at index 1.
         let start = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_9","name":"read_file"}}"#;
-        assert!(handle_sse_line(start, &mut bufs).is_none(), "start yields nothing");
+        assert!(handle_sse_line(start, &mut bufs, &mut sig).is_none(), "start yields nothing");
         // input_json_delta arrives in two fragments — Anthropic streams partial JSON.
         let d1 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/a"}}"#;
         let d2 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":".txt\"}"}}"#;
-        assert!(handle_sse_line(d1, &mut bufs).is_none(), "json delta yields nothing");
-        assert!(handle_sse_line(d2, &mut bufs).is_none(), "json delta yields nothing");
+        assert!(handle_sse_line(d1, &mut bufs, &mut sig).is_none(), "json delta yields nothing");
+        assert!(handle_sse_line(d2, &mut bufs, &mut sig).is_none(), "json delta yields nothing");
         // message_stop reassembles the terminal tool_calls Message.
-        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
         assert_eq!(m.content, "");
         assert_eq!(m.tool_calls.len(), 1);
         let call = &m.tool_calls[0];
@@ -781,26 +929,30 @@ mod tests {
         // A pure-text turn has no tool_use blocks; message_stop yields nothing
         // and the run loop treats the ended stream as a turn boundary.
         let mut bufs = HashMap::new();
-        assert!(handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).is_none());
+        let mut sig = String::new();
+        assert!(handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).is_none());
     }
 
     #[test]
     fn sse_multiple_tool_calls_preserve_index_order() {
         let mut bufs = HashMap::new();
+        let mut sig = String::new();
         // Two tool_use blocks, opened out of index order (1 then 0).
         let s1 = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"b","name":"second"}}"#;
         let s0 = r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"first"}}"#;
-        handle_sse_line(s1, &mut bufs);
-        handle_sse_line(s0, &mut bufs);
+        handle_sse_line(s1, &mut bufs, &mut sig);
+        handle_sse_line(s0, &mut bufs, &mut sig);
         handle_sse_line(
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
             &mut bufs,
+            &mut sig,
         );
         handle_sse_line(
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
             &mut bufs,
+            &mut sig,
         );
-        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
         assert_eq!(m.tool_calls.len(), 2);
         // Reassembled in index order regardless of arrival order.
         assert_eq!(m.tool_calls[0].id, "a");
@@ -840,6 +992,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 reasoning: None,
+                reasoning_signature: None,
             });
             Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
         }
@@ -866,6 +1019,7 @@ mod tests {
             }],
             tool_call_id: None,
             reasoning: None,
+            reasoning_signature: None,
         };
         let end_msg = Message::assistant("done");
         let model = ScriptedModel::new(vec![call_msg, end_msg]);
@@ -890,5 +1044,98 @@ mod tests {
         // EchoTool.invoke returns `echo:{args}` — the event must carry that real
         // output, proving the v1.1 fill (not the old empty-status placeholder).
         assert_eq!(succeeded.as_deref(), Some(r#"echo:{"text":"hi"}"#));
+    }
+
+    // --- v1.1: reasoning 双协议贯通 (GLM Interleaved + Preserved Thinking) ---
+
+    #[test]
+    fn sse_thinking_delta_streams_reasoning_and_carries_signature_on_stop() {
+        let mut bufs = HashMap::new();
+        let mut sig = String::new();
+        // thinking_delta streams the reasoning trace chunk-by-chunk, each chunk
+        // yielded as a Message carrying reasoning (content empty, no tool_calls).
+        let d1 = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step "}}"#;
+        let d2 = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"one"}}"#;
+        let m1 = handle_sse_line(d1, &mut bufs, &mut sig).unwrap();
+        assert_eq!(m1.reasoning.as_deref(), Some("step "));
+        assert!(m1.content.is_empty());
+        assert!(m1.tool_calls.is_empty());
+        let m2 = handle_sse_line(d2, &mut bufs, &mut sig).unwrap();
+        assert_eq!(m2.reasoning.as_deref(), Some("one"));
+        // signature_delta accumulates silently into sig_buf — no Message yielded.
+        let sd = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-123"}}"#;
+        assert!(handle_sse_line(sd, &mut bufs, &mut sig).is_none());
+        assert_eq!(sig, "sig-123");
+        // message_stop carries the accumulated signature even with no tools — so
+        // a pure reasoning+answer turn still preserves its signature next turn.
+        let stop = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
+        assert!(stop.tool_calls.is_empty());
+        assert_eq!(stop.reasoning_signature.as_deref(), Some("sig-123"));
+    }
+
+    #[test]
+    fn decode_anthropic_thinking_block_into_reasoning_and_signature() {
+        let v = json!({
+            "content": [
+                {"type":"thinking","thinking":"let me reason","signature":"abc"},
+                {"type":"text","text":"the answer"}
+            ]
+        });
+        let m = decode_anthropic_message(&v).unwrap();
+        assert_eq!(m.content, "the answer");
+        assert_eq!(m.reasoning.as_deref(), Some("let me reason"));
+        assert_eq!(m.reasoning_signature.as_deref(), Some("abc"));
+        // A thinking block with no signature decodes reasoning-only.
+        let v2 = json!({"content":[{"type":"thinking","thinking":"unsigned"},{"type":"text","text":"x"}]});
+        let m2 = decode_anthropic_message(&v2).unwrap();
+        assert_eq!(m2.reasoning.as_deref(), Some("unsigned"));
+        assert!(m2.reasoning_signature.is_none());
+    }
+
+    #[test]
+    fn build_body_enables_thinking_and_replays_preserved_thinking_block() {
+        use kernel_core::{Message, ModelOptions, Role, ThinkingConfig};
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        // thinking on: body carries the thinking param, and max_tokens is raised
+        // above budget (caller's 1024 < budget 2000 → 2000 + 4096).
+        let opts = ModelOptions {
+            thinking: Some(ThinkingConfig { budget_tokens: 2000 }),
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+        let body = model.build_body("glm-4.6", &[Message::user("hi")], &opts, true);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2000);
+        assert!(
+            body["max_tokens"].as_u64().unwrap() > 2000,
+            "max_tokens must exceed budget: {}",
+            body["max_tokens"]
+        );
+        // preserved: an assistant turn that carried reasoning replays it as a
+        // leading thinking block (with signature) before the text answer.
+        let prior = vec![Message {
+            role: Role::Assistant,
+            content: "ans".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: Some("thought".into()),
+            reasoning_signature: Some("sig9".into()),
+        }];
+        let body2 = model.build_body("glm-4.6", &prior, &ModelOptions::default(), false);
+        let assistant = &body2["messages"][0];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"][0]["type"], "thinking");
+        assert_eq!(assistant["content"][0]["thinking"], "thought");
+        assert_eq!(assistant["content"][0]["signature"], "sig9");
+        assert_eq!(assistant["content"][1]["type"], "text");
+        assert_eq!(assistant["content"][1]["text"], "ans");
+        // No-reasoning assistant keeps the original string-content shape.
+        let plain = model.build_body(
+            "glm-4.6",
+            &[Message::assistant("hi")],
+            &ModelOptions::default(),
+            false,
+        );
+        assert_eq!(plain["messages"][0]["content"], "hi");
     }
 }

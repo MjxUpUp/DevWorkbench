@@ -249,15 +249,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.sessionBlocks);
       const existing = next.get(sessionId) ?? [];
-      // Merge consecutive text deltas into one block. Real streaming emits a
-      // Text event per token; BlocksView renders each event as its own card, so
-      // without merging a long reply explodes into hundreds of cards and shatters
-      // Markdown across block boundaries. Concatenate onto the last text block.
+      // Merge consecutive text AND thinking deltas into one block each. Real
+      // streaming emits a Text/Thinking event per token; BlocksView renders each
+      // event as its own card, so without merging a long reply (or a long
+      // thinking trace) explodes into hundreds of cards and shatters Markdown
+      // across block boundaries. Concatenate onto the last same-kind block.
       const last = existing[existing.length - 1];
       if (event.kind === 'text' && last && last.kind === 'text') {
         next.set(sessionId, [
           ...existing.slice(0, -1),
           { kind: 'text', content: last.content + event.content },
+        ]);
+      } else if (event.kind === 'thinking' && last && last.kind === 'thinking') {
+        next.set(sessionId, [
+          ...existing.slice(0, -1),
+          { kind: 'thinking', content: last.content + event.content },
         ]);
       } else {
         next.set(sessionId, [...existing, event]);

@@ -221,6 +221,7 @@ pub(crate) fn build_react_agent(
     )
     .with_context(ctx)
     .with_history(history)
+    .with_thinking(2048)
     .with_hooks(Arc::new(hooks)))
 }
 
