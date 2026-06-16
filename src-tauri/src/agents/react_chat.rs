@@ -35,10 +35,10 @@ use std::collections::VecDeque;
 /// - `TurnBoundary`       → `[]` (same)
 /// - `Done(outcome)`      → `[Result{is_error: status != Completed, secs}]`
 ///
-/// NB: the transparent agent's Succeeded/Failed tool events carry NO result
-/// content (only the status — see `react_agent::run`). So the ToolResult content
-/// is a status placeholder, not real tool output. Backfilling the real result is
-/// a Phase E followup (needs `react_agent` to yield it alongside the status).
+/// NB: the transparent ReactAgent now fills `ToolCallEvent.result` with the real
+/// tool output (see `react_agent::run`), so Succeeded/Failed map to the actual
+/// content. The `"(ok)"/"(failed)"` fallback only applies when an emitter
+/// reports status without a result (e.g. some opaque-agent reverse-mapping paths).
 pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
     match ev {
         AgentEvent::Token(s) => vec![ChatStreamEvent::Text { content: s }],
@@ -48,11 +48,11 @@ pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
                 input: parse_tool_arguments(&tc.arguments),
             }],
             ToolCallStatus::Succeeded => vec![ChatStreamEvent::ToolResult {
-                content: "(ok)".to_string(),
+                content: tc.result.unwrap_or_else(|| "(ok)".to_string()),
                 is_error: false,
             }],
             ToolCallStatus::Failed => vec![ChatStreamEvent::ToolResult {
-                content: "(failed)".to_string(),
+                content: tc.result.unwrap_or_else(|| "(failed)".to_string()),
                 is_error: true,
             }],
         },
@@ -119,6 +119,7 @@ pub fn chat_event_to_agent_events(
                 tool: name.clone(),
                 arguments: args,
                 status: ToolCallStatus::Started,
+                result: None,
             })]
         }
         ChatStreamEvent::ToolResult { content, is_error } => match pending_tools.pop_front() {
@@ -133,6 +134,9 @@ pub fn chat_event_to_agent_events(
                     tool: name,
                     arguments: args,
                     status,
+                    // claude's ToolResult.content IS the real tool output —
+                    // carry it through so downstream renders the actual result.
+                    result: Some(content.clone()),
                 })]
             }
             // Orphan (no pending ToolUse): demote content to a Token so it
@@ -358,6 +362,7 @@ mod tests {
             tool: "Read".to_string(),
             arguments: r#"{"file_path":"/a.txt"}"#.to_string(),
             status: ToolCallStatus::Started,
+            result: None,
         });
         let out = map_agent_event(ev, 0);
         assert_eq!(out.len(), 1);
@@ -376,6 +381,7 @@ mod tests {
             tool: "Bash".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Succeeded,
+            result: None,
         });
         let out = map_agent_event(ev, 0);
         assert_eq!(out.len(), 1);
@@ -389,11 +395,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_succeeded_with_result_maps_real_content() {
+        // v1.1: ReactAgent now fills `result` with the real tool output — the
+        // mapped ToolResult must carry that content, not the "(ok)" placeholder.
+        let ev = AgentEvent::ToolCall(ToolCallEvent {
+            tool: "Read".to_string(),
+            arguments: "{}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            result: Some("the file contents".to_string()),
+        });
+        let out = map_agent_event(ev, 0);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ChatStreamEvent::ToolResult { content, is_error } => {
+                assert_eq!(content, "the file contents");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult with real content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_call_failed_with_result_maps_real_error() {
+        let ev = AgentEvent::ToolCall(ToolCallEvent {
+            tool: "Read".to_string(),
+            arguments: "{}".to_string(),
+            status: ToolCallStatus::Failed,
+            result: Some("permission denied".to_string()),
+        });
+        let out = map_agent_event(ev, 0);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ChatStreamEvent::ToolResult { content, is_error } => {
+                assert_eq!(content, "permission denied");
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult with real error, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn tool_call_failed_maps_to_error_result() {
         let ev = AgentEvent::ToolCall(ToolCallEvent {
             tool: "Bash".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Failed,
+            result: None,
         });
         let out = map_agent_event(ev, 0);
         assert_eq!(out.len(), 1);

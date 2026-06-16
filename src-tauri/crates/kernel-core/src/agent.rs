@@ -83,6 +83,12 @@ pub struct ToolCallEvent {
     /// Raw arguments as observed (may be partial for opaque agents).
     pub arguments: String,
     pub status: ToolCallStatus,
+    /// The tool's output — the success payload on `Succeeded`, the error/block
+    /// text on `Failed`. `None` for `Started`, or when the emitter reports only
+    /// status (e.g. an opaque agent that doesn't parse tool output). The
+    /// transparent ReactAgent fills this so the chat UI renders the real tool
+    /// output instead of a placeholder.
+    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,5 +160,24 @@ mod tests {
         assert!(!c.resumable);
         assert!(!c.injectable_tools);
         assert!(!c.read_only);
+    }
+
+    #[test]
+    fn tool_call_event_carries_optional_result() {
+        // Succeeded/Failed carry the real tool output; Started carries None.
+        let done = ToolCallEvent {
+            tool: "Read".into(),
+            arguments: "{}".into(),
+            status: ToolCallStatus::Succeeded,
+            result: Some("the file contents".into()),
+        };
+        assert_eq!(done.result.as_deref(), Some("the file contents"));
+        let started = ToolCallEvent {
+            tool: "Read".into(),
+            arguments: "{}".into(),
+            status: ToolCallStatus::Started,
+            result: None,
+        };
+        assert!(started.result.is_none());
     }
 }

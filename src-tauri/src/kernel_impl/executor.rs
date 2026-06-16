@@ -204,13 +204,24 @@ pub(crate) fn build_react_agent(
         working_dir: Some(working_dir.to_string()),
         conversation_id: conversation_id.map(|s| s.to_string()),
     };
+    // Mount the kernel hook pipeline (the Forge task-guard / bash-guard /
+    // assertion-check analogs). CommandGuard vetoes destructive shell commands
+    // before they run; AssertionGuard watches file-write diffs for assertion
+    // weakening after the fact. TaskGuard is deliberately deferred to v1.2: it
+    // blocks every WriteFile unless an active Forge task is set, and the chat
+    // path carries no task state yet — mounting it now would brick the agent's
+    // own file-writing tools.
+    let mut hooks = crate::kernel_impl::hooks::HookManager::new();
+    hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
+    hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
     Ok(ReactAgent::new(
         chat,
         registry,
         "You are a Dev Workbench kernel agent. Complete the task concisely.",
     )
     .with_context(ctx)
-    .with_history(history))
+    .with_history(history)
+    .with_hooks(Arc::new(hooks)))
 }
 
 /// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s.
@@ -303,11 +314,13 @@ mod tests {
                 tool: "Read".into(),
                 arguments: r#"{"file_path":"/x"}"#.into(),
                 status: ToolCallStatus::Started,
+                result: None,
             })),
             Ok(AgentEvent::ToolCall(ToolCallEvent {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                result: None,
             })),
         ])
         .await;
@@ -363,11 +376,13 @@ mod tests {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Started,
+                result: None,
             })),
             Ok(AgentEvent::ToolCall(ToolCallEvent {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                result: None,
             })),
             Ok(AgentEvent::Done(AgentOutcome {
                 status: AgentRunStatus::Completed,

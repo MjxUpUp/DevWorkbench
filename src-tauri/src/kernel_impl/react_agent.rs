@@ -586,6 +586,7 @@ impl kernel_core::Agent for ReactAgent {
                         tool: call.function.name.clone(),
                         arguments: call.function.arguments.clone(),
                         status: kernel_core::ToolCallStatus::Started,
+                        result: None,
                     });
                     let blocked = if let Some(h) = &hooks {
                         let action = crate::kernel_impl::hooks::Action::CallTool {
@@ -594,12 +595,15 @@ impl kernel_core::Agent for ReactAgent {
                         };
                         match h.before(&action).await {
                             Err(reason) => {
+                                let blocked_msg =
+                                    format!("[blocked by {}: {}]", reason.hook, reason.message);
                                 yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                                     tool: call.function.name.clone(),
                                     arguments: call.function.arguments.clone(),
                                     status: kernel_core::ToolCallStatus::Failed,
+                                    result: Some(blocked_msg.clone()),
                                 });
-                                Some(format!("[blocked by {}: {}]", reason.hook, reason.message))
+                                Some(blocked_msg)
                             }
                             Ok(()) => None,
                         }
@@ -615,16 +619,19 @@ impl kernel_core::Agent for ReactAgent {
                                         tool: call.function.name.clone(),
                                         arguments: call.function.arguments.clone(),
                                         status: kernel_core::ToolCallStatus::Succeeded,
+                                        result: Some(out.clone()),
                                     });
                                     out
                                 }
                                 Err(e) => {
+                                    let err = format!("[tool error: {e}]");
                                     yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                                         tool: call.function.name.clone(),
                                         arguments: call.function.arguments.clone(),
                                         status: kernel_core::ToolCallStatus::Failed,
+                                        result: Some(err.clone()),
                                     });
-                                    format!("[tool error: {e}]")
+                                    err
                                 }
                             },
                             None => format!("[unknown tool: {}]", call.function.name),
@@ -798,5 +805,90 @@ mod tests {
         // Reassembled in index order regardless of arrival order.
         assert_eq!(m.tool_calls[0].id, "a");
         assert_eq!(m.tool_calls[1].id, "b");
+    }
+
+    // --- v1.1: stream run must fill the real tool output into ToolCallEvent.result ---
+
+    /// A scripted ChatModel: each `stream()` call emits the next Message from a
+    /// fixed script. Lets us drive the ReactAgent ReAct loop without a live LLM
+    /// and assert that real tool output is carried in the Succeeded event.
+    #[derive(Clone)]
+    struct ScriptedModel {
+        script: Arc<Vec<Message>>,
+        call: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedModel {
+        fn new(script: Vec<Message>) -> Self {
+            Self {
+                script: Arc::new(script),
+                call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatModel for ScriptedModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err(Error::Unsupported("ScriptedModel: drive via stream()".into()))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let msg = self.script.get(idx).cloned().unwrap_or_else(|| Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning: None,
+            });
+            Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_fills_real_tool_output_into_succeeded_event() {
+        use futures::StreamExt;
+        use kernel_core::Agent;
+        // turn 0: model calls `echo`; turn 1: bare text ends the ReAct loop.
+        let call_msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![kernel_core::ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: kernel_core::FunctionCall {
+                    name: "echo".into(),
+                    arguments: r#"{"text":"hi"}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+        };
+        let end_msg = Message::assistant("done");
+        let model = ScriptedModel::new(vec![call_msg, end_msg]);
+        let reg = ToolRegistry::new().with(EchoTool);
+        let agent = ReactAgent::new(model, reg, "sys");
+        let mut s = agent
+            .run(kernel_core::AgentInput {
+                prompt: "go".into(),
+                working_dir: None,
+                model: None,
+                resume_from: None,
+            })
+            .unwrap();
+        let mut succeeded: Option<String> = None;
+        while let Some(ev) = s.next().await {
+            if let Ok(kernel_core::AgentEvent::ToolCall(tc)) = ev {
+                if tc.status == kernel_core::ToolCallStatus::Succeeded {
+                    succeeded = tc.result;
+                }
+            }
+        }
+        // EchoTool.invoke returns `echo:{args}` — the event must carry that real
+        // output, proving the v1.1 fill (not the old empty-status placeholder).
+        assert_eq!(succeeded.as_deref(), Some(r#"echo:{"text":"hi"}"#));
     }
 }
