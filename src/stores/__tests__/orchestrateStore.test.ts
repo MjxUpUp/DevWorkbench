@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { parseNodeIds, useOrchestrateStore, SAMPLE_YAML } from '../orchestrateStore';
+import type { ChatStreamEvent } from '../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -93,6 +94,69 @@ describe('orchestrateStore', () => {
         error: 'cycle detected',
       });
       expect(useOrchestrateStore.getState().error).toBe('cycle detected');
+    });
+
+    it('accumulates a text node_output chunk into blocks', () => {
+      useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output',
+        node: 'agent_1',
+        chunk: { kind: 'text', content: 'hello' } as ChatStreamEvent,
+      });
+      expect(useOrchestrateStore.getState().nodes['agent_1']?.blocks).toEqual([
+        { kind: 'text', content: 'hello' },
+      ]);
+    });
+
+    it('merges consecutive text chunks (same semantics as agentStore.appendBlock)', () => {
+      useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'text', content: 'hel' } as ChatStreamEvent,
+      });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'text', content: 'lo' } as ChatStreamEvent,
+      });
+      // Two text deltas fold into ONE text block — otherwise BlocksView would
+      // render hundreds of per-token cards.
+      expect(useOrchestrateStore.getState().nodes['agent_1']?.blocks).toEqual([
+        { kind: 'text', content: 'hello' },
+      ]);
+    });
+
+    it('keeps tool_use and tool_result as separate blocks (no merge across kinds)', () => {
+      useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'text', content: 'reading' } as ChatStreamEvent,
+      });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } } as ChatStreamEvent,
+      });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { kind: 'tool_result', content: 'file contents', is_error: false } as ChatStreamEvent,
+      });
+      expect(useOrchestrateStore.getState().nodes['agent_1']?.blocks).toEqual([
+        { kind: 'text', content: 'reading' },
+        { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } },
+        { kind: 'tool_result', content: 'file contents', is_error: false },
+      ]);
+    });
+
+    it('degrades a chunk without a kind discriminator to a text block', () => {
+      // Test/mock executors emit {partial}; a stray non-ChatStreamEvent chunk
+      // must still surface (as text) rather than vanish.
+      useOrchestrateStore.getState().applyEvent({ kind: 'node_start', node: 'agent_1' });
+      useOrchestrateStore.getState().applyEvent({
+        kind: 'node_output', node: 'agent_1',
+        chunk: { partial: 'STUB' },
+      });
+      expect(useOrchestrateStore.getState().nodes['agent_1']?.blocks).toEqual([
+        { kind: 'text', content: 'STUB' },
+      ]);
     });
   });
 

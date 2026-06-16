@@ -213,27 +213,38 @@ pub(crate) fn build_react_agent(
     .with_history(history))
 }
 
-/// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s:
-/// - `Token` → `Delta` (forwarded to the frontend as `NodeOutput`)
-/// - `Done`  → `Final` (becomes the node's output value, propagated to successors)
-/// - `ToolCall`/`FileChanged`/`TurnBoundary` → dropped (the runner only
-///   forwards textual deltas; these are agent-internal observations)
-/// - `Err`   → stream error (fails the node)
+/// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s.
+///
+/// - `Done` → `Final` (becomes the node's output value, propagated to graph
+///   successors). NOT emitted as a `NodeOutput` — the terminal status surfaces
+///   via `node_end` instead of a Result block.
+/// - every other event → structured `ChatStreamEvent` wire blocks (via
+///   `react_chat::map_agent_event`, the SAME mapping single-agent chat uses),
+///   each serialized into `Delta(Value)`. This lets the workflow canvas render
+///   text / tool_use / tool_result block cards — identical to chat — instead of
+///   the old flat text-tail. `secs=0` is safe: only Result blocks consume secs,
+///   and Done (the sole Result source) is handled above.
+/// - `Err` → stream error (fails the node).
 fn map_agent_to_chunks(
     events: BoxStream<'static, Result<kernel_core::AgentEvent, kernel_core::Error>>,
 ) -> impl futures::Stream<Item = Result<AgentChunk, String>> {
     use futures::StreamExt;
-    events.filter_map(|ev_res| async move {
-        match ev_res {
-            Ok(kernel_core::AgentEvent::Token(t)) => {
-                Some(Ok(AgentChunk::Delta(Value::String(t))))
-            }
+    events.flat_map(|ev_res| {
+        let chunks: Vec<Result<AgentChunk, String>> = match ev_res {
             Ok(kernel_core::AgentEvent::Done(outcome)) => {
-                Some(Ok(AgentChunk::Final(outcome_to_value(outcome))))
+                vec![Ok(AgentChunk::Final(outcome_to_value(outcome)))]
             }
-            Ok(_) => None,
-            Err(e) => Some(Err(e.to_string())),
-        }
+            Ok(other) => crate::agents::react_chat::map_agent_event(other, 0)
+                .into_iter()
+                .map(|w| {
+                    Ok(AgentChunk::Delta(
+                        serde_json::to_value(&w).unwrap_or(Value::Null),
+                    ))
+                })
+                .collect(),
+            Err(e) => vec![Err(e.to_string())],
+        };
+        futures::stream::iter(chunks)
     })
 }
 
@@ -246,4 +257,129 @@ fn outcome_to_value(o: kernel_core::AgentOutcome) -> Value {
         "exit_code": o.exit_code,
         "honesty": o.honesty,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use kernel_core::{AgentEvent, AgentOutcome, AgentRunStatus, ToolCallEvent, ToolCallStatus};
+    use std::path::PathBuf;
+
+    /// Drive `map_agent_to_chunks` with a scripted event list and collect the
+    /// emitted chunks (errors dropped — tests only feed Ok events).
+    async fn collect_chunks(events: Vec<Result<AgentEvent, kernel_core::Error>>) -> Vec<AgentChunk> {
+        let mut s = map_agent_to_chunks(Box::pin(futures::stream::iter(events)));
+        let mut out = Vec::new();
+        while let Some(c) = s.next().await {
+            if let Ok(chunk) = c {
+                out.push(chunk);
+            }
+        }
+        out
+    }
+
+    fn kind_of(v: &Value) -> Option<&str> {
+        v.get("kind").and_then(|k| k.as_str())
+    }
+
+    #[tokio::test]
+    async fn token_maps_to_text_delta() {
+        let chunks = collect_chunks(vec![Ok(AgentEvent::Token("hi".into()))]).await;
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            AgentChunk::Delta(v) => {
+                assert_eq!(kind_of(v), Some("text"));
+                assert_eq!(v["content"], "hi");
+            }
+            other => panic!("expected Delta, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_started_and_succeeded_map_to_tool_use_and_result_deltas() {
+        let chunks = collect_chunks(vec![
+            Ok(AgentEvent::ToolCall(ToolCallEvent {
+                tool: "Read".into(),
+                arguments: r#"{"file_path":"/x"}"#.into(),
+                status: ToolCallStatus::Started,
+            })),
+            Ok(AgentEvent::ToolCall(ToolCallEvent {
+                tool: "Read".into(),
+                arguments: "{}".into(),
+                status: ToolCallStatus::Succeeded,
+            })),
+        ])
+        .await;
+        assert_eq!(chunks.len(), 2);
+        match (&chunks[0], &chunks[1]) {
+            (AgentChunk::Delta(use_v), AgentChunk::Delta(res_v)) => {
+                assert_eq!(kind_of(use_v), Some("tool_use"));
+                assert_eq!(use_v["name"], "Read");
+                assert_eq!(kind_of(res_v), Some("tool_result"));
+                assert_eq!(res_v["is_error"], false);
+            }
+            other => panic!("expected [Delta(tool_use), Delta(tool_result)], got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn done_maps_to_final_not_delta() {
+        // Done must become Final (graph data-flow propagation), NOT a
+        // Delta/Result block — the node terminal status surfaces via node_end.
+        let chunks = collect_chunks(vec![Ok(AgentEvent::Done(AgentOutcome {
+            status: AgentRunStatus::Completed,
+            ..Default::default()
+        }))])
+        .await;
+        assert_eq!(chunks.len(), 1, "got {chunks:?}");
+        match &chunks[0] {
+            AgentChunk::Final(v) => {
+                assert_eq!(v["status"], "completed");
+            }
+            other => panic!("expected Final, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_changed_and_turn_boundary_emit_nothing() {
+        // map_agent_event returns empty Vec for these (G3b deferred). The
+        // workflow path inherits that — no spurious chunks, no panic.
+        let chunks = collect_chunks(vec![
+            Ok(AgentEvent::FileChanged(PathBuf::from("/x.rs"))),
+            Ok(AgentEvent::TurnBoundary),
+        ])
+        .await;
+        assert!(chunks.is_empty(), "got {chunks:?}");
+    }
+
+    #[tokio::test]
+    async fn full_turn_sequence_produces_deltas_then_final() {
+        // Token → text, ToolCall Started → tool_use, Succeeded → tool_result,
+        // Done → Final. Order and structure must match chat's BlocksView input.
+        let chunks = collect_chunks(vec![
+            Ok(AgentEvent::Token("reading".into())),
+            Ok(AgentEvent::ToolCall(ToolCallEvent {
+                tool: "Read".into(),
+                arguments: "{}".into(),
+                status: ToolCallStatus::Started,
+            })),
+            Ok(AgentEvent::ToolCall(ToolCallEvent {
+                tool: "Read".into(),
+                arguments: "{}".into(),
+                status: ToolCallStatus::Succeeded,
+            })),
+            Ok(AgentEvent::Done(AgentOutcome {
+                status: AgentRunStatus::Completed,
+                ..Default::default()
+            })),
+        ])
+        .await;
+        assert_eq!(chunks.len(), 4, "got {chunks:?}");
+        assert!(matches!(chunks[3], AgentChunk::Final(_)));
+        // First three are Deltas: text, tool_use, tool_result.
+        for c in chunks.iter().take(3) {
+            assert!(matches!(c, AgentChunk::Delta(_)));
+        }
+    }
 }

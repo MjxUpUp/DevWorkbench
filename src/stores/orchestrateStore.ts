@@ -1,14 +1,17 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { WorkflowProgressEvent } from '../types';
+import type { ChatStreamEvent, WorkflowProgressEvent } from '../types';
 
 /** Per-node status surfaced from workflow:progress events. */
 export type NodeState = {
   status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval';
   error?: string;
-  /** Live-streamed agent output (accumulated `node_output` Delta chunks).
-   * Populated only for agent nodes; null/undefined otherwise. */
-  streamingOutput?: string;
+  /** Structured agent output accumulated from `node_output` chunks, each a
+   * ChatStreamEvent (text/tool_use/tool_result) — the SAME schema single-agent
+   * chat renders via BlocksView. Populated only for agent nodes; undefined
+   * otherwise. Replaces the former flat `streamingOutput: string` which lost
+   * all tool-call structure and was truncated to a 500-char tail. */
+  blocks?: ChatStreamEvent[];
 };
 
 interface OrchestrateState {
@@ -85,16 +88,32 @@ export const useOrchestrateStore = create<OrchestrateState>((set, get) => ({
             },
           };
         case 'node_output': {
-          // Gap-④ wiring: accumulate each streaming Delta chunk onto the node so
-          // the canvas can render live agent output. The Final chunk arrives
-          // separately via node_end/graph_done (the node's logical output).
+          // Each Delta chunk is a serialized ChatStreamEvent (the workflow path
+          // now maps AgentEvent → ChatStreamEvent in executor.rs, identical to
+          // single-agent chat). Accumulate into `blocks` with the same
+          // consecutive-text-merge semantics as agentStore.appendBlock, so the
+          // canvas renders the same BlocksView cards chat does. Chunks lacking a
+          // `kind` (test/mock {partial} stubs) degrade to a text block.
           const prev = state.nodes[event.node];
+          const blocks = [...(prev?.blocks ?? [])];
+          const raw = event.chunk as unknown;
+          const isEvent =
+            raw && typeof raw === 'object' && 'kind' in raw && typeof (raw as { kind: unknown }).kind === 'string';
+          const block: ChatStreamEvent = isEvent
+            ? (raw as ChatStreamEvent)
+            : { kind: 'text', content: formatChunk(event.chunk) };
+          const last = blocks[blocks.length - 1];
+          if (block.kind === 'text' && last && last.kind === 'text') {
+            blocks[blocks.length - 1] = { kind: 'text', content: last.content + block.content };
+          } else {
+            blocks.push(block);
+          }
           return {
             nodes: {
               ...state.nodes,
               [event.node]: {
                 ...(prev ?? { status: 'running' as const }),
-                streamingOutput: (prev?.streamingOutput ?? '') + formatChunk(event.chunk),
+                blocks,
               },
             },
           };

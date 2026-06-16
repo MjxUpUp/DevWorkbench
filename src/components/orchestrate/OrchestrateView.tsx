@@ -7,7 +7,8 @@ import {
   useOrchestrateStore,
   type NodeState,
 } from '../../stores/orchestrateStore';
-import type { WorkflowProgressPayload, WorkflowRunResult } from '../../types';
+import { BlocksView } from '../chat/BlocksView';
+import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult } from '../../types';
 
 /** Color per node status — drives the canvas node fill. */
 const STATUS_COLOR: Record<NodeState['status'], string> = {
@@ -143,8 +144,10 @@ export function OrchestrateView() {
                     style={{ background: STATUS_COLOR[state.status] }}
                   />
                   <span className="dag-node-status">{STATUS_LABEL[state.status]}</span>
-                  {state.streamingOutput && (
-                    <pre className="dag-node-stream">{state.streamingOutput.slice(-500)}</pre>
+                  {state.blocks && state.blocks.length > 0 && (
+                    <div className="dag-node-stream">
+                      <BlocksView events={state.blocks} running={state.status === 'running'} />
+                    </div>
                   )}
                   {state.error && <pre className="dag-node-error">{state.error}</pre>}
                 </div>
@@ -202,13 +205,22 @@ function formatEvent(event: WorkflowProgressPayload['event']): string {
     case 'approval_required':
       return `? ${event.node} 等待审批`;
     case 'node_output': {
-      // Streaming agent chunk — show a short preview (real agents emit text;
-      // mock/test executors emit {partial}). Without this case the chunk fell
-      // through to the default branch and was rendered as "· node_output",
-      // silently discarding the agent's live output.
-      const c = event.chunk;
+      // Real workflow chunks are now ChatStreamEvent (kind discriminator);
+      // test/mock executors still emit {partial}. Preview per kind so the event
+      // log reflects the structure (text / 🔧 tool / result) instead of a raw
+      // JSON blob.
+      const c = event.chunk as unknown;
       let text: string;
-      if (typeof c === 'string') {
+      if (c && typeof c === 'object' && 'kind' in c) {
+        const ev = c as ChatStreamEvent;
+        switch (ev.kind) {
+          case 'text': text = ev.content; break;
+          case 'tool_use': text = `🔧 ${ev.name}`; break;
+          case 'tool_result': text = ev.content; break;
+          case 'result': text = ev.is_error ? '✗ 失败' : '✓ 完成'; break;
+          default: text = JSON.stringify(c);
+        }
+      } else if (typeof c === 'string') {
         text = c;
       } else if (c && typeof c === 'object' && 'partial' in c) {
         text = String((c as { partial: unknown }).partial);
