@@ -1,0 +1,18 @@
+[package]
+name = "kernel-core"
+version = "0.1.0"
+edition = "2021"
+description = "DevWorkbench kernel core — trait & schema layer (eino-inspired), zero implementations"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Core trait layer stays minimal: only serde + async-trait + futures for the
+# Stream return types that eino-style components need. No LLM, no DB, no tokio
+# here — those live in the dependent crates (kernel-agents, kernel-runtime, etc.)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+futures = "0.3"
+thiserror = "2"

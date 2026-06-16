@@ -1,23 +1,34 @@
 import { useNavigationStore } from '../stores/navigationStore';
-import { TabBar } from './TabBar';
-import { OverviewTab } from './tabs/OverviewTab';
-import { SessionsTab } from './tabs/SessionsTab';
-import { TimelineTab } from './tabs/TimelineTab';
-import { KnowledgeTab } from './tabs/KnowledgeTab';
+import { ChatView } from './chat/ChatView';
+import { SkillMarketView } from './skills/SkillMarketView';
+import { OrchestrateView } from './orchestrate/OrchestrateView';
+import { GitPanel } from './git/GitPanel';
 
-export function MainPanel() {
-  const activeTab = useNavigationStore((s) => s.activeTab);
-  const project = useNavigationStore((s) => s.activeProject);
+/**
+ * Main stage view router.
+ *
+ * Views: task (chat) / skills / orchestrate. (Settings renders as a full-screen
+ * overlay above the grid — see App.tsx. Search is a CommandPalette modal, not a
+ * routed view — see Sidebar's 搜索 item.)
+ *
+ * The task view is the only one that shows the right-side Git tool panel — the
+ * stage becomes a 2-column grid (chat | git) in that mode. Other views are
+ * single-pane.
+ */
+export function MainStage() {
+  const activeView = useNavigationStore((s) => s.activeView);
+  const activeProject = useNavigationStore((s) => s.activeProject);
+
+  const isTask = activeView === 'task';
 
   return (
-    <div className="main-panel">
-      <TabBar />
-      <div className="main-panel-content">
-        {activeTab === 'overview' ? <OverviewTab project={project} /> :
-         activeTab === 'sessions' ? <SessionsTab /> :
-         activeTab === 'timeline' ? <TimelineTab project={project} /> :
-         <KnowledgeTab project={project} />}
+    <main className={`main-stage${isTask ? ' has-git-panel' : ''}`}>
+      <div className="main-stage-body">
+        {activeView === 'task' && <ChatView />}
+        {activeView === 'skills' && <SkillMarketView />}
+        {activeView === 'orchestrate' && <OrchestrateView />}
       </div>
-    </div>
+      {isTask && <GitPanel projectPath={activeProject?.path ?? null} />}
+    </main>
   );
 }

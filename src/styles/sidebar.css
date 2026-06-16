@@ -196,78 +196,8 @@
   font-family: var(--font-mono);
 }
 
-/* === Sidebar === */
-.sidebar {
-  width: var(--sidebar-width);
-  min-width: var(--sidebar-width);
-  background: var(--surface-0);
-  border-right: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
-  color: var(--text-secondary);
-}
-
-.sidebar-header {
-  padding: var(--space-4) var(--space-4) var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.sidebar-logo {
-  width: 28px;
-  height: 28px;
-  background: var(--accent);
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-on-accent);
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 13px;
-}
-
-/* === Sidebar Quick Actions (top nav) === */
-.sidebar-quick-actions {
-  display: flex;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.sidebar-quick-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-1);
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--duration-fast) ease;
-  flex: 1;
-  justify-content: center;
-}
-
-.sidebar-quick-btn:hover {
-  background: var(--surface-2);
-  border-color: var(--border-hover);
-  color: var(--text-primary);
-}
-
-.sidebar-quick-btn .shortcut-hint {
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}
+/* === Left column — container styles moved to left-column.css (zcode single-column) === */
+/* Child sections below (.sidebar-quick-actions, .sidebar-scroll, .sidebar-project-*) are reused inside .left-column */
 
 .sidebar-scroll {
   flex: 1;
@@ -278,6 +208,106 @@
 .sidebar-footer {
   padding: var(--space-2);
   border-top: 1px solid var(--border-subtle);
+}
+
+/* === Sidebar quick actions — zcode-style vertical menu (icon + label + shortcut) === */
+.sidebar-quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.sidebar-quick-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.sidebar-quick-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.sidebar-quick-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  transition: color var(--duration-fast) ease;
+}
+
+.sidebar-quick-btn:hover .sidebar-quick-icon {
+  color: var(--accent);
+}
+
+.sidebar-quick-label {
+  flex: 1;
+}
+
+.sidebar-quick-shortcut {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+/* === Agent Status Bar (inside sidebar bottom) === */
+.agent-status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  font-size: var(--text-xs);
+  color: var(--status-running);
+}
+
+.agent-status-bar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-running);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.agent-status-bar-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Resize handle — drag to adjust sidebar width */
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:active {
+  background: var(--accent);
+  opacity: 0.3;
 }
 
 /* === Sidebar Project Conversation Tree === */

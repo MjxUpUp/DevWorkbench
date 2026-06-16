@@ -1,15 +1,18 @@
 import { useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
 import { AddProject } from './components/AddProject';
-import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
-import { MainPanel } from './components/MainPanel';
+import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
-import { ConfigCenter } from './components/ConfigCenter';
+import { SettingsView } from './components/settings/SettingsView';
+import { TitleBar } from './components/layout/TitleBar';
+import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
 import { useTools } from './hooks/useTools';
 import { useAgentStore } from './stores/agentStore';
-import { useNavigationStore } from './stores/navigationStore';
+import { useNavigationStore, type ViewId } from './stores/navigationStore';
 import { useProjectStore } from './stores/projectStore';
+import { useSettingsStore } from './stores/settingsStore';
+import { applyTheme } from './utils/theme';
 import './styles/index.css';
 
 // Error boundary to catch React render crashes
@@ -41,14 +44,13 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 function App() {
-  const { tools, error: toolsError } = useTools();
+  const { error: toolsError } = useTools();
 
   // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
-  const agents = useAgentStore((s) => s.agents);
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
-  const settingsOpen = useNavigationStore((s) => s.settingsOpen);
-  const setSettingsOpen = useNavigationStore((s) => s.setSettingsOpen);
+  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
+  const activeView = useNavigationStore((s) => s.activeView);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -57,6 +59,15 @@ function App() {
   const loadProjects = useProjectStore((s) => s.loadProjects);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
+
+  // Load settings on mount — applies the persisted theme (light/dark/auto) ASAP
+  // to avoid a flash of the default theme before the store resolves.
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
+  useEffect(() => {
+    // Apply a sane default immediately; loadSettings will refine it once persisted.
+    applyTheme('auto');
+    loadSettings();
+  }, [loadSettings]);
 
   // Initialize agent store event listeners once (use getState to avoid re-render)
   useEffect(() => {
@@ -117,15 +128,31 @@ function App() {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+N: New conversation
+      // Ctrl+N: New conversation — clear the active selection and focus the task
+      // view so the user types the first turn. The conversation container is
+      // created lazily on send (createConversation), not eagerly here, so we
+      // don't spawn a garbage turn with a placeholder prompt.
       if (e.key === 'n' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        const activeProject = useNavigationStore.getState().activeProject;
-        if (activeProject) {
-          const agent = useAgentStore.getState().getDefaultAgent();
-          if (agent) {
-            useAgentStore.getState().newConversation(activeProject.path, '新对话', agent);
-          }
+        if (useNavigationStore.getState().activeProject) {
+          useNavigationStore.getState().selectConversation(null);
+          useNavigationStore.getState().setActiveView('task');
+        }
+      }
+
+      // Ctrl+B: Toggle left column (zcode-style sidebar toggle)
+      if (e.key === 'b' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        useNavigationStore.getState().toggleSidebar();
+      }
+
+      // Ctrl+1~5: Switch views (task / search / skills / orchestrate / settings)
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '5') {
+        e.preventDefault();
+        const views: ViewId[] = ['task', 'search', 'skills', 'orchestrate', 'settings'];
+        const idx = parseInt(e.key) - 1;
+        if (idx < views.length) {
+          useNavigationStore.getState().setActiveView(views[idx]);
         }
       }
     };
@@ -137,11 +164,12 @@ function App() {
   return (
     <ErrorBoundary>
     <ToastProvider>
-    <div className="app">
+    <div className={`app${!sidebarOpen ? ' left-column-hidden' : ''}`}>
+      <TitleBar />
       <Sidebar />
-      <MainPanel />
+      <MainStage />
       <CommandPalette />
-      <ConfigCenter />
+      {activeView === 'settings' && <SettingsView />}
 
       {(projectError || toolsError) && <div className="error-banner" style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',zIndex:300}}>{projectError || toolsError}</div>}
 
@@ -149,9 +177,7 @@ function App() {
         <AddProject onAdd={async (p) => { await addProject(p); setAddProjectOpen(false); }} onClose={() => setAddProjectOpen(false)} existingProjects={projects} />
       )}
 
-      {settingsOpen && (
-        <Settings tools={tools} agents={agents} onClose={() => setSettingsOpen(false)} />
-      )}
+      <StatusBar />
     </div>
     </ToastProvider>
     </ErrorBoundary>

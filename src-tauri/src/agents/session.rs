@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{AgentType, ContextSnapshot, Session, SessionStatus};
+use crate::models::{AgentType, ContextSnapshot, Conversation, Session, SessionStatus};
 use rusqlite::params;
 use std::path::PathBuf;
 
@@ -22,7 +22,8 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
     let mut stmt = conn.prepare(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
-                context_snapshot, linked_requirement_id, parent_session_id
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id, blocks
          FROM sessions ORDER BY started_at DESC"
     )?;
 
@@ -44,6 +45,11 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -58,6 +64,8 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             context_snapshot,
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
+            blocks,
         })
     })?;
 
@@ -104,8 +112,9 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
         "INSERT OR IGNORE INTO sessions
             (id, project_path, agent_type, status, prompt, model,
              started_at, finished_at, exit_code, output_summary,
-             context_snapshot, linked_requirement_id, parent_session_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             context_snapshot, linked_requirement_id, parent_session_id,
+             conversation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             s.id,
             s.project_path,
@@ -120,6 +129,7 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
             snapshot_json,
             s.linked_requirement_id,
             s.parent_session_id,
+            s.conversation_id,
         ],
     )?;
     Ok(())
@@ -157,6 +167,25 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
         set_clauses.push("context_snapshot = ?".to_string());
         param_values.push(Box::new(snap_json));
     }
+    if let Some(conv) = patch.get("conversationId").or_else(|| patch.get("conversation_id")) {
+        set_clauses.push("conversation_id = ?".to_string());
+        // null → unset the conversation; otherwise the conversation id string.
+        let v = conv.as_str().map(|s| s.to_string());
+        param_values.push(Box::new(v));
+    }
+    if let Some(blocks) = patch.get("blocks") {
+        // Persisted chat blocks (text/tool_use/tool_result JSON array). Written
+        // by finalize_session so history replays via BlocksView. null (Value::Null)
+        // → SQL NULL so load returns None (raw agent / explicit clear), matching
+        // the conversationId branch's null-handling — NOT the string "null".
+        let v = if blocks.is_null() {
+            None
+        } else {
+            Some(serde_json::to_string(blocks).unwrap_or_default())
+        };
+        set_clauses.push("blocks = ?".to_string());
+        param_values.push(Box::new(v));
+    }
 
     if set_clauses.is_empty() {
         return Ok(());
@@ -177,7 +206,8 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
     let mut stmt = conn.prepare(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
-                context_snapshot, linked_requirement_id, parent_session_id
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id, blocks
          FROM sessions WHERE project_path = ?1 ORDER BY started_at DESC"
     )?;
 
@@ -199,6 +229,11 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -213,6 +248,8 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             context_snapshot,
             linked_requirement_id: row.get(11)?,
             parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
+            blocks,
         })
     })?;
 
@@ -221,6 +258,168 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
         result.push(s?);
     }
     Ok(result)
+}
+
+// ---- Conversation CRUD ----
+//
+// A Conversation is the multi-turn container (= a Claude Code session). Turns
+// (sessions) attach via conversation_id. These helpers cover insert / load /
+// patch; the v9→v10 migration backfills conversations from existing
+// parent_session_id chains.
+
+pub fn insert_conversation_db(conn: &rusqlite::Connection, c: &Conversation) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO conversations
+            (id, project_path, title, last_agent, status, started_at, last_activity_at, pinned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            c.id,
+            c.project_path,
+            c.title,
+            c.last_agent.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default().trim_matches('"').to_string()),
+            c.status,
+            c.started_at,
+            c.last_activity_at,
+            c.pinned as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_agent_type(s: Option<String>) -> Option<AgentType> {
+    s.and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok())
+}
+
+pub fn load_conversations_for_project_db(
+    conn: &rusqlite::Connection,
+    project_path: &str,
+) -> Result<Vec<Conversation>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_path, title, last_agent, status, started_at, last_activity_at, pinned
+         FROM conversations WHERE project_path = ?1
+         ORDER BY pinned DESC, last_activity_at DESC"
+    )?;
+    let rows = stmt.query_map(params![project_path], |row| {
+        let last_agent_str: Option<String> = row.get(3)?;
+        Ok(Conversation {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            title: row.get(2)?,
+            last_agent: parse_agent_type(last_agent_str),
+            status: row.get(4)?,
+            started_at: row.get(5)?,
+            last_activity_at: row.get(6)?,
+            pinned: row.get::<_, i32>(7)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Patch a conversation by id. Supports title / status / pinned / lastAgent /
+/// lastActivityAt. Mirrors update_session_db's dynamic-SET style.
+pub fn update_conversation_db(
+    conn: &rusqlite::Connection,
+    id: &str,
+    patch: serde_json::Value,
+) -> Result<(), AppError> {
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
+        set_clauses.push("title = ?".to_string());
+        param_values.push(Box::new(title.to_string()));
+    }
+    if let Some(status) = patch.get("status").and_then(|v| v.as_str()) {
+        set_clauses.push("status = ?".to_string());
+        param_values.push(Box::new(status.to_string()));
+    }
+    if let Some(pinned) = patch.get("pinned").and_then(|v| v.as_bool()) {
+        set_clauses.push("pinned = ?".to_string());
+        param_values.push(Box::new(pinned as i32));
+    }
+    if let Some(last_agent) = patch.get("lastAgent").and_then(|v| v.as_str()) {
+        set_clauses.push("last_agent = ?".to_string());
+        param_values.push(Box::new(last_agent.to_string()));
+    }
+    if let Some(last_activity) = patch.get("lastActivityAt").or_else(|| patch.get("last_activity_at")).and_then(|v| v.as_str()) {
+        set_clauses.push("last_activity_at = ?".to_string());
+        param_values.push(Box::new(last_activity.to_string()));
+    }
+
+    if set_clauses.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("UPDATE conversations SET {} WHERE id = ?", set_clauses.join(", "));
+    param_values.push(Box::new(id.to_string()));
+    let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let rows = conn.execute(&sql, params.as_slice())?;
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Conversation {} 不存在", id)));
+    }
+    Ok(())
+}
+
+/// Load the turns (sessions) of one conversation, oldest-first. Used by the
+/// context bridge to inject prior-turn history into a follow-up turn of the
+/// same conversation — especially when the follow-up switches agents, where the
+/// new agent has no native way to inherit the prior agent's internal state.
+pub fn load_turns_for_conversation_db(
+    conn: &rusqlite::Connection,
+    conversation_id: &str,
+) -> Result<Vec<Session>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_path, agent_type, status, prompt, model,
+                started_at, finished_at, exit_code, output_summary,
+                context_snapshot, linked_requirement_id, parent_session_id,
+                conversation_id, blocks
+         FROM sessions WHERE conversation_id = ?1 ORDER BY started_at ASC"
+    )?;
+    let sessions = stmt.query_map(params![conversation_id], |row| {
+        let agent_type_str: String = row.get(2)?;
+        let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
+            .unwrap_or(AgentType::ClaudeCode);
+        let status_str: String = row.get(3)?;
+        let status = match status_str.as_str() {
+            "running" => SessionStatus::Running,
+            "completed" => SessionStatus::Completed,
+            "failed" => SessionStatus::Failed,
+            _ => SessionStatus::Failed,
+        };
+        let snapshot_str: Option<String> = row.get(10)?;
+        let context_snapshot: Option<ContextSnapshot> = snapshot_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        let blocks_str: Option<String> = row.get(14)?;
+        let blocks: Option<serde_json::Value> = blocks_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        Ok(Session {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            agent_type,
+            status,
+            prompt: row.get(4)?,
+            model: row.get(5)?,
+            started_at: row.get(6)?,
+            finished_at: row.get(7)?,
+            exit_code: row.get(8)?,
+            output_summary: row.get(9)?,
+            context_snapshot,
+            linked_requirement_id: row.get(11)?,
+            parent_session_id: row.get(12)?,
+            conversation_id: row.get(13)?,
+            blocks,
+        })
+    })?;
+    let mut out = Vec::new();
+    for s in sessions {
+        out.push(s?);
+    }
+    Ok(out)
 }
 
 // ---- Legacy helpers (still used by pty output logging) ----
@@ -278,6 +477,8 @@ mod tests {
             context_snapshot: None,
             linked_requirement_id: None,
             parent_session_id: None,
+            conversation_id: None,
+            blocks: None,
         }
     }
 
@@ -336,5 +537,85 @@ mod tests {
         let result = update_session_db(&conn, "s1", patch);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("无效 status"));
+    }
+
+    #[test]
+    fn load_turns_returns_conversation_turns_oldest_first() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        // Three turns of one conversation, inserted out of time-order to prove
+        // the ORDER BY started_at ASC sort (not insert order) drives the result.
+        let mut mid = make_session("mid", "/p", SessionStatus::Completed);
+        mid.conversation_id = Some("c1".to_string());
+        mid.started_at = "2026-01-02T00:00:00Z".to_string();
+        let mut last = make_session("last", "/p", SessionStatus::Completed);
+        last.conversation_id = Some("c1".to_string());
+        last.started_at = "2026-01-03T00:00:00Z".to_string();
+        let mut first = make_session("first", "/p", SessionStatus::Completed);
+        first.conversation_id = Some("c1".to_string());
+        first.started_at = "2026-01-01T00:00:00Z".to_string();
+        // A turn of a DIFFERENT conversation must not leak in.
+        let mut other = make_session("other", "/p", SessionStatus::Completed);
+        other.conversation_id = Some("c2".to_string());
+
+        for s in [&mid, &last, &first, &other] {
+            insert_session_db(&conn, s).unwrap();
+        }
+
+        let turns = load_turns_for_conversation_db(&conn, "c1").unwrap();
+        let ids: Vec<&str> = turns.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["first", "mid", "last"], "oldest-first within c1 only");
+    }
+
+    /// blocks round-trip: update_session_db writes the persisted blocks JSON,
+    /// load_sessions_from_db reads it back as the same Value. This is the DB
+    /// half of the G1 persistence path (the merge+cap transformation is unit-
+    /// tested in pty::tests; finalize_session applies it before this write).
+    #[test]
+    fn blocks_round_trip_through_update_and_load() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_session_db(&conn, &make_session("s1", "/p", SessionStatus::Running)).unwrap();
+
+        let blocks = serde_json::json!([
+            { "kind": "text", "content": "hello" },
+            { "kind": "tool_use", "name": "Read", "input": { "file_path": "/x" } },
+            { "kind": "tool_result", "content": "file body", "is_error": false },
+        ]);
+        let mut patch = serde_json::json!({});
+        patch["blocks"] = blocks.clone();
+        update_session_db(&conn, "s1", patch).unwrap();
+
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        let s = loaded.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.blocks.as_ref().unwrap(),
+            &blocks,
+            "blocks must round-trip unchanged through the DB layer"
+        );
+    }
+
+    /// A raw agent (no agent:event stream) writes no blocks — load must return
+    /// None without error, and an explicit null patch must clear them. Guards
+    /// the fallback path: AgentMessage falls through to the terminal when blocks
+    /// is null/None.
+    #[test]
+    fn blocks_absent_is_none_and_null_clears() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        // No blocks written at all (raw agent / pre-G1 session).
+        insert_session_db(&conn, &make_session("raw", "/p", SessionStatus::Completed)).unwrap();
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        let s = loaded.iter().find(|s| s.id == "raw").unwrap();
+        assert!(s.blocks.is_none(), "no blocks written → None on load");
+
+        // Explicit null patch clears the column.
+        let mut patch = serde_json::json!({});
+        patch["blocks"] = serde_json::Value::Null;
+        update_session_db(&conn, "raw", patch).unwrap();
+        let loaded2 = load_sessions_from_db(&conn).unwrap();
+        let s2 = loaded2.iter().find(|s| s.id == "raw").unwrap();
+        assert!(s2.blocks.is_none(), "null blocks patch → None on load");
     }
 }

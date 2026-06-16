@@ -22,7 +22,8 @@ export interface ToolStatus {
 export interface AppSettings {
   scan_directories: string[];
   tool_paths: Record<string, string>;
-  theme: string;
+  /** light | dark | auto (auto follows the OS via prefers-color-scheme) */
+  theme: 'light' | 'dark' | 'auto';
   preferred_terminal: string;
   cli_flags: Record<string, string>;
 }
@@ -44,6 +45,10 @@ export interface GitStatus {
   ahead: number;
   behind: number;
   lastCommitTime: string | null;
+  /** Lines added (tracked HEAD→worktree + untracked file contents). */
+  insertions: number;
+  /** Lines deleted (tracked HEAD→worktree). */
+  deletions: number;
 }
 
 // ---- Agent Hub types ----
@@ -55,11 +60,10 @@ export type AgentType =
   | 'gemini_cli'
   | 'copilot'
   | 'qwen_code'
-  | 'pi';
+  | 'pi'
+  | 'react_kernel';
 
 export type SessionStatus = 'running' | 'completed' | 'failed';
-
-export type RequirementStatus = 'todo' | 'in_progress' | 'done';
 
 export interface AgentInfo {
   agentType: AgentType;
@@ -70,9 +74,18 @@ export interface AgentInfo {
   supportsResume: boolean;
 }
 
+export interface FileDiff {
+  path: string;
+  added: number;
+  removed: number;
+}
+
 export interface ContextSnapshot {
   filesChanged: string[];
   keyOutput: string;
+  /** Per-file line stats from `git diff --numstat`. Optional because older
+   *  sessions persisted before this field existed only have filesChanged. */
+  fileDiffs?: FileDiff[];
 }
 
 export interface Session {
@@ -89,19 +102,34 @@ export interface Session {
   contextSnapshot: ContextSnapshot | null;
   linkedRequirementId: string | null;
   parentSessionId: string | null;
+  /** The multi-turn conversation this turn (session) belongs to. A conversation
+   *  is the Claude-Code-style "topic" container; a session is now one turn of
+   *  it. Backfilled for pre-v1.1 data by migrate_v9_to_v10. */
+  conversationId: string | null;
+  /** Persisted chat blocks (text/tool_use/tool_result) written at finalize so a
+   *  historical session replays via BlocksView instead of the raw terminal log.
+   *  null/undefined for raw agents (no agent:event stream) or pre-G1 sessions. */
+  blocks?: ChatStreamEvent[] | null;
+  tokenUsage?: number;
+  estimatedCost?: number;
 }
 
-export interface Requirement {
+/**
+ * A conversation = the multi-turn topic container (one Claude-Code "session").
+ * A `Session` is now one turn inside it. Conversations live under a project;
+ * turns inside a conversation may switch agents (claude → codex → …).
+ */
+export interface Conversation {
   id: string;
   projectPath: string;
   title: string;
-  description: string | null;
-  status: RequirementStatus;
-  priority: string | null;
-  linkedSessionId: string | null;
-  artifacts: string[];
-  createdAt: string;
-  updatedAt: string;
+  /** The agent of the most recent turn. Null only if the conversation has no
+   *  turns yet (shouldn't happen in practice — creating one always spawns turn 1). */
+  lastAgent: AgentType | null;
+  status: string;
+  startedAt: string;
+  lastActivityAt: string;
+  pinned: boolean;
 }
 
 // ---- Activity types ----
@@ -140,7 +168,7 @@ export interface KnowledgeEntry {
 
 export interface QualityCheck {
   name: string;
-  status: string;
+  status: 'passed' | 'failed' | 'warning' | 'skipped';
   message: string | null;
 }
 
@@ -196,3 +224,97 @@ export interface FileEntry {
   name: string;
   isDir: boolean;
 }
+
+// ---- Dashboard types ----
+
+export interface CostSummary {
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  sessionCount: number;
+}
+
+export interface CostTrendPoint {
+  date: string;
+  cost: number;
+  tokens: number;
+}
+
+export interface BudgetSettings {
+  monthlyBudgetUsd: number | null;
+  alertThreshold: number;
+}
+
+export interface DashboardStats {
+  todayCost: number;
+  costTrend: number;
+  totalTokens: number;
+  tokenTrend: number;
+  activeSessions: number;
+  qualityRate: number;
+}
+
+export interface BudgetInfo {
+  spent: number;
+  total: number;
+  percentage: number;
+}
+
+export interface QualityEntry {
+  sessionId: string;
+  sessionNumber: number;
+  score: number;
+  total: number;
+  agent: string;
+  tokens: number;
+  status: 'pass' | 'warn' | 'fail';
+}
+
+// ---- Workflow types ----
+
+export interface Workflow {
+  id: string;
+  name: string;
+  yamlContent: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Note: WorkflowRun / WorkflowStep removed — the static run-tracking model was
+// never written to. Execution is now stream-based via the kernel-compose Graph
+// engine: run_workflow returns a { run_id, output } result and emits live
+// `workflow:progress` events the Orchestrate canvas subscribes to.
+
+/** Result of `invoke('run_workflow', { yamlContent, input, workingDir })`. */
+export interface WorkflowRunResult {
+  run_id: string;
+  output: unknown;
+}
+
+/** GraphEvent kinds emitted as `workflow:progress` payload.runId === run_id. */
+export type WorkflowProgressEvent =
+  | { kind: 'node_start'; node: string }
+  | { kind: 'node_end'; node: string; status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval'; error?: string }
+  | { kind: 'approval_required'; node: string; prompt: string; resume_token: string }
+  | { kind: 'node_output'; node: string; chunk: unknown }
+  | { kind: 'graph_done'; output: unknown }
+  | { kind: 'graph_failed'; error: string };
+
+/** The full `workflow:progress` Tauri event payload. */
+export interface WorkflowProgressPayload {
+  runId: string;
+  event: WorkflowProgressEvent;
+}
+
+// ---- Chat block stream types ----
+
+/** Wire-level structured event from the `agent:event` channel — one per parsed
+ *  block of an agent's output (claude stream-json today; ReactAgent later).
+ *  The chat UI folds these into block cards (text / tool call / tool result /
+ *  result). Mirrors the Rust `ChatStreamEvent` serde schema exactly: tag is
+ *  "kind", field names are verbatim (snake_case, NO camelCase). */
+export type ChatStreamEvent =
+  | { kind: 'text'; content: string }
+  | { kind: 'tool_use'; name: string; input: unknown }
+  | { kind: 'tool_result'; content: string; is_error: boolean }
+  | { kind: 'result'; is_error: boolean; secs: number };

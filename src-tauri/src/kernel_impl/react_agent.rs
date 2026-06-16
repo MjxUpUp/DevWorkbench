@@ -1,0 +1,802 @@
+//! Transparent ReactAgent + GLM ChatModel + ToolRegistry.
+//!
+//! The "transparent" agent: the kernel controls the LLM call AND the tool loop
+//! directly (eino `adk/react.go` Rust port). Used for kernel-internal tasks and
+//! as a self-built agent that can call MCP tools and Skills.
+//!
+//! Three pieces:
+//! - [`GlmChatModel`]: `ChatModel` impl calling Zhipu GLM via Anthropic API,
+//!   with real SSE streaming and tool binding.
+//! - [`ToolRegistry`]: a cloneable collection of `dyn Tool` (MCP + Skill + builtin).
+//! - [`ReactAgent`]: reason->act->observe loop, bounded by max_steps, implements
+//!   `kernel_core::Agent`. Binds tools to the model, dispatches hooks around
+//!   tool calls, and streams AgentEvents.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use kernel_core::{
+    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+    ChatModel, Error, Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
+};
+use serde_json::{json, Value};
+
+use crate::kernel_impl::hooks::HookManager;
+
+// ---------------------------------------------------------------------------
+// GlmChatModel
+// ---------------------------------------------------------------------------
+
+/// A ChatModel calling Zhipu GLM via its Anthropic-compatible Messages API.
+#[derive(Clone)]
+pub struct GlmChatModel {
+    base_url: String,
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+    bound_tools: Vec<ToolInfo>,
+}
+
+impl GlmChatModel {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+            client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap_or_else(|_| reqwest::Client::new()),
+            bound_tools: Vec::new(),
+        }
+    }
+
+    pub fn bigmodel(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new("https://open.bigmodel.cn/api/anthropic", api_key, model)
+    }
+
+    fn build_body(&self, model: &str, messages: &[Message], opts: &ModelOptions, stream: bool) -> Value {
+        let msgs: Vec<Value> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| match m.role {
+                Role::Tool => {
+                    // M5: Anthropic expects tool results as user-role messages with
+                    // a tool_result content block (not assistant text).
+                    json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
+                            "content": m.content,
+                        }],
+                    })
+                }
+                Role::User => json!({ "role": "user", "content": m.content }),
+                _ => {
+                    // Assistant: include tool_calls as tool_use blocks if present.
+                    if m.tool_calls.is_empty() {
+                        json!({ "role": "assistant", "content": m.content })
+                    } else {
+                        let mut content: Vec<Value> = vec![json!({"type":"text","text":m.content})];
+                        for tc in &m.tool_calls {
+                            let input: Value = serde_json::from_str(&tc.function.arguments)
+                                .unwrap_or(json!({}));
+                            content.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": input,
+                            }));
+                        }
+                        json!({ "role": "assistant", "content": content })
+                    }
+                }
+            })
+            .collect();
+        let system: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut body = json!({
+            "model": model,
+            "messages": msgs,
+            "max_tokens": opts.max_tokens.unwrap_or(4096),
+            "stream": stream,
+        });
+        if !system.is_empty() {
+            body["system"] = Value::String(system);
+        }
+        if let Some(t) = opts.temperature {
+            body["temperature"] = json!(t);
+        }
+        if !self.bound_tools.is_empty() {
+            let tools: Vec<Value> = self.bound_tools.iter().map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters_schema,
+                })
+            }).collect();
+            body["tools"] = Value::Array(tools);
+        }
+        body
+    }
+}
+
+#[async_trait]
+impl ChatModel for GlmChatModel {
+    async fn generate(&self, messages: &[Message], opts: &ModelOptions) -> Result<Message, Error> {
+        let model = opts.model.clone().unwrap_or_else(|| self.model.clone());
+        let body = self.build_body(&model, messages, opts, false);
+        let resp = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+                Err(Error::Model(format!("GLM stream failed: {status}")))?;
+        }
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Model(format!("decode: {e}")))?;
+        decode_anthropic_message(&v)
+    }
+
+    fn stream(&self, messages: &[Message], opts: &ModelOptions) -> Result<MessageStream, Error> {
+        let model_clone = self.clone();
+        let messages = messages.to_vec();
+        let opts = opts.clone();
+        let s = async_stream::try_stream! {
+            let model_name = opts.model.clone().unwrap_or_else(|| model_clone.model.clone());
+            let body = model_clone.build_body(&model_name, &messages, &opts, true);
+            let resp = model_clone.client
+                .post(format!("{}/v1/messages", model_clone.base_url))
+                .header("x-api-key", &model_clone.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| Error::Network(e.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                Err(Error::Model(format!("GLM stream failed: {status}")))?;
+            }
+            use futures::StreamExt;
+            let mut byte_stream = resp.bytes_stream();
+            let mut buf = String::new();
+            // Accumulate tool_use blocks by Anthropic content_block index, then
+            // reassemble into a terminal tool_calls Message on message_stop. Text
+            // deltas are yielded inline for real token-by-token streaming. The
+            // per-line decision lives in handle_sse_line (unit-testable, no HTTP).
+            let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
+            while let Some(chunk_res) = byte_stream.next().await {
+                let bytes = chunk_res.map_err(|e| Error::Network(e.to_string()))?;
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(nl) = buf.find('\n') {
+                    let line = buf[..nl].trim().to_string();
+                    buf.drain(..=nl);
+                    if let Some(msg) = handle_sse_line(&line, &mut tool_bufs) {
+                        yield msg;
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(s))
+    }
+
+    fn with_tools(&self, tools: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+        let mut clone = self.clone();
+        clone.bound_tools = tools.to_vec();
+        Ok(Box::new(clone))
+    }
+}
+
+fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
+        for block in arr {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                        text_parts.push(t.to_string());
+                    }
+                }
+                Some("tool_use") => {
+                    let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let args = block.get("input").map(|i| i.to_string()).unwrap_or_else(|| "{}".to_string());
+                    tool_calls.push(kernel_core::ToolCall {
+                        id,
+                        call_type: "function".into(),
+                        function: kernel_core::FunctionCall { name, arguments: args },
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(Message {
+        role: Role::Assistant,
+        content: text_parts.join(""),
+        tool_calls,
+        tool_call_id: None,
+        reasoning: None,
+    })
+}
+
+/// Parse one SSE `data: <json>` line from an Anthropic Messages stream, mutate
+/// the tool_use accumulator, and return any Message to yield. Returns None for
+/// non-data lines, malformed JSON, and event types that carry no Message (ping,
+/// message_start, content_block_stop). Text deltas become assistant Messages
+/// immediately (real streaming); tool_use blocks accumulate and reassemble into
+/// a terminal tool_calls Message on message_stop. Extracted from stream() so the
+/// tool_use accumulation is unit-testable without HTTP.
+fn handle_sse_line(
+    line: &str,
+    tool_bufs: &mut HashMap<u64, (String, String, String)>,
+) -> Option<Message> {
+    let data = line.trim().strip_prefix("data: ")?;
+    let ev: Value = serde_json::from_str(data).ok()?;
+    match ev.get("type").and_then(|t| t.as_str())? {
+        "content_block_start" => {
+            if let Some(block) = ev.get("content_block") {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    tool_bufs.insert(idx, (id, name, String::new()));
+                }
+            }
+            None
+        }
+        "content_block_delta" => {
+            let dt = ev.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str());
+            if dt == Some("text_delta") {
+                ev.get("delta")
+                    .and_then(|d| d.get("text"))
+                    .and_then(|t| t.as_str())
+                    .map(|t| Message::assistant(t.to_string()))
+            } else if dt == Some("input_json_delta") {
+                let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                if let Some(partial) = ev
+                    .get("delta")
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(|p| p.as_str())
+                {
+                    if let Some(slot) = tool_bufs.get_mut(&idx) {
+                        slot.2.push_str(partial);
+                    }
+                }
+                None
+            } else {
+                None
+            }
+        }
+        "message_stop" => {
+            if tool_bufs.is_empty() {
+                return None;
+            }
+            let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
+            idxs.sort();
+            let tool_calls: Vec<kernel_core::ToolCall> = idxs
+                .into_iter()
+                .filter_map(|idx| tool_bufs.remove(&idx))
+                .map(|(id, name, args)| kernel_core::ToolCall {
+                    id,
+                    call_type: "function".into(),
+                    function: kernel_core::FunctionCall {
+                        name,
+                        arguments: if args.is_empty() { "{}".to_string() } else { args },
+                    },
+                })
+                .collect();
+            Some(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls,
+                tool_call_id: None,
+                reasoning: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolRegistry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct ToolRegistry {
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.push(Arc::new(tool));
+        self
+    }
+
+    pub fn push(&mut self, tool: impl Tool + 'static) {
+        self.tools.push(Arc::new(tool));
+    }
+
+    pub fn push_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.push(tool);
+    }
+
+    pub fn infos(&self) -> Vec<ToolInfo> {
+        self.tools.iter().map(|t| t.info()).collect()
+    }
+
+    pub fn find(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.iter().find(|t| t.info().name == name).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReactAgent
+// ---------------------------------------------------------------------------
+
+pub struct ReactAgent {
+    model: Arc<dyn ChatModel>,
+    tools: ToolRegistry,
+    hooks: Option<Arc<HookManager>>,
+    max_steps: usize,
+    system_prompt: String,
+    /// Context passed to every tool invocation. Defaults to empty
+    /// (`ToolContext::default()`) — set via [`with_context`] when the agent
+    /// should operate in a specific working dir / conversation.
+    ctx: ToolContext,
+    /// Prior conversation turns, injected between the system prompt and the
+    /// current task at the start of `run`/`run_loop`. Empty by default
+    /// (single-turn); set via [`with_history`] when resuming a conversation so
+    /// the model sees earlier user/assistant/tool turns as real `Message`s.
+    history: Vec<Message>,
+}
+
+impl ReactAgent {
+    pub fn new(
+        model: impl ChatModel + 'static,
+        tools: ToolRegistry,
+        system_prompt: impl Into<String>,
+    ) -> Self {
+        Self {
+            model: Arc::new(model),
+            tools,
+            hooks: None,
+            max_steps: 12,
+            system_prompt: system_prompt.into(),
+            ctx: ToolContext::default(),
+            history: Vec::new(),
+        }
+    }
+
+    pub fn with_hooks(mut self, hooks: Arc<HookManager>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    pub fn with_max_steps(mut self, n: usize) -> Self {
+        self.max_steps = n;
+        self
+    }
+
+    /// Set the ToolContext forwarded to every tool invocation. Without this,
+    /// file-scoped tools receive `working_dir = None` and cannot locate the
+    /// project.
+    pub fn with_context(mut self, ctx: ToolContext) -> Self {
+        self.ctx = ctx;
+        self
+    }
+
+    /// Inject prior conversation turns as `Message`s prepended (after the system
+    /// prompt, before the current task) to the model's history on each run. This
+    /// is the ReactAgent analog of the CLI path's prompt-prefix context
+    /// injection — but structured (real user/assistant/tool turns, not a flat
+    /// output_summary string). Symmetric to `with_context`: a pure builder that
+    /// only stores; the actual splice happens in `run`/`run_loop`.
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
+    pub async fn run_loop(&self, task: &str, opts: ModelOptions) -> Result<String, Error> {
+        let infos = self.tools.infos();
+        let model: Arc<dyn ChatModel> = if infos.is_empty() {
+            Arc::clone(&self.model)
+        } else {
+            match self.model.with_tools(&infos) {
+                Ok(b) => Arc::from(b),
+                Err(e) => {
+                    log::warn!("[ReactAgent] with_tools failed, proceeding without tools: {e}");
+                    Arc::clone(&self.model)
+                }
+            }
+        };
+
+        let prior_history = self.history.clone();
+        let mut history = Vec::with_capacity(2 + prior_history.len());
+        history.push(Message::system(&self.system_prompt));
+        history.extend(prior_history);
+        history.push(Message::user(task));
+        for _step in 0..self.max_steps {
+            let resp = model.generate(&history, &opts).await?;
+            history.push(resp.clone());
+            if resp.tool_calls.is_empty() {
+                return Ok(resp.content);
+            }
+            for call in &resp.tool_calls {
+                let result = self.execute_tool_call(call, &self.ctx).await;
+                history.push(Message {
+                    role: Role::Tool,
+                    content: result,
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(call.id.clone()),
+                    reasoning: None,
+                });
+            }
+        }
+        Err(Error::Agent(format!(
+            "ReactAgent exceeded {} steps without a final answer",
+            self.max_steps
+        )))
+    }
+
+    async fn execute_tool_call(&self, call: &kernel_core::ToolCall, ctx: &ToolContext) -> String {
+        if let Some(hooks) = &self.hooks {
+            let action = crate::kernel_impl::hooks::Action::CallTool {
+                tool: call.function.name.clone(),
+                arguments: call.function.arguments.clone(),
+            };
+            if let Err(reason) = hooks.before(&action).await {
+                return format!("[blocked by {}: {}]", reason.hook, reason.message);
+            }
+        }
+        let result = match self.tools.find(&call.function.name) {
+            Some(t) => t
+                .invoke(&call.function.arguments, ctx)
+                .await
+                .unwrap_or_else(|e| format!("[tool error: {e}]")),
+            None => format!("[unknown tool: {}]", call.function.name),
+        };
+        if let Some(hooks) = &self.hooks {
+            let outcome = crate::kernel_impl::hooks::ActionOutcome {
+                action: crate::kernel_impl::hooks::Action::CallTool {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                },
+                ok: !result.starts_with("[tool error"),
+                diff: None,
+                error: if result.starts_with('[') { Some(result.clone()) } else { None },
+            };
+            let findings = hooks.after(&outcome).await;
+            for f in findings {
+                log::warn!("[hook] {}: {}", f.rule, f.explanation);
+            }
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl kernel_core::Agent for ReactAgent {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Transparent
+    }
+    fn capabilities(&self) -> AgentCaps {
+        AgentCaps {
+            interruptible: true,
+            resumable: true,
+            injectable_tools: true,
+            read_only: self.tools.tools.iter().all(|t| t.is_read_only()),
+        }
+    }
+
+    fn run(&self, input: AgentInput) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
+        let model = Arc::clone(&self.model);
+        let tools = self.tools.clone();
+        let hooks = self.hooks.clone();
+        let system_prompt = self.system_prompt.clone();
+        let max_steps = self.max_steps;
+        let ctx = self.ctx.clone();
+        let prior_history = self.history.clone();
+        let task = input.prompt;
+        let model_opt = input.model;
+
+        let s = async_stream::try_stream! {
+            let infos = tools.infos();
+            let bound: Arc<dyn ChatModel> = if infos.is_empty() {
+                model
+            } else {
+                match model.with_tools(&infos) {
+                    Ok(b) => Arc::from(b),
+                    Err(e) => {
+                        log::warn!("[ReactAgent] with_tools failed in stream, no tools: {e}");
+                        model
+                    }
+                }
+            };
+            let mut history = Vec::with_capacity(2 + prior_history.len());
+            history.push(Message::system(&system_prompt));
+            history.extend(prior_history.iter().cloned());
+            history.push(Message::user(&task));
+            let opts = ModelOptions { model: model_opt, ..Default::default() };
+            let mut final_output = String::new();
+
+            for _step in 0..max_steps {
+                // Real streaming: consume the model's SSE stream, yielding each
+                // text delta as a Token (chat renders token-by-token) while the
+                // stream() helper accumulates tool_calls from content_block_start
+                // + input_json_delta events. Text + tool_calls are reassembled
+                // into one assistant Message for coherent next-turn history.
+                use futures::StreamExt;
+                let mut turn_stream = bound.stream(&history, &opts).map_err(Error::from)?;
+                let mut turn_text = String::new();
+                let mut turn_tool_calls: Vec<kernel_core::ToolCall> = Vec::new();
+                while let Some(msg_res) = turn_stream.next().await {
+                    let msg = msg_res.map_err(Error::from)?;
+                    if !msg.content.is_empty() {
+                        turn_text.push_str(&msg.content);
+                        yield AgentEvent::Token(msg.content.clone());
+                    }
+                    if !msg.tool_calls.is_empty() {
+                        turn_tool_calls = msg.tool_calls;
+                    }
+                }
+                history.push(Message {
+                    role: Role::Assistant,
+                    content: turn_text.clone(),
+                    tool_calls: turn_tool_calls.clone(),
+                    tool_call_id: None,
+                    reasoning: None,
+                });
+                if turn_tool_calls.is_empty() {
+                    final_output = turn_text;
+                    yield AgentEvent::TurnBoundary;
+                    break;
+                }
+                for call in &turn_tool_calls {
+                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                        tool: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                        status: kernel_core::ToolCallStatus::Started,
+                    });
+                    let blocked = if let Some(h) = &hooks {
+                        let action = crate::kernel_impl::hooks::Action::CallTool {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                        };
+                        match h.before(&action).await {
+                            Err(reason) => {
+                                yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                                    tool: call.function.name.clone(),
+                                    arguments: call.function.arguments.clone(),
+                                    status: kernel_core::ToolCallStatus::Failed,
+                                });
+                                Some(format!("[blocked by {}: {}]", reason.hook, reason.message))
+                            }
+                            Ok(()) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let result = match blocked {
+                        Some(b) => b,
+                        None => match tools.find(&call.function.name) {
+                            Some(t) => match t.invoke(&call.function.arguments, &ctx).await {
+                                Ok(out) => {
+                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                                        tool: call.function.name.clone(),
+                                        arguments: call.function.arguments.clone(),
+                                        status: kernel_core::ToolCallStatus::Succeeded,
+                                    });
+                                    out
+                                }
+                                Err(e) => {
+                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                                        tool: call.function.name.clone(),
+                                        arguments: call.function.arguments.clone(),
+                                        status: kernel_core::ToolCallStatus::Failed,
+                                    });
+                                    format!("[tool error: {e}]")
+                                }
+                            },
+                            None => format!("[unknown tool: {}]", call.function.name),
+                        },
+                    };
+                    history.push(Message {
+                        role: Role::Tool,
+                        content: result,
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(call.id.clone()),
+                        reasoning: None,
+                    });
+                }
+            }
+            yield AgentEvent::Done(AgentOutcome {
+                status: AgentRunStatus::Completed,
+                files_changed: Vec::new(),
+                exit_code: Some(0),
+                output_summary: Some(final_output),
+                // Transparent agent: honesty is enforced at the call level via
+                // HookManager (each tool invocation inspectable before commit),
+                // not via post-hoc diff audit. OpaqueAgent fills this instead.
+                honesty: None,
+            });
+        };
+        Ok(Box::pin(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernel_core::ToolInfo;
+
+    #[test]
+    fn decode_anthropic_text_block() {
+        let v = json!({ "content": [ {"type": "text", "text": "hello"} ] });
+        let m = decode_anthropic_message(&v).unwrap();
+        assert_eq!(m.content, "hello");
+        assert_eq!(m.role, Role::Assistant);
+    }
+
+    #[test]
+    fn decode_anthropic_tool_use_block() {
+        let v = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "grep",
+                "input": {"pattern": "foo"}
+            }]
+        });
+        let m = decode_anthropic_message(&v).unwrap();
+        assert_eq!(m.tool_calls.len(), 1);
+        assert_eq!(m.tool_calls[0].function.name, "grep");
+        assert_eq!(m.tool_calls[0].id, "call_1");
+        assert!(m.tool_calls[0].function.arguments.contains("foo"));
+    }
+
+    #[test]
+    fn build_body_injects_bound_tools() {
+        let mut model = GlmChatModel::bigmodel("k", "glm-4.6");
+        model.bound_tools = vec![ToolInfo {
+            name: "grep".into(),
+            description: "search".into(),
+            parameters_schema: json!({"type": "object"}),
+        }];
+        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        assert_eq!(body["tools"][0]["name"], "grep");
+    }
+
+    #[test]
+    fn build_body_omits_tools_when_empty() {
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn with_tools_returns_bound_clone() {
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let _bound = model.with_tools(&[ToolInfo {
+            name: "x".into(),
+            description: "y".into(),
+            parameters_schema: json!({}),
+        }]).unwrap();
+        let body_orig = model.build_body("m", &[Message::user("a")], &ModelOptions::default(), false);
+        assert!(body_orig.get("tools").is_none(), "original stays unbound");
+    }
+
+    struct EchoTool;
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn info(&self) -> ToolInfo {
+            ToolInfo {
+                name: "echo".into(),
+                description: "echo the argument back".into(),
+                parameters_schema: json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            }
+        }
+        async fn invoke(&self, args: &str, _ctx: &ToolContext) -> Result<String, Error> {
+            Ok(format!("echo:{args}"))
+        }
+    }
+
+    #[test]
+    fn registry_finds_by_name() {
+        let reg = ToolRegistry::new().with(EchoTool);
+        assert!(reg.find("echo").is_some());
+        assert!(reg.find("nope").is_none());
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn sse_text_delta_yields_assistant_message() {
+        let mut bufs = HashMap::new();
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#;
+        let m = handle_sse_line(line, &mut bufs).unwrap();
+        assert_eq!(m.content, "hi");
+        assert!(m.tool_calls.is_empty());
+        assert!(bufs.is_empty(), "text delta must not touch the tool accumulator");
+    }
+
+    #[test]
+    fn sse_accumulates_tool_use_across_split_json_deltas() {
+        let mut bufs = HashMap::new();
+        // content_block_start opens a tool_use block at index 1.
+        let start = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_9","name":"read_file"}}"#;
+        assert!(handle_sse_line(start, &mut bufs).is_none(), "start yields nothing");
+        // input_json_delta arrives in two fragments — Anthropic streams partial JSON.
+        let d1 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/a"}}"#;
+        let d2 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":".txt\"}"}}"#;
+        assert!(handle_sse_line(d1, &mut bufs).is_none(), "json delta yields nothing");
+        assert!(handle_sse_line(d2, &mut bufs).is_none(), "json delta yields nothing");
+        // message_stop reassembles the terminal tool_calls Message.
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        assert_eq!(m.content, "");
+        assert_eq!(m.tool_calls.len(), 1);
+        let call = &m.tool_calls[0];
+        assert_eq!(call.id, "call_9");
+        assert_eq!(call.function.name, "read_file");
+        assert_eq!(call.function.arguments, r#"{"path":"/a.txt"}"#);
+    }
+
+    #[test]
+    fn sse_message_stop_without_tools_yields_none() {
+        // A pure-text turn has no tool_use blocks; message_stop yields nothing
+        // and the run loop treats the ended stream as a turn boundary.
+        let mut bufs = HashMap::new();
+        assert!(handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).is_none());
+    }
+
+    #[test]
+    fn sse_multiple_tool_calls_preserve_index_order() {
+        let mut bufs = HashMap::new();
+        // Two tool_use blocks, opened out of index order (1 then 0).
+        let s1 = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"b","name":"second"}}"#;
+        let s0 = r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"first"}}"#;
+        handle_sse_line(s1, &mut bufs);
+        handle_sse_line(s0, &mut bufs);
+        handle_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            &mut bufs,
+        );
+        handle_sse_line(
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            &mut bufs,
+        );
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        assert_eq!(m.tool_calls.len(), 2);
+        // Reassembled in index order regardless of arrival order.
+        assert_eq!(m.tool_calls[0].id, "a");
+        assert_eq!(m.tool_calls[1].id, "b");
+    }
+}

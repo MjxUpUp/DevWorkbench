@@ -119,6 +119,10 @@ pub fn save_mcp_config(config: &McpConfigFile, path: &Path) -> Result<(), AppErr
                     crate::models::AgentType::Copilot => "\"copilot\"".to_string(),
                     crate::models::AgentType::QwenCode => "\"qwen\"".to_string(),
                     crate::models::AgentType::Pi => "\"pi\"".to_string(),
+                    // ReactKernel is not a CLI — MCP translation is CLI-only, so
+                    // it never legitimately appears in target_agents. Empty
+                    // placeholder keeps the match exhaustive; unreachable.
+                    crate::models::AgentType::ReactKernel => "\"\"".to_string(),
                 })
                 .collect();
             toml_str.push_str(&format!("target_agents = [{}]\n", agents.join(", ")));

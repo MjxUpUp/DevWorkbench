@@ -147,7 +147,7 @@ pub fn open_terminal(working_dir: String, command: Option<String>, db: State<'_,
     validate_command(&cmd)?;
 
     // 读取用户设置的偏好终端
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     let preferred = crate::commands::projects::load_settings_from_db(&conn)
         .ok()
         .map(|s| s.preferred_terminal)

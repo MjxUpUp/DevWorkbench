@@ -1,62 +1,64 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
 
-export type TabId = 'overview' | 'sessions' | 'timeline' | 'knowledge';
+export type ViewId = 'task' | 'search' | 'skills' | 'orchestrate' | 'settings';
 
 interface NavigationState {
-  /** Currently active tab in the main panel */
-  activeTab: TabId;
+  /** Currently active view in the main stage */
+  activeView: ViewId;
   /** Currently selected project (single source of truth) */
   activeProject: Project | null;
-  /** Currently selected session ID */
-  selectedSessionId: string | null;
+  /** Currently selected conversation ID (the topic container). The main task
+   *  view renders the turns of THIS conversation. Selecting a project clears it;
+   *  sending the first message creates + selects one. */
+  selectedConversationId: string | null;
   /** Currently expanded project ID in sidebar */
   expandedProjectId: string | null;
   /** Command palette open */
   commandPaletteOpen: boolean;
-  /** Config center open */
-  configCenterOpen: boolean;
   /** Add project modal open */
   addProjectOpen: boolean;
-  /** Settings modal open */
-  settingsOpen: boolean;
+  /** Sidebar width (user draggable) */
+  sidebarWidth: number;
+  /** Left column visible — zcode-style single-column toggle (replaces per-view auto-hide) */
+  sidebarOpen: boolean;
 
-  setActiveTab: (tab: TabId) => void;
+  setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
-  selectSession: (id: string | null) => void;
+  selectConversation: (id: string | null) => void;
   toggleProjectExpand: (projectId: string) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
-  toggleConfigCenter: () => void;
-  setConfigCenterOpen: (open: boolean) => void;
   setAddProjectOpen: (open: boolean) => void;
-  setSettingsOpen: (open: boolean) => void;
+  setSidebarWidth: (width: number) => void;
+  toggleSidebar: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
-  activeTab: 'overview',
+  activeView: 'task',
   activeProject: null,
-  selectedSessionId: null,
+  selectedConversationId: null,
   expandedProjectId: null,
   commandPaletteOpen: false,
-  configCenterOpen: false,
   addProjectOpen: false,
-  settingsOpen: false,
+  sidebarWidth: 240,
+  sidebarOpen: true,
 
-  setActiveTab: (tab) => set({ activeTab: tab }),
-  selectProject: (project) => set({ activeProject: project, selectedSessionId: null }),
-  selectSession: (id) => set({
-    selectedSessionId: id,
-    // Switch to sessions tab when selecting a session; stay on current tab when deselecting
-    ...(id ? { activeTab: 'sessions' as TabId } : {}),
+  setActiveView: (view) => set({ activeView: view }),
+  // Switching project resets the active conversation — a conversation belongs to
+  // exactly one project, so the old selection is meaningless in the new scope.
+  selectProject: (project) => set({ activeProject: project, selectedConversationId: null }),
+  selectConversation: (id) => set({
+    selectedConversationId: id,
+    // Switch to the task view when selecting a conversation.
+    ...(id ? { activeView: 'task' as ViewId } : {}),
   }),
   toggleProjectExpand: (projectId) => set((s) => ({
     expandedProjectId: s.expandedProjectId === projectId ? null : projectId,
   })),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
-  toggleConfigCenter: () => set((s) => ({ configCenterOpen: !s.configCenterOpen })),
-  setConfigCenterOpen: (open) => set({ configCenterOpen: open }),
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
-  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 }));

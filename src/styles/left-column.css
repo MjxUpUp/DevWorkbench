@@ -1,0 +1,289 @@
+/* === Left Column — logo + nav (创建任务/搜索/技能) + workspace projects + user === */
+.left-column {
+  grid-area: left-column;
+  position: relative;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: var(--sidebar-max);
+  background: var(--surface-0);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+
+/* Primary navigation — icon + label list */
+.left-column-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--space-2);
+  flex-shrink: 0;
+}
+
+.left-column-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-nav-item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-nav-item.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.left-column-nav-icon {
+  flex-shrink: 0;
+}
+
+.left-column-nav-label {
+  flex: 1;
+}
+
+/* Section header (工作区) */
+.left-column-section-header {
+  padding: var(--space-4) var(--space-3) var(--space-1);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Workspace — flat project list */
+.left-column-projects {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--space-2);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.left-column-projects-empty {
+  padding: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.left-column-project {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-project:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-project.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.left-column-project-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-project remove control — revealed on hover/focus of the project row so
+ * it doesn't add visual noise to the list at rest. */
+.left-column-project-remove {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.left-column-project:hover .left-column-project-remove,
+.left-column-project:focus-within .left-column-project-remove,
+.left-column-project.active .left-column-project-remove {
+  display: flex;
+}
+
+.left-column-project-remove:hover {
+  background: var(--surface-2);
+  color: var(--danger, #e5484d);
+}
+
+/* Conversations (topic list) nested under the active project. These are the
+ * Claude-Code "session" topic containers; selecting one loads its turns in the
+ * main view. Styled as an indented, lighter-weight sub-list so the hierarchy
+ * (project → conversation) reads at a glance. */
+.left-column-conversations {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0 var(--space-2) var(--space-3);
+}
+
+.left-column-conversations-empty {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.left-column-conversation {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  padding: 5px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-conversation:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-conversation.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.left-column-conversation-pin {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.left-column-conversation-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Footer — user profile with dropdown menu */
+.left-column-user-wrap {
+  position: relative;
+  flex-shrink: 0;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.left-column-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  padding: 4px var(--space-2);
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-user:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.left-column-user-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: var(--surface-2);
+  border-radius: 50%;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.left-column-user-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+/* Dropdown menu (设置 / 添加项目) */
+.left-column-user-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: var(--space-2);
+  right: var(--space-2);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  z-index: 50;
+}
+
+.left-column-user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.left-column-user-menu-item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}

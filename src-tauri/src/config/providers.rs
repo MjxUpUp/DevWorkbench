@@ -69,10 +69,59 @@ pub fn save_providers_config(data_dir: &std::path::Path, config: &ProvidersConfi
     Ok(())
 }
 
+/// A resolved provider ready to construct a `ChatModel`: the endpoint to hit,
+/// the credential, and the concrete model id to request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProvider {
+    pub endpoint: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// Resolve which provider + credentials serve a given model id.
+///
+/// Strategy:
+/// 1. Honor `model_mapping` first (e.g. `"claude_opus"` → `"glm-4.6"`), so a
+///    request for a Claude model transparently maps to its GLM stand-in.
+/// 2. Then find the first **enabled** provider whose models contain the resolved
+///    id AND whose `api_key` is non-empty (no key = not actually usable).
+///
+/// Returns `None` when nothing serves the request — the caller then falls back
+/// to a default empty-key model (calls fail at request time, but construction
+/// doesn't crash the whole graph run).
+pub fn resolve_provider(config: &ProvidersConfig, model_id: &str) -> Option<ResolvedProvider> {
+    let resolved_model = config
+        .model_mapping
+        .get(model_id)
+        .map(|s| s.as_str())
+        .unwrap_or(model_id);
+    for p in &config.providers {
+        if !p.enabled || p.api_key.is_empty() {
+            continue;
+        }
+        if p.models.iter().any(|m| m.id == resolved_model && m.enabled) {
+            return Some(ResolvedProvider {
+                endpoint: p.endpoint.clone(),
+                api_key: p.api_key.clone(),
+                model: resolved_model.to_string(),
+            });
+        }
+    }
+    None
+}
+
 /// Default providers configuration with preset entries.
+///
+/// NOTE on protocol: the kernel's only `ChatModel` impl (`GlmChatModel`) speaks
+/// the **Anthropic Messages API** (`POST {base}/v1/messages`, `x-api-key`,
+/// `anthropic-version`). So every preset endpoint MUST be an Anthropic-compatible
+/// base (no trailing `/v1` — the impl appends it). Z.AI exposes such an endpoint;
+/// Anthropic itself is the canonical one. OpenAI-compatible providers (DeepSeek,
+/// OpenRouter, …) are intentionally omitted until a second ChatModel impl lands —
+/// pre-shipping a provider the kernel can't call would mislead users.
 fn default_providers_config() -> ProvidersConfig {
     let mut model_mapping = HashMap::new();
-    model_mapping.insert("claude_opus".to_string(), "glm-5.1".to_string());
+    model_mapping.insert("claude_opus".to_string(), "glm-4.6".to_string());
     model_mapping.insert("claude_sonnet".to_string(), "glm-4-flash".to_string());
 
     ProvidersConfig {
@@ -80,34 +129,23 @@ fn default_providers_config() -> ProvidersConfig {
             ProviderConfig {
                 id: "zai".to_string(),
                 name: "Z.AI (GLM)".to_string(),
-                endpoint: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+                endpoint: "https://open.bigmodel.cn/api/anthropic".to_string(),
                 api_key: String::new(),
                 enabled: true,
                 models: vec![
-                    ModelEntry { id: "glm-5.1".to_string(), label: "GLM-5.1".to_string(), enabled: true },
+                    ModelEntry { id: "glm-4.6".to_string(), label: "GLM-4.6".to_string(), enabled: true },
                     ModelEntry { id: "glm-4-flash".to_string(), label: "GLM-4 Flash".to_string(), enabled: true },
                 ],
             },
             ProviderConfig {
                 id: "anthropic".to_string(),
                 name: "Anthropic".to_string(),
-                endpoint: "https://api.anthropic.com/v1".to_string(),
+                endpoint: "https://api.anthropic.com".to_string(),
                 api_key: String::new(),
                 enabled: false,
                 models: vec![
                     ModelEntry { id: "claude-opus-4-8".to_string(), label: "Claude Opus 4.8".to_string(), enabled: true },
                     ModelEntry { id: "claude-sonnet-4-6".to_string(), label: "Claude Sonnet 4.6".to_string(), enabled: true },
-                ],
-            },
-            ProviderConfig {
-                id: "deepseek".to_string(),
-                name: "DeepSeek".to_string(),
-                endpoint: "https://api.deepseek.com/v1".to_string(),
-                api_key: String::new(),
-                enabled: false,
-                models: vec![
-                    ModelEntry { id: "deepseek-chat".to_string(), label: "DeepSeek Chat".to_string(), enabled: true },
-                    ModelEntry { id: "deepseek-reasoner".to_string(), label: "DeepSeek Reasoner".to_string(), enabled: true },
                 ],
             },
         ],
@@ -126,9 +164,37 @@ mod tests {
         let config = default_providers_config();
         save_providers_config(tmp.path(), &config).unwrap();
         let loaded = load_providers_config(tmp.path()).unwrap();
-        assert_eq!(loaded.providers.len(), 3);
+        assert_eq!(loaded.providers.len(), 2);
         assert_eq!(loaded.providers[0].id, "zai");
         assert!(loaded.model_mapping.contains_key("claude_opus"));
+        // glm-4.6 is the flagship default the executor falls back to.
+        assert_eq!(loaded.model_mapping.get("claude_opus").unwrap(), "glm-4.6");
+    }
+
+    #[test]
+    fn resolve_provider_finds_enabled_with_key() {
+        let mut config = default_providers_config();
+        config.providers[0].api_key = "sk-real".into(); // zai enabled by default
+        let r = resolve_provider(&config, "glm-4.6").expect("zai serves glm-4.6");
+        assert_eq!(r.api_key, "sk-real");
+        assert_eq!(r.model, "glm-4.6");
+        assert!(r.endpoint.ends_with("/api/anthropic"));
+    }
+
+    #[test]
+    fn resolve_provider_skips_empty_key() {
+        let config = default_providers_config(); // no key anywhere
+        assert!(resolve_provider(&config, "glm-4.6").is_none());
+    }
+
+    #[test]
+    fn resolve_provider_honors_mapping() {
+        let mut config = default_providers_config();
+        config.providers[0].api_key = "sk-real".into();
+        // claude_opus maps to glm-4.6 — must resolve to the GLM provider+model.
+        let r = resolve_provider(&config, "claude_opus").expect("mapping resolves");
+        assert_eq!(r.model, "glm-4.6");
+        assert_eq!(r.api_key, "sk-real");
     }
 
     #[test]

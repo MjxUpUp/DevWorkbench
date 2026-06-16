@@ -1,6 +1,6 @@
 [package]
 name = "dev-workbench"
-version = "0.8.0"
+version = "1.0.0"
 description = "一目了然 — 本地开发工作台"
 authors = ["you"]
 license = "MIT"
@@ -10,6 +10,15 @@ rust-version = "1.77.2"
 [lib]
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[workspace]
+# Workspace root sits in src-tauri/ so tauri.conf.json relative paths
+# (frontendDist: "../dist") keep working unchanged. The main crate (dev-workbench,
+# i.e. `.`) stays the Tauri entry point; kernel-* crates hold the new eino-inspired
+# kernel. Phase 0 only adds kernel-core (trait/schema shell); existing modules
+# (agents/, knowledge/, quality/, mcp/) remain in the main crate and will migrate
+# incrementally in later phases.
+members = ["crates/kernel-core", "crates/kernel-compose"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -31,12 +40,19 @@ log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 git2 = { version = "0.20", features = ["vendored-openssl"] }
 uuid = { version = "1", features = ["v4"] }
-portable-pty = "0.8"
 rusqlite = { version = "0.34", features = ["bundled"] }
 toml = "0.8"
 thiserror = "2"
 sha2 = "0.10"
 notify = { version = "7", features = ["macos_kqueue"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync"] }
+kernel-core = { path = "crates/kernel-core" }
+kernel-compose = { path = "crates/kernel-compose" }
+async-trait = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
