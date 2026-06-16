@@ -167,6 +167,31 @@ fn react_chat_driver(
         log::warn!("[checkpoint] create failed for {session_id}: {e} (rollback disabled)");
     }
 
+    // T8 experience flywheel replay: pull Forge's pending *mandatory* reviews
+    // (low-score, unresolved) into the knowledge base as quality_failure lessons,
+    // which build_react_agent → experience_prompt_suffix (T7) surfaces in THIS
+    // session's system prompt. Best-effort + dedup → idempotent and non-blocking
+    // (forge missing / no pending reviews = no-op). Same blocking-subprocess-at-
+    // session-start pattern as the checkpoint above.
+    match crate::quality::experience::list_forge_reviews(std::path::Path::new(project_path)) {
+        Ok(reviews) => {
+            let pending = crate::quality::experience::pending_mandatory(&reviews);
+            if !pending.is_empty() {
+                if let Ok(conn) = db_conn.get() {
+                    let res = crate::quality::experience::replay_to_knowledge(
+                        &conn, project_path, &pending, agent_type,
+                    );
+                    log::info!(
+                        "[experience] replayed {} lessons ({} skipped) for {session_id}",
+                        res.replayed, res.skipped
+                    );
+                }
+            }
+        }
+        Err(crate::error::AppError::ForgeNotInstalled) => {} // forge absent → nothing new
+        Err(e) => log::warn!("[experience] replay failed for {session_id}: {e}"),
+    }
+
     // Prior conversation turns → structured Message history. This is the
     // ReactAgent analog of the CLI path's inject_conversation_context, but built
     // from persisted blocks (real user/assistant/tool turns) instead of a flat

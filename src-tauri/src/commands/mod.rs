@@ -13,3 +13,4 @@ pub mod mcp_cmds;
 pub mod skills_cmds;
 pub mod cost_cmds;
 pub mod provider_cmds;
+pub mod experience;

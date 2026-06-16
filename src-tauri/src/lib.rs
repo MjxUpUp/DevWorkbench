@@ -192,6 +192,8 @@ pub fn run() {
             commands::agents::get_quality_reports,
             commands::agents::get_quality_report_for_session,
             commands::agents::run_quality_gate,
+            commands::experience::list_pending_forge_reviews,
+            commands::experience::replay_forge_experience,
             commands::files::list_project_files,
             commands::workflows::list_workflows,
             commands::workflows::create_workflow,
