@@ -4,6 +4,7 @@ import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent } from '../types';
+import type { AgentMode } from '../components/ModeSelector';
 
 interface AgentState {
   agents: AgentInfo[];
@@ -32,6 +33,7 @@ interface AgentState {
     parentSessionId?: string,
     conversationId?: string,
     kernel?: boolean,
+    mode?: AgentMode,
   ) => Promise<Session>;
   stopAgent: (sessionId: string) => Promise<void>;
   getSessionsForProject: (projectPath: string) => Session[];
@@ -46,7 +48,7 @@ interface AgentState {
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
   /** First turn of a brand-new conversation (no conversation_id yet). */
-  createConversation: (projectPath: string, prompt: string, agentType: AgentType, kernel?: boolean) => Promise<Session>;
+  createConversation: (projectPath: string, prompt: string, agentType: AgentType, kernel?: boolean, mode?: AgentMode) => Promise<Session>;
   /** Append a follow-up turn to an existing conversation. The agent may differ
    *  from prior turns — that's the whole point of the conversation container. */
   continueConversation: (
@@ -55,6 +57,7 @@ interface AgentState {
     prompt: string,
     agentType: AgentType,
     kernel?: boolean,
+    mode?: AgentMode,
   ) => Promise<Session>;
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
@@ -120,7 +123,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, kernel) => {
+  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, kernel, mode) => {
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
       agentType,
@@ -130,6 +133,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       parentSessionId: parentSessionId || null,
       conversationId: conversationId || null,
       kernel: kernel ?? false,
+      mode: mode ?? null,
     });
     set((s) => ({ sessions: [...s.sessions, session] }));
     // If this turn created/attached a conversation, refresh that project's
@@ -205,22 +209,22 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().qualityReports.get(sessionId) ?? null;
   },
 
-  createConversation: async (projectPath, prompt, agentType, kernel) => {
+  createConversation: async (projectPath, prompt, agentType, kernel, mode) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
     // No conversation_id → backend creates a new container and attaches this
     // turn as its first. The returned session carries the new conversationId.
-    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, undefined, kernel);
+    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, undefined, kernel, mode);
   },
 
-  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel) => {
+  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
     // conversation_id present → backend attaches this as a follow-up turn of
     // the existing container and touches its last_agent / last_activity_at.
-    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, conversationId, kernel);
+    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, conversationId, kernel, mode);
   },
 
   getDefaultAgent: () => {

@@ -192,3 +192,40 @@ describe('agentStore.appendBlock — merge consecutive text deltas', () => {
     ]);
   });
 });
+
+describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ sessions: [], conversations: [] });
+    vi.clearAllMocks();
+    // spawnAgent awaits invoke (Session) then refreshConversations awaits invoke
+    // (Conversation[]) — one mock return value satisfies both.
+    vi.mocked(invoke).mockResolvedValue(mk());
+  });
+
+  it('passes the selected mode through to the spawn_agent_session payload', async () => {
+    await useAgentStore.getState().spawnAgent(
+      '/p', 'claude_code', 'hi', undefined, undefined, undefined, undefined, false, 'plan',
+    );
+    const [cmd, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(cmd).toBe('spawn_agent_session');
+    expect(payload).toMatchObject({ mode: 'plan' });
+  });
+
+  it('defaults mode to null when none selected (backend maps null → Default)', async () => {
+    await useAgentStore.getState().spawnAgent('/p', 'claude_code', 'hi');
+    const [, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(payload).toMatchObject({ mode: null });
+  });
+
+  it('createConversation forwards mode to spawnAgent', async () => {
+    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', false, 'skip-permissions');
+    const [, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(payload).toMatchObject({ mode: 'skip-permissions' });
+  });
+
+  it('continueConversation forwards mode to spawnAgent', async () => {
+    await useAgentStore.getState().continueConversation('/p', 'c1', 'hi', 'claude_code', false, 'auto-edit');
+    const [, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(payload).toMatchObject({ mode: 'auto-edit' });
+  });
+});

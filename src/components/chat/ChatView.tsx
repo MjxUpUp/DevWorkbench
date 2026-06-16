@@ -153,7 +153,7 @@ export function ChatView() {
       if (activeConversationId && !runningSession) {
         // Follow-up turn on the existing conversation. The agent may differ
         // from the previous turn — that's the conversation-container model.
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel);
+        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode);
         // continueConversation attaches to the already-selected conversation;
         // selection is already correct, no need to re-select.
         void session;
@@ -163,7 +163,7 @@ export function ChatView() {
         // the main view binds to the new container.
         const agent = selectedAgent || getDefaultAgent();
         if (agent) {
-          const session = await createConversation(project.path, text, agent, kernel);
+          const session = await createConversation(project.path, text, agent, kernel, agentMode);
           selectConversation(session.conversationId);
         }
       }
@@ -172,7 +172,7 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to send:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project, activeConversationId, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt]);
+  }, [selectedAgent, prompt, runningSession, project, activeConversationId, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;

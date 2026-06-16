@@ -52,6 +52,53 @@ pub enum Severity {
     Warn,
 }
 
+/// Permission mode — mirrors the frontend `AgentMode` selector and shapes how
+/// [`HookManager::before`] gates actions. This is the backend half of
+/// "permission mode 贯通": the run loop carries the selected mode into
+/// `before`, which short-circuits before the per-hook dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    /// Interactive execution (P0: existing guard behaviour).
+    #[default]
+    Default,
+    /// Auto-accept file edits without asking (P0: same as Default — the
+    /// confirm-on-write interaction lands later).
+    AutoEdit,
+    /// Read-only planning — block writes and command execution until the user
+    /// confirms the plan.
+    Plan,
+    /// Minimal output (P0: same guard behaviour; event throttling is later).
+    Silent,
+    /// Skip every permission check — bypass all before-hooks.
+    SkipPermissions,
+}
+
+impl PermissionMode {
+    /// Returns a block reason if this mode forbids the action outright (plan
+    /// mode blocks file writes and command execution). Pure predicate so it's
+    /// unit-testable in isolation, away from the hook dispatch.
+    pub fn blocks_action(self, action: &Action) -> Option<&'static str> {
+        match self {
+            PermissionMode::Plan => match action {
+                Action::WriteFile { .. } => {
+                    Some("plan mode is read-only: confirm the plan before writing files")
+                }
+                Action::RunCommand { .. } => {
+                    Some("plan mode is read-only: confirm the plan before running commands")
+                }
+                Action::CallTool { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Does this mode skip all before-hooks? (skip-permissions.)
+    pub fn skips_guards(self) -> bool {
+        matches!(self, PermissionMode::SkipPermissions)
+    }
+}
+
 /// A hook. `before` may veto; `after` observes.
 #[async_trait]
 pub trait Hook: Send + Sync {
@@ -67,6 +114,7 @@ pub trait Hook: Send + Sync {
 /// Registry + dispatcher for hooks.
 pub struct HookManager {
     hooks: Vec<Box<dyn Hook>>,
+    mode: PermissionMode,
 }
 
 impl Default for HookManager {
@@ -77,7 +125,20 @@ impl Default for HookManager {
 
 impl HookManager {
     pub fn new() -> Self {
-        Self { hooks: Vec::new() }
+        Self {
+            hooks: Vec::new(),
+            mode: PermissionMode::Default,
+        }
+    }
+
+    /// Set the permission mode shaping how `before` gates actions.
+    pub fn with_mode(mut self, mode: PermissionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
     }
 
     pub fn register(&mut self, hook: Box<dyn Hook>) {
@@ -87,6 +148,19 @@ impl HookManager {
     /// Run all `before` hooks. Returns the first BlockReason, or Ok.
     /// (A BlockReason stops the action; warnings are logged but don't block.)
     pub async fn before(&self, action: &Action) -> Result<(), BlockReason> {
+        // Permission-mode short-circuit (runs before per-hook dispatch):
+        // skip-permissions bypasses everything; plan mode blocks writes and
+        // command execution until the user confirms the plan.
+        if self.mode.skips_guards() {
+            return Ok(());
+        }
+        if let Some(msg) = self.mode.blocks_action(action) {
+            return Err(BlockReason {
+                hook: "permission_mode".into(),
+                message: msg.into(),
+                severity: Severity::Block,
+            });
+        }
         for h in &self.hooks {
             if let Err(reason) = h.before(action).await {
                 if reason.severity == Severity::Block {
@@ -396,5 +470,88 @@ mod tests {
         };
         let findings = mgr.after(&outcome).await;
         assert!(!findings.is_empty());
+    }
+
+    // --- v1.1 Task 5: permission mode gating ---
+
+    #[test]
+    fn plan_mode_blocks_writes_and_commands_only() {
+        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let run = Action::RunCommand { command: "echo hi".into() };
+        let tool = Action::CallTool { tool: "read".into(), arguments: "{}".into() };
+        assert!(PermissionMode::Plan.blocks_action(&write).is_some());
+        assert!(PermissionMode::Plan.blocks_action(&run).is_some());
+        // Plan still allows read-style tool calls — only writes/commands stop.
+        assert!(PermissionMode::Plan.blocks_action(&tool).is_none());
+    }
+
+    #[test]
+    fn non_plan_modes_do_not_block_writes() {
+        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        for m in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::Silent,
+            PermissionMode::SkipPermissions,
+        ] {
+            assert!(m.blocks_action(&write).is_none(), "{m:?} should not block writes");
+        }
+    }
+
+    #[test]
+    fn skips_guards_only_for_skip_permissions() {
+        assert!(PermissionMode::SkipPermissions.skips_guards());
+        for m in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::Plan,
+            PermissionMode::Silent,
+        ] {
+            assert!(!m.skips_guards(), "{m:?} should not skip guards");
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_manager_blocks_write_before_hooks() {
+        let mgr = HookManager::new().with_mode(PermissionMode::Plan);
+        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let err = mgr.before(&write).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block);
+        assert_eq!(err.hook, "permission_mode");
+    }
+
+    #[tokio::test]
+    async fn skip_permissions_bypasses_command_guard() {
+        // Even a destructive `rm -rf /` is allowed under skip-permissions — the
+        // mode short-circuits before the command guard runs.
+        let mut mgr = HookManager::new().with_mode(PermissionMode::SkipPermissions);
+        mgr.register(Box::new(CommandGuardHook::default()));
+        assert!(mgr.before(&cmd("rm -rf /")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn default_mode_still_enforces_command_guard() {
+        let mut mgr = HookManager::new();
+        mgr.register(Box::new(CommandGuardHook::default()));
+        assert!(mgr.before(&cmd("rm -rf /")).await.is_err());
+    }
+
+    #[test]
+    fn permission_mode_serde_matches_frontend_kebab() {
+        // Frontend AgentMode uses kebab-case ids; the backend must round-trip
+        // the exact same strings so the wire value passes through unchanged.
+        let cases = [
+            ("default", PermissionMode::Default),
+            ("auto-edit", PermissionMode::AutoEdit),
+            ("plan", PermissionMode::Plan),
+            ("silent", PermissionMode::Silent),
+            ("skip-permissions", PermissionMode::SkipPermissions),
+        ];
+        for (s, mode) in cases {
+            let ser = serde_json::to_string(&mode).unwrap();
+            assert_eq!(ser, format!("\"{s}\""), "serialize {mode:?}");
+            let de: PermissionMode = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(de, mode, "deserialize {s}");
+        }
     }
 }

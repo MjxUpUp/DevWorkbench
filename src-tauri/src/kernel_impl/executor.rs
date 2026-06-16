@@ -83,6 +83,7 @@ impl Executor for KernelExecutor {
                     None,
                     Vec::new(),
                     Some(self.db.clone()),
+                    crate::kernel_impl::hooks::PermissionMode::Default,
                 )?)
             }
         };
@@ -160,6 +161,7 @@ pub(crate) fn build_react_agent(
     conversation_id: Option<&str>,
     history: Vec<kernel_core::Message>,
     db: Option<DbState>,
+    mode: crate::kernel_impl::hooks::PermissionMode,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -223,7 +225,7 @@ pub(crate) fn build_react_agent(
     // blocks every WriteFile unless an active Forge task is set, and the chat
     // path carries no task state yet — mounting it now would brick the agent's
     // own file-writing tools.
-    let mut hooks = crate::kernel_impl::hooks::HookManager::new();
+    let mut hooks = crate::kernel_impl::hooks::HookManager::new().with_mode(mode);
     hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
     hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
     Ok(ReactAgent::new(
