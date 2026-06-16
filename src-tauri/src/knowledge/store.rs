@@ -5,8 +5,16 @@ use rusqlite::params;
 /// Add a knowledge entry to the database. Skips if a near-duplicate already exists
 /// (same project_hash and matching first 200 chars of content).
 pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<(), AppError> {
-    // Dedup check: match on project_hash + first 200 chars of content
-    let content_prefix = &entry.content[..entry.content.len().min(200)];
+    // Dedup check: match on project_hash + first 200 CHARS of content —
+    // char-based, NOT byte slicing. It must be chars().take(200) for two reasons:
+    //   1. SQLite's SUBSTR(content, 1, 200) counts CHARACTERS, so a byte prefix
+    //      would compare against a different string and dedup would silently miss.
+    //   2. A byte index of 200 lands inside a 3-byte CJK char (e.g. '的' at bytes
+    //      198..201) → panic "byte index 200 is not a char boundary". This
+    //      panicked add_entry on EVERY react_kernel completion (CJK output), so
+    //      knowledge entries were never inserted and every completion logged a
+    //      [PANIC]. chars().take(200) never panics and matches SUBSTR exactly.
+    let content_prefix: String = entry.content.chars().take(200).collect();
     let exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM knowledge_entries WHERE project_hash = ?1 AND SUBSTR(content, 1, 200) = ?2",
@@ -343,6 +351,39 @@ mod tests {
         add_entry(&db.conn, &make_entry("k2", "proj_a", "Title 2", "Content about Python")).unwrap();
         let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_add_entry_multibyte_content_does_not_panic() {
+        // Regression: the OLD `&content[..content.len().min(200)]` byte-sliced.
+        // 300 CJK chars = 900 bytes, so byte index 200 lands mid-char (inside
+        // '的' at bytes 198..201) → panic "byte index 200 is not a char boundary".
+        // This fired on every react_kernel completion (CJK output). Char-based
+        // truncation must never panic and must insert cleanly.
+        let db = TempDb::new();
+        let cjk = "的".repeat(300);
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "中文知识", &cjk)).unwrap();
+        let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content.chars().count(), 300);
+    }
+
+    #[test]
+    fn test_dedup_multibyte_uses_char_prefix_not_byte() {
+        // Dedup must key on the first 200 CHARS (matching SQLite SUBSTR), not
+        // 200 bytes. Two CJK entries that share their first 200 chars but diverge
+        // afterward must dedup; two that differ within the first 200 chars must not.
+        let db = TempDb::new();
+        let shared = "知识".repeat(150); // 300 chars; first 200 chars identical below
+        let mut same_prefix_a = shared.clone();
+        same_prefix_a.push_str("尾巴甲"); // diverge AFTER the 200-char window
+        let mut same_prefix_b = shared;
+        same_prefix_b.push_str("尾巴乙");
+        add_entry(&db.conn, &make_entry("k1", "proj_a", "T1", &same_prefix_a)).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj_a", "T2", &same_prefix_b)).unwrap();
+        let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(entries.len(), 1); // dedup: same first-200-char prefix
+        assert_eq!(entries[0].id, "k1");
     }
 
     #[test]
