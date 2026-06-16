@@ -122,3 +122,50 @@ describe('agentStore — conversation selectors', () => {
     expect(useAgentStore.getState().getConversationForSession('orphan')).toBeNull();
   });
 });
+
+describe('agentStore.appendBlock — merge consecutive text deltas', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ sessionBlocks: new Map() });
+  });
+
+  it('concatenates content when the last block is also text (real streaming)', () => {
+    // Real streaming emits one Text event per token; appendBlock must fold them
+    // into a single block so BlocksView doesn't render one card per delta.
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'hel' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'lo' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: ' world' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([{ kind: 'text', content: 'hello world' }]);
+  });
+
+  it('does not merge when the previous block is a different kind', () => {
+    useAgentStore.getState().appendBlock('s1', { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'done' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([
+      { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } },
+      { kind: 'text', content: 'done' },
+    ]);
+  });
+
+  it('resumes merging after a non-text block splits the run', () => {
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'a' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'tool_use', name: 'Read', input: {} });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'b' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'c' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([
+      { kind: 'text', content: 'a' },
+      { kind: 'tool_use', name: 'Read', input: {} },
+      { kind: 'text', content: 'bc' },
+    ]);
+  });
+
+  it('keeps sessions isolated', () => {
+    useAgentStore.getState().appendBlock('a', { kind: 'text', content: '1' });
+    useAgentStore.getState().appendBlock('b', { kind: 'text', content: '2' });
+    useAgentStore.getState().appendBlock('a', { kind: 'text', content: '3' });
+    expect(useAgentStore.getState().sessionBlocks.get('a')).toEqual([{ kind: 'text', content: '13' }]);
+    expect(useAgentStore.getState().sessionBlocks.get('b')).toEqual([{ kind: 'text', content: '2' }]);
+  });
+});

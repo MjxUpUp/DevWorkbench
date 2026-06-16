@@ -9,6 +9,7 @@ use tauri::{Emitter, Manager, State};
 use crate::agents::kernel_tasks::KernelTasks;
 use crate::agents::react_chat;
 use crate::kernel_impl::executor;
+use crate::mcp::registry::McpRegistry;
 use crate::models::SessionStatus;
 use kernel_core::{Agent, AgentEvent, AgentInput, AgentRunStatus};
 
@@ -148,9 +149,16 @@ fn react_chat_driver(
     let at_drv = agent_type.clone();
     let model_drv = model.map(|m| m.to_string());
     let prompt_drv = prompt.to_string();
+    let conv_drv = resolved_conv_id.clone();
 
     let handle = tokio::spawn(async move {
-        let agent = match executor::build_react_agent(model_drv.as_deref()) {
+        let mcp = app_drv.try_state::<McpRegistry>();
+        let agent = match executor::build_react_agent(
+            model_drv.as_deref(),
+            mcp.as_deref(),
+            &pp_drv,
+            Some(conv_drv.as_str()),
+        ) {
             Ok(a) => a,
             Err(e) => {
                 log::error!("[react_chat] build_react_agent failed for {}: {e}", sid_drv);

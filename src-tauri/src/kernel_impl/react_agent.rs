@@ -12,6 +12,7 @@
 //!   `kernel_core::Agent`. Binds tools to the model, dispatches hooks around
 //!   tool calls, and streams AgentEvents.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -175,20 +176,19 @@ impl ChatModel for GlmChatModel {
             use futures::StreamExt;
             let mut byte_stream = resp.bytes_stream();
             let mut buf = String::new();
+            // Accumulate tool_use blocks by Anthropic content_block index, then
+            // reassemble into a terminal tool_calls Message on message_stop. Text
+            // deltas are yielded inline for real token-by-token streaming. The
+            // per-line decision lives in handle_sse_line (unit-testable, no HTTP).
+            let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
             while let Some(chunk_res) = byte_stream.next().await {
                 let bytes = chunk_res.map_err(|e| Error::Network(e.to_string()))?;
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
-                            if ev.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
-                                if let Some(text) = ev.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
-                                    yield Message::assistant(text.to_string());
-                                }
-                            }
-                        }
+                    if let Some(msg) = handle_sse_line(&line, &mut tool_bufs) {
+                        yield msg;
                     }
                 }
             }
@@ -235,6 +235,84 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
         tool_call_id: None,
         reasoning: None,
     })
+}
+
+/// Parse one SSE `data: <json>` line from an Anthropic Messages stream, mutate
+/// the tool_use accumulator, and return any Message to yield. Returns None for
+/// non-data lines, malformed JSON, and event types that carry no Message (ping,
+/// message_start, content_block_stop). Text deltas become assistant Messages
+/// immediately (real streaming); tool_use blocks accumulate and reassemble into
+/// a terminal tool_calls Message on message_stop. Extracted from stream() so the
+/// tool_use accumulation is unit-testable without HTTP.
+fn handle_sse_line(
+    line: &str,
+    tool_bufs: &mut HashMap<u64, (String, String, String)>,
+) -> Option<Message> {
+    let data = line.trim().strip_prefix("data: ")?;
+    let ev: Value = serde_json::from_str(data).ok()?;
+    match ev.get("type").and_then(|t| t.as_str())? {
+        "content_block_start" => {
+            if let Some(block) = ev.get("content_block") {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    tool_bufs.insert(idx, (id, name, String::new()));
+                }
+            }
+            None
+        }
+        "content_block_delta" => {
+            let dt = ev.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str());
+            if dt == Some("text_delta") {
+                ev.get("delta")
+                    .and_then(|d| d.get("text"))
+                    .and_then(|t| t.as_str())
+                    .map(|t| Message::assistant(t.to_string()))
+            } else if dt == Some("input_json_delta") {
+                let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                if let Some(partial) = ev
+                    .get("delta")
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(|p| p.as_str())
+                {
+                    if let Some(slot) = tool_bufs.get_mut(&idx) {
+                        slot.2.push_str(partial);
+                    }
+                }
+                None
+            } else {
+                None
+            }
+        }
+        "message_stop" => {
+            if tool_bufs.is_empty() {
+                return None;
+            }
+            let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
+            idxs.sort();
+            let tool_calls: Vec<kernel_core::ToolCall> = idxs
+                .into_iter()
+                .filter_map(|idx| tool_bufs.remove(&idx))
+                .map(|(id, name, args)| kernel_core::ToolCall {
+                    id,
+                    call_type: "function".into(),
+                    function: kernel_core::FunctionCall {
+                        name,
+                        arguments: if args.is_empty() { "{}".to_string() } else { args },
+                    },
+                })
+                .collect();
+            Some(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls,
+                tool_call_id: None,
+                reasoning: None,
+            })
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +369,10 @@ pub struct ReactAgent {
     hooks: Option<Arc<HookManager>>,
     max_steps: usize,
     system_prompt: String,
+    /// Context passed to every tool invocation. Defaults to empty
+    /// (`ToolContext::default()`) — set via [`with_context`] when the agent
+    /// should operate in a specific working dir / conversation.
+    ctx: ToolContext,
 }
 
 impl ReactAgent {
@@ -305,6 +387,7 @@ impl ReactAgent {
             hooks: None,
             max_steps: 12,
             system_prompt: system_prompt.into(),
+            ctx: ToolContext::default(),
         }
     }
 
@@ -315,6 +398,14 @@ impl ReactAgent {
 
     pub fn with_max_steps(mut self, n: usize) -> Self {
         self.max_steps = n;
+        self
+    }
+
+    /// Set the ToolContext forwarded to every tool invocation. Without this,
+    /// file-scoped tools receive `working_dir = None` and cannot locate the
+    /// project.
+    pub fn with_context(mut self, ctx: ToolContext) -> Self {
+        self.ctx = ctx;
         self
     }
 
@@ -340,7 +431,7 @@ impl ReactAgent {
                 return Ok(resp.content);
             }
             for call in &resp.tool_calls {
-                let result = self.execute_tool_call(call, &ToolContext::default()).await;
+                let result = self.execute_tool_call(call, &self.ctx).await;
                 history.push(Message {
                     role: Role::Tool,
                     content: result,
@@ -412,6 +503,7 @@ impl kernel_core::Agent for ReactAgent {
         let hooks = self.hooks.clone();
         let system_prompt = self.system_prompt.clone();
         let max_steps = self.max_steps;
+        let ctx = self.ctx.clone();
         let task = input.prompt;
         let model_opt = input.model;
 
@@ -433,17 +525,38 @@ impl kernel_core::Agent for ReactAgent {
             let mut final_output = String::new();
 
             for _step in 0..max_steps {
-                let resp = bound.generate(&history, &opts).await.map_err(Error::from)?;
-                history.push(resp.clone());
-                if !resp.content.is_empty() {
-                    yield AgentEvent::Token(resp.content.clone());
+                // Real streaming: consume the model's SSE stream, yielding each
+                // text delta as a Token (chat renders token-by-token) while the
+                // stream() helper accumulates tool_calls from content_block_start
+                // + input_json_delta events. Text + tool_calls are reassembled
+                // into one assistant Message for coherent next-turn history.
+                use futures::StreamExt;
+                let mut turn_stream = bound.stream(&history, &opts).map_err(Error::from)?;
+                let mut turn_text = String::new();
+                let mut turn_tool_calls: Vec<kernel_core::ToolCall> = Vec::new();
+                while let Some(msg_res) = turn_stream.next().await {
+                    let msg = msg_res.map_err(Error::from)?;
+                    if !msg.content.is_empty() {
+                        turn_text.push_str(&msg.content);
+                        yield AgentEvent::Token(msg.content.clone());
+                    }
+                    if !msg.tool_calls.is_empty() {
+                        turn_tool_calls = msg.tool_calls;
+                    }
                 }
-                if resp.tool_calls.is_empty() {
-                    final_output = resp.content;
+                history.push(Message {
+                    role: Role::Assistant,
+                    content: turn_text.clone(),
+                    tool_calls: turn_tool_calls.clone(),
+                    tool_call_id: None,
+                    reasoning: None,
+                });
+                if turn_tool_calls.is_empty() {
+                    final_output = turn_text;
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
-                for call in &resp.tool_calls {
+                for call in &turn_tool_calls {
                     yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                         tool: call.function.name.clone(),
                         arguments: call.function.arguments.clone(),
@@ -471,7 +584,7 @@ impl kernel_core::Agent for ReactAgent {
                     let result = match blocked {
                         Some(b) => b,
                         None => match tools.find(&call.function.name) {
-                            Some(t) => match t.invoke(&call.function.arguments, &ToolContext::default()).await {
+                            Some(t) => match t.invoke(&call.function.arguments, &ctx).await {
                                 Ok(out) => {
                                     yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
                                         tool: call.function.name.clone(),
@@ -598,5 +711,67 @@ mod tests {
         assert!(reg.find("echo").is_some());
         assert!(reg.find("nope").is_none());
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn sse_text_delta_yields_assistant_message() {
+        let mut bufs = HashMap::new();
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#;
+        let m = handle_sse_line(line, &mut bufs).unwrap();
+        assert_eq!(m.content, "hi");
+        assert!(m.tool_calls.is_empty());
+        assert!(bufs.is_empty(), "text delta must not touch the tool accumulator");
+    }
+
+    #[test]
+    fn sse_accumulates_tool_use_across_split_json_deltas() {
+        let mut bufs = HashMap::new();
+        // content_block_start opens a tool_use block at index 1.
+        let start = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_9","name":"read_file"}}"#;
+        assert!(handle_sse_line(start, &mut bufs).is_none(), "start yields nothing");
+        // input_json_delta arrives in two fragments — Anthropic streams partial JSON.
+        let d1 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/a"}}"#;
+        let d2 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":".txt\"}"}}"#;
+        assert!(handle_sse_line(d1, &mut bufs).is_none(), "json delta yields nothing");
+        assert!(handle_sse_line(d2, &mut bufs).is_none(), "json delta yields nothing");
+        // message_stop reassembles the terminal tool_calls Message.
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        assert_eq!(m.content, "");
+        assert_eq!(m.tool_calls.len(), 1);
+        let call = &m.tool_calls[0];
+        assert_eq!(call.id, "call_9");
+        assert_eq!(call.function.name, "read_file");
+        assert_eq!(call.function.arguments, r#"{"path":"/a.txt"}"#);
+    }
+
+    #[test]
+    fn sse_message_stop_without_tools_yields_none() {
+        // A pure-text turn has no tool_use blocks; message_stop yields nothing
+        // and the run loop treats the ended stream as a turn boundary.
+        let mut bufs = HashMap::new();
+        assert!(handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).is_none());
+    }
+
+    #[test]
+    fn sse_multiple_tool_calls_preserve_index_order() {
+        let mut bufs = HashMap::new();
+        // Two tool_use blocks, opened out of index order (1 then 0).
+        let s1 = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"b","name":"second"}}"#;
+        let s0 = r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"first"}}"#;
+        handle_sse_line(s1, &mut bufs);
+        handle_sse_line(s0, &mut bufs);
+        handle_sse_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            &mut bufs,
+        );
+        handle_sse_line(
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            &mut bufs,
+        );
+        let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs).unwrap();
+        assert_eq!(m.tool_calls.len(), 2);
+        // Reassembled in index order regardless of arrival order.
+        assert_eq!(m.tool_calls[0].id, "a");
+        assert_eq!(m.tool_calls[1].id, "b");
     }
 }

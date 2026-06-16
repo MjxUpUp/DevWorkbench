@@ -249,7 +249,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.sessionBlocks);
       const existing = next.get(sessionId) ?? [];
-      next.set(sessionId, [...existing, event]);
+      // Merge consecutive text deltas into one block. Real streaming emits a
+      // Text event per token; BlocksView renders each event as its own card, so
+      // without merging a long reply explodes into hundreds of cards and shatters
+      // Markdown across block boundaries. Concatenate onto the last text block.
+      const last = existing[existing.length - 1];
+      if (event.kind === 'text' && last && last.kind === 'text') {
+        next.set(sessionId, [
+          ...existing.slice(0, -1),
+          { kind: 'text', content: last.content + event.content },
+        ]);
+      } else {
+        next.set(sessionId, [...existing, event]);
+      }
       return { sessionBlocks: next };
     });
   },
