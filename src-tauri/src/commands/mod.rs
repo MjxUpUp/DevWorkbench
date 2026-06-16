@@ -6,6 +6,7 @@ pub mod scanner;
 pub mod projects;
 pub mod git;
 pub mod agents;
+pub mod checkpoint;
 pub mod files;
 pub mod workflows;
 pub mod mcp_cmds;

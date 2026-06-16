@@ -2,6 +2,7 @@
 //! DevWorkbench subsystems (pty agents, knowledge store, quality gates) plus
 //! the self-built transparent agent's tool ecosystem (MCP, Skills, Hooks).
 
+pub mod checkpoint;
 pub mod executor;
 pub mod hooks;
 pub mod honesty;

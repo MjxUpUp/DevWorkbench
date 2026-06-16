@@ -163,6 +163,8 @@ pub fn run() {
             commands::projects::record_tool_open,
             commands::git::get_git_status,
             commands::git::batch_get_git_status,
+            commands::checkpoint::get_checkpoint,
+            commands::checkpoint::rollback_to_checkpoint,
             commands::agents::discover_agents_cmd,
             commands::agents::recommend_agent_for_project,
             commands::agents::spawn_agent_session,

@@ -155,6 +155,18 @@ fn react_chat_driver(
         &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
     )?;
 
+    // Shadow-git checkpoint at session start: snapshot the working tree so the
+    // user can roll this agent's changes back later. Best-effort — a non-repo
+    // path or missing git only disables rollback for this session, it never
+    // blocks the run (checkpoint is an enhancement, not a gate).
+    if let Err(e) = crate::kernel_impl::checkpoint::create_at_session_start(
+        project_path,
+        &session_id,
+        "session_start",
+    ) {
+        log::warn!("[checkpoint] create failed for {session_id}: {e} (rollback disabled)");
+    }
+
     // Prior conversation turns → structured Message history. This is the
     // ReactAgent analog of the CLI path's inject_conversation_context, but built
     // from persisted blocks (real user/assistant/tool turns) instead of a flat

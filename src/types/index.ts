@@ -88,6 +88,28 @@ export interface ContextSnapshot {
   fileDiffs?: FileDiff[];
 }
 
+// ---- Shadow-git checkpoint (v1.2 T6) ----
+
+/** Working-tree snapshot captured at ReactAgent session start, enabling one-
+ *  click rollback of the agent's changes. camelCase matches the Rust struct's
+ *  `#[serde(rename_all = "camelCase")]`. */
+export interface Checkpoint {
+  sessionId: string;
+  projectPath: string;
+  createdAt: string;
+  headSha: string;
+  stashSha: string | null;
+  untrackedAtCheckpoint: string[];
+  reason: string;
+}
+
+/** Outcome of rolling a session back to its checkpoint. */
+export interface RollbackResult {
+  restoredFiles: string[];
+  removedUntracked: string[];
+  skipped: string[];
+}
+
 export interface Session {
   id: string;
   projectPath: string;
