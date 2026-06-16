@@ -200,21 +200,18 @@ impl Agent for OpaqueAgent {
                 listener_ids.push(ev_id);
             } else {
                 // Raw agent (codex/gemini/qwen/cursor/pi): pty:output → Token.
-                // Decode bytes lossily as UTF-8; ANSI escapes are preserved.
+                // The sessionId filter + `data` byte-array decode + lossy UTF-8
+                // live in the pure `decode_pty_output_payload` helper so they're
+                // unit-testable without an AppHandle (symmetric to the claude
+                // channel's decode_agent_event_payload). from_str (I/O) and
+                // try_send (backpressure) stay here. ANSI escapes are preserved
+                // through the lossy UTF-8 decode.
                 let tx_out = tx.clone();
                 let sid_for_output = session_id.clone();
                 let output_id = app.listen("pty:output", move |event| {
-                    let payload = event.payload();
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                        if v.get("sessionId").and_then(|s| s.as_str()) == Some(&sid_for_output) {
-                            if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
-                                let bytes: Vec<u8> = data.iter()
-                                    .filter_map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
-                                    .collect();
-                                let text = String::from_utf8_lossy(&bytes).into_owned();
-                                let _ = tx_out.try_send(AgentMsg::Token(text));
-                            }
-                        }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
+                    if let Some(text) = decode_pty_output_payload(&v, &sid_for_output) {
+                        let _ = tx_out.try_send(AgentMsg::Token(text));
                     }
                 });
                 listener_ids.push(output_id);
@@ -345,6 +342,41 @@ fn decode_agent_event_payload(
         return Vec::new();
     };
     crate::agents::react_chat::chat_event_to_agent_events(&wire, pending)
+}
+
+/// Pure mirror of `decode_agent_event_payload` for the Raw (non-claude) channel:
+/// parse + sessionId-filter + extract the `data` byte array from a `pty:output`
+/// payload and lossy-decode it to a Token string. Returns None for: a
+/// non-matching sessionId (incl. PREFIX sessionIds — `==` is exact, not
+/// starts_with), missing/non-array `data`, or any non-object payload — mirroring
+/// the Raw listener's silent-skip contract. The raw-payload `from_str` (I/O) and
+/// `try_send` (channel backpressure) stay in the listener.
+///
+/// SEMANTIC PIN — Some("") vs None is load-bearing and asymmetric with the
+/// claude channel: an EMPTY data array `[]` is a legal array → yields Some(""),
+/// which the listener forwards as Token(""). Missing/non-array `data`, a
+/// non-matching sid, or a non-object payload yields None (listener skips). Do
+/// NOT "symmetrize" []→None — it changes behavior. Truth source: the listener's
+/// `if let Some(data) = v.get("data").and_then(|d| d.as_array())`, which enters
+/// for `[]`.
+///
+/// Extracted pure so the byte-decode (u64→u8 filter + from_utf8_lossy) — a
+/// Raw-channel-specific invariant with no claude counterpart — is unit-testable
+/// without an AppHandle. NO `pending: &mut VecDeque` param (unlike the claude
+/// helper): the Raw path has no FIFO ToolUse↔ToolResult pairing to maintain.
+fn decode_pty_output_payload(
+    payload: &serde_json::Value,
+    session_id: &str,
+) -> Option<String> {
+    if payload.get("sessionId").and_then(|s| s.as_str()) != Some(session_id) {
+        return None;
+    }
+    let data = payload.get("data")?.as_array()?;
+    let bytes: Vec<u8> = data
+        .iter()
+        .filter_map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
+        .collect();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -592,5 +624,128 @@ mod tests {
         }
         assert_tool_event(&all[1], "Read", ToolCallStatus::Started);
         assert_tool_event(&all[2], "Read", ToolCallStatus::Succeeded);
+    }
+
+    // ---- decode_pty_output_payload (Raw channel, symmetric to the claude
+    // decode_* tests above) ----
+
+    #[test]
+    fn decode_pty_output_matching_session_emits_decoded_text() {
+        // Happy path: matching session + ASCII byte array → decoded string.
+        let out = decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": [104, 105] }),
+            "s1",
+        );
+        assert_eq!(out.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn decode_pty_output_filters_other_session_id() {
+        // Concurrency-critical: a workflow runs multiple raw nodes in parallel,
+        // each listening the SAME global pty:output channel filtered by its own
+        // sid. A payload for a different session must yield None (listener
+        // skips) — symmetric to the claude channel's cross-session guard.
+        let out = decode_pty_output_payload(
+            &json!({ "sessionId": "other", "data": [104] }),
+            "s1",
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn decode_pty_output_filters_prefix_session_id() {
+        // `==` is EXACT, not starts_with. Two UUID-like sessions sharing a
+        // prefix ("s1" vs "s1prefix") must NOT cross-trigger. (The claude
+        // channel's test set is missing this boundary — added here on raw.)
+        let out = decode_pty_output_payload(
+            &json!({ "sessionId": "s1prefix", "data": [104] }),
+            "s1",
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn decode_pty_output_missing_data_field() {
+        let out = decode_pty_output_payload(&json!({ "sessionId": "s1" }), "s1");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn decode_pty_output_data_not_array() {
+        // data as a string or number is not a byte array → None.
+        assert!(decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": "hi" }),
+            "s1",
+        )
+        .is_none());
+        assert!(decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": 42 }),
+            "s1",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn decode_pty_output_empty_data_array_is_some_empty_string() {
+        // SEMANTIC PIN: an empty array is a LEGAL array → Some(""), NOT None.
+        // Asymmetric with missing/non-array data (which yield None) and with the
+        // claude channel. Guards against a future "symmetrization" that would
+        // change behavior. Truth source: the listener's
+        // `if let Some(data) = ...as_array()` enters for `[]`.
+        let out = decode_pty_output_payload(&json!({ "sessionId": "s1", "data": [] }), "s1");
+        assert_eq!(out.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn decode_pty_output_non_u8_elements_dropped() {
+        // A mixed array: only values where as_u64→Some(n) AND
+        // u8::try_from(n)→Ok survive the filter_map. Out-of-range (256),
+        // negative (-1), string, null, bool, and non-integer float (1.5) all
+        // drop; 104/105 survive → "hi".
+        let out = decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": [104, 256, -1, "x", null, true, 1.5, 105] }),
+            "s1",
+        );
+        assert_eq!(out.as_deref(), Some("hi"));
+
+        // Integer-float boundary: json!(256.0) is an f64 that as_u64() ACCEPTS
+        // (Some(256)), but u8::try_from(256) rejects it — so it drops via the
+        // SAME u8::try_from branch as the integer 256 above, NOT via the
+        // as_u64-None branch that 1.5 takes. Pinning the distinction.
+        let float_out = decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": [256.0] }),
+            "s1",
+        );
+        assert_eq!(float_out.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn decode_pty_output_invalid_utf8_lossy() {
+        // 0xFF is not a valid UTF-8 lead byte → from_utf8_lossy replaces it with
+        // U+FFFD, 0x41 ('A') survives. Raw-channel-specific invariant (the
+        // claude channel has no byte decode). Pins: no panic, replacement
+        // semantics — a CLI emitting non-UTF-8 bytes (Windows paths, broken
+        // emoji) still surfaces, just with U+FFFD.
+        let out = decode_pty_output_payload(
+            &json!({ "sessionId": "s1", "data": [255, 65] }),
+            "s1",
+        );
+        assert_eq!(out.as_deref(), Some("\u{FFFD}A"));
+    }
+
+    #[test]
+    fn decode_pty_output_session_id_non_string() {
+        // sessionId as a number must not match the string target (and must not
+        // panic) — number.as_str() is None.
+        let out = decode_pty_output_payload(&json!({ "sessionId": 42, "data": [] }), "42");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn decode_pty_output_non_object_payload() {
+        // A non-object payload (string / array / null) must yield None, no panic.
+        assert!(decode_pty_output_payload(&json!("str"), "s1").is_none());
+        assert!(decode_pty_output_payload(&json!([1, 2]), "s1").is_none());
+        assert!(decode_pty_output_payload(&json!(null), "s1").is_none());
     }
 }
