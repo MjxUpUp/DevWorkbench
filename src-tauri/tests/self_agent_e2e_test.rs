@@ -99,6 +99,30 @@ impl ChatModel for StreamingChatModel {
     }
 }
 
+/// A capture mock: records the EXACT `&[Message]` history its first `stream()`
+/// call receives, then yields one terminal assistant message so `run()`
+/// finishes in a single step. Used to verify `with_history` splices prior turns
+/// into the model's input in the right place/order.
+struct CapturingChatModel {
+    seen: Arc<Mutex<Vec<Message>>>,
+}
+
+#[async_trait]
+impl ChatModel for CapturingChatModel {
+    async fn generate(&self, _m: &[Message], _o: &ModelOptions) -> Result<Message, Error> {
+        Err(Error::Unsupported("capture mock has no generate".into()))
+    }
+    fn stream(&self, m: &[Message], _o: &ModelOptions) -> Result<MessageStream, Error> {
+        // Record the full history the run loop handed us — this is the assertion
+        // target for the resume test.
+        *self.seen.lock().unwrap() = m.to_vec();
+        let s = async_stream::try_stream! {
+            yield Message::assistant("turn2 reply");
+        };
+        Ok(Box::pin(s))
+    }
+}
+
 fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
     ToolCall {
         id: id.into(),
@@ -331,4 +355,87 @@ async fn react_agent_streams_token_deltas_then_tool_calls_and_threads_ctx() {
     // Turn boundary after the final text-only turn, then Done.
     assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnBoundary)), "no TurnBoundary");
     assert!(events.iter().any(|e| matches!(e, AgentEvent::Done(_))), "no Done");
+}
+
+#[tokio::test]
+async fn react_agent_injects_prior_history_between_system_and_current_task() {
+    // G3a multi-turn resume: with_history splices prior-turn Messages between
+    // the system prompt and the current task, in order, so the model sees real
+    // conversation context — not just the latest prompt in isolation.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let model = CapturingChatModel { seen: Arc::clone(&seen) };
+    let registry = ToolRegistry::new();
+
+    // Prior turn 1: a user question + the assistant's reply (with a tool call)
+    // + the tool result — the exact shape turns_to_history produces.
+    let prior = vec![
+        Message::user("turn1 prompt"),
+        Message {
+            role: Role::Assistant,
+            content: "turn1 reply".into(),
+            tool_calls: vec![tool_call("turn0_call0", "probe", "{}")],
+            tool_call_id: None,
+            reasoning: None,
+        },
+        Message {
+            role: Role::Tool,
+            content: "turn1 tool result".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("turn0_call0".into()),
+            reasoning: None,
+        },
+    ];
+    let agent = ReactAgent::new(model, registry, "SYS").with_history(prior);
+
+    let mut stream = agent
+        .run(AgentInput {
+            prompt: "turn2 prompt".into(),
+            working_dir: None,
+            model: None,
+            resume_from: None,
+        })
+        .unwrap();
+    use futures::StreamExt;
+    while stream.next().await.is_some() {}
+
+    let captured = seen.lock().unwrap().clone();
+    // Expected order: system, prior[0..3], current task. No drops, no reordering.
+    assert_eq!(captured.len(), 5, "captured: {:?}", captured.iter().map(|m| (m.role, m.content.as_str())).collect::<Vec<_>>());
+    assert_eq!(captured[0].role, Role::System);
+    assert_eq!(captured[0].content, "SYS");
+    assert_eq!(captured[1].role, Role::User);
+    assert_eq!(captured[1].content, "turn1 prompt");
+    assert_eq!(captured[2].role, Role::Assistant);
+    assert_eq!(captured[2].content, "turn1 reply");
+    assert_eq!(captured[3].role, Role::Tool);
+    // Current task is LAST — after all prior history.
+    assert_eq!(captured[4].role, Role::User);
+    assert_eq!(captured[4].content, "turn2 prompt");
+}
+
+#[tokio::test]
+async fn react_agent_without_history_keeps_system_then_task_only() {
+    // Regression guard: empty history must reproduce the original single-turn
+    // shape — system, then the task, nothing spliced between.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let model = CapturingChatModel { seen: Arc::clone(&seen) };
+    let registry = ToolRegistry::new();
+    let agent = ReactAgent::new(model, registry, "SYS").with_history(Vec::new());
+
+    let mut stream = agent
+        .run(AgentInput {
+            prompt: "only prompt".into(),
+            working_dir: None,
+            model: None,
+            resume_from: None,
+        })
+        .unwrap();
+    use futures::StreamExt;
+    while stream.next().await.is_some() {}
+
+    let captured = seen.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2, "captured: {:?}", captured);
+    assert_eq!(captured[0].role, Role::System);
+    assert_eq!(captured[1].role, Role::User);
+    assert_eq!(captured[1].content, "only prompt");
 }

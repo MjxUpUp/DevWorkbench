@@ -442,7 +442,7 @@ pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
 /// (which has no serde derives) so this schema can evolve with the UI without
 /// touching the kernel trait layer. Serialized with `kind` as the discriminator
 /// tag so the TS union narrows on it.
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum ChatStreamEvent {
     #[serde(rename = "text")]
@@ -618,7 +618,7 @@ pub fn spawn_pty_agent(
 /// Load the completed prior turns of a conversation (oldest-first), best-effort.
 /// The currently-spawning turn isn't in the DB yet, so it's naturally excluded.
 /// A DB failure degrades to "no prior history" rather than blocking the spawn.
-fn load_prior_turns(db_conn: &crate::db::DbState, conversation_id: &str) -> Vec<crate::models::Session> {
+pub(crate) fn load_prior_turns(db_conn: &crate::db::DbState, conversation_id: &str) -> Vec<crate::models::Session> {
     let Ok(conn) = db_conn.get() else {
         return Vec::new();
     };

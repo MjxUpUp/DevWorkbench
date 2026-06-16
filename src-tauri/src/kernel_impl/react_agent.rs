@@ -373,6 +373,11 @@ pub struct ReactAgent {
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
     /// should operate in a specific working dir / conversation.
     ctx: ToolContext,
+    /// Prior conversation turns, injected between the system prompt and the
+    /// current task at the start of `run`/`run_loop`. Empty by default
+    /// (single-turn); set via [`with_history`] when resuming a conversation so
+    /// the model sees earlier user/assistant/tool turns as real `Message`s.
+    history: Vec<Message>,
 }
 
 impl ReactAgent {
@@ -388,6 +393,7 @@ impl ReactAgent {
             max_steps: 12,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
+            history: Vec::new(),
         }
     }
 
@@ -409,6 +415,17 @@ impl ReactAgent {
         self
     }
 
+    /// Inject prior conversation turns as `Message`s prepended (after the system
+    /// prompt, before the current task) to the model's history on each run. This
+    /// is the ReactAgent analog of the CLI path's prompt-prefix context
+    /// injection — but structured (real user/assistant/tool turns, not a flat
+    /// output_summary string). Symmetric to `with_context`: a pure builder that
+    /// only stores; the actual splice happens in `run`/`run_loop`.
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
     pub async fn run_loop(&self, task: &str, opts: ModelOptions) -> Result<String, Error> {
         let infos = self.tools.infos();
         let model: Arc<dyn ChatModel> = if infos.is_empty() {
@@ -423,7 +440,11 @@ impl ReactAgent {
             }
         };
 
-        let mut history = vec![Message::system(&self.system_prompt), Message::user(task)];
+        let prior_history = self.history.clone();
+        let mut history = Vec::with_capacity(2 + prior_history.len());
+        history.push(Message::system(&self.system_prompt));
+        history.extend(prior_history);
+        history.push(Message::user(task));
         for _step in 0..self.max_steps {
             let resp = model.generate(&history, &opts).await?;
             history.push(resp.clone());
@@ -504,6 +525,7 @@ impl kernel_core::Agent for ReactAgent {
         let system_prompt = self.system_prompt.clone();
         let max_steps = self.max_steps;
         let ctx = self.ctx.clone();
+        let prior_history = self.history.clone();
         let task = input.prompt;
         let model_opt = input.model;
 
@@ -520,7 +542,10 @@ impl kernel_core::Agent for ReactAgent {
                     }
                 }
             };
-            let mut history = vec![Message::system(&system_prompt), Message::user(&task)];
+            let mut history = Vec::with_capacity(2 + prior_history.len());
+            history.push(Message::system(&system_prompt));
+            history.extend(prior_history.iter().cloned());
+            history.push(Message::user(&task));
             let opts = ModelOptions { model: model_opt, ..Default::default() };
             let mut final_output = String::new();
 

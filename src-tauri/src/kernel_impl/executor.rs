@@ -81,6 +81,7 @@ impl Executor for KernelExecutor {
                     mcp.as_deref(),
                     &project_path,
                     None,
+                    Vec::new(),
                 )?)
             }
         };
@@ -156,6 +157,7 @@ pub(crate) fn build_react_agent(
     mcp: Option<&McpRegistry>,
     working_dir: &str,
     conversation_id: Option<&str>,
+    history: Vec<kernel_core::Message>,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -207,7 +209,8 @@ pub(crate) fn build_react_agent(
         registry,
         "You are a Dev Workbench kernel agent. Complete the task concisely.",
     )
-    .with_context(ctx))
+    .with_context(ctx)
+    .with_history(history))
 }
 
 /// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s:

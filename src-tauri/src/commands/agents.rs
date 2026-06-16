@@ -141,6 +141,19 @@ fn react_chat_driver(
         &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
     )?;
 
+    // Prior conversation turns → structured Message history. This is the
+    // ReactAgent analog of the CLI path's inject_conversation_context, but built
+    // from persisted blocks (real user/assistant/tool turns) instead of a flat
+    // output_summary string. Computed before spawn so it can be moved into the
+    // task. load_prior_turns returns ASC; the current turn (just registered as
+    // Running) is excluded by turns_to_history's Running filter.
+    let prior_turns = pty::load_prior_turns(&db_conn, &resolved_conv_id);
+    let history_drv = react_chat::turns_to_history(
+        &prior_turns,
+        react_chat::REACT_HISTORY_TURN_TEXT_CAP,
+        react_chat::REACT_HISTORY_TOTAL_TEXT_CAP,
+    );
+
     let started = std::time::Instant::now();
     let app_drv = app.clone();
     let sid_drv = session_id.clone();
@@ -158,6 +171,7 @@ fn react_chat_driver(
             mcp.as_deref(),
             &pp_drv,
             Some(conv_drv.as_str()),
+            history_drv,
         ) {
             Ok(a) => a,
             Err(e) => {
