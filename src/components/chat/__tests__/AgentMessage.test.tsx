@@ -74,13 +74,30 @@ describe('AgentMessage — completed-session output', () => {
     });
   });
 
-  it('does not call read_session_output_cmd while running (live terminal stream instead)', () => {
+  it('structured agent running shows chat-blocks waiting, NOT terminal (no full-output fetch)', () => {
+    // claude_code (and react_kernel) are structured: while running with no block
+    // yet (e.g. the model gateway holding its response) they must render
+    // BlocksView's "等待模型响应" waiting state — NEVER the terminal box. This
+    // is the regression the fix targets: previously claude fell through to
+    // TerminalView here because `running` short-circuited `showTerminal`.
     const runningSession: Session = { ...base, status: 'running', outputSummary: null, finishedAt: null, exitCode: null };
     render(<AgentMessage session={runningSession} running={true} qualityReport={noReport} />);
 
-    // Running sessions stream via TerminalView; the full-output fetch must NOT fire.
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
+    expect(screen.queryByTestId('terminal-stub')).not.toBeInTheDocument();
+    expect(screen.getByText('等待模型响应')).toBeInTheDocument();
+  });
+
+  it('raw agent (pi) running keeps the terminal stream, not chat-blocks', () => {
+    // Raw agents emit only pty:output bytes → no agent:event blocks → they keep
+    // the terminal path while running. Guards the structured/raw split so the
+    // fix doesn't accidentally force pi/codex into BlocksView waiting.
+    const runningPi: Session = { ...base, agentType: 'pi', status: 'running', outputSummary: null, finishedAt: null, exitCode: null };
+    render(<AgentMessage session={runningPi} running={true} qualityReport={noReport} />);
+
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('read_session_output_cmd', expect.anything());
     expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
+    expect(screen.queryByText('等待模型响应')).not.toBeInTheDocument();
   });
 
   it('keeps the terminal as a placeholder while the full output loads (no flash)', async () => {

@@ -15,12 +15,26 @@ interface BlocksViewProps {
  *  (collapsible output, red on error), result (final status line). Raw agents
  *  (pi) emit no agent:event and never reach this view. */
 export function BlocksView({ events, running }: BlocksViewProps) {
+  // Structured agents (claude/react_kernel) reach this view even while running
+  // with zero blocks yet — e.g. the model gateway is holding its response. Show
+  // a chat-blocks-native "waiting" hint instead of falling back to the terminal
+  // box, so the chat-blocks form is the ONLY display for structured agents.
+  const waiting = running && events.length === 0;
   return (
     <div className="chat-blocks">
-      {events.map((ev, i) => (
-        <BlockCard key={i} event={ev} />
-      ))}
-      {running && <span className="chat-blocks-cursor" aria-hidden="true" />}
+      {waiting ? (
+        <div className="chat-blocks-waiting">
+          <span className="chat-blocks-waiting-text">等待模型响应</span>
+          <span className="chat-blocks-cursor" aria-hidden="true" />
+        </div>
+      ) : (
+        <>
+          {events.map((ev, i) => (
+            <BlockCard key={i} event={ev} />
+          ))}
+          {running && <span className="chat-blocks-cursor" aria-hidden="true" />}
+        </>
+      )}
     </div>
   );
 }

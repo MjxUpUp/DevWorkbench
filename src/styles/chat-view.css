@@ -615,6 +615,19 @@
   border-radius: 1px;
 }
 
+/* Waiting hint — structured agent (claude/react_kernel) running but no block has
+   arrived yet (e.g. the model gateway is holding its response). Replaces the old
+   terminal "等待输出" box so the chat-blocks form is the only display for
+   structured agents. */
+.chat-blocks-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  padding: 2px 0;
+}
+
 /* Decision Chain steps */
 .decision-chain-steps {
   display: flex;

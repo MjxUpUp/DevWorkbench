@@ -61,9 +61,14 @@ describe('BlocksView', () => {
     expect(card?.classList.contains('error')).toBe(true);
   });
 
-  it('renders just a caret for an empty running stream', () => {
+  it('renders a waiting hint + caret for an empty running stream', () => {
+    // Running but no block has arrived yet (e.g. model gateway holding its
+    // response) → show a "等待模型响应" hint + the streaming caret. This is the
+    // structured-agent running state that replaces the old terminal "等待输出"
+    // box — the chat-blocks form stays the only display for claude/react_kernel.
     const { container } = render(<BlocksView events={[]} running={true} />);
     expect(container.querySelectorAll('.chat-block').length).toBe(0);
+    expect(screen.getByText('等待模型响应')).toBeInTheDocument();
     expect(container.querySelector('.chat-blocks-cursor')).not.toBeNull();
   });
 

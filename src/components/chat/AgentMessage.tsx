@@ -47,6 +47,16 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   // still renders its block cards instead of the raw terminal log.
   const blocks = liveBlocks.length > 0 ? liveBlocks : (session.blocks ?? EMPTY_BLOCKS);
   const useBlocks = blocks.length > 0;
+  // Structured agents (claude_code / react_kernel) emit `agent:event` blocks and
+  // must NEVER render the terminal form — even before the first block arrives
+  // (e.g. the model gateway is holding its response). Without this gate, claude
+  // showed a terminal box "等待输出" during that running-but-empty window,
+  // contradicting the B-plan goal of eliminating the terminal form for
+  // structured agents. Raw agents (pi/codex/…) emit only pty:output bytes, so
+  // they keep the terminal path. `showBlocks` drives the render branch below;
+  // BlocksView itself renders a chat-blocks "waiting" hint when empty + running.
+  const isStructured = session.agentType === 'claude_code' || session.agentType === 'react_kernel';
+  const showBlocks = useBlocks || (isStructured && running);
 
   // Completed session → load the full reply text once. Falls back to the
   // (truncated) outputSummary if the log file is gone, so something always shows.
@@ -158,15 +168,15 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         </div>
       )}
 
-      {/* 输出区（三态互斥）：
-          - running：Terminal 实时流式
-          - 刚完成 + pty 缓存仍在 + 完整输出未就绪：保留 Terminal 作占位。关键在于
-            这里 NOT 卸载 TerminalView —— 完成→就绪之间它继续渲染 pty 缓存最后画面，
-            等 fullOutput 一就绪，卸载 terminal 与挂载 markdown 在同一 React commit，
-            xterm canvas 无残留空间，杜绝"一闪而过的 terminal"。
-          - 完整输出就绪：Markdown 渲染（完整、未截断）
-          - 历史会话（无 pty 缓存）未就绪：loading 占位 */}
-      {useBlocks ? (
+      {/* 输出区（结构化 agent 永远走 chat-blocks，含等待态；raw agent 三态）：
+          - 结构化（claude/react_kernel）有 blocks / 运行中：BlocksView（运行且无
+            block 时 BlocksView 渲染"等待模型响应"等待态，绝不回退 terminal）
+          - raw agent running：Terminal 实时流式
+          - raw 刚完成 + pty 缓存仍在 + 完整输出未就绪：保留 Terminal 作占位（NOT
+            卸载 TerminalView，完成→就绪同帧 swap，杜绝 terminal"一闪"）
+          - raw 完整输出就绪：Markdown 渲染（完整、未截断）
+          - raw 历史会话（无 pty 缓存）未就绪：loading 占位 */}
+      {showBlocks ? (
         <div className="agent-block">
           <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
             <span className="agent-block-title">输出</span>
