@@ -35,18 +35,6 @@ pub fn load_sessions(db: State<'_, DbState>) -> Result<Vec<Session>, AppError> {
     crate::agents::session::load_sessions_from_db(&conn).map_err(AppError::from)
 }
 
-#[tauri::command]
-pub fn get_sessions_for_project(db: State<'_, DbState>, project_path: String) -> Result<Vec<Session>, AppError> {
-    let conn = db.get()?;
-    crate::agents::session::get_sessions_for_project_db(&conn, &project_path).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn update_session(db: State<'_, DbState>, id: String, patch: serde_json::Value) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::agents::session::update_session_db(&conn, &id, patch).map_err(AppError::from)
-}
-
 /// Read the FULL (ANSI-stripped) output for a session, for the completed-session terminal view.
 /// Unlike the stored `outputSummary` (tail-truncated to OUTPUT_SUMMARY_MAX_CHARS), this returns
 /// the complete text so the completed session isn't cut off mid-reply.
@@ -474,18 +462,6 @@ pub fn delete_knowledge_entry(db: State<'_, DbState>, id: String) -> Result<(), 
     crate::knowledge::store::delete_entry(&conn, &id).map_err(AppError::from)
 }
 
-#[tauri::command]
-pub fn trigger_knowledge_collection(
-    db: State<'_, DbState>,
-    project_path: String,
-    session_id: String,
-    agent_type: crate::models::AgentType,
-) -> Result<usize, AppError> {
-    let conn = db.get()?;
-    crate::knowledge::collector::collect_from_session(&conn, &project_path, &session_id, &agent_type)
-        .map_err(AppError::from)
-}
-
 // Config commands
 #[tauri::command]
 pub fn load_mcp_config(project_path: String) -> Result<crate::models::McpConfigFile, AppError> {
@@ -521,8 +497,3 @@ pub fn get_quality_report_for_session(db: State<'_, DbState>, session_id: String
     crate::quality::report::get_report_for_session(&conn, &session_id).map_err(AppError::from)
 }
 
-#[tauri::command]
-pub fn run_quality_gate(project_path: String) -> Result<crate::models::QualityReport, AppError> {
-    let path = std::path::Path::new(&project_path);
-    crate::quality::forge::run_forge_gate(path).map_err(AppError::from)
-}

@@ -30,9 +30,3 @@ pub async fn save_budget(db: State<'_, DbState>, settings: BudgetSettings) -> Re
     let conn = db.get().map_err(|e| AppError::Cost(format!("Lock error: {}", e)))?;
     agentfare::save_budget_settings(&conn, &settings)
 }
-
-#[tauri::command]
-pub async fn check_budget_alert(db: State<'_, DbState>) -> Result<bool, AppError> {
-    let conn = db.get().map_err(|e| AppError::Cost(format!("Lock error: {}", e)))?;
-    agentfare::check_budget_alert(&conn)
-}

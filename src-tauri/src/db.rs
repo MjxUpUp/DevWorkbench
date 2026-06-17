@@ -339,24 +339,12 @@ pub fn init_db(db_path: &Path) -> Result<Connection, AppError> {
     Ok(conn)
 }
 
-/// Check whether data migration has already been applied (version >= 8).
-pub fn is_migrated(conn: &Connection) -> bool {
-    match conn.query_row(
-        "SELECT COUNT(*) FROM schema_version WHERE version >= 8",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(count) => count > 0,
-        Err(_) => false,
-    }
-}
-
 /// Check whether the v0.6→v0.7 sessions migration has been applied (version >= 7).
 ///
-/// This is separate from `is_migrated` (>= 8) because migrate_v6_to_v7 runs
-/// *before* migrate_v7_to_v8 writes version=8. Using is_migrated as the v6
-/// guard made v6_to_v7 short-circuit once v7_to_v8 had run, so sessions.json
-/// was never imported — silently dropping all v0.6 conversation history.
+/// Reads version >= 7 from schema_version. migrate_v6_to_v7 runs *before*
+/// migrate_v7_to_v8 writes version=8, so this v6 guard must key off 7, not 8 —
+/// keying off 8 made v6_to_v7 short-circuit once v7_to_v8 had run, so
+/// sessions.json was never imported (silently dropping v0.6 history).
 pub fn is_v6_migrated(conn: &Connection) -> bool {
     match conn.query_row(
         "SELECT COUNT(*) FROM schema_version WHERE version >= 7",

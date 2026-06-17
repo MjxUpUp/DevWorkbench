@@ -13,6 +13,4 @@ pub mod mcp_tool;
 pub mod model_router;
 pub mod opaque_agent;
 pub mod react_agent;
-pub mod retriever;
 pub mod skill_tool;
-pub mod unified_context;

@@ -57,13 +57,6 @@ impl From<String> for AppError {
     }
 }
 
-/// Bridge kernel-core errors into AppError (compose layer returns kernel_core::Error).
-impl From<kernel_core::Error> for AppError {
-    fn from(e: kernel_core::Error) -> Self {
-        AppError::Agent(e.to_string())
-    }
-}
-
 // Tauri commands require errors to implement Serialize.
 // We serialize the display string so the frontend receives a human-readable message.
 impl Serialize for AppError {

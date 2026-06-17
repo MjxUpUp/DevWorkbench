@@ -23,19 +23,6 @@ pub fn get_git_status(project_path: String) -> Result<GitStatus, String> {
     })
 }
 
-/// 批量获取多个项目的 Git 状态
-#[tauri::command]
-pub fn batch_get_git_status(project_paths: Vec<String>) -> Result<Vec<(String, Option<GitStatus>)>, String> {
-    let results = project_paths
-        .into_iter()
-        .map(|path| {
-            let status = get_git_status(path.clone()).ok();
-            (path, status)
-        })
-        .collect();
-    Ok(results)
-}
-
 fn get_branch_name(repo: &git2::Repository) -> String {
     // 先尝试获取当前 HEAD 指向的分支名
     if let Ok(head) = repo.head() {

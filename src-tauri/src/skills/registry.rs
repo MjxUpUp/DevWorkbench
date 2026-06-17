@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 
 use crate::error::AppError;
-use crate::models::{Skill, SkillReport};
+use crate::models::Skill;
 
 /// Helper: parse metadata JSON and populate catalog fields on a Skill.
 fn enrich_from_metadata(skill: &mut Skill) {
@@ -144,16 +144,6 @@ pub fn find_by_org_name(conn: &Connection, org: &str, name: &str) -> Result<Opti
 /// Remove a skill by ID.
 pub fn uninstall_skill(conn: &Connection, id: &str) -> Result<(), AppError> {
     conn.execute("DELETE FROM skills WHERE id = ?1", [id])?;
-    Ok(())
-}
-
-/// Insert a skill scan report.
-pub fn add_report(conn: &Connection, report: &SkillReport) -> Result<(), AppError> {
-    conn.execute(
-        "INSERT INTO skill_reports (id, skill_id, scan_result, scanned_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![report.id, report.skill_id, report.scan_result, report.scanned_at],
-    )?;
     Ok(())
 }
 

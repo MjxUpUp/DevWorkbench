@@ -5,12 +5,6 @@ use rusqlite::Connection;
 use crate::error::AppError;
 use crate::models::{BudgetSettings, CostRecord, CostSummary, CostTrendPoint};
 
-/// Read cost records from the local AgentFare database.
-pub fn read_cost_records(_db_path: &str) -> Result<Vec<CostRecord>, AppError> {
-    // Skeleton: will open external AgentFare SQLite and read records.
-    Ok(Vec::new())
-}
-
 /// Persist one cost record. This is the write half that was missing — the read
 /// side (aggregate_costs / cost_trend) and the table both already existed, but
 /// nothing was ever inserting rows, so cost tracking stayed at zero. Called from

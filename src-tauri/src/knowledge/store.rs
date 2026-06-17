@@ -264,15 +264,6 @@ pub fn delete_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppErro
     Ok(())
 }
 
-/// Increment access count and return the entry.
-pub fn touch_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppError> {
-    conn.execute(
-        "UPDATE knowledge_entries SET access_count = access_count + 1, updated_at = ?1 WHERE id = ?2",
-        params![chrono::Local::now().to_rfc3339(), id],
-    )?;
-    Ok(())
-}
-
 fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Error> {
     let agent_type_str: String = row.get(5)?;
     let agent_type: AgentType =

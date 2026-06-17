@@ -18,13 +18,6 @@ pub async fn list_skills(db: State<'_, DbState>) -> Result<Vec<Skill>, AppError>
 }
 
 #[tauri::command]
-pub async fn install_skill(db: State<'_, DbState>, skill: Skill) -> Result<(), AppError> {
-    let conn = db.get()
-        .map_err(|e| crate::error::AppError::Config(format!("Lock error: {}", e)))?;
-    crate::skills::registry::install_skill(&conn, &skill)
-}
-
-#[tauri::command]
 pub async fn uninstall_skill(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
     let conn = db.get()
         .map_err(|e| crate::error::AppError::Config(format!("Lock error: {}", e)))?;
@@ -131,40 +124,6 @@ pub async fn install_skill_from_catalog(
     };
     crate::skills::registry::install_skill(&conn, &skill)?;
     Ok(skill)
-}
-
-/// Rate a skill (persist into its metadata). Simple 0..=5 rating for the market.
-#[tauri::command]
-pub async fn rate_skill(
-    db: State<'_, DbState>,
-    skill_id: String,
-    rating: f64,
-) -> Result<(), AppError> {
-    if !(0.0..=5.0).contains(&rating) {
-        return Err(AppError::Skill("rating must be 0..=5".into()));
-    }
-    let conn = db.get()
-        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
-    // Load existing metadata, merge rating, write back.
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT metadata FROM skills WHERE id = ?1",
-            rusqlite::params![&skill_id],
-            |r| r.get(0),
-        )
-        .ok();
-    let mut meta: serde_json::Value = existing
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    meta["rating"] = serde_json::json!(rating);
-    let meta_str = serde_json::to_string(&meta)
-        .map_err(|e| AppError::Skill(format!("serialize metadata: {e}")))?;
-    conn.execute(
-        "UPDATE skills SET metadata = ?1 WHERE id = ?2",
-        rusqlite::params![meta_str, &skill_id],
-    )?;
-    Ok(())
 }
 
 /// Resolve the user home directory (mirrors commands::projects::dirs_home but

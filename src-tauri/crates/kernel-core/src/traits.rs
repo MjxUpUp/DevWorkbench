@@ -11,7 +11,6 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-use crate::document::Document;
 use crate::schema::Message;
 use crate::Error;
 
@@ -127,28 +126,6 @@ pub trait Tool: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
-}
-
-// ---------------------------------------------------------------------------
-// Retriever (RAG)
-// ---------------------------------------------------------------------------
-
-/// Retrieval options. `top_k` caps result count; `score_threshold` filters.
-#[derive(Debug, Clone, Default)]
-pub struct RetrieveOptions {
-    pub top_k: Option<usize>,
-    pub score_threshold: Option<f64>,
-    /// Scope to a project / namespace; None = cross-project.
-    pub scope: Option<String>,
-}
-
-#[async_trait]
-pub trait Retriever: Send + Sync {
-    async fn retrieve(
-        &self,
-        query: &str,
-        opts: &RetrieveOptions,
-    ) -> Result<Vec<Document>, Error>;
 }
 
 // Note: ChatTemplate trait removed — it had zero implementors and zero callers

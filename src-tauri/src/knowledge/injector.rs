@@ -127,8 +127,14 @@ pub fn inject_for_agent(
         .into_iter()
         .map(|c| {
             let mut entry = c.entry.clone();
-            if entry.content.len() > MAX_INJECT_ENTRY_CHARS {
-                entry.content.truncate(MAX_INJECT_ENTRY_CHARS);
+            if entry.content.chars().count() > MAX_INJECT_ENTRY_CHARS {
+                // Truncate by CHAR count, not byte length: String::truncate(n)
+                // panics (is_char_boundary) when n lands inside a multibyte CJK
+                // char. At 300 bytes that's ~2/3 of CJK content — the spawn-thread
+                // panicked, rx.recv_timeout timed out, and knowledge injection
+                // silently failed behind a "timed out" warn. store.rs:391 already
+                // uses this chars().take() fix; this is the same bug's残留.
+                entry.content = entry.content.chars().take(MAX_INJECT_ENTRY_CHARS).collect();
                 entry.content.push_str("...");
             }
             TruncatedEntry {

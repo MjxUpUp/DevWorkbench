@@ -103,12 +103,6 @@ impl CircuitBreaker {
         }
     }
 
-    /// A breaker using the default config. Convenient for the single shared
-    /// GLM-upstream instance.
-    pub fn with_defaults() -> Self {
-        Self::new(CircuitBreakerConfig::default())
-    }
-
     /// Gate check: may a request to `host` proceed? `Closed` → yes; `HalfOpen`
     /// → yes only while inflight probes are under the cap; `Open` past cooldown
     /// → flip to `HalfOpen` and allow one probe; `Open` inside cooldown → no.
@@ -195,11 +189,6 @@ impl CircuitBreaker {
             .values()
             .filter(|c| c.state != CircuitState::Closed)
             .count()
-    }
-
-    /// Clear all host state (testing / manual reset).
-    pub fn reset(&self) {
-        self.hosts.lock().unwrap().clear();
     }
 }
 
