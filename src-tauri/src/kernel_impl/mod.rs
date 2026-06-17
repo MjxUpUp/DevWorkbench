@@ -14,3 +14,4 @@ pub mod model_router;
 pub mod opaque_agent;
 pub mod react_agent;
 pub mod skill_tool;
+pub mod subagent_spec;

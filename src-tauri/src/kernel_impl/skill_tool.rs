@@ -125,7 +125,7 @@ impl Tool for SkillTool {
 
 /// Split a SKILL.md into (frontmatter_yaml, body_markdown).
 /// Returns ("", full_text) if no frontmatter fence is present.
-fn split_frontmatter(raw: &str) -> (String, String) {
+pub(crate) fn split_frontmatter(raw: &str) -> (String, String) {
     let raw = raw.trim_start_matches('\u{feff}');
     let rest = match raw.strip_prefix("---\n") {
         Some(r) => r,

@@ -653,34 +653,63 @@ impl ToolRegistry {
 /// compaction compresses ONE agent's history; subagent dispatch SPLITS work
 /// across independent contexts. Both attack the long-task context-overflow
 /// root cause — compaction from inside one run, dispatch across runs.
+/// The anonymous worker prompt used when no `{subagent: name}` is given (or the
+/// name doesn't match a loaded spec). Extracted so the named path can override
+/// it without duplicating the text.
+fn default_worker_prompt() -> &'static str {
+    "你是子任务执行 agent。专注完成给定的单一子任务,给出简洁结论。\
+     你只有只读工具(搜索/读取),不能修改文件、不能再派发子 agent。"
+}
+
 pub struct SubAgentTool {
     model: Arc<dyn ChatModel>,
     read_only_tools: ToolRegistry,
     max_steps: usize,
+    /// Named sub-agent specs (D1). `{subagent: "name"}` matching one of these
+    /// runs the child with that spec's system_prompt instead of
+    /// [default_worker_prompt], so the agent can delegate to a specialist by
+    /// name. Empty = anonymous-worker-only (the v2.0 T2 behavior).
+    named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
 }
 
 impl SubAgentTool {
     /// `read_only_tools` should be the parent registry's read-only subset —
     /// pass `registry.read_only_subset()` so the child can't mutate or recurse.
+    /// `named` are the loaded named sub-agent specs (empty = anonymous-only).
     pub fn new(
         model: Arc<dyn ChatModel>,
         read_only_tools: ToolRegistry,
         max_steps: usize,
+        named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
     ) -> Self {
-        Self { model, read_only_tools, max_steps }
+        Self { model, read_only_tools, max_steps, named }
     }
 }
 
 #[async_trait]
 impl Tool for SubAgentTool {
     fn info(&self) -> ToolInfo {
+        // List named sub-agents (if any) so the model knows WHO it can delegate
+        // to by name — without this the {subagent: "name"} parameter is useless.
+        let named_list = if self.named.is_empty() {
+            String::from("(无命名子 agent — 不传 subagent 则派给匿名 worker)")
+        } else {
+            self.named
+                .iter()
+                .map(|s| format!("- {}: {}", s.name, s.description))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         ToolInfo {
             name: "dispatch_subagent".into(),
-            description: "把一个独立、自包含的子任务派给子 agent 执行并返回结论。用于拆分长任务、隔离上下文：子 agent 拥有全新历史与只读工具，不可改文件、不可再派发。参数 {task: 子任务描述}".into(),
+            description: format!(
+                "把一个独立、自包含的子任务派给子 agent 执行并返回结论。用于拆分长任务、隔离上下文：子 agent 拥有全新历史与只读工具,不可改文件、不可再派发。可选 {{subagent: name}} 指定命名子 agent(用其专用 system_prompt),不指定或名称不匹配则派给匿名 worker。可用命名子 agent:\n{named_list}"
+            ),
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string", "description": "派给子 agent 的自包含子任务" }
+                    "task": { "type": "string", "description": "派给子 agent 的自包含子任务" },
+                    "subagent": { "type": "string", "description": "可选:命名子 agent 名称(见 description 列表);不指定则匿名 worker" }
                 },
                 "required": ["task"]
             }),
@@ -688,18 +717,45 @@ impl Tool for SubAgentTool {
     }
 
     async fn invoke(&self, args: &str, ctx: &ToolContext) -> Result<String, Error> {
-        let task = serde_json::from_str::<serde_json::Value>(args)
-            .ok()
+        let parsed = serde_json::from_str::<serde_json::Value>(args).ok();
+        let task = parsed
+            .as_ref()
             .and_then(|v| v.get("task").and_then(|t| t.as_str()).map(str::to_owned))
             .ok_or_else(|| Error::Agent("dispatch_subagent 需要参数 {task: string}".into()))?;
         if task.trim().is_empty() {
             return Err(Error::Agent("dispatch_subagent 的 task 不能为空".into()));
         }
-        const WORKER_PROMPT: &str = "你是子任务执行 agent。专注完成给定的单一子任务，给出简洁结论。\
-            你只有只读工具(搜索/读取)，不能修改文件、不能再派发子 agent。";
-        let child = ReactAgent::new_shared(Arc::clone(&self.model), self.read_only_tools.clone(), WORKER_PROMPT)
-            .with_context(ctx.clone())
-            .with_max_steps(self.max_steps);
+        let requested = parsed
+            .as_ref()
+            .and_then(|v| v.get("subagent").and_then(|s| s.as_str()).map(str::to_owned));
+        // Resolve the worker prompt: a matching named spec overrides the
+        // anonymous default. An unknown name is NOT an error — it degrades to
+        // the anonymous worker so the agent's dispatch still succeeds. Owned
+        // String, not a borrow of self.named: a `&str` borrowing self would have
+        // to outlive 'static across the awaited run_loop (an async borrow of
+        // self across an await point), which the borrow checker rejects.
+        let worker_prompt: String = match &requested {
+            Some(name) => self
+                .named
+                .iter()
+                .find(|s| &s.name == name)
+                .and_then(|s| {
+                    if s.system_prompt.trim().is_empty() {
+                        None
+                    } else {
+                        Some(s.system_prompt.clone())
+                    }
+                })
+                .unwrap_or_else(|| default_worker_prompt().to_string()),
+            None => default_worker_prompt().to_string(),
+        };
+        // NOTE: tools_allow narrowing is deferred — narrowing ToolRegistry by
+        // name-prefix needs a filtering helper; today the named spec's leverage
+        // is its system_prompt, and the tool subset stays the full read-only set.
+        let child =
+            ReactAgent::new_shared(Arc::clone(&self.model), self.read_only_tools.clone(), worker_prompt.as_str())
+                .with_context(ctx.clone())
+                .with_max_steps(self.max_steps);
         match child.run_loop(&task, ModelOptions::default()).await {
             Ok(out) => Ok(format!("[子 agent 结论] {out}")),
             Err(e) => {
@@ -1631,7 +1687,7 @@ mod tests {
     async fn subagent_dispatches_child_and_returns_conclusion() {
         // Child has no tools → run_loop calls generate directly and returns the
         // reply as the final answer, which SubAgentTool wraps for the parent.
-        let tool = SubAgentTool::new(shared_gen_model("子任务结论：找到 3 处"), ToolRegistry::new(), 6);
+        let tool = SubAgentTool::new(shared_gen_model("子任务结论：找到 3 处"), ToolRegistry::new(), 6, Vec::new());
         let out = tool.invoke(r#"{"task":"分析依赖"}"#, &ToolContext::default()).await.unwrap();
         assert!(out.contains("[子 agent 结论]"), "conclusion wrapped: {out}");
         assert!(out.contains("子任务结论"), "child answer surfaced: {out}");
@@ -1639,7 +1695,7 @@ mod tests {
 
     #[tokio::test]
     async fn subagent_rejects_malformed_or_empty_task() {
-        let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 6);
+        let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 6, Vec::new());
         let ctx = ToolContext::default();
         assert!(tool.invoke("not json", &ctx).await.is_err(), "non-JSON rejected");
         assert!(tool.invoke(r#"{}"#, &ctx).await.is_err(), "missing task rejected");
@@ -1655,7 +1711,7 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.push(ProbeTool { name: "read_file", read_only: true, calls: calls.clone() });
         reg.push(ProbeTool { name: "write_file", read_only: false, calls });
-        reg.push(SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4));
+        reg.push(SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4, Vec::new()));
 
         let ro = reg.read_only_subset();
         assert_eq!(ro.len(), 1, "only the read-only tool survives");
@@ -1681,11 +1737,69 @@ mod tests {
                 Ok(Box::new(FailModel))
             }
         }
-        let tool = SubAgentTool::new(Arc::new(FailModel), ToolRegistry::new(), 4);
+        let tool = SubAgentTool::new(Arc::new(FailModel), ToolRegistry::new(), 4, Vec::new());
         let out = tool.invoke(r#"{"task":"x"}"#, &ToolContext::default()).await.unwrap();
         // Failure branch returns "[子 agent 失败: {e}]" — note ':' (it carries
         // the cause), NOT ']' like the success prefix.
         assert!(out.contains("[子 agent 失败:"), "failure surfaced, not propagated: {out}");
+    }
+
+    #[test]
+    fn info_lists_named_subagents_when_present() {
+        // D1: when named specs are loaded, the tool's description must surface
+        // their names so the model knows WHO it can delegate to by name, and the
+        // schema must expose the {subagent} parameter. Empty named (the other
+        // tests above) keeps the legacy anonymous-only description.
+        use crate::kernel_impl::subagent_spec::SubAgentSpec;
+        let spec = SubAgentSpec {
+            name: "researcher".into(),
+            description: "deep research".into(),
+            system_prompt: "你是调研员".into(),
+            tools_allow: vec![],
+        };
+        let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4, vec![spec]);
+        let info = tool.info();
+        assert!(info.description.contains("researcher"), "named agent listed: {}", info.description);
+        assert!(info.description.contains("deep research"), "description carried: {}", info.description);
+        let props = info.parameters_schema.get("properties").expect("schema has properties");
+        assert!(props.get("subagent").is_some(), "{{subagent}} parameter present");
+    }
+
+    #[tokio::test]
+    async fn subagent_named_dispatch_runs_with_named_spec() {
+        // {subagent: "researcher"} matching a loaded spec → the child runs under
+        // the spec's system_prompt (overriding the anonymous worker). With a
+        // no-tool child the run returns the model's reply; we assert the named
+        // path SUCCEEDS and wraps the conclusion — not that the prompt text
+        // reached the model (the GenModel mock ignores prompts, so that would be
+        // a tautology against the mock, not against real behavior).
+        use crate::kernel_impl::subagent_spec::SubAgentSpec;
+        let spec = SubAgentSpec {
+            name: "researcher".into(),
+            description: "deep research".into(),
+            system_prompt: "你是资深调研员,只给结论与依据".into(),
+            tools_allow: vec![],
+        };
+        let tool = SubAgentTool::new(shared_gen_model("结论：ok"), ToolRegistry::new(), 4, vec![spec]);
+        let out = tool
+            .invoke(r#"{"task":"调研X","subagent":"researcher"}"#, &ToolContext::default())
+            .await
+            .unwrap();
+        assert!(out.contains("[子 agent 结论]"), "named dispatch wraps conclusion: {out}");
+        assert!(out.contains("结论：ok"), "named child answer surfaced: {out}");
+    }
+
+    #[tokio::test]
+    async fn subagent_unknown_name_falls_back_to_anonymous_worker() {
+        // An unknown {subagent} name is NOT an error — it degrades to the
+        // anonymous worker so the dispatch still succeeds (the agent never gets
+        // stuck on a typo'd subagent name). named=[] here, so any name misses.
+        let tool = SubAgentTool::new(shared_gen_model("结论：anon"), ToolRegistry::new(), 4, Vec::new());
+        let out = tool
+            .invoke(r#"{"task":"x","subagent":"ghost"}"#, &ToolContext::default())
+            .await
+            .unwrap();
+        assert!(out.contains("[子 agent 结论]"), "unknown name → anonymous worker: {out}");
     }
 
     #[test]

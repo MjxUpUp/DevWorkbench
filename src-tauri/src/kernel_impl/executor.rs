@@ -277,10 +277,19 @@ pub(crate) fn build_react_agent(
     // not mutate, and cannot dispatch further subagents (the dispatcher isn't
     // read-only), bounding recursion at depth 1. Snapshot the subset BEFORE
     // pushing the dispatcher itself so it isn't included.
+    //
+    // D1: named sub-agents from .agents/subagents/<name>/AGENT.md let the agent
+    // delegate BY NAME via dispatch_subagent {subagent: "researcher"}. An empty
+    // list (no such dir on disk) preserves the legacy anonymous-worker behavior.
+    let mut subagents: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec> = Vec::new();
+    for dir in subagents_search_dirs(&home, working_dir, &data_dir) {
+        subagents.extend(crate::kernel_impl::subagent_spec::load_subagents(&dir));
+    }
     registry.push(crate::kernel_impl::react_agent::SubAgentTool::new(
         Arc::clone(&chat),
         registry.read_only_subset(),
         8,
+        subagents.clone(),
     ));
 
     // Surface installed skills + MCP tools BY NAME in the system prompt, not just
@@ -290,6 +299,7 @@ pub(crate) fn build_react_agent(
     // agent can SEE the skill exists). Built-in read_file/bash/etc. and the
     // subagent dispatcher are deliberately omitted — they're already prominent.
     sys_prompt.push_str(&installed_skills_appendix(&registry.infos()));
+    sys_prompt.push_str(&subagents_appendix(&subagents));
 
     let ctx = ToolContext {
         working_dir: Some(working_dir.to_string()),
@@ -356,6 +366,19 @@ fn skills_search_dirs(home: &Path, working_dir: &str, data_dir: &Path) -> Vec<Pa
     ]
 }
 
+/// D1: directories scanned for named sub-agents (`.agents/subagents/<name>/
+/// AGENT.md`). Same three-tier layout as [skills_search_dirs] — global → project
+/// → app-private — so a project can shadow a global sub-agent of the same name.
+/// `dispatch_subagent` resolves the first match, so global takes precedence on a
+/// duplicate (consistent with how skills_search_dirs orders skill loading).
+fn subagents_search_dirs(home: &Path, working_dir: &str, data_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".agents").join("subagents"),
+        PathBuf::from(working_dir).join(".agents").join("subagents"),
+        data_dir.join("subagents"),
+    ]
+}
+
 /// The kernel agent's standing system prompt: identity + tool-selection
 /// discipline. The discipline sits in the BASE prompt (prepended before memory
 /// and experience suffixes) so it always reads as the agent's rule, not
@@ -402,6 +425,28 @@ fn installed_skills_appendix(infos: &[kernel_core::ToolInfo]) -> String {
             .unwrap_or("")
             .trim();
         out.push_str(&format!("\n- {name}: {one_line}"));
+    }
+    out
+}
+
+/// D1: surface named sub-agents in the system prompt so the agent delegates BY
+/// NAME (`dispatch_subagent {subagent: "researcher"}`) instead of always falling
+/// back to the anonymous worker. Empty list → empty string (no dangling header),
+/// matching [installed_skills_appendix]. First non-empty description line keeps
+/// the prompt bounded even when AGENT.md frontmatter description is multi-line.
+fn subagents_appendix(specs: &[crate::kernel_impl::subagent_spec::SubAgentSpec]) -> String {
+    if specs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nNamed sub-agents available for dispatch_subagent {subagent: name}:");
+    for s in specs {
+        let one_line = s
+            .description
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        out.push_str(&format!("\n- {}: {one_line}", s.name));
     }
     out
 }
@@ -482,6 +527,51 @@ mod executor_tests {
         let app = installed_skills_appendix(&infos);
         assert!(app.contains("skill__big: Does the big thing"));
         assert!(!app.contains("and more detail here"));
+    }
+
+    #[test]
+    fn subagents_search_dirs_mirrors_skills_three_tier_layout() {
+        // D1: subagent dirs follow the same global → project → app-private
+        // ordering as skills_search_dirs (a project can shadow a global).
+        let dirs = subagents_search_dirs(
+            Path::new("/home/u"),
+            "/proj",
+            Path::new("/home/u/.dev-workbench"),
+        );
+        assert_eq!(dirs[0], PathBuf::from("/home/u/.agents/subagents"));
+        assert_eq!(dirs[1], PathBuf::from("/proj/.agents/subagents"));
+        assert_eq!(dirs[2], PathBuf::from("/home/u/.dev-workbench/subagents"));
+    }
+
+    #[test]
+    fn subagents_appendix_empty_when_no_named_specs() {
+        // No named sub-agents → no appendix (no dangling header in the prompt).
+        assert_eq!(subagents_appendix(&[]), "");
+    }
+
+    #[test]
+    fn subagents_appendix_lists_names_and_first_desc_line() {
+        use crate::kernel_impl::subagent_spec::SubAgentSpec;
+        let specs = vec![
+            SubAgentSpec {
+                name: "researcher".into(),
+                description: "Deep web research\nlonger detail".into(),
+                system_prompt: "x".into(),
+                tools_allow: vec![],
+            },
+            SubAgentSpec {
+                name: "test-writer".into(),
+                description: "Writes tests".into(),
+                system_prompt: "y".into(),
+                tools_allow: vec![],
+            },
+        ];
+        let app = subagents_appendix(&specs);
+        assert!(app.starts_with("\n\nNamed sub-agents"));
+        assert!(app.contains("- researcher: Deep web research"));
+        assert!(app.contains("- test-writer: Writes tests"));
+        // multi-line description trimmed to the first non-empty line
+        assert!(!app.contains("longer detail"));
     }
 }
 
