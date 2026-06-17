@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 /// - `ToolCall` Started   → `[ToolUse{name, input: parse(arguments)}]`
 /// - `ToolCall` Succeeded → `[ToolResult{content: "(ok)",   is_error: false}]`
 /// - `ToolCall` Failed    → `[ToolResult{content: "(failed)", is_error: true}]`
-/// - `FileChanged`        → `[]` (no variant yet — Phase E followup)
+/// - `FileChanged(p)`     → `[FileChanged{path: p}]` (per-write mutation line)
 /// - `TurnBoundary`       → `[]` (same)
 /// - `Done(outcome)`      → `[Result{is_error: status != Completed, secs}]`
 ///
@@ -57,7 +57,9 @@ pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
                 is_error: true,
             }],
         },
-        AgentEvent::FileChanged(_) => Vec::new(),
+        AgentEvent::FileChanged(p) => vec![ChatStreamEvent::FileChanged {
+            path: p.display().to_string(),
+        }],
         AgentEvent::TurnBoundary => Vec::new(),
         AgentEvent::Done(outcome) => {
             vec![ChatStreamEvent::Result {
@@ -155,6 +157,12 @@ pub fn chat_event_to_agent_events(
         // Done is owned by agent:completed; emitting here would duplicate the
         // terminal event and double-end the stream.
         ChatStreamEvent::Result { .. } => Vec::new(),
+        // FileChanged never arrives on the chat wire from an opaque CLI (CLIs
+        // don't surface per-write events); it's emitted only by the transparent
+        // ReactAgent forward path. The reverse map exists for the OpaqueAgent
+        // stream, so this arm keeps the match exhaustive as a no-op rather than
+        // fabricating a kernel event.
+        ChatStreamEvent::FileChanged { .. } => Vec::new(),
     }
 }
 
@@ -310,6 +318,7 @@ fn blocks_to_assistant_message(
             // Stripped from history — see the doc comment above.
             ChatStreamEvent::ToolUse { .. } | ChatStreamEvent::ToolResult { .. } => {}
             ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
+            ChatStreamEvent::FileChanged { .. } => {} // per-write signal, not history prose
         }
     }
 
@@ -478,9 +487,16 @@ mod tests {
     }
 
     #[test]
-    fn file_changed_is_dropped() {
+    fn file_changed_maps_to_file_changed_event() {
+        // FileChanged is no longer dropped — it maps to a wire FileChanged
+        // block so the chat UI renders per-write mutations as they land.
         let ev = AgentEvent::FileChanged(PathBuf::from("/x.rs"));
-        assert!(map_agent_event(ev, 0).is_empty());
+        let out = map_agent_event(ev, 0);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ChatStreamEvent::FileChanged { path } => assert_eq!(path, "/x.rs"),
+            other => panic!("expected FileChanged, got {:?}", other),
+        }
     }
 
     #[test]

@@ -577,6 +577,14 @@ pub enum ChatStreamEvent {
     ToolResult { content: String, is_error: bool },
     #[serde(rename = "result")]
     Result { is_error: bool, secs: u64 },
+    /// A file was changed on disk by the agent (a write_file/patch tool landed).
+    /// Surfaced as a lightweight path line so the user sees per-write mutations
+    /// as they happen — distinct from the aggregated `Done.files_changed` list
+    /// (a git-diff snapshot taken once at run end) and from a tool_result card
+    /// (which shows tool output, not which path was touched). Maps from
+    /// kernel-core `AgentEvent::FileChanged`.
+    #[serde(rename = "file_changed")]
+    FileChanged { path: String },
 }
 
 impl ClaudeBlock {
@@ -2508,6 +2516,7 @@ mod tests {
                 ChatStreamEvent::ToolUse { .. } => "tool_use",
                 ChatStreamEvent::ToolResult { .. } => "tool_result",
                 ChatStreamEvent::Result { .. } => "result",
+                ChatStreamEvent::FileChanged { .. } => "file_changed",
             })
             .collect();
         assert_eq!(kinds, vec!["text", "tool_use", "tool_result", "text", "result"]);

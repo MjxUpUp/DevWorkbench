@@ -376,4 +376,5 @@ export type ChatStreamEvent =
   | { kind: 'thinking'; content: string }
   | { kind: 'tool_use'; name: string; input: unknown }
   | { kind: 'tool_result'; content: string; is_error: boolean }
-  | { kind: 'result'; is_error: boolean; secs: number };
+  | { kind: 'result'; is_error: boolean; secs: number }
+  | { kind: 'file_changed'; path: string };

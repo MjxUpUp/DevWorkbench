@@ -151,4 +151,12 @@ describe('BlocksView', () => {
     expect(container.querySelectorAll('.chat-block').length).toBe(0);
     expect(container.querySelector('.chat-blocks-cursor')).toBeNull();
   });
+
+  it('renders a file_changed block as a path line', () => {
+    // D3: a per-write mutation surfaces as a lightweight 📄 path card, distinct
+    // from tool_result (tool output) and the end-of-run result card.
+    render(<BlocksView events={[{ kind: 'file_changed', path: '/src/app.rs' }]} running={false} />);
+    expect(screen.getByText('/src/app.rs')).toBeInTheDocument();
+    expect(document.querySelector('.chat-block-file')).not.toBeNull();
+  });
 });

@@ -191,6 +191,37 @@ describe('agentStore.appendBlock — merge consecutive text deltas', () => {
       { kind: 'text', content: ' more' },
     ]);
   });
+
+  it('appends file_changed events verbatim (no merging — each write is distinct)', () => {
+    // D3: a per-write mutation surfaces as a file_changed block. Unlike text/
+    // thinking (which fold per-token deltas), each file_changed is an independent
+    // write event — two writes must stay as two cards so the user sees each
+    // change accumulate. appendBlock's else branch handles this (only text/
+    // thinking merge); lock it in so a future "merge all same-kind" refactor
+    // doesn't silently collapse file writes.
+    useAgentStore.getState().appendBlock('s1', { kind: 'file_changed', path: '/a.rs' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'file_changed', path: '/b.rs' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([
+      { kind: 'file_changed', path: '/a.rs' },
+      { kind: 'file_changed', path: '/b.rs' },
+    ]);
+  });
+
+  it('does not merge file_changed into a preceding text block', () => {
+    // A file write between two text spans must NOT fold the text together — the
+    // file_changed card sits between them in arrival order (same invariant as
+    // the tool_use test above).
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'before' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'file_changed', path: '/x.rs' });
+    useAgentStore.getState().appendBlock('s1', { kind: 'text', content: 'after' });
+    const blocks = useAgentStore.getState().sessionBlocks.get('s1');
+    expect(blocks).toEqual([
+      { kind: 'text', content: 'before' },
+      { kind: 'file_changed', path: '/x.rs' },
+      { kind: 'text', content: 'after' },
+    ]);
+  });
 });
 
 describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', () => {

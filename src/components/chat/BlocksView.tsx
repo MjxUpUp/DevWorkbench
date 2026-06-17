@@ -83,6 +83,16 @@ function BlockCard({ event }: { event: ChatStreamEvent }) {
           <span className="chat-block-result-secs">{event.secs}s</span>
         </div>
       );
+    case 'file_changed':
+      // A per-write mutation the agent landed (write_file/patch). Lighter than
+      // a tool_result card (which shows output): just the touched path, so the
+      // user sees file changes accumulate live alongside the tool calls.
+      return (
+        <div className="chat-block chat-block-file">
+          <span className="chat-block-file-icon" aria-hidden="true">📄</span>
+          <span className="chat-block-file-path">{event.path}</span>
+        </div>
+      );
   }
 }
 

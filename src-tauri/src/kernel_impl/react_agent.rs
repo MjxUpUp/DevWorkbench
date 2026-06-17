@@ -1302,11 +1302,15 @@ impl kernel_core::Agent for ReactAgent {
                         status: kernel_core::ToolCallStatus::Started,
                         result: None,
                     });
+                    // Classify once: the before-hook uses it for the veto, and —
+                    // on a successful write — we re-match it below to emit a
+                    // per-write FileChanged event so the chat UI shows mutations
+                    // live (D3).
+                    let action = crate::kernel_impl::hooks::classify_action(
+                        &call.function.name,
+                        &call.function.arguments,
+                    );
                     let blocked = if let Some(h) = &hooks {
-                        let action = crate::kernel_impl::hooks::classify_action(
-                            &call.function.name,
-                            &call.function.arguments,
-                        );
                         match h.before(&action).await {
                             Err(reason) => {
                                 let blocked_msg =
@@ -1335,6 +1339,16 @@ impl kernel_core::Agent for ReactAgent {
                                         status: kernel_core::ToolCallStatus::Succeeded,
                                         result: Some(out.clone()),
                                     });
+                                    // D3: a write tool landed — surface the touched
+                                    // path as a FileChanged event so the chat UI
+                                    // renders per-write mutations in real time,
+                                    // distinct from the end-of-run git-diff
+                                    // aggregate carried by Done.files_changed.
+                                    if let crate::kernel_impl::hooks::Action::WriteFile { path, .. } =
+                                        &action
+                                    {
+                                        yield AgentEvent::FileChanged(std::path::PathBuf::from(path));
+                                    }
                                     out
                                 }
                                 Err(e) => {
