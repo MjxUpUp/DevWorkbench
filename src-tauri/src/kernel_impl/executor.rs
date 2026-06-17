@@ -5,6 +5,7 @@
 //! - Gate nodes → `quality::forge::run_forge_gate` (or HonestyVerifier for the
 //!   "honesty" gate).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -223,15 +224,20 @@ pub(crate) fn build_react_agent(
             )),
     );
 
-    // Build the tool registry: skills (always, from ~/.dev-workbench/skills) +
-    // MCP tools (when a registry is available). An empty registry leaves the
-    // agent chat-only; a populated one activates the tool loop + ToolCall
-    // events end-to-end (the tool loop + react_chat mapping are already wired
-    // — only the registry was empty before).
+    // Build the tool registry: skills + MCP tools + the subagent dispatcher.
+    // Skills search every dir `skill_catalog` (skills_cmds.rs) scans (see
+    // skills_search_dirs) — not just the always-empty `~/.dev-workbench/skills`
+    // — so the agent actually sees installed skills instead of reporting "I
+    // only have dispatch_subagent, I can't see skills". load_dir is resilient
+    // to malformed SKILL.md frontmatter (skill_tool fallback), so no skill is
+    // dropped on a parse hiccup. An empty registry leaves the agent chat-only;
+    // a populated one activates the tool loop + ToolCall events end-to-end.
     let mut registry = ToolRegistry::new();
-    let skills_dir = data_dir.join("skills");
-    for skill in SkillTool::load_dir(&skills_dir) {
-        registry.push(skill);
+    let home = crate::commands::projects::dirs_home();
+    for dir in skills_search_dirs(&home, working_dir, &data_dir) {
+        for skill in SkillTool::load_dir(&dir) {
+            registry.push(skill);
+        }
     }
     if let Some(reg) = mcp {
         // get_tools() is synchronous stdio I/O — acceptable as a one-shot cost
@@ -295,6 +301,40 @@ pub(crate) fn build_react_agent(
         // unchanged for configs that don't declare one). See `compact_threshold`.
         .with_context_compaction(compact_threshold(context_window), 8)
         .with_hooks(Arc::new(hooks)))
+}
+
+/// Skill directories a kernel agent searches, in priority order: global
+/// `~/.agents/skills`, project `<cwd>/.agents/skills`, then the app-private
+/// `~/.dev-workbench/skills` legacy fallback. Mirrors what `skill_catalog`
+/// (skills_cmds.rs) scans so the agent's registry matches the Skills Market —
+/// the previous single `~/.dev-workbench/skills` lookup was always empty, which
+/// is why the agent reported "I only have dispatch_subagent, I can't see
+/// skills". Extracted from build_react_agent so the directory set is testable.
+fn skills_search_dirs(home: &Path, working_dir: &str, data_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".agents").join("skills"),
+        PathBuf::from(working_dir).join(".agents").join("skills"),
+        data_dir.join("skills"),
+    ]
+}
+
+#[cfg(test)]
+mod executor_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn skills_search_dirs_covers_global_project_and_legacy_in_priority_order() {
+        let dirs = skills_search_dirs(
+            Path::new("/home/u"),
+            "/proj",
+            Path::new("/home/u/.dev-workbench"),
+        );
+        // global first, project second, app-private legacy last.
+        assert_eq!(dirs[0], PathBuf::from("/home/u/.agents/skills"));
+        assert_eq!(dirs[1], PathBuf::from("/proj/.agents/skills"));
+        assert_eq!(dirs[2], PathBuf::from("/home/u/.dev-workbench/skills"));
+    }
 }
 
 /// v2.0: size auto-compaction to the model's REAL context window, not a

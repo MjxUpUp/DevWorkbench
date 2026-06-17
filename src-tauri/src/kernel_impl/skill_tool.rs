@@ -51,9 +51,23 @@ impl SkillTool {
     /// Parse SKILL.md text (split out for testing).
     pub fn parse_text(raw: &str, path: PathBuf) -> Result<Self, Error> {
         let (fm, body) = split_frontmatter(raw);
-        let fm: SkillFrontmatter = serde_yaml::from_str(&fm)
-            .map_err(|e| Error::Tool(format!("parse frontmatter: {e}")))?;
-        Ok(Self::new(fm.name, fm.description, body, path))
+        // Try strict YAML first — handles well-formed frontmatter including the
+        // optional `metadata:` block. But third-party SKILL.md files in the
+        // wild frequently break serde_yaml: `description` values embed
+        // unescaped quotes (`用户问"X"时`) or bare colons (`Use when: 恢复`),
+        // which serde_yaml rejects. load_dir then silently dropped the whole
+        // skill (`skip skill ... parse frontmatter`), and a kernel agent built
+        // against the resulting empty registry told users "I only have
+        // dispatch_subagent, I can't see skills". Fall back to a line scan
+        // that needs only name + description and reads their values raw
+        // (stripping one optional wrapping quote pair) — a malformed
+        // description then costs nothing but the metadata block.
+        let (name, description) = match serde_yaml::from_str::<SkillFrontmatter>(&fm) {
+            Ok(parsed) => (parsed.name, parsed.description),
+            Err(_) => extract_name_desc(&fm)
+                .ok_or_else(|| Error::Tool("parse frontmatter: missing name".into()))?,
+        };
+        Ok(Self::new(name, description, body, path))
     }
 
     /// Load all skills from a directory tree (recursively finds SKILL.md).
@@ -129,6 +143,43 @@ fn split_frontmatter(raw: &str) -> (String, String) {
     }
 }
 
+/// Best-effort name/description extraction for frontmatter serde_yaml rejects.
+/// Walks lines, takes the FIRST `name:` / `description:` and treats everything
+/// after the colon as a raw string (stripping one matching wrapping quote pair).
+/// Returns None only when `name` is absent — description defaults to empty,
+/// mirroring SkillFrontmatter's `#[serde(default)]`.
+fn extract_name_desc(fm: &str) -> Option<(String, String)> {
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    for line in fm.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("name:") {
+            if name.is_none() {
+                name = Some(strip_wrap_quotes(rest.trim()));
+            }
+        } else if let Some(rest) = line.strip_prefix("description:") {
+            if description.is_none() {
+                description = Some(strip_wrap_quotes(rest.trim()));
+            }
+        }
+    }
+    Some((name?, description.unwrap_or_default()))
+}
+
+/// Strip ONE wrapping pair of quotes (`"` or `'`) from both ends, only when
+/// the first and last byte are the SAME quote kind. Inner quotes survive —
+/// that is the whole point for values like `用户问"X"时`.
+fn strip_wrap_quotes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +223,68 @@ mod tests {
         let (fm, body) = split_frontmatter(raw);
         assert!(fm.contains("name: x"));
         assert!(body.contains("body"));
+    }
+
+    // Regression: third-party SKILL.md commonly embeds an unescaped quote in
+    // `description` (`用户问"X"时`). serde_yaml rejects it; the line-scan
+    // fallback must still yield the skill so the agent's registry isn't empty.
+    #[test]
+    fn parses_description_with_embedded_quotes_via_fallback() {
+        let raw = "---\nname: adr\ndescription: \"Use when: 用户问\"X\"时、评估方案权衡时。SKIP: 日常编码。\"\nmetadata:\n  pattern: x\n---\n\n# ADR\n";
+        let t = SkillTool::parse_text(raw, PathBuf::from("/x/SKILL.md")).unwrap();
+        assert_eq!(t.name, "adr");
+        assert!(t.description.contains("用户问"));
+        // inner quotes survive — they're the value, not YAML syntax
+        assert!(t.description.contains("\"X\""));
+        assert!(t.body.contains("# ADR"));
+    }
+
+    // Regression: a bare (unquoted) description that contains a colon
+    // (`Use when: 恢复`) reads as a nested mapping to serde_yaml. Fallback
+    // keeps the whole line as the description.
+    #[test]
+    fn parses_bare_description_with_colon_via_fallback() {
+        let raw = "---\nname: session-continuity\ndescription: 跨会话接力。Use when: 恢复工作时、用户说\"继续\"时。SKIP: 新项目。\nmetadata:\n  pattern: y\n---\n\n# Continuity\n";
+        let t = SkillTool::parse_text(raw, PathBuf::from("/x/SKILL.md")).unwrap();
+        assert_eq!(t.name, "session-continuity");
+        assert!(t.description.starts_with("跨会话接力"));
+        assert!(t.description.contains("Use when: 恢复"));
+    }
+
+    #[test]
+    fn rejects_frontmatter_without_name() {
+        // Neither serde_yaml (missing required `name`) nor the line scan finds
+        // a name → hard error, not a silently empty skill.
+        let raw = "---\ndescription: nothing useful here\n---\n\nbody\n";
+        assert!(SkillTool::parse_text(raw, PathBuf::from("/x/SKILL.md")).is_err());
+    }
+
+    /// Live check against the real `~/.agents/skills`: the three skills that
+    /// serde_yaml used to skip (malformed frontmatter) must now load. Ignored by
+    /// default — it touches a machine-specific catalog — run with
+    /// `cargo test -- --ignored` to confirm the fix end-to-end on this box.
+    #[test]
+    #[ignore = "touches the real ~/.agents/skills catalog; run with --ignored"]
+    fn loads_real_global_skills_without_skipping() {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        let Some(home) = home else { return };
+        let dir = std::path::PathBuf::from(home).join(".agents").join("skills");
+        if !dir.is_dir() {
+            eprintln!("no ~/.agents/skills on this machine; nothing to assert");
+            return;
+        }
+        let skills = SkillTool::load_dir(&dir);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        eprintln!("loaded real skills ({})", names.len());
+        for expected in [
+            "architecture-decision-record",
+            "evidence-based-proposal",
+            "session-continuity",
+        ] {
+            assert!(
+                names.iter().any(|n| *n == expected),
+                "{expected} still missing — frontmatter fallback did not recover it. Loaded: {names:?}"
+            );
+        }
     }
 }
