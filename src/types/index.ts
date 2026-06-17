@@ -265,6 +265,15 @@ export interface McpConfigFile {
   servers: McpServerConfig[];
 }
 
+/** One tool advertised by one connected MCP server (Rust mcp_cmds::
+ * McpToolListing, the `mcp_catalog` "what can I use right now" row). */
+export interface McpToolListing {
+  server: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
 // ---- Provider types ----
 
 export interface ModelEntry {

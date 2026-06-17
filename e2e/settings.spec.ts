@@ -126,10 +126,13 @@ test('skills: lists installed skills and installs a catalog entry', async ({ pag
   });
   await page.goto('/settings.html');
 
-  // Installed skill is listed.
-  await expect(page.getByText('my-skill')).toBeVisible();
+  // Installed skill is listed — scope to the skills section: the capability
+  // overview also renders installed skills (same skills store), so an unscoped
+  // getByText would strict-match twice.
+  const skillsSec = page.locator('[data-e2e="skills"]');
+  await expect(skillsSec.getByText('my-skill')).toBeVisible();
   // Install the catalog entry.
-  await page.getByRole('button', { name: '安装技能 fresh-skill' }).click();
+  await skillsSec.getByRole('button', { name: '安装技能 fresh-skill' }).click();
 
   const all = await calls(page);
   const install = all.find((c) => c.cmd === 'install_skill_from_catalog');
@@ -138,4 +141,40 @@ test('skills: lists installed skills and installs a catalog entry', async ({ pag
     name: 'fresh-skill',
     source: '/home/.agents/skills/fresh-skill',
   });
+});
+
+test('capability-overview: aggregates built-ins + skills + MCP tools (read-only)', async ({ page }) => {
+  await seedMock(page, {
+    get_providers_config: EMPTY_PROVIDERS,
+    get_knowledge_for_project: EMPTY,
+    skill_catalog: EMPTY,
+    // Skills group reuses the skills store — same list_skills source as SkillsSection.
+    list_skills: [
+      { id: 's1', org: 'local', name: 'cap-skill', description: 'an installed skill', category: 'tool', rating: 4 },
+    ],
+    // MCP tools group pulls live tools from mcp_catalog.
+    mcp_catalog: [
+      { server: 'filesystem', name: 'search_files', description: 'find files', inputSchema: {} },
+    ],
+  });
+  await page.goto('/settings.html');
+
+  // Capability section is mounted alongside the others in the e2e harness. Scope
+  // assertions to it so the shared skills-store row (cap-skill also renders in the
+  // skills section) doesn't trip Playwright's strict-mode multi-match.
+  const cap = page.locator('[data-e2e="capability"]');
+
+  // Built-in tools are a STATIC list — they must render with zero mock data, since
+  // they are the agent's non-negotiable faculties (not fetched). exact:true avoids
+  // matching the MCP row "filesystem / search_files" substring.
+  await expect(cap.getByText('read_file', { exact: true })).toBeVisible();
+  await expect(cap.getByText('bash', { exact: true })).toBeVisible();
+  // Skills group — populated from list_skills (same store as SkillsSection).
+  await expect(cap.getByText('cap-skill')).toBeVisible();
+  // MCP tools group — populated from mcp_catalog, rendered as "server / name".
+  await expect(cap.getByText('filesystem / search_files')).toBeVisible();
+
+  // READ-ONLY guarantee: the capability overview must NOT show the MCP config
+  // add-server form (that belongs to the separate MCP servers config page).
+  await expect(cap.getByPlaceholder('Server 名称 (如 filesystem)')).toHaveCount(0);
 });

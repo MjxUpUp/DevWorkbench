@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { ProvidersSection } from '../src/components/settings/ProvidersSection';
 import { MemorySection } from '../src/components/settings/MemorySection';
 import { SkillsSection } from '../src/components/settings/SkillsSection';
+import { PluginsSection } from '../src/components/settings/PluginsSection';
 import { ToastProvider } from '../src/components/Toast';
 import { useNavigationStore } from '../src/stores/navigationStore';
 
@@ -31,6 +32,10 @@ function Harness() {
       <h2>skills</h2>
       <section data-e2e="skills">
         <SkillsSection />
+      </section>
+      <h2>capability</h2>
+      <section data-e2e="capability">
+        <PluginsSection />
       </section>
     </ToastProvider>
   );

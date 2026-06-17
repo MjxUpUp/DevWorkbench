@@ -7,6 +7,7 @@ import { MemorySection } from './MemorySection';
 import { SkillsSection } from './SkillsSection';
 import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
+import { PluginsSection } from './PluginsSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
@@ -42,7 +43,7 @@ interface SectionDef {
 const SECTIONS: SectionDef[] = [
   { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection },
   { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection },
-  { id: 'plugins', label: '插件', Icon: IconInbox, placeholder: { title: '插件', desc: '管理已安装的插件与扩展能力', hint: '插件管理功能正在开发中，敬请期待' } },
+  { id: 'plugins', label: '能力总览', Icon: IconInbox, Component: PluginsSection },
   { id: 'skills', label: '技能', Icon: IconSparkles, Component: SkillsSection },
   { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection },
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, placeholder: { title: '子智能体', desc: '配置可被主智能体调用的子智能体', hint: '子智能体配置正在开发中，敬请期待' } },
