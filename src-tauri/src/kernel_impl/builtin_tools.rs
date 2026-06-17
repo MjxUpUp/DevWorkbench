@@ -337,6 +337,17 @@ impl Tool for BashTool {
             c.arg("-c").arg(&command);
             c
         };
+        // CREATE_NO_WINDOW — react_kernel 的 bash 工具每调一次都 spawn 一个
+        // cmd/sh 子进程；不隐藏窗口的话每跑一条命令就弹一次控制台黑框（用户
+        // 观察到的"agent 运行中终端不断闪现"）。与 honesty.rs/git.rs/pty.rs 等
+        // 所有子进程 spawn 一致。tokio::process::Command 同样 impl CommandExt。
+        #[cfg(target_os = "windows")]
+        {
+            // tokio::process::Command exposes creation_flags as an INHERENT
+            // method on Windows (unlike std::process::Command, which needs the
+            // CommandExt trait import — see honesty.rs). No trait import here.
+            cmd.creation_flags(0x0800_0000);
+        }
         if let Some(dir) = &ctx.working_dir {
             cmd.current_dir(dir);
         }
@@ -533,6 +544,13 @@ mod tests {
     #[tokio::test]
     async fn bash_runs_echo() {
         // Cross-platform: cmd /C echo hi (win) / sh -c echo hi (unix) both print hi.
+        // Also implicitly covers the Windows CREATE_NO_WINDOW flag on BashTool's
+        // Command: on Windows this test compiles WITH creation_flags(0x0800_0000)
+        // and still returns stdout normally — so the flag hides the console popup
+        // (the "agent 运行中终端不断闪现" symptom) WITHOUT breaking spawn/output.
+        // The popup itself is a GUI/OS behavior no unit test can assert; this echo
+        // round-trip is the closest executable guarantee that the flag didn't
+        // regress the command path.
         let dir = tempfile::tempdir().unwrap();
         let out = BashTool.invoke(r#"{"command":"echo agent_smoke"}"#, &ctx(dir.path())).await.unwrap();
         assert!(out.contains("agent_smoke"), "got: {out}");

@@ -217,6 +217,25 @@ describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', ()
     expect(payload).toMatchObject({ mode: null });
   });
 
+  it('upserts (not appends) when the session id already exists — regression: duplicate render + stream jitter', async () => {
+    // react_chat_driver emits agent:started (→ refreshSessions loads the row
+    // from DB) BEFORE spawn_agent_session resolves, so by the time spawnAgent's
+    // set() runs the session is usually already in state. A blind
+    // `[...sessions, session]` append then produced TWO same-id rows →
+    // getTurnsForConversation returned the turn twice → ChatView rendered the
+    // reply twice, and the duplicate `<div key={session.id}>`s thrashed React
+    // reconciliation on every stream delta (the "发送一次出现两个渲染" +
+    // "流式抽搐" symptoms). Must upsert by id.
+    useAgentStore.setState({ sessions: [mk({ id: 'dup', status: 'running', prompt: 'old' })] });
+    vi.mocked(invoke).mockResolvedValue(mk({ id: 'dup', status: 'running', prompt: 'new' }));
+
+    await useAgentStore.getState().spawnAgent('/p', 'claude_code', 'hi');
+
+    const sessions = useAgentStore.getState().sessions;
+    expect(sessions.filter((s) => s.id === 'dup')).toHaveLength(1);
+    expect(sessions.find((s) => s.id === 'dup')?.prompt).toBe('new');
+  });
+
   it('createConversation forwards mode to spawnAgent', async () => {
     await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', false, 'skip-permissions');
     const [, payload] = vi.mocked(invoke).mock.calls[0];

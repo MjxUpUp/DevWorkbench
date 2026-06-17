@@ -136,7 +136,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       kernel: kernel ?? false,
       mode: mode ?? null,
     });
-    set((s) => ({ sessions: [...s.sessions, session] }));
+    // Upsert, NEVER blind-append. The backend (react_chat_driver →
+    // register_running_session) writes the session row AND emits `agent:started`
+    // synchronously BEFORE spawn_agent_session returns, so the agent:started
+    // listener's refreshSessions has usually already loaded this very session
+    // from the DB by the time we reach here. A blind `[...sessions, session]`
+    // push then yields TWO rows with the same id → getTurnsForConversation
+    // returns the turn twice → ChatView renders the reply twice (the "发送一次
+    // 出现两个渲染" symptom), and the duplicate `<div key={session.id}>`s thrash
+    // React reconciliation on every stream delta (the "抽搐/jitter" symptom).
+    set((s) => {
+      const exists = s.sessions.some((x) => x.id === session.id);
+      return {
+        sessions: exists
+          ? s.sessions.map((x) => (x.id === session.id ? { ...x, ...session } : x))
+          : [...s.sessions, session],
+      };
+    });
     // If this turn created/attached a conversation, refresh that project's
     // conversation list so the sidebar shows it. Derive the project from the
     // turn we just spawned (covers both create + continue).
