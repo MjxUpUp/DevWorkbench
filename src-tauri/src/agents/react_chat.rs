@@ -16,7 +16,7 @@
 use crate::agents::pty::ChatStreamEvent;
 use crate::models::{Session, SessionStatus};
 use kernel_core::{
-    AgentEvent, AgentRunStatus, FunctionCall, Message, Role, ToolCall, ToolCallEvent, ToolCallStatus,
+    AgentEvent, AgentRunStatus, Message, Role, ToolCallEvent, ToolCallStatus,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -195,13 +195,15 @@ fn tail(s: &str, max: usize) -> String {
 /// Convert prior conversation turns (ASC by started_at, as returned by
 /// `pty::load_prior_turns`) into kernel-core `Message`s for the ReactAgent's
 /// `run()` history. Each completed/failed turn expands to:
-///   user(prompt) + [assistant(text+tool_calls) + tool messages]  (from blocks)
-///   user(prompt) + assistant(output_summary)                      (legacy fallback)
-///   user(prompt)                                                  (no output at all)
-/// Running turns are skipped (no finalized content yet). When the result
-/// exceeds the message or total-char caps, the OLDEST whole turns are dropped
-/// — turns are never split mid-way, so a tool_call and its tool result always
-/// travel together.
+///   user(prompt) + assistant(text+reasoning, tool calls STRIPPED)  (from blocks)
+///   user(prompt) + assistant(output_summary)                        (legacy fallback)
+///   user(prompt)                                                    (no output at all)
+/// Running turns are skipped (no finalized content yet). Tool calls and their
+/// raw results are NOT replayed into history (see blocks_to_assistant_message),
+/// so the model never copies a prior turn's tool choice by example. When the
+/// result exceeds the message or total-char caps, the OLDEST whole turns are
+/// dropped — turns are never split mid-way, so a prompt and its assistant reply
+/// always travel together.
 pub fn turns_to_history(
     turns: &[Session],
     turn_text_cap: usize,
@@ -220,30 +222,30 @@ pub fn turns_to_history(
         let mut group: Vec<Message> = Vec::with_capacity(2);
         group.push(Message::user(sess.prompt.clone()));
 
-        let assistant_and_tools = sess
+        let assistant_msg = sess
             .blocks
             .as_ref()
             .filter(|v| !v.is_null())
             .and_then(|v| serde_json::from_value::<Vec<ChatStreamEvent>>(v.clone()).ok())
-            .map(|blocks| {
+            .and_then(|blocks| {
                 if blocks.is_empty() {
-                    Vec::new()
+                    None
                 } else {
-                    let turn_idx = groups.len();
-                    blocks_to_assistant_and_tool_messages(turn_idx, &blocks, turn_text_cap)
+                    blocks_to_assistant_message(&blocks, turn_text_cap)
                 }
             })
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 // No persisted blocks (raw agent, or pre-G1 session) → fall back
                 // to the text-only summary so the model at least sees the reply.
                 sess.output_summary
                     .as_deref()
                     .filter(|s| !s.is_empty())
-                    .map(|s| vec![Message::assistant(tail(s, turn_text_cap))])
-                    .unwrap_or_default()
+                    .map(|s| Message::assistant(tail(s, turn_text_cap)))
             });
 
-        group.extend(assistant_and_tools);
+        if let Some(msg) = assistant_msg {
+            group.push(msg);
+        }
         // A turn with only a user prompt (no assistant reply recorded) is still
         // useful context — the model learns the user asked this. Keep it.
         groups.push(group);
@@ -278,31 +280,35 @@ pub fn turns_to_history(
     out
 }
 
-/// Turn one prior session's persisted blocks back into the assistant message
-/// (text + tool_calls) followed by one tool message per tool result. The
-/// ChatStreamEvent wire schema carries no correlation ids, so we synthesize
-/// stable ones per turn (`turn{N}_call{M}`) and thread them through both the
-/// assistant's `tool_calls[i].id` and the matching tool message's
-/// `tool_call_id` — providers (GLM/Anthropic) require them to correlate.
+/// Turn one prior session's persisted blocks back into a SINGLE assistant
+/// message — text + reasoning only. ToolUse/ToolResult are deliberately
+/// DROPPED from history for two reasons:
 ///
-/// Tool results are paired positionally with tool uses (zip). If a turn has
-/// more results than uses (or vice versa), the orphan tail is dropped rather
-/// than fabricated — a malformed history must not feed the model bad pairs.
-fn blocks_to_assistant_and_tool_messages(
-    turn_idx: usize,
+///   1. Context bloat — a raw tool result (a file body, a command's stdout) can
+///      be kilobytes; replaying every prior tool call+result across turns fills
+///      the window with content the model rarely needs verbatim.
+///   2. Tool-selection pollution — replaying a prior tool_call teaches the model
+///      "this is how we do X here" by example, so it re-plays the same command
+///      (e.g. claude_code's `bash lark-cli`) instead of routing through the
+///      matching skill abstraction (skill__lark-doc). The CLI path already
+///      avoids this — it carries only a text summary — so the kernel path now
+///      matches; the base system prompt reinforces it with explicit discipline.
+///
+/// A turn whose blocks are ALL tool calls (no assistant prose, no reasoning)
+/// yields None: nothing survives the strip, and emitting an empty assistant
+/// message would be vacuous (some providers reject empty assistant turns).
+fn blocks_to_assistant_message(
     blocks: &[ChatStreamEvent],
     text_cap: usize,
-) -> Vec<Message> {
+) -> Option<Message> {
     let mut text_chunks: Vec<&str> = Vec::new();
     let mut reasoning_chunks: Vec<&str> = Vec::new();
-    let mut tool_uses: Vec<(&str, &Value)> = Vec::new();
-    let mut tool_results: Vec<&str> = Vec::new();
     for ev in blocks {
         match ev {
             ChatStreamEvent::Text { content } => text_chunks.push(content.as_str()),
             ChatStreamEvent::Thinking { content } => reasoning_chunks.push(content.as_str()),
-            ChatStreamEvent::ToolUse { name, input } => tool_uses.push((name.as_str(), input)),
-            ChatStreamEvent::ToolResult { content, .. } => tool_results.push(content.as_str()),
+            // Stripped from history — see the doc comment above.
+            ChatStreamEvent::ToolUse { .. } | ChatStreamEvent::ToolResult { .. } => {}
             ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
         }
     }
@@ -312,24 +318,13 @@ fn blocks_to_assistant_and_tool_messages(
     // No signature survives the wire round-trip, so a replayed thinking block is
     // unsigned — only consequential once an opaque CLI actually emits thinking.
     let assistant_reasoning = tail(&reasoning_chunks.join(""), text_cap);
-    let tool_calls: Vec<ToolCall> = tool_uses
-        .iter()
-        .enumerate()
-        .map(|(k, (name, input))| ToolCall {
-            id: format!("turn{}_call{}", turn_idx, k),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: (*name).to_string(),
-                arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string()),
-            },
-        })
-        .collect();
-
-    let mut out: Vec<Message> = Vec::with_capacity(1 + tool_results.len());
-    out.push(Message {
+    if assistant_text.is_empty() && assistant_reasoning.is_empty() {
+        return None;
+    }
+    Some(Message {
         role: Role::Assistant,
         content: assistant_text,
-        tool_calls: tool_calls.clone(),
+        tool_calls: Vec::new(),
         tool_call_id: None,
         reasoning: if assistant_reasoning.is_empty() {
             None
@@ -337,21 +332,7 @@ fn blocks_to_assistant_and_tool_messages(
             Some(assistant_reasoning)
         },
         reasoning_signature: None,
-    });
-    // Pair each assistant tool_call with its result positionally. The id on the
-    // tool message MUST match the assistant tool_call's id for correlation.
-    for (k, result_content) in tool_results.iter().enumerate() {
-        let id = format!("turn{}_call{}", turn_idx, k);
-        out.push(Message {
-            role: Role::Tool,
-            content: tail(result_content, text_cap / 2),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(id),
-            reasoning: None,
-            reasoning_signature: None,
-        });
-    }
-    out
+    })
 }
 
 #[cfg(test)]
@@ -780,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn single_turn_with_blocks_expands_to_user_assistant_and_tool_messages() {
+    fn single_turn_with_blocks_strips_tool_calls_keeps_assistant_text() {
         let t = turn(
             "t0",
             "read the file",
@@ -793,18 +774,18 @@ mod tests {
             None,
         );
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        // user + assistant(+1 tool_call) + 1 tool message
-        assert_eq!(out.len(), 3);
+        // user + assistant ONLY — ToolUse/ToolResult are stripped so the next run
+        // neither bloats context nor copies the prior tool call by example.
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0].role, Role::User);
         assert_eq!(out[0].content, "read the file");
         assert_eq!(out[1].role, Role::Assistant);
-        assert_eq!(out[1].tool_calls.len(), 1);
-        assert_eq!(out[1].tool_calls[0].function.name, "Read");
-        // assistant text = merged text chunks
+        // No tool_calls, no tool messages survive the strip.
+        assert!(out[1].tool_calls.is_empty());
+        assert!(out.iter().all(|m| m.role != Role::Tool));
+        // assistant text = merged text chunks (both kept; the tool block between
+        // them is dropped without splitting the surrounding text).
         assert!(out[1].content.contains("reading now") && out[1].content.contains("done"));
-        assert_eq!(out[2].role, Role::Tool);
-        // id correlation: tool message's tool_call_id == assistant tool_call's id
-        assert_eq!(out[2].tool_call_id.as_deref(), Some(out[1].tool_calls[0].id.as_str()));
     }
 
     #[test]
@@ -844,7 +825,10 @@ mod tests {
     }
 
     #[test]
-    fn multiple_tools_pair_positionally_and_correlate_ids() {
+    fn multiple_tool_uses_and_results_all_stripped() {
+        // With tool calls stripped, several ToolUse + ToolResult in one turn must
+        // collapse to a single assistant text message — no tool_calls, no tool
+        // messages, regardless of how many tools the prior turn ran.
         let t = turn("t0", "do two things", Some(blocks_json(&[
             ChatStreamEvent::Text { content: "ok".into() },
             ChatStreamEvent::ToolUse { name: "A".into(), input: json!({}) },
@@ -853,17 +837,11 @@ mod tests {
             ChatStreamEvent::ToolResult { content: "resB".into(), is_error: false },
         ])), None);
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        // user + assistant(2 tool_calls) + toolA + toolB
-        assert_eq!(out.len(), 4);
-        assert_eq!(out[1].tool_calls.len(), 2);
-        assert_eq!(out[1].tool_calls[0].function.name, "A");
-        assert_eq!(out[1].tool_calls[1].function.name, "B");
-        assert_eq!(out[2].role, Role::Tool);
-        assert_eq!(out[2].content, "resA");
-        assert_eq!(out[3].content, "resB");
-        // Each tool message correlates with its assistant tool_call id, in order.
-        assert_eq!(out[2].tool_call_id.as_deref(), Some(out[1].tool_calls[0].id.as_str()));
-        assert_eq!(out[3].tool_call_id.as_deref(), Some(out[1].tool_calls[1].id.as_str()));
+        assert_eq!(out.len(), 2); // user + assistant only
+        assert_eq!(out[1].role, Role::Assistant);
+        assert!(out[1].tool_calls.is_empty());
+        assert!(out.iter().all(|m| m.role != Role::Tool));
+        assert_eq!(out[1].content, "ok");
     }
 
     #[test]
@@ -895,7 +873,8 @@ mod tests {
                     ChatStreamEvent::ToolResult { content: "z".into(), is_error: false },
                 ])), None))
             .collect();
-        // 30 turns × 3 messages = 90 > cap of 40. The kept prefix is newest.
+        // 30 turns × 2 messages (tool calls stripped: user + assistant) = 60 > cap
+        // of 40. The kept prefix is newest.
         let out = turns_to_history(&turns, REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
         assert!(out.len() <= REACT_HISTORY_TOTAL_MESSAGES);
         // Newest turn's prompt must be present; oldest must be gone.
@@ -905,17 +884,35 @@ mod tests {
     }
 
     #[test]
-    fn long_tool_result_is_truncated_to_half_turn_cap() {
-        let long = "x".repeat(REACT_HISTORY_TURN_TEXT_CAP * 2);
+    fn turn_with_only_tool_calls_produces_no_assistant_message() {
+        // A turn whose blocks are entirely tool calls (no Text/Thinking) carries
+        // nothing after the strip → blocks_to_assistant_message returns None, so
+        // the turn keeps ONLY its user message (no fabricated empty assistant,
+        // which some providers reject).
         let t = turn("t0", "ask", Some(blocks_json(&[
             ChatStreamEvent::ToolUse { name: "Read".into(), input: json!({}) },
-            ChatStreamEvent::ToolResult { content: long.clone(), is_error: false },
+            ChatStreamEvent::ToolResult { content: "file contents".into(), is_error: false },
         ])), None);
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        // tool message content must be ≤ turn_cap/2 + the "..." prefix (4 chars).
-        let tool_msg = out.iter().find(|m| m.role == Role::Tool).unwrap();
-        assert!(tool_msg.content.len() <= REACT_HISTORY_TURN_TEXT_CAP / 2 + 4);
-        assert!(tool_msg.content.starts_with("..."));
+        assert_eq!(out.len(), 1); // user only — no assistant message survives
+        assert_eq!(out[0].role, Role::User);
+    }
+
+    #[test]
+    fn long_assistant_text_is_truncated_to_turn_cap() {
+        // The tail() cap still bounds the kept assistant text — a long reply
+        // doesn't blow past turn_text_cap even after tool calls are stripped.
+        // (Replaces the old tool-result truncation test: tool messages no longer
+        // exist, so the truncation guarantee now applies to the assistant text.)
+        let long = "x".repeat(REACT_HISTORY_TURN_TEXT_CAP * 2);
+        let t = turn("t0", "ask", Some(blocks_json(&[
+            ChatStreamEvent::Text { content: long.clone() },
+        ])), None);
+        let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
+        let assistant = out.iter().find(|m| m.role == Role::Assistant).unwrap();
+        // tail() prepends "..." (3 chars) + the trailing turn_text_cap chars.
+        assert!(assistant.content.len() <= REACT_HISTORY_TURN_TEXT_CAP + 4);
+        assert!(assistant.content.starts_with("..."));
     }
 
     #[test]

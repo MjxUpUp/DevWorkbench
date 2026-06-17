@@ -182,9 +182,12 @@ pub(crate) fn build_react_agent(
     // T7 experience flywheel: prepend prior quality-failure lessons so the
     // agent avoids repeating them. Computed before `db` moves into the cost
     // sink. Best-effort — a DB read failure just yields the bare prompt.
-    let mut sys_prompt = String::from(
-        "You are a Dev Workbench kernel agent. Complete the task concisely.",
-    );
+    // Tool selection discipline lives in the BASE prompt (before memory/experience
+    // suffixes) so it always reads as the agent's standing rule, not incidental
+    // context. Without it the model under-uses skills (it doesn't realize
+    // skill__lark-doc exists until it scans every tool description) and leans on
+    // raw bash for tasks a skill already covers — the lark-cli-vs-skill regression.
+    let mut sys_prompt = String::from(BASE_SYSTEM_PROMPT);
     if let Some(dbs) = db.as_ref() {
         if let Ok(conn) = dbs.get() {
             let hash = crate::activity::hash_project_path(working_dir);
@@ -275,6 +278,14 @@ pub(crate) fn build_react_agent(
         8,
     ));
 
+    // Surface installed skills + MCP tools BY NAME in the system prompt, not just
+    // in the tool-list descriptions. The model otherwise can't tell which skill__
+    // names exist without scanning every tool's description, so it under-uses
+    // skills and falls back to bash (the discipline above only sticks if the
+    // agent can SEE the skill exists). Built-in read_file/bash/etc. and the
+    // subagent dispatcher are deliberately omitted — they're already prominent.
+    sys_prompt.push_str(&installed_skills_appendix(&registry.infos()));
+
     let ctx = ToolContext {
         working_dir: Some(working_dir.to_string()),
         conversation_id: conversation_id.map(|s| s.to_string()),
@@ -336,6 +347,56 @@ fn skills_search_dirs(home: &Path, working_dir: &str, data_dir: &Path) -> Vec<Pa
     ]
 }
 
+/// The kernel agent's standing system prompt: identity + tool-selection
+/// discipline. The discipline sits in the BASE prompt (prepended before memory
+/// and experience suffixes) so it always reads as the agent's rule, not
+/// incidental context. Asserted by `base_prompt_carries_tool_selection_discipline`.
+const BASE_SYSTEM_PROMPT: &str = concat!(
+    "You are a Dev Workbench kernel agent. Complete the task concisely.\n",
+    "\n",
+    "Tool selection discipline (IMPORTANT):\n",
+    "- Prefer a matching domain skill (skill__*) or MCP tool (mcp__*) over raw ",
+    "bash. A skill packages the canonical call sequence and pre-checks; invoking ",
+    "it returns its how-to, so you don't reinvent the invocation or guess its flags.\n",
+    "- Only fall back to `bash` for a CLI when NO skill/mcp covers it, and check ",
+    "the CLI's --help first if you are unsure of its flags.\n",
+    "- Do NOT replay a command just because a prior turn used it — judge each task ",
+    "fresh and route through the matching abstraction. Conversation history carries ",
+    "NO tool calls precisely so past tool choices cannot bias the next run.\n",
+    "- For code work: investigate with read_file/glob/grep before writing ",
+    "(write_file/bash), then verify with the project's own tests/build.",
+);
+
+/// Format the installed `skill__*` and `mcp__*` tools into a system-prompt
+/// appendix that names them up front. The model otherwise has to scan every
+/// tool's description to learn which skills exist, so it under-uses them and
+/// falls back to bash. Built-in tools (read_file/bash/…) and the subagent
+/// dispatcher are excluded — they're already prominent, and listing them would
+/// bury the skills. Returns "" when no skills/mcp are registered. Pure over
+/// `&[ToolInfo]` so it is unit-testable without building a real ToolRegistry.
+fn installed_skills_appendix(infos: &[kernel_core::ToolInfo]) -> String {
+    let installed: Vec<(&str, &str)> = infos
+        .iter()
+        .filter(|i| i.name.starts_with("skill__") || i.name.starts_with("mcp__"))
+        .map(|i| (i.name.as_str(), i.description.as_str()))
+        .collect();
+    if installed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nInstalled skills & MCP tools available now:");
+    for (name, desc) in &installed {
+        // One line each: first non-empty line of the description keeps the prompt
+        // bounded even when a SKILL.md frontmatter description is multi-line.
+        let one_line = desc
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        out.push_str(&format!("\n- {name}: {one_line}"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod executor_tests {
     use super::*;
@@ -352,6 +413,66 @@ mod executor_tests {
         assert_eq!(dirs[0], PathBuf::from("/home/u/.agents/skills"));
         assert_eq!(dirs[1], PathBuf::from("/proj/.agents/skills"));
         assert_eq!(dirs[2], PathBuf::from("/home/u/.dev-workbench/skills"));
+    }
+
+    fn info(name: &str, desc: &str) -> kernel_core::ToolInfo {
+        kernel_core::ToolInfo {
+            name: name.to_string(),
+            description: desc.to_string(),
+            parameters_schema: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn base_prompt_carries_tool_selection_discipline() {
+        // The discipline must live in the base prompt so it reads as a standing
+        // rule. Assert the literal fragments the model is graded against — if the
+        // wording changes, this test must change with it (no fuzzy match).
+        assert!(BASE_SYSTEM_PROMPT.contains("skill__*"));
+        assert!(BASE_SYSTEM_PROMPT.contains("mcp__*"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Do NOT replay a command"));
+        assert!(BASE_SYSTEM_PROMPT.contains("--help"));
+        // History stripping is enforced in react_chat, but the prompt must TELL
+        // the agent not to lean on past tool calls — the two changes are a pair.
+        assert!(BASE_SYSTEM_PROMPT.contains("NO tool calls"));
+    }
+
+    #[test]
+    fn installed_skills_appendix_lists_skills_and_mcp_excludes_builtin() {
+        let infos = vec![
+            info("read_file", "Read a file"),
+            info("bash", "Run a shell command"),
+            info("skill__lark-doc", "Read a Feishu/Lark doc"),
+            info("mcp__github__create_issue", "Create a GitHub issue"),
+        ];
+        let app = installed_skills_appendix(&infos);
+        // skills + mcp named up front...
+        assert!(app.contains("skill__lark-doc"));
+        assert!(app.contains("mcp__github__create_issue"));
+        assert!(app.starts_with("\n\nInstalled skills"));
+        // ...built-ins excluded (already prominent in the tool list / discipline).
+        assert!(!app.contains("read_file"));
+        assert!(!app.contains("bash"));
+    }
+
+    #[test]
+    fn installed_skills_appendix_empty_when_only_builtin_tools() {
+        // No skills/mcp → no appendix (don't emit a dangling header line).
+        let infos = vec![info("read_file", "x"), info("grep", "y")];
+        assert_eq!(installed_skills_appendix(&infos), "");
+    }
+
+    #[test]
+    fn installed_skills_appendix_trims_multiline_description_to_first_line() {
+        // A SKILL.md frontmatter description may be multi-line; only the first
+        // non-empty line is used so the appendix stays bounded.
+        let infos = vec![info(
+            "skill__big",
+            "   \nDoes the big thing\nand more detail here",
+        )];
+        let app = installed_skills_appendix(&infos);
+        assert!(app.contains("skill__big: Does the big thing"));
+        assert!(!app.contains("and more detail here"));
     }
 }
 
