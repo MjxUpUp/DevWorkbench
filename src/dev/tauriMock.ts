@@ -61,7 +61,7 @@ const providers = {
   active: 'anthropic',
 };
 
-const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
+export const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   load_projects: () => projects,
   get_sessions_for_project: () => sessions,
   load_sessions: () => sessions,
@@ -79,7 +79,17 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   get_providers_config: () => providers,
   set_providers_config: () => null,
   test_provider_connection: () => ({ ok: true, latency_ms: 42 }),
-  detect_tools: () => ({ git: { installed: true, version: '2.45.0' }, node: { installed: true, version: '20.10.0' }, rust: { installed: true, version: '1.78.0' } }),
+  // ToolStatus[] contract — {name, installed, path} per item. The old object
+  // shape ({git,node,rust}) matched no consumer (useTools/AgentSection both
+  // invoke<ToolStatus[]>), so the dev tool-status list silently rendered empty
+  // (Array.isArray guard swallowed it). Mirrors Rust detect_tools: all agent
+  // command_names + NON_AGENT_TOOLS (code, git).
+  detect_tools: () => [
+    { name: 'claude', installed: true, path: '/usr/local/bin/claude' },
+    { name: 'codex', installed: true, path: '/usr/local/bin/codex' },
+    { name: 'code', installed: true, path: '/usr/local/bin/code' },
+    { name: 'git', installed: true, path: '/usr/bin/git' },
+  ],
   get_git_status: () => ({ branch: 'feature/kernel-refactor', ahead: 0, behind: 0, modified: ['src/App.tsx'], staged: [], untracked: [] }),
   batch_get_git_status: () => projects.map((p) => ({ path: p.path, branch: 'main', ahead: 0, behind: 0, modified: [], staged: [], untracked: [] })),
   get_recent_activity: () => [],
@@ -90,8 +100,12 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   check_budget_alert: () => null,
   load_mcp_config: () => ({ servers: [] }),
   discover_agents_cmd: () => [
-    { agentType: 'claude_code', displayName: 'Claude Code', installed: true },
-    { agentType: 'codex', displayName: 'Codex CLI', installed: true },
+    // Full AgentInfo contract (commandName/path/supportsResume) — missing
+    // commandName made AgentSection's `key={a.commandName}` collide (every
+    // entry key=undefined → React "unique key" warnings). Matches the Rust
+    // AgentInfo serde(rename_all = "camelCase") shape.
+    { agentType: 'claude_code', displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/local/bin/claude', supportsResume: true },
+    { agentType: 'codex', displayName: 'Codex CLI', commandName: 'codex', installed: true, path: '/usr/local/bin/codex', supportsResume: true },
   ],
   recommend_agent_for_project: () => 'claude_code',
   list_skills: () => [],
