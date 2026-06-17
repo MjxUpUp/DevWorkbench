@@ -651,6 +651,15 @@ pub struct ReactAgent {
     /// every turn; returning true halts the run gracefully
     /// (`FatalReason::Budget`) before spending another LLM call. None = unlimited.
     budget_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Context auto-compaction threshold (v1.3 C1). When set, each turn first
+    /// estimates the history's token count; if it exceeds this, the middle
+    /// turns are summarized into one message (system + summary + recent tail).
+    /// None = never compact (unbounded growth, the old behavior).
+    max_context_tokens: Option<usize>,
+    /// How many recent turns to keep verbatim when compacting. Defaults to 6
+    /// (~3 full user/assistant/tool rounds) so the model still sees the live
+    /// tool results it's reacting to.
+    compact_keep_recent: usize,
     system_prompt: String,
     /// Context passed to every tool invocation. Defaults to empty
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
@@ -681,6 +690,8 @@ impl ReactAgent {
             audit_fn: None,
             model_router: None,
             budget_check: None,
+            max_context_tokens: None,
+            compact_keep_recent: 6,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
@@ -765,6 +776,17 @@ impl ReactAgent {
     /// Production wires `cost::agentfare::is_budget_exhausted` over the DB.
     pub fn with_budget_check(mut self, f: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.budget_check = Some(f);
+        self
+    }
+
+    /// Enable context auto-compaction (v1.3 C1). When the history's estimated
+    /// token count exceeds `max_tokens`, the middle turns are summarized into
+    /// one message, keeping `keep_recent` recent turns verbatim. Summarization
+    /// runs on the raw (tool-less) model so it can't fire tool calls, and a
+    /// summarizer failure is swallowed (skips that round) to avoid data loss.
+    pub fn with_context_compaction(mut self, max_tokens: usize, keep_recent: usize) -> Self {
+        self.max_context_tokens = Some(max_tokens);
+        self.compact_keep_recent = keep_recent;
         self
     }
 
@@ -876,17 +898,19 @@ impl kernel_core::Agent for ReactAgent {
         let audit_fn = self.audit_fn.clone();
         let model_router = self.model_router.clone();
         let budget_check = self.budget_check.clone();
+        let max_context_tokens = self.max_context_tokens;
+        let compact_keep_recent = self.compact_keep_recent;
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
             let bound: Arc<dyn ChatModel> = if infos.is_empty() {
-                model
+                Arc::clone(&model)
             } else {
                 match model.with_tools(&infos) {
                     Ok(b) => Arc::from(b),
                     Err(e) => {
                         log::warn!("[ReactAgent] with_tools failed in stream, no tools: {e}");
-                        model
+                        Arc::clone(&model)
                     }
                 }
             };
@@ -924,6 +948,22 @@ impl kernel_core::Agent for ReactAgent {
                 // constant; only the model id in the request body changes.
                 if let Some(router) = model_router.as_ref() {
                     opts.model = Some(router(&history, &base_model));
+                }
+                // v1.3 C1: if the history has grown past the compaction
+                // threshold, compress its middle into one summary message
+                // before this turn's LLM call. Summarization uses the RAW model
+                // (no tools bound) so it can't fire tool calls; a summarizer
+                // error is swallowed (skip this round, retry next turn) rather
+                // than truncating and losing information mid-run.
+                if let Some(max_tok) = max_context_tokens {
+                    let _ = crate::kernel_impl::context_compact::maybe_compact(
+                        &mut history,
+                        model.as_ref(),
+                        &opts,
+                        max_tok,
+                        compact_keep_recent,
+                    )
+                    .await;
                 }
                 // Real streaming: consume the model's SSE stream, yielding each
                 // text delta as a Token (chat renders token-by-token) while the
@@ -1450,6 +1490,102 @@ mod tests {
             "no stream call when budget exhausted: {:?}",
             seen.lock().unwrap()
         );
+    }
+
+    // --- v1.3: C1 context auto-compaction ---
+
+    /// Mock that records the message count handed to each `stream()` call and
+    /// counts `generate()` calls (the summarizer path). Drives the compaction
+    /// integration: a large prior history must be summarized (generate fires)
+    /// before the model sees it, so `stream` gets a compact history.
+    #[derive(Clone)]
+    struct CompactingModel {
+        summary: String,
+        stream_lens: Arc<std::sync::Mutex<Vec<usize>>>,
+        generate_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CompactingModel {
+        fn new(summary: &str) -> Self {
+            Self {
+                summary: summary.to_string(),
+                stream_lens: Arc::new(std::sync::Mutex::new(Vec::new())),
+                generate_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatModel for CompactingModel {
+        async fn generate(&self, _msgs: &[Message], _opts: &ModelOptions) -> Result<Message, Error> {
+            self.generate_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Message::assistant(self.summary.clone()))
+        }
+        fn stream(&self, msgs: &[Message], _opts: &ModelOptions) -> Result<MessageStream, Error> {
+            self.stream_lens.lock().unwrap().push(msgs.len());
+            let msg = Message::assistant("done");
+            Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_compacts_history_when_over_threshold() {
+        use kernel_core::Agent;
+        // 20 fat prior turns → far over a 100-token threshold. The loop must
+        // summarize them (generate) BEFORE the first stream call, so the model
+        // sees a compact history, not the whole transcript.
+        let model = CompactingModel::new("压缩摘要");
+        let stream_lens = model.stream_lens.clone();
+        let gen_calls = model.generate_calls.clone();
+        let mut prior = Vec::new();
+        for i in 0..20 {
+            prior.push(Message::user(format!("历史 turn {i} ").repeat(40)));
+        }
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
+            .with_history(prior)
+            .with_context_compaction(100, 4);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+
+        let gens = gen_calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(gens, 1, "summarizer (generate) must fire exactly once");
+
+        let lens = stream_lens.lock().unwrap();
+        assert_eq!(lens.len(), 1, "one converging turn");
+        assert!(
+            lens[0] <= 6,
+            "stream must see the compacted history (system+summary+4 tail+task), got {}: {:?}",
+            lens[0],
+            lens
+        );
+        assert!(lens[0] < 22, "compaction must shrink from 22 messages");
+    }
+
+    #[tokio::test]
+    async fn run_skips_compaction_under_threshold() {
+        use kernel_core::Agent;
+        // No prior history, generous threshold → no summarizer call, stream sees
+        // the full (tiny) history verbatim: system + task = 2.
+        let model = CompactingModel::new("压缩摘要");
+        let stream_lens = model.stream_lens.clone();
+        let gen_calls = model.generate_calls.clone();
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
+            .with_context_compaction(1_000_000, 4);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+
+        let gens = gen_calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(gens, 0, "no summarizer when under threshold");
+
+        let lens = stream_lens.lock().unwrap();
+        assert_eq!(lens.len(), 1);
+        assert_eq!(lens[0], 2, "uncompacted history is system + task");
     }
 
     #[tokio::test]

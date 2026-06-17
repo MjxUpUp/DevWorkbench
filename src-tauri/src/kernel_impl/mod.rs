@@ -3,6 +3,7 @@
 //! the self-built transparent agent's tool ecosystem (MCP, Skills, Hooks).
 
 pub mod checkpoint;
+pub mod context_compact;
 pub mod executor;
 pub mod hooks;
 pub mod honesty;

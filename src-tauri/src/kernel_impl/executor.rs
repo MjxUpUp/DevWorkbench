@@ -265,6 +265,12 @@ pub(crate) fn build_react_agent(
             crate::kernel_impl::model_router::route_step,
         ))
         .with_budget_check(budget_check)
+        // v1.3 C1: summarize the conversation middle once it exceeds ~24k tokens,
+        // keeping the last 8 turns verbatim. GLM-4.6 has a 128k window but the
+        // thinking budget + tool results + system prompt eat into it; 24k leaves
+        // ample headroom while preventing the unbounded growth that blew long
+        // runs. Summarization rides the raw tool-less model.
+        .with_context_compaction(24_000, 8)
         .with_hooks(Arc::new(hooks)))
 }
 
