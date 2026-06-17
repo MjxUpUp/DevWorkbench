@@ -347,41 +347,24 @@ fn react_chat_driver(
         }
         let summary = if final_output.is_empty() { None } else { Some(final_output) };
 
-        // v1.3 T2: close the long-term-memory loop. The opaque CLI path feeds
-        // the knowledge flywheel via collect_from_session (log-parsing); the
-        // kernel agent has no log, so write its completed output directly as a
-        // `react_session` entry → the NEXT session's memory_prompt_suffix can
-        // surface it. Best-effort: a DB write failure just logs + continues
-        // (memory is an enhancement, not a gate). Only on Completed so a failed/
-        // degraded run doesn't pollute the project's memory.
+        // v1.3 T2 + D6: close the long-term-memory loop. A Completed kernel-
+        // agent session has no CLI log, so write its knowledge contributions
+        // directly — the natural-language `react_session` memory (what it SAID)
+        // AND the structured `react_reflection` companion (what it DID). The
+        // write core is factored into session_reflection::persist_completion_
+        // memory so it's unit-testable over a plain Connection; this surrounding
+        // closure holds a Tauri AppHandle + live ReactAgent stream and can't be
+        // driven from `cargo test`. Best-effort (a DB failure just logs). Only
+        // on Completed so a Failed/degraded run doesn't pollute memory.
         if final_status == SessionStatus::Completed {
             if let Ok(conn) = db_drv.get() {
                 let hash = crate::activity::hash_project_path(&pp_drv);
-                // v1.3 T2: natural-language session memory (what the agent SAID).
-                if let Some(out) = summary.as_ref() {
-                    let entry = crate::knowledge::store::build_session_memory_entry(
-                        &hash, &sid_drv, &prompt_drv, out, &at_drv,
-                    );
-                    if let Err(e) = crate::knowledge::store::add_entry(&conn, &entry) {
-                        log::warn!("[react_chat] session-memory write failed for {sid_drv}: {e}");
-                    } else {
-                        log::info!("[react_chat] session-memory recorded for {sid_drv}");
-                    }
-                }
-                // D6 reflection: STRUCTURED companion (what the agent DID — tools
-                // / files / errors), distilled from final_blocks with no extra
-                // LLM call. Independent of output_summary — the behavioral signal
-                // lives in the blocks even when the prose summary is empty. Lets
-                // the next session's memory suffix match on behavior, not prose.
-                if let Some((title, content)) =
-                    crate::kernel_impl::session_reflection::summarize(&final_blocks, &prompt_drv)
-                {
-                    let entry = crate::knowledge::store::build_session_reflection_entry(
-                        &hash, &sid_drv, &title, &content, &at_drv,
-                    );
-                    if let Err(e) = crate::knowledge::store::add_entry(&conn, &entry) {
-                        log::warn!("[react_chat] session-reflection write failed for {sid_drv}: {e}");
-                    }
+                let written = crate::kernel_impl::session_reflection::persist_completion_memory(
+                    &conn, &hash, &sid_drv, &prompt_drv,
+                    summary.as_deref(), &final_blocks, &at_drv,
+                );
+                if written > 0 {
+                    log::info!("[react_chat] {written} knowledge entries recorded for {sid_drv}");
                 }
             }
         }

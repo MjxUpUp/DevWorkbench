@@ -70,6 +70,55 @@ pub fn summarize(blocks: &[ChatStreamEvent], prompt: &str) -> Option<(String, St
     Some((title, lines.join("\n")))
 }
 
+/// Persist a Completed kernel-agent session's knowledge contributions in one
+/// call — the natural-language `react_session` memory (what the agent SAID)
+/// AND the structured `react_reflection` companion (what it DID). This is the
+/// COMPLETE core of the `react_chat` completion hook (`commands/agents.rs`),
+/// factored out so it is testable over a plain [`rusqlite::Connection`]: the
+/// hook itself lives inline inside a `tokio::spawn`'d closure that holds a
+/// Tauri `AppHandle` and drives a live `ReactAgent` stream, which can't be run
+/// from `cargo test`. Extracting the logic means the part the hook actually
+/// executes is covered by unit tests instead of only by the compiler.
+///
+/// Returns the count of entries written (0..=2). Best-effort and independent
+/// per entry: a reflection still lands when prose is empty, and prose still
+/// lands when the run used no tools. `summarize` returns `None` for a pure-chat
+/// turn, so such a run writes only the `react_session` row (or nothing if it
+/// also has no prose). The caller is responsible for the "only call this on
+/// `SessionStatus::Completed`" guard — a Failed run must not pollute memory.
+pub fn persist_completion_memory(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+    session_id: &str,
+    prompt: &str,
+    summary: Option<&str>,
+    final_blocks: &[ChatStreamEvent],
+    agent_type: &crate::models::AgentType,
+) -> usize {
+    let mut written = 0;
+    // 1. Natural-language memory — only when there is prose to store.
+    if let Some(out) = summary.filter(|s| !s.is_empty()) {
+        let entry = crate::knowledge::store::build_session_memory_entry(
+            project_hash, session_id, prompt, out, agent_type,
+        );
+        if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
+            written += 1;
+        }
+    }
+    // 2. Structured reflection — `summarize` is None for pure-chat, so no empty
+    //    row. Independent of `summary`: the behavioral signal lives in the
+    //    blocks even when prose is empty.
+    if let Some((title, content)) = summarize(final_blocks, prompt) {
+        let entry = crate::knowledge::store::build_session_reflection_entry(
+            project_hash, session_id, &title, &content, agent_type,
+        );
+        if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
+            written += 1;
+        }
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +234,92 @@ mod tests {
         // The pure-chat Text block carries no behavioral signal — must NOT leak
         // into the structured reflection.
         assert!(!refl.content.contains("done"));
+    }
+
+    // ---- persist_completion_memory: covers the completion hook's WRITE core ----
+    //
+    // The hook itself (commands/agents.rs) is inline in a tokio::spawn'd closure
+    // holding a Tauri AppHandle + live ReactAgent stream — undriveable from
+    // `cargo test`. These tests exercise the exact logic the hook delegates to,
+    // over a real sqlite Connection, so the four summary×blocks combinations a
+    // Completed session can hit are all pinned.
+
+    fn fresh_conn() -> rusqlite::Connection {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::db::init_db(&tmp.path().join("c.db")).unwrap()
+    }
+    fn cats(conn: &rusqlite::Connection, hash: &str) -> Vec<String> {
+        crate::knowledge::store::get_entries_for_project(conn, hash)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.category)
+            .collect()
+    }
+
+    #[test]
+    fn persist_writes_both_session_and_reflection_when_prose_and_tools() {
+        let conn = fresh_conn();
+        let hash = crate::activity::hash_project_path("/p");
+        let blocks = vec![tu("write_file"), tr(false), fc("src/a.rs")];
+
+        let n = persist_completion_memory(
+            &conn, &hash, "sid", "改 a.rs", Some("done, edited a.rs"),
+            &blocks, &crate::models::AgentType::ClaudeCode,
+        );
+
+        assert_eq!(n, 2, "prose + tools → both entries");
+        let mut cats = cats(&conn, &hash);
+        cats.sort();
+        assert_eq!(cats, vec!["react_reflection".to_string(), "react_session".to_string()]);
+    }
+
+    #[test]
+    fn persist_writes_only_reflection_when_no_prose() {
+        // No prose summary, but tools were used → reflection still lands, no
+        // empty react_session row.
+        let conn = fresh_conn();
+        let hash = crate::activity::hash_project_path("/p");
+        let blocks = vec![tu("bash"), tr(false)];
+
+        let n = persist_completion_memory(
+            &conn, &hash, "sid", "task", None,
+            &blocks, &crate::models::AgentType::ClaudeCode,
+        );
+
+        assert_eq!(n, 1);
+        assert_eq!(cats(&conn, &hash), vec!["react_reflection".to_string()]);
+    }
+
+    #[test]
+    fn persist_writes_only_session_when_pure_chat_with_prose() {
+        // Pure-chat turn (Text only) with prose → summarize is None, so only the
+        // react_session memory is written, no empty reflection.
+        let conn = fresh_conn();
+        let hash = crate::activity::hash_project_path("/p");
+        let blocks = vec![ChatStreamEvent::Text { content: "just talking".into() }];
+
+        let n = persist_completion_memory(
+            &conn, &hash, "sid", "hello", Some("hi there"),
+            &blocks, &crate::models::AgentType::ClaudeCode,
+        );
+
+        assert_eq!(n, 1);
+        assert_eq!(cats(&conn, &hash), vec!["react_session".to_string()]);
+    }
+
+    #[test]
+    fn persist_writes_nothing_when_no_prose_and_no_signal() {
+        // No prose AND a pure-chat turn → nothing at all. The DB stays empty.
+        let conn = fresh_conn();
+        let hash = crate::activity::hash_project_path("/p");
+        let blocks = vec![ChatStreamEvent::Text { content: "x".into() }];
+
+        let n = persist_completion_memory(
+            &conn, &hash, "sid", "q", None,
+            &blocks, &crate::models::AgentType::ClaudeCode,
+        );
+
+        assert_eq!(n, 0);
+        assert!(cats(&conn, &hash).is_empty());
     }
 }
