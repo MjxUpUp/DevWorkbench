@@ -68,6 +68,15 @@ pub enum PermissionMode {
     /// Read-only planning — block writes and command execution until the user
     /// confirms the plan.
     Plan,
+    /// Dry-run / preview (v2.0 C6) — let the agent reason over a COMPLETE plan
+    /// with zero side effects. Read-only tools (search/read) run for real so the
+    /// agent plans against actual file contents; every side-effecting tool is
+    /// intercepted in `execute_tool_call` and returns a simulated result instead
+    /// of landing. Unlike `Plan` (which *blocks* writes and halts the loop),
+    /// DryRun keeps the loop running so the agent emits a full execution plan the
+    /// user can review before re-running in a real mode. `blocks_action` returns
+    /// `None` for it — the simulation happens one layer down, not at the gate.
+    DryRun,
     /// Minimal output (P0: same guard behaviour; event throttling is later).
     Silent,
     /// Skip every permission check — bypass all before-hooks.
@@ -96,6 +105,14 @@ impl PermissionMode {
     /// Does this mode skip all before-hooks? (skip-permissions.)
     pub fn skips_guards(self) -> bool {
         matches!(self, PermissionMode::SkipPermissions)
+    }
+
+    /// Is this dry-run / preview mode (v2.0 C6)? Side-effecting tools are
+    /// simulated, not landed — see `execute_tool_call`. `blocks_action` returns
+    /// `None` for it; the interception happens one layer down so read-only tools
+    /// still run for real and the loop keeps producing a plan.
+    pub fn is_dry_run(self) -> bool {
+        matches!(self, PermissionMode::DryRun)
     }
 }
 
@@ -485,12 +502,40 @@ mod tests {
         assert!(PermissionMode::Plan.blocks_action(&tool).is_none());
     }
 
+    // --- v2.0 C6: dry-run execution mode layering ---
+
+    #[test]
+    fn dry_run_blocks_nothing_and_is_detectable() {
+        // DryRun must NOT gate at the hook layer — its interception lives in
+        // execute_tool_call. Every action passes `blocks_action` unchanged, and
+        // `is_dry_run` flags it so the tool-execution layer can simulate.
+        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let run = Action::RunCommand { command: "rm -rf x".into() };
+        let tool = Action::CallTool { tool: "write".into(), arguments: "{}".into() };
+        assert!(PermissionMode::DryRun.blocks_action(&write).is_none());
+        assert!(PermissionMode::DryRun.blocks_action(&run).is_none());
+        assert!(PermissionMode::DryRun.blocks_action(&tool).is_none());
+        assert!(PermissionMode::DryRun.is_dry_run());
+        assert!(!PermissionMode::Default.is_dry_run());
+        assert!(!PermissionMode::Plan.is_dry_run());
+    }
+
+    #[tokio::test]
+    async fn dry_run_manager_lets_side_effects_through_gate() {
+        // The gate must pass a write action in dry-run (unlike Plan, which
+        // blocks). The simulation is the tool layer's job, not the hook's.
+        let mgr = HookManager::new().with_mode(PermissionMode::DryRun);
+        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        assert!(mgr.before(&write).await.is_ok());
+    }
+
     #[test]
     fn non_plan_modes_do_not_block_writes() {
         let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
         for m in [
             PermissionMode::Default,
             PermissionMode::AutoEdit,
+            PermissionMode::DryRun,
             PermissionMode::Silent,
             PermissionMode::SkipPermissions,
         ] {
@@ -505,6 +550,7 @@ mod tests {
             PermissionMode::Default,
             PermissionMode::AutoEdit,
             PermissionMode::Plan,
+            PermissionMode::DryRun,
             PermissionMode::Silent,
         ] {
             assert!(!m.skips_guards(), "{m:?} should not skip guards");
@@ -544,6 +590,7 @@ mod tests {
             ("default", PermissionMode::Default),
             ("auto-edit", PermissionMode::AutoEdit),
             ("plan", PermissionMode::Plan),
+            ("dry-run", PermissionMode::DryRun),
             ("silent", PermissionMode::Silent),
             ("skip-permissions", PermissionMode::SkipPermissions),
         ];

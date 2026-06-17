@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 
-export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'silent' | 'skip-permissions';
+export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'dry-run' | 'silent' | 'skip-permissions';
 
 interface ModeOption {
   id: AgentMode;
@@ -13,6 +13,7 @@ const MODE_OPTIONS: ModeOption[] = [
   { id: 'default', label: '默认', shortLabel: '默认', desc: '交互式执行，询问关键操作' },
   { id: 'auto-edit', label: '自动', shortLabel: '自动', desc: '自动接受文件编辑不询问' },
   { id: 'plan', label: '计划', shortLabel: '计划', desc: '先输出计划，确认后执行' },
+  { id: 'dry-run', label: '预演', shortLabel: '预演', desc: '预演执行计划：只读工具真跑、写入类工具不落地' },
   { id: 'silent', label: '静默', shortLabel: '静默', desc: '最小化输出' },
   { id: 'skip-permissions', label: '跳过', shortLabel: '跳过', desc: '跳过所有权限检查' },
 ];

@@ -843,6 +843,27 @@ impl ReactAgent {
                 return format!("[blocked by {}: {}]", reason.hook, reason.message);
             }
         }
+        // v2.0 C6: dry-run simulation. In DryRun mode the gate lets every action
+        // through (DryRun blocks nothing); HERE is where side-effecting tools are
+        // intercepted and return a simulated result instead of landing. Read-only
+        // tools run for real so the agent plans against actual file contents /
+        // search hits — a dry-run that couldn't read the project is useless.
+        if self
+            .hooks
+            .as_ref()
+            .map(|h| h.mode().is_dry_run())
+            .unwrap_or(false)
+        {
+            if let Some(tool) = self.tools.find(&call.function.name) {
+                if !tool.is_read_only() {
+                    let preview: String = call.function.arguments.chars().take(200).collect();
+                    return format!(
+                        "[dry-run] 预演未执行 {}({preview}) — 此为预览，切换真实模式以落地改动",
+                        call.function.name
+                    );
+                }
+            }
+        }
         let result = match self.tools.find(&call.function.name) {
             Some(t) => t
                 .invoke(&call.function.arguments, ctx)
@@ -1302,6 +1323,103 @@ mod tests {
         assert!(reg.find("echo").is_some());
         assert!(reg.find("nope").is_none());
         assert_eq!(reg.len(), 1);
+    }
+
+    // --- v2.0 C6: dry-run execution-mode simulation ---
+
+    use std::sync::Mutex;
+
+    /// Tool that records every real `invoke` and reports a configurable
+    /// read-only flag — lets a test prove dry-run simulates side effects while
+    /// letting read-only tools run for real.
+    struct ProbeTool {
+        name: &'static str,
+        read_only: bool,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Tool for ProbeTool {
+        fn info(&self) -> ToolInfo {
+            ToolInfo {
+                name: self.name.into(),
+                description: "probe".into(),
+                parameters_schema: json!({"type":"object"}),
+            }
+        }
+        async fn invoke(&self, args: &str, _ctx: &ToolContext) -> Result<String, Error> {
+            self.calls.lock().unwrap().push(args.to_string());
+            Ok(format!("invoked:{}:{}", self.name, args))
+        }
+        fn is_read_only(&self) -> bool {
+            self.read_only
+        }
+    }
+
+    fn probe_call(name: &str, args: &str) -> kernel_core::ToolCall {
+        kernel_core::ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: kernel_core::FunctionCall {
+                name: name.into(),
+                arguments: args.into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_simulates_side_effects_runs_read_only_for_real() {
+        let write_calls = Arc::new(Mutex::new(Vec::new()));
+        let read_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
+        reg.push(ProbeTool { name: "read_file", read_only: true, calls: read_calls.clone() });
+
+        let hooks = Arc::new(
+            crate::kernel_impl::hooks::HookManager::new()
+                .with_mode(crate::kernel_impl::hooks::PermissionMode::DryRun),
+        );
+        // execute_tool_call never drives the model, but ReactAgent::new needs one.
+        let agent = ReactAgent::new(ScriptedModel::new(vec![]), reg, "sys").with_hooks(hooks);
+        let ctx = ToolContext::default();
+
+        let r1 = agent
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .await;
+        assert!(r1.contains("[dry-run]"), "side-effect tool simulated, got: {r1}");
+        assert!(write_calls.lock().unwrap().is_empty(), "write must NOT land in dry-run");
+
+        let r2 = agent
+            .execute_tool_call(&probe_call("read_file", r#"{"path":"a.rs"}"#), &ctx)
+            .await;
+        assert!(!r2.contains("[dry-run]"), "read-only tool runs for real, got: {r2}");
+        assert_eq!(read_calls.lock().unwrap().len(), 1, "read-only tool invoked once");
+
+        // Unknown tool in dry-run: find() is None so it falls through to the
+        // stable "[unknown tool]" path — dry-run never invents execution.
+        let r3 = agent.execute_tool_call(&probe_call("nope", "{}"), &ctx).await;
+        assert!(r3.contains("[unknown tool: nope]"), "unknown tool path unchanged: {r3}");
+    }
+
+    #[tokio::test]
+    async fn real_mode_lands_side_effecting_tool() {
+        // Regression guard: the dry-run branch must NOT fire outside DryRun.
+        let write_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
+
+        let hooks = Arc::new(
+            crate::kernel_impl::hooks::HookManager::new()
+                .with_mode(crate::kernel_impl::hooks::PermissionMode::Default),
+        );
+        let agent = ReactAgent::new(ScriptedModel::new(vec![]), reg, "sys").with_hooks(hooks);
+        let ctx = ToolContext::default();
+
+        let r = agent
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .await;
+        assert!(!r.contains("[dry-run]"), "real mode must NOT simulate: {r}");
+        assert_eq!(write_calls.lock().unwrap().len(), 1, "write landed once in real mode");
     }
 
     #[test]
