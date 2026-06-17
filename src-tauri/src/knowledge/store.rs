@@ -90,6 +90,35 @@ pub fn build_session_memory_entry(
     }
 }
 
+/// Build a `react_reflection` KnowledgeEntry — the STRUCTURED companion to a
+/// session's `react_session` natural-language memory (D6 reflection). Where
+/// [`build_session_memory_entry`] stores what the agent SAID, this stores what
+/// it DID (tool usage / files touched / errors) so the next session can match
+/// on behavior patterns via FTS. `title`/`content` are pre-formatted by
+/// `kernel_impl::session_reflection::summarize`; we only cap + tag here.
+pub fn build_session_reflection_entry(
+    project_hash: &str,
+    session_id: &str,
+    title: &str,
+    content: &str,
+    agent_type: &AgentType,
+) -> KnowledgeEntry {
+    KnowledgeEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_hash: project_hash.to_string(),
+        category: "react_reflection".to_string(),
+        title: title.chars().take(120).collect(),
+        content: content.chars().take(1000).collect(),
+        source_agent: agent_type.clone(),
+        source_session_id: Some(session_id.to_string()),
+        source_type: "react_agent".to_string(),
+        confidence: 0.6,
+        created_at: chrono::Local::now().to_rfc3339(),
+        updated_at: chrono::Local::now().to_rfc3339(),
+        access_count: 0,
+    }
+}
+
 /// Search knowledge entries using FTS5 full-text search.
 pub fn search_entries(
     conn: &rusqlite::Connection,
@@ -485,5 +514,29 @@ mod tests {
         assert_eq!(e.title, "第一行标题");
         assert!(!e.title.contains("第二行"));
         assert_eq!(e.source_agent, AgentType::Codex);
+    }
+
+    #[test]
+    fn build_session_reflection_entry_tags_category_and_caps() {
+        // D6 reflection builder: distinct category from react_session, same
+        // confidence (0.6 → clears the memory-suffix threshold), title/content
+        // capped so a noisy run can't bloat FTS.
+        let e = build_session_reflection_entry(
+            "hash1",
+            "sid1",
+            &"R".repeat(200),
+            &"c".repeat(2000),
+            &AgentType::ClaudeCode,
+        );
+        assert_eq!(e.category, "react_reflection", "distinct from react_session");
+        assert_eq!(e.source_type, "react_agent");
+        assert_eq!(e.source_session_id.as_deref(), Some("sid1"));
+        assert!((e.confidence - 0.6).abs() < 1e-9);
+        assert_eq!(e.content.chars().count(), 1000, "content capped at 1000");
+        assert!(
+            e.title.chars().count() <= 120,
+            "title capped at 120: {}",
+            e.title.chars().count()
+        );
     }
 }

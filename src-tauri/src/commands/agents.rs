@@ -355,9 +355,10 @@ fn react_chat_driver(
         // (memory is an enhancement, not a gate). Only on Completed so a failed/
         // degraded run doesn't pollute the project's memory.
         if final_status == SessionStatus::Completed {
-            if let Some(out) = summary.as_ref() {
-                if let Ok(conn) = db_drv.get() {
-                    let hash = crate::activity::hash_project_path(&pp_drv);
+            if let Ok(conn) = db_drv.get() {
+                let hash = crate::activity::hash_project_path(&pp_drv);
+                // v1.3 T2: natural-language session memory (what the agent SAID).
+                if let Some(out) = summary.as_ref() {
                     let entry = crate::knowledge::store::build_session_memory_entry(
                         &hash, &sid_drv, &prompt_drv, out, &at_drv,
                     );
@@ -365,6 +366,21 @@ fn react_chat_driver(
                         log::warn!("[react_chat] session-memory write failed for {sid_drv}: {e}");
                     } else {
                         log::info!("[react_chat] session-memory recorded for {sid_drv}");
+                    }
+                }
+                // D6 reflection: STRUCTURED companion (what the agent DID — tools
+                // / files / errors), distilled from final_blocks with no extra
+                // LLM call. Independent of output_summary — the behavioral signal
+                // lives in the blocks even when the prose summary is empty. Lets
+                // the next session's memory suffix match on behavior, not prose.
+                if let Some((title, content)) =
+                    crate::kernel_impl::session_reflection::summarize(&final_blocks, &prompt_drv)
+                {
+                    let entry = crate::knowledge::store::build_session_reflection_entry(
+                        &hash, &sid_drv, &title, &content, &at_drv,
+                    );
+                    if let Err(e) = crate::knowledge::store::add_entry(&conn, &entry) {
+                        log::warn!("[react_chat] session-reflection write failed for {sid_drv}: {e}");
                     }
                 }
             }
