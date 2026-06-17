@@ -35,6 +35,61 @@ pub struct ActionOutcome {
     pub error: Option<String>,
 }
 
+/// Map a tool call name+arguments into an [`Action`] variant. WriteFile and
+/// RunCommand are classified by tool name so Plan mode and AssertionGuard can
+/// act on them; everything else stays as CallTool (the historic single-channel).
+///
+/// Built-in tool names: `write_file` / `WriteFile` / `write` → WriteFile;
+/// `bash` / `Bash` / `exec` / `shell` / `cmd` → RunCommand.
+pub fn classify_action(tool_name: &str, arguments: &str) -> Action {
+    let args_val = || -> Option<serde_json::Value> {
+        serde_json::from_str(arguments).ok()
+    };
+    if matches!(
+        tool_name,
+        "write_file" | "WriteFile" | "write" | "Write" | "patch"
+    ) {
+        let (path, preview) = args_val()
+            .as_ref()
+            .map(|v| {
+                let p = v
+                    .get("file_path")
+                    .or_else(|| v.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let c = v
+                    .get("content")
+                    .or_else(|| v.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                (p.to_string(), c.chars().take(200).collect::<String>())
+            })
+            .unwrap_or_default();
+        Action::WriteFile {
+            path,
+            content_preview: preview,
+        }
+    } else if matches!(
+        tool_name,
+        "bash" | "Bash" | "exec" | "shell" | "cmd" | "sh" | "run"
+    ) {
+        let command = args_val()
+            .as_ref()
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| arguments.to_string());
+        Action::RunCommand { command }
+    } else {
+        Action::CallTool {
+            tool: tool_name.to_string(),
+            arguments: arguments.to_string(),
+        }
+    }
+}
+
 /// Why a hook blocked an action (carried in the Err).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockReason {

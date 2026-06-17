@@ -386,12 +386,15 @@ pub fn stop_agent_session(
     // NOT run. So we always write the failed status + emit agent:completed
     // here (same as the pty path), regardless of agent kind.
 
-    // Always update session status so UI reflects the stop immediately
+    // Always update session status so UI reflects the stop immediately.
+    // "cancelled" (not "failed") — the user deliberately stopped it, so the UI
+    // renders "已取消" rather than "失败". AgentRunStatus::Cancelled exists for
+    // this distinction but was never wired until now.
     let patch = serde_json::json!({
-        "status": "failed",
+        "status": "cancelled",
         "finishedAt": chrono::Utc::now().to_rfc3339(),
-        "exitCode": -1,
-        "outputSummary": "Session stopped by user"
+        "exitCode": 0,
+        "outputSummary": "Session cancelled by user"
     });
     {
         let conn = db.get()?;
@@ -402,8 +405,8 @@ pub fn stop_agent_session(
         "agent:completed",
         serde_json::json!({
             "sessionId": session_id,
-            "status": "failed",
-            "exitCode": -1
+            "status": "cancelled",
+            "exitCode": 0
         }),
     );
 

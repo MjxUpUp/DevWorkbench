@@ -936,12 +936,64 @@ impl ReactAgent {
         )))
     }
 
+    /// Collect the list of files changed since the last commit (uncommitted working
+    /// tree changes). Best-effort — returns an empty vec on failure.
+    fn git_changed_files(working_dir: &Option<String>) -> Vec<String> {
+        let Some(dir) = working_dir.as_deref() else {
+            return Vec::new();
+        };
+        let Ok(out) = std::process::Command::new("git")
+            .args(["diff", "--name-only"])
+            .current_dir(dir)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    /// Capture `git diff` in the working directory so the AssertionGuard can scan
+    /// write_file outcomes for assertion weakening. Best-effort — a missing git
+    /// repo or spawn failure returns None (no diff → no weakening scan).
+    fn capture_git_diff(working_dir: &Option<String>) -> Option<String> {
+        let dir = working_dir.as_deref()?;
+        let out = std::process::Command::new("git")
+            .args(["diff", "--no-color"])
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        if out.status.success() {
+            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            None
+        }
+    }
+
     async fn execute_tool_call(&self, call: &kernel_core::ToolCall, ctx: &ToolContext) -> String {
+        // Classify the tool name+args into an Action variant so Plan mode can
+        // block writes/commands and AssertionGuard can scan diffs. Previously
+        // every tool was Action::CallTool, making WriteFile/RunCommand dead
+        // paths and the associated guards (Plan, Assertion, Task) empty shells.
+        let action = crate::kernel_impl::hooks::classify_action(
+            &call.function.name,
+            &call.function.arguments,
+        );
+        // Capture a pre-write diff so the post-hook can detect assertion weakening
+        // even when the diff is cumulative across several writes in one turn.
+        let pre_diff = if matches!(&action, crate::kernel_impl::hooks::Action::WriteFile { .. }) {
+            Self::capture_git_diff(&ctx.working_dir)
+        } else {
+            None
+        };
+
         if let Some(hooks) = &self.hooks {
-            let action = crate::kernel_impl::hooks::Action::CallTool {
-                tool: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
-            };
             if let Err(reason) = hooks.before(&action).await {
                 return format!("[blocked by {}: {}]", reason.hook, reason.message);
             }
@@ -975,13 +1027,16 @@ impl ReactAgent {
             None => format!("[unknown tool: {}]", call.function.name),
         };
         if let Some(hooks) = &self.hooks {
+            let post_diff =
+                if matches!(&action, crate::kernel_impl::hooks::Action::WriteFile { .. }) {
+                    Self::capture_git_diff(&ctx.working_dir).or(pre_diff)
+                } else {
+                    None
+                };
             let outcome = crate::kernel_impl::hooks::ActionOutcome {
-                action: crate::kernel_impl::hooks::Action::CallTool {
-                    tool: call.function.name.clone(),
-                    arguments: call.function.arguments.clone(),
-                },
+                action,
                 ok: !result.starts_with("[tool error"),
-                diff: None,
+                diff: post_diff,
                 error: if result.starts_with('[') { Some(result.clone()) } else { None },
             };
             let findings = hooks.after(&outcome).await;
@@ -1248,10 +1303,10 @@ impl kernel_core::Agent for ReactAgent {
                         result: None,
                     });
                     let blocked = if let Some(h) = &hooks {
-                        let action = crate::kernel_impl::hooks::Action::CallTool {
-                            tool: call.function.name.clone(),
-                            arguments: call.function.arguments.clone(),
-                        };
+                        let action = crate::kernel_impl::hooks::classify_action(
+                            &call.function.name,
+                            &call.function.arguments,
+                        );
                         match h.before(&action).await {
                             Err(reason) => {
                                 let blocked_msg =
@@ -1330,7 +1385,7 @@ impl kernel_core::Agent for ReactAgent {
             } else {
                 yield AgentEvent::Done(AgentOutcome {
                     status: AgentRunStatus::Completed,
-                    files_changed: Vec::new(),
+                    files_changed: Self::git_changed_files(&ctx.working_dir),
                     exit_code: Some(0),
                     output_summary: Some(final_output),
                     // Transparent agent: honesty is enforced at the call level via
