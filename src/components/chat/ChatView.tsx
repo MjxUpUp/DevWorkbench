@@ -7,6 +7,8 @@ import { ChatHeader } from './ChatHeader';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
+import { useProvidersStore } from '../../stores/providersStore';
+import type { ModelOption } from '../ModelSelector';
 
 interface AttachedFile {
   path: string;
@@ -23,6 +25,25 @@ export function ChatView() {
   const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null);
   const [agentMode, setAgentMode] = useState<AgentMode>('default');
   const [selectedModel, setSelectedModel] = useState('default');
+  // Providers config (providers.toml) — the source of truth for the model
+  // picker, so the chat selector lists the SAME models Settings → Providers
+  // configures (was a hardcoded 4-item list → "列表对不上" the config page).
+  // Loaded once on mount; selecting a non-default id routes through the matching
+  // enabled provider — that's how "切换供应商" works (one model per provider).
+  const providersConfig = useProvidersStore((s) => s.config);
+  const loadProviders = useProvidersStore((s) => s.loadProviders);
+  useEffect(() => { void loadProviders(); }, [loadProviders]);
+  const modelOptions: ModelOption[] = useMemo(() => {
+    const opts: ModelOption[] = [{ id: 'default', label: '默认模型', provider: '系统' }];
+    for (const p of providersConfig?.providers ?? []) {
+      if (!p.enabled) continue;
+      for (const m of p.models) {
+        if (!m.enabled) continue;
+        opts.push({ id: m.id, label: m.label || m.id, provider: p.name });
+      }
+    }
+    return opts;
+  }, [providersConfig]);
   const [prompt, setPrompt] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
 
@@ -150,10 +171,15 @@ export function ChatView() {
       // Kernel agents (self-hosted ReactAgent) route through react_chat_driver
       // instead of a CLI subprocess — flagged by kernel=true.
       const kernel = selectedAgent === 'react_kernel';
+      // Resolve the model for the backend: 'default'/unset → let the backend
+      // pick; any concrete id routes through the matching enabled provider.
+      // Without this the picker was decorative — the value never reached
+      // spawn_agent_session (logged model=None → fallback or send failure).
+      const model = selectedModel && selectedModel !== 'default' ? selectedModel : undefined;
       if (activeConversationId && !runningSession) {
         // Follow-up turn on the existing conversation. The agent may differ
         // from the previous turn — that's the conversation-container model.
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode);
+        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode, model);
         // continueConversation attaches to the already-selected conversation;
         // selection is already correct, no need to re-select.
         void session;
@@ -163,7 +189,7 @@ export function ChatView() {
         // the main view binds to the new container.
         const agent = selectedAgent || getDefaultAgent();
         if (agent) {
-          const session = await createConversation(project.path, text, agent, kernel, agentMode);
+          const session = await createConversation(project.path, text, agent, kernel, agentMode, model);
           selectConversation(session.conversationId);
         }
       }
@@ -172,7 +198,7 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to send:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project, activeConversationId, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode]);
+  }, [selectedAgent, prompt, runningSession, project, activeConversationId, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
@@ -239,6 +265,7 @@ export function ChatView() {
           onModeChange={setAgentMode}
           selectedModel={selectedModel}
           onModelChange={setSelectedModel}
+          modelOptions={modelOptions}
           onClear={handleClear}
         />
         <div className="chat-empty">
@@ -258,8 +285,6 @@ export function ChatView() {
           onRemoveFile={handleRemoveFile}
           agentMode={agentMode}
           onModeChange={setAgentMode}
-          selectedModel={selectedModel}
-          onModelChange={setSelectedModel}
           placeholder="提出后续修改要求... @ 文件 / 命令 $ 技能"
         />
       </div>
@@ -276,6 +301,7 @@ export function ChatView() {
         onModeChange={setAgentMode}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
+        modelOptions={modelOptions}
         onClear={handleClear}
       />
       <div className="message-list" ref={messageListRef}>
@@ -321,8 +347,6 @@ export function ChatView() {
         onRemoveFile={handleRemoveFile}
         agentMode={agentMode}
         onModeChange={setAgentMode}
-        selectedModel={selectedModel}
-        onModelChange={setSelectedModel}
         placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}
       />
     </div>

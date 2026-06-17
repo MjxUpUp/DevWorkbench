@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSkillsStore } from '../../stores/skillsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useToast } from '../Toast';
@@ -32,12 +32,27 @@ export function SkillsSection() {
     loadCatalog(activeProject?.path);
   }, [loadInstalled, loadCatalog, activeProject]);
 
+  // Per-skill in-flight install flags so the button shows "安装中…" + disables
+  // while the (idempotent) backend call resolves — without this the await gives
+  // no feedback and felt like a hang. Cleared in finally so a failure still
+  // re-enables the button.
+  const [installing, setInstalling] = useState<Set<string>>(new Set());
   const onInstall = async (name: string, source: string) => {
+    setInstalling((prev) => new Set(prev).add(name));
     try {
-      await installFromCatalog(name, source);
-      success(`已安装技能 ${name}`);
+      const skill = await installFromCatalog(name, source);
+      // Surface WHERE it landed so "不知道装到哪" is answered inline — the
+      // backend returns path (catalog skills resolve from ~/.agents/skills or
+      // project .agents/skills).
+      success(skill.path ? `已安装技能 ${name}（路径：${skill.path}）` : `已安装技能 ${name}`);
     } catch (e) {
       error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstalling((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
     }
   };
 
@@ -117,11 +132,11 @@ export function SkillsSection() {
                 <span className="skills-source" title={c.source}>{c.source}</span>
                 <button
                   className="provider-btn primary skills-install-btn"
-                  disabled={isInstalled}
+                  disabled={isInstalled || installing.has(c.name)}
                   onClick={() => onInstall(c.name, c.source)}
                   aria-label={`安装技能 ${c.name}`}
                 >
-                  {isInstalled ? '已安装' : '安装'}
+                  {isInstalled ? '已安装' : installing.has(c.name) ? '安装中…' : '安装'}
                 </button>
               </div>
             </div>

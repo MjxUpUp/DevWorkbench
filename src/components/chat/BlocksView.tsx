@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ChatStreamEvent } from '../../types';
@@ -7,6 +7,27 @@ import { IconCpu } from '../Icons';
 interface BlocksViewProps {
   events: ChatStreamEvent[];
   running: boolean;
+}
+
+/** Merge consecutive same-kind text/thinking events into one block before
+ *  rendering. Live streaming already merges via agentStore.appendBlock, but the
+ *  finalized replay path reads `session.blocks` from the DB which stores the
+ *  raw per-delta stream (GLM emits one thinking_delta per SSE chunk) and
+ *  bypasses that merge — without this, a single reasoning trace renders as N
+ *  stacked "思考过程" cards, each holding a content fragment (the symptom in
+ *  acceptance). Normalizing at the render layer fixes BOTH paths and is
+ *  idempotent on already-merged live data. */
+function normalizeEvents(events: ChatStreamEvent[]): ChatStreamEvent[] {
+  const out: ChatStreamEvent[] = [];
+  for (const ev of events) {
+    const last = out[out.length - 1];
+    if (last && (ev.kind === 'text' || ev.kind === 'thinking') && last.kind === ev.kind) {
+      (last as ChatStreamEvent & { content: string }).content += ev.content;
+    } else {
+      out.push({ ...ev });
+    }
+  }
+  return out;
 }
 
 /** Renders an agent's structured output as a stack of block cards — the
@@ -20,6 +41,7 @@ export function BlocksView({ events, running }: BlocksViewProps) {
   // a chat-blocks-native "waiting" hint instead of falling back to the terminal
   // box, so the chat-blocks form is the ONLY display for structured agents.
   const waiting = running && events.length === 0;
+  const merged = useMemo(() => normalizeEvents(events), [events]);
   return (
     <div className="chat-blocks">
       {waiting ? (
@@ -29,7 +51,7 @@ export function BlocksView({ events, running }: BlocksViewProps) {
         </div>
       ) : (
         <>
-          {events.map((ev, i) => (
+          {merged.map((ev, i) => (
             <BlockCard key={i} event={ev} />
           ))}
           {running && <span className="chat-blocks-cursor" aria-hidden="true" />}

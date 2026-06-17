@@ -1,7 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { IconPlay, IconStop } from '../Icons';
 import { TriggerMenu } from '../TriggerMenu';
-import { ModelSelector } from '../ModelSelector';
 import type { AgentMode } from '../ModeSelector';
 
 interface AttachedFile {
@@ -22,9 +21,6 @@ interface ComposerProps {
   /** Agent execution mode — surfaces a "计划模式" toggle in the action bar. */
   agentMode?: AgentMode;
   onModeChange?: (mode: AgentMode) => void;
-  /** Selected model id — surfaces a model picker in the action bar. */
-  selectedModel?: string;
-  onModelChange?: (model: string) => void;
   placeholder?: string;
 }
 
@@ -40,8 +36,6 @@ export function Composer({
   onRemoveFile,
   agentMode,
   onModeChange,
-  selectedModel,
-  onModelChange,
   placeholder,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -190,9 +184,6 @@ export function Composer({
             >
               计划模式
             </button>
-          )}
-          {onModelChange && (
-            <ModelSelector value={selectedModel ?? 'default'} onChange={onModelChange} />
           )}
         </div>
         {isRunning ? (

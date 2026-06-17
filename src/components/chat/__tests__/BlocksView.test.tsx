@@ -73,6 +73,61 @@ describe('BlocksView', () => {
     expect(screen.getByText('step by step plan')).toBeInTheDocument();
   });
 
+  it('merges consecutive per-delta thinking events into a single card', () => {
+    // GLM streams reasoning as many thinking_delta SSE chunks; the finalized
+    // replay path (session.blocks from the DB) stores each as a separate event,
+    // bypassing agentStore.appendBlock's live merge. Without render-layer
+    // normalization one trace exploded into N stacked "思考过程" cards (the
+    // acceptance symptom). normalizeEvents folds consecutive same-kind events.
+    const { container } = render(
+      <BlocksView
+        events={[
+          { kind: 'thinking', content: 'step 1. ' },
+          { kind: 'thinking', content: 'step 2. ' },
+          { kind: 'thinking', content: 'step 3.' },
+        ]}
+        running={false}
+      />,
+    );
+    // Exactly ONE thinking card, not three.
+    expect(container.querySelectorAll('.chat-block-thinking').length).toBe(1);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('step 1. step 2. step 3.')).toBeInTheDocument();
+  });
+
+  it('does NOT merge thinking across a different-kind block in between', () => {
+    // A text answer between two thinking traces means two separate reasoning
+    // spans (interleaved thinking) — keep them as two cards, in order.
+    const { container } = render(
+      <BlocksView
+        events={[
+          { kind: 'thinking', content: 'first' },
+          { kind: 'text', content: 'answer' },
+          { kind: 'thinking', content: 'second' },
+        ]}
+        running={false}
+      />,
+    );
+    expect(container.querySelectorAll('.chat-block-thinking').length).toBe(2);
+  });
+
+  it('merges consecutive text events the same way', () => {
+    // Same per-delta fragmentation hits text blocks too; normalizeEvents covers
+    // both text and thinking so a streamed Markdown reply stays one card.
+    const { container } = render(
+      <BlocksView
+        events={[
+          { kind: 'text', content: 'foo ' },
+          { kind: 'text', content: 'bar ' },
+          { kind: 'text', content: 'baz' },
+        ]}
+        running={false}
+      />,
+    );
+    expect(container.querySelectorAll('.chat-block-text').length).toBe(1);
+    expect(screen.getByText('foo bar baz')).toBeInTheDocument();
+  });
+
   it('marks an errored tool result', () => {
     render(<BlocksView events={[{ kind: 'tool_result', content: 'boom', is_error: true }]} running={false} />);
     expect(screen.getByText('工具错误')).toBeInTheDocument();

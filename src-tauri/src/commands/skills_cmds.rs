@@ -88,6 +88,16 @@ pub async fn install_skill_from_catalog(
 ) -> Result<Skill, AppError> {
     // Find the SKILL.md under <source>/<leaf-name>/SKILL.md or <source>/SKILL.md.
     let leaf = name.strip_prefix("skill__").unwrap_or(&name);
+    let conn = db.get()
+        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
+    // Idempotent: the catalog lists skills already on disk, so re-clicking
+    // "安装" on an already-registered skill must NOT create a duplicate row.
+    // (Each install used to mint a fresh uuid id, so INSERT OR IGNORE by-id
+    // never deduped — parallel rows piled up.) Resolve by the natural key
+    // (org, name) the user sees; return the existing record instead.
+    if let Some(existing) = crate::skills::registry::find_by_org_name(&conn, "local", leaf)? {
+        return Ok(existing);
+    }
     let candidates = [
         PathBuf::from(&source).join(leaf).join("SKILL.md"),
         PathBuf::from(&source).join("SKILL.md"),
@@ -119,8 +129,6 @@ pub async fn install_skill_from_catalog(
         security_details: None,
         config_schema: None,
     };
-    let conn = db.get()
-        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
     crate::skills::registry::install_skill(&conn, &skill)?;
     Ok(skill)
 }

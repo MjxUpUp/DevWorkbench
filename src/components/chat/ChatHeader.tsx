@@ -1,6 +1,6 @@
 import { useAgentStore } from '../../stores/agentStore';
 import { ModeSelector, type AgentMode } from '../ModeSelector';
-import { ModelSelector } from '../ModelSelector';
+import { ModelSelector, type ModelOption } from '../ModelSelector';
 import { IconTrash } from '../Icons';
 import type { AgentType } from '../../types';
 
@@ -11,6 +11,9 @@ interface ChatHeaderProps {
   onModeChange: (mode: AgentMode) => void;
   selectedModel: string;
   onModelChange: (model: string) => void;
+  /** Model options sourced from providers.toml (built in ChatView). When
+   *  omitted the ModelSelector falls back to its built-in default list. */
+  modelOptions?: ModelOption[];
   onClear: () => void;
 }
 
@@ -21,6 +24,7 @@ export function ChatHeader({
   onModeChange,
   selectedModel,
   onModelChange,
+  modelOptions,
   onClear,
 }: ChatHeaderProps) {
   const agents = useAgentStore((s) => s.agents);
@@ -45,7 +49,7 @@ export function ChatHeader({
       </select>
 
       <ModeSelector value={agentMode} onChange={onModeChange} />
-      <ModelSelector value={selectedModel} onChange={onModelChange} />
+      <ModelSelector value={selectedModel} onChange={onModelChange} models={modelOptions} />
 
       <button className="chat-clear-btn" title="清空对话" onClick={onClear}>
         <IconTrash size={16} />

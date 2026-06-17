@@ -48,7 +48,7 @@ interface AgentState {
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
   /** First turn of a brand-new conversation (no conversation_id yet). */
-  createConversation: (projectPath: string, prompt: string, agentType: AgentType, kernel?: boolean, mode?: AgentMode) => Promise<Session>;
+  createConversation: (projectPath: string, prompt: string, agentType: AgentType, kernel?: boolean, mode?: AgentMode, model?: string) => Promise<Session>;
   /** Append a follow-up turn to an existing conversation. The agent may differ
    *  from prior turns — that's the whole point of the conversation container. */
   continueConversation: (
@@ -58,6 +58,7 @@ interface AgentState {
     agentType: AgentType,
     kernel?: boolean,
     mode?: AgentMode,
+    model?: string,
   ) => Promise<Session>;
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
@@ -209,22 +210,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().qualityReports.get(sessionId) ?? null;
   },
 
-  createConversation: async (projectPath, prompt, agentType, kernel, mode) => {
+  createConversation: async (projectPath, prompt, agentType, kernel, mode, model) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
     // No conversation_id → backend creates a new container and attaches this
     // turn as its first. The returned session carries the new conversationId.
-    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, undefined, kernel, mode);
+    // `model` flows through to spawn_agent_session so the chosen provider/model
+    // actually routes — previously undefined, the backend saw model=None and
+    // fell back to the default (or failed outright if no key was configured).
+    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, undefined, kernel, mode);
   },
 
-  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode) => {
+  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode, model) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
     // conversation_id present → backend attaches this as a follow-up turn of
     // the existing container and touches its last_agent / last_activity_at.
-    return get().spawnAgent(projectPath, agentType, prompt, undefined, undefined, undefined, conversationId, kernel, mode);
+    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, conversationId, kernel, mode);
   },
 
   getDefaultAgent: () => {
