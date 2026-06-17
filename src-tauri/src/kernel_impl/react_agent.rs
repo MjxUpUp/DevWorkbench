@@ -624,6 +624,97 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// Return a new registry holding only the read-only tools (v2.0 T2: the
+    /// child agent dispatched by [`SubAgentTool`] gets the investigation tools
+    /// but NOT the mutators — and not the dispatcher itself, which bounds
+    /// recursion at depth 1: a child cannot dispatch a grandchild).
+    pub fn read_only_subset(&self) -> ToolRegistry {
+        ToolRegistry {
+            tools: self.tools.iter().filter(|t| t.is_read_only()).cloned().collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SubAgent dispatch tool (v2.0 T2)
+// ---------------------------------------------------------------------------
+
+/// A tool that dispatches a self-contained subtask to a child ReactAgent.
+///
+/// The parent delegates work to keep its own context lean; the child runs with
+/// a FRESH history (so the parent's accumulated turns neither bleed into nor
+/// overflow the child's window), a focused worker prompt, and a READ-ONLY tool
+/// subset. Read-only only means the child can investigate but not mutate — and
+/// cannot dispatch further subagents (`SubAgentTool` is itself not read-only,
+/// so `read_only_subset` excludes it), bounding recursion at depth 1.
+///
+/// This is the structural complement to context auto-compaction (v1.3 C1):
+/// compaction compresses ONE agent's history; subagent dispatch SPLITS work
+/// across independent contexts. Both attack the long-task context-overflow
+/// root cause — compaction from inside one run, dispatch across runs.
+pub struct SubAgentTool {
+    model: Arc<dyn ChatModel>,
+    read_only_tools: ToolRegistry,
+    max_steps: usize,
+}
+
+impl SubAgentTool {
+    /// `read_only_tools` should be the parent registry's read-only subset —
+    /// pass `registry.read_only_subset()` so the child can't mutate or recurse.
+    pub fn new(
+        model: Arc<dyn ChatModel>,
+        read_only_tools: ToolRegistry,
+        max_steps: usize,
+    ) -> Self {
+        Self { model, read_only_tools, max_steps }
+    }
+}
+
+#[async_trait]
+impl Tool for SubAgentTool {
+    fn info(&self) -> ToolInfo {
+        ToolInfo {
+            name: "dispatch_subagent".into(),
+            description: "把一个独立、自包含的子任务派给子 agent 执行并返回结论。用于拆分长任务、隔离上下文：子 agent 拥有全新历史与只读工具，不可改文件、不可再派发。参数 {task: 子任务描述}".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "派给子 agent 的自包含子任务" }
+                },
+                "required": ["task"]
+            }),
+        }
+    }
+
+    async fn invoke(&self, args: &str, ctx: &ToolContext) -> Result<String, Error> {
+        let task = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v.get("task").and_then(|t| t.as_str()).map(str::to_owned))
+            .ok_or_else(|| Error::Agent("dispatch_subagent 需要参数 {task: string}".into()))?;
+        if task.trim().is_empty() {
+            return Err(Error::Agent("dispatch_subagent 的 task 不能为空".into()));
+        }
+        const WORKER_PROMPT: &str = "你是子任务执行 agent。专注完成给定的单一子任务，给出简洁结论。\
+            你只有只读工具(搜索/读取)，不能修改文件、不能再派发子 agent。";
+        let child = ReactAgent::new_shared(Arc::clone(&self.model), self.read_only_tools.clone(), WORKER_PROMPT)
+            .with_context(ctx.clone())
+            .with_max_steps(self.max_steps);
+        match child.run_loop(&task, ModelOptions::default()).await {
+            Ok(out) => Ok(format!("[子 agent 结论] {out}")),
+            Err(e) => {
+                // Surface the failure as a tool result, not an error, so the
+                // parent can adapt (retry differently / do it inline) instead
+                // of aborting its whole run on one bad subtask.
+                log::warn!("[subagent] dispatch failed for task '{task}': {e}");
+                Ok(format!("[子 agent 失败: {e}]"))
+            }
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,8 +772,20 @@ impl ReactAgent {
         tools: ToolRegistry,
         system_prompt: impl Into<String>,
     ) -> Self {
+        // Delegate so the field-init lives in one place (new_shared).
+        Self::new_shared(Arc::new(model), tools, system_prompt)
+    }
+
+    /// Build from an already-shared model handle (v2.0 T2): subagent dispatch
+    /// reuses the parent's `Arc<dyn ChatModel>` instead of re-wrapping an owned
+    /// model. Same defaults as [`new`].
+    pub fn new_shared(
+        model: Arc<dyn ChatModel>,
+        tools: ToolRegistry,
+        system_prompt: impl Into<String>,
+    ) -> Self {
         Self {
-            model: Arc::new(model),
+            model,
             tools,
             hooks: None,
             max_steps: 12,
@@ -1420,6 +1523,100 @@ mod tests {
             .await;
         assert!(!r.contains("[dry-run]"), "real mode must NOT simulate: {r}");
         assert_eq!(write_calls.lock().unwrap().len(), 1, "write landed once in real mode");
+    }
+
+    // --- v2.0 T2: subagent dispatch ---
+
+    /// ChatModel whose `generate` returns a fixed assistant reply and whose
+    /// `with_tools` returns a clone — lets a test drive a child ReactAgent's
+    /// run_loop (which uses generate, not stream) with no real endpoint.
+    #[derive(Clone)]
+    struct GenModel {
+        reply: String,
+    }
+
+    impl GenModel {
+        fn new(reply: &str) -> Self {
+            Self { reply: reply.to_string() }
+        }
+    }
+
+    #[async_trait]
+    impl ChatModel for GenModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Ok(Message::assistant(self.reply.clone()))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            Err(Error::Unsupported("GenModel: drive via generate".into()))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    fn shared_gen_model(reply: &str) -> Arc<dyn ChatModel> {
+        Arc::new(GenModel::new(reply))
+    }
+
+    #[tokio::test]
+    async fn subagent_dispatches_child_and_returns_conclusion() {
+        // Child has no tools → run_loop calls generate directly and returns the
+        // reply as the final answer, which SubAgentTool wraps for the parent.
+        let tool = SubAgentTool::new(shared_gen_model("子任务结论：找到 3 处"), ToolRegistry::new(), 6);
+        let out = tool.invoke(r#"{"task":"分析依赖"}"#, &ToolContext::default()).await.unwrap();
+        assert!(out.contains("[子 agent 结论]"), "conclusion wrapped: {out}");
+        assert!(out.contains("子任务结论"), "child answer surfaced: {out}");
+    }
+
+    #[tokio::test]
+    async fn subagent_rejects_malformed_or_empty_task() {
+        let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 6);
+        let ctx = ToolContext::default();
+        assert!(tool.invoke("not json", &ctx).await.is_err(), "non-JSON rejected");
+        assert!(tool.invoke(r#"{}"#, &ctx).await.is_err(), "missing task rejected");
+        assert!(tool.invoke(r#"{"task":""}"#, &ctx).await.is_err(), "empty task rejected");
+        assert!(tool.invoke(r#"{"task":"   "}"#, &ctx).await.is_err(), "blank task rejected");
+    }
+
+    #[test]
+    fn read_only_subset_keeps_readonly_drops_mutators_and_dispatcher() {
+        // The child must get investigation tools only — mutators AND the
+        // dispatcher itself are excluded, so it can't mutate or recurse.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "read_file", read_only: true, calls: calls.clone() });
+        reg.push(ProbeTool { name: "write_file", read_only: false, calls });
+        reg.push(SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4));
+
+        let ro = reg.read_only_subset();
+        assert_eq!(ro.len(), 1, "only the read-only tool survives");
+        assert!(ro.find("read_file").is_some());
+        assert!(ro.find("write_file").is_none(), "mutator dropped");
+        assert!(ro.find("dispatch_subagent").is_none(), "dispatcher dropped → recursion bounded");
+    }
+
+    #[tokio::test]
+    async fn subagent_failure_surfaces_as_result_not_error() {
+        // A child that errors must NOT propagate the error — the parent gets a
+        // "[子 agent 失败]" tool result so it can adapt instead of aborting.
+        struct FailModel;
+        #[async_trait]
+        impl ChatModel for FailModel {
+            async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+                Err(Error::Unsupported("boom".into()))
+            }
+            fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+                Err(Error::Unsupported("boom".into()))
+            }
+            fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+                Ok(Box::new(FailModel))
+            }
+        }
+        let tool = SubAgentTool::new(Arc::new(FailModel), ToolRegistry::new(), 4);
+        let out = tool.invoke(r#"{"task":"x"}"#, &ToolContext::default()).await.unwrap();
+        // Failure branch returns "[子 agent 失败: {e}]" — note ':' (it carries
+        // the cause), NOT ']' like the success prefix.
+        assert!(out.contains("[子 agent 失败:"), "failure surfaced, not propagated: {out}");
     }
 
     #[test]

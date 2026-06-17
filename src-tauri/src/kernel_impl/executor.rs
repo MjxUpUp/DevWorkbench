@@ -206,17 +206,21 @@ pub(crate) fn build_react_agent(
             .map(|conn| crate::cost::agentfare::is_budget_exhausted(&conn).unwrap_or(false))
             .unwrap_or(false)
     });
-    let chat = GlmChatModel::new(endpoint, api_key, resolved_model)
-        // P0 model orchestration: a process-wide breaker so a down GLM endpoint
-        // fails fast instead of every session retrying into it, plus a cost sink
-        // that records token usage + derived cost per request (conversation_id
-        // acts as the session_id for cost attribution).
-        .with_circuit(crate::kernel_impl::react_agent::shared_glm_circuit())
-        .with_cost_sink(crate::cost::sink::optional_shared(
-            db,
-            "react_kernel",
-            conversation_id.map(|s| s.to_string()),
-        ));
+    // Shared as `Arc<dyn ChatModel>` so the subagent dispatcher (v2.0 T2) can
+    // hand the SAME model handle to child agents instead of re-wrapping it.
+    let chat: Arc<dyn kernel_core::ChatModel> = Arc::new(
+        GlmChatModel::new(endpoint, api_key, resolved_model)
+            // P0 model orchestration: a process-wide breaker so a down GLM
+            // endpoint fails fast instead of every session retrying into it,
+            // plus a cost sink that records token usage + derived cost per
+            // request (conversation_id acts as the session_id for attribution).
+            .with_circuit(crate::kernel_impl::react_agent::shared_glm_circuit())
+            .with_cost_sink(crate::cost::sink::optional_shared(
+                db,
+                "react_kernel",
+                conversation_id.map(|s| s.to_string()),
+            )),
+    );
 
     // Build the tool registry: skills (always, from ~/.dev-workbench/skills) +
     // MCP tools (when a registry is available). An empty registry leaves the
@@ -243,6 +247,17 @@ pub(crate) fn build_react_agent(
         }
     }
 
+    // v2.0 T2: subagent dispatch. The child reuses this agent's model handle
+    // and gets the read-only tool subset — it can investigate (search/read) but
+    // not mutate, and cannot dispatch further subagents (the dispatcher isn't
+    // read-only), bounding recursion at depth 1. Snapshot the subset BEFORE
+    // pushing the dispatcher itself so it isn't included.
+    registry.push(crate::kernel_impl::react_agent::SubAgentTool::new(
+        Arc::clone(&chat),
+        registry.read_only_subset(),
+        8,
+    ));
+
     let ctx = ToolContext {
         working_dir: Some(working_dir.to_string()),
         conversation_id: conversation_id.map(|s| s.to_string()),
@@ -257,7 +272,7 @@ pub(crate) fn build_react_agent(
     let mut hooks = crate::kernel_impl::hooks::HookManager::new().with_mode(mode);
     hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
     hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
-    Ok(ReactAgent::new(chat, registry, sys_prompt)
+    Ok(ReactAgent::new_shared(chat, registry, sys_prompt)
         .with_context(ctx)
         .with_history(history)
         .with_thinking(2048)
