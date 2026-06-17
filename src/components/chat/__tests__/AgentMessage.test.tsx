@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AgentMessage } from '../AgentMessage';
 import { useAgentStore } from '../../../stores/agentStore';
@@ -194,5 +194,31 @@ describe('AgentMessage — completed-session output', () => {
     // No blocks → the terminal stub mounts (the full-output path), and the
     // raw text is fetched + rendered.
     expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
+  });
+});
+
+describe('AgentMessage — copy session id', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAgentStore.setState({ sessionBlocks: new Map() } as never);
+  });
+
+  it('copies the session id to clipboard on click and shows 已复制 feedback', async () => {
+    // session.id is the unique key for cross-referencing backend logs / the DB;
+    // a one-click copy lets the user hand it to whoever is debugging instead of
+    // pasting the raw prompt and hoping it's unique enough to grep.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    // jsdom ships no clipboard API — inject a stub.
+    Object.assign(navigator, { clipboard: { writeText } });
+    vi.mocked(invoke).mockResolvedValue('full output');
+
+    render(<AgentMessage session={{ ...base, id: 'sid-copy-test-123' }} running={false} qualityReport={noReport} />);
+
+    const btn = screen.getByRole('button', { name: /复制ID/ });
+    await fireEvent.click(btn);
+
+    expect(writeText).toHaveBeenCalledWith('sid-copy-test-123');
+    // The button label flips to the confirmation while the timeout runs.
+    expect(await screen.findByText('已复制')).toBeInTheDocument();
   });
 });

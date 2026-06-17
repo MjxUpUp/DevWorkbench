@@ -310,6 +310,14 @@ pub(crate) fn build_react_agent(
         // fixes both; unknown window → conservative 32k default (→ 24k,
         // unchanged for configs that don't declare one). See `compact_threshold`.
         .with_context_compaction(compact_threshold(context_window), 8)
+        // max_steps 30 — override the ReactAgent default (12). 12 fit focused
+        // code edits but starves exploration tasks: reading a PRIVATE Feishu
+        // wiki via the authenticated `lark-cli`, the agent burned its whole
+        // 12-step budget learning the CLI's flags (--doc/--scope/--format/…)
+        // and never reached the actual fetch → "Reached the 12-step tool-call
+        // limit". claude-code has no such hard ceiling; 30 leaves room to learn
+        // a tool AND finish. Sub-agent stays at 8 (focused investigation only).
+        .with_max_steps(30)
         .with_hooks(Arc::new(hooks)))
 }
 

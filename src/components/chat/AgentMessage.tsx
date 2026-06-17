@@ -25,6 +25,20 @@ const EMPTY_BLOCKS: ChatStreamEvent[] = [];
 export function AgentMessage({ session, running, qualityReport, elapsed }: AgentMessageProps) {
   const [chainCollapsed, setChainCollapsed] = useState(false);
   const [terminalCollapsed, setTerminalCollapsed] = useState(false);
+  // "复制ID" 反馈：点击后短暂显示"已复制"。session.id 是排查后端日志/DB 的
+  // 唯一键——用户报问题时复制 id 给排查方，比复述原始 prompt 精确省时得多
+  // （否则只能靠 prompt 文本盲查会话）。
+  const [idCopied, setIdCopied] = useState(false);
+
+  const copySessionId = async () => {
+    try {
+      await navigator.clipboard.writeText(session.id);
+      setIdCopied(true);
+      window.setTimeout(() => setIdCopied(false), 1500);
+    } catch {
+      // clipboard 不可用时退化为选中 prompt（webview 非 secure / 权限拒绝等）
+    }
+  };
   // Full agent reply for completed sessions. session.outputSummary is the
   // tail-truncated (2000-char) preview of the same log file the terminal reads,
   // so rendering it as Markdown produced a duplicated, cut-off block next to
@@ -147,6 +161,14 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         <span style={{ margin: '0 4px', color: 'var(--text-tertiary)' }}>·</span>
         <span>{statusLabel}</span>
         {elapsed && <span className="agent-elapsed">{elapsed}</span>}
+        <button
+          type="button"
+          className={`agent-message-copy-id${idCopied ? ' copied' : ''}`}
+          title={`会话 ID（点击复制，便于报障排查后端日志/DB）：${session.id}`}
+          onClick={copySessionId}
+        >
+          {idCopied ? '已复制' : '复制ID'}
+        </button>
       </div>
 
       {/* Decision Chain block */}

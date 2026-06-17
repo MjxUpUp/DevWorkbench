@@ -455,6 +455,29 @@
   color: var(--text-tertiary);
 }
 
+.agent-message-header .agent-message-copy-id {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  background: transparent;
+  border: 1px solid var(--block-border);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.agent-message-header .agent-message-copy-id:hover {
+  color: var(--text-secondary);
+  border-color: var(--accent);
+}
+
+.agent-message-header .agent-message-copy-id.copied {
+  color: var(--success);
+  border-color: var(--success);
+}
+
 /* --- Structured Blocks (inside AgentMessage) --- */
 
 .agent-block {
