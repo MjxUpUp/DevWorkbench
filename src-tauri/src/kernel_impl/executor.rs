@@ -632,12 +632,23 @@ fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> 
     let failures: Vec<_> = entries
         .iter()
         .filter(|e| e.category == "quality_failure")
-        .take(3)
         .collect();
     if failures.is_empty() {
         return String::new();
     }
-    let body = failures
+    // D6 token budget: pick failure lessons front-to-back while their rendered
+    // line fits the budget (was a hardcoded take(3)). Budget is TOKENS not rows,
+    // so a few verbose warnings can't crowd out the task while terse ones aren't
+    // artificially capped.
+    let picked = crate::knowledge::budget::select_within_budget(
+        &failures,
+        crate::knowledge::budget::EXPERIENCE_BUDGET_TOKENS,
+        |e: &&crate::models::KnowledgeEntry| format!("- {}", e.title),
+    );
+    if picked.is_empty() {
+        return String::new();
+    }
+    let body = picked
         .iter()
         .map(|e| format!("- {}", e.title))
         .collect::<Vec<_>>()
@@ -670,7 +681,17 @@ fn memory_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> Stri
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.updated_at.cmp(&a.updated_at))
     });
-    let picked: Vec<_> = mems.into_iter().take(5).collect();
+    // D6 token budget: pick memories front-to-back (after confidence/recency
+    // ranking) while their rendered line — title + up to 200 chars of content —
+    // fits the budget (was a hardcoded take(5)).
+    let picked = crate::knowledge::budget::select_within_budget(
+        &mems,
+        crate::knowledge::budget::MEMORY_BUDGET_TOKENS,
+        |e: &&crate::models::KnowledgeEntry| {
+            let c: String = e.content.chars().take(200).collect();
+            format!("- {}: {}", e.title, c)
+        },
+    );
     if picked.is_empty() {
         return String::new();
     }

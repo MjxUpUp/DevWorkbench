@@ -80,6 +80,50 @@ pub fn create_feedback(
         }
     }
 
+    // D6 reinforcement — the flywheel's positive side. A PASSING gate also
+    // carries a reusable lesson (what was done right), not just failures. Written
+    // as `quality_success` at confidence 0.7 so the memory suffix (≥0.6) surfaces
+    // it; the experience suffix stays failure-only. Without this the agent only
+    // ever learned from its mistakes.
+    if report.overall_status == "passed" {
+        let passed_checks: Vec<&crate::models::QualityCheck> =
+            report.checks.iter().filter(|c| c.status == "passed").collect();
+
+        if !passed_checks.is_empty() {
+            let content = passed_checks
+                .iter()
+                .map(|c| {
+                    format!(
+                        "- {}{}",
+                        c.name,
+                        c.message
+                            .as_ref()
+                            .map(|m| format!(": {}", m))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let entry = crate::models::KnowledgeEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                project_hash: activity::hash_project_path(project_path),
+                category: "quality_success".to_string(),
+                title: format!("Quality gate passed: {}", title),
+                content,
+                source_agent: agent_type.clone(),
+                source_session_id: Some(report.session_id.clone()),
+                source_type: "forge_gate".to_string(),
+                confidence: 0.7,
+                created_at: chrono::Local::now().to_rfc3339(),
+                updated_at: chrono::Local::now().to_rfc3339(),
+                access_count: 0,
+            };
+
+            let _ = crate::knowledge::store::add_entry(conn, &entry);
+        }
+    }
+
     Ok(())
 }
 
@@ -146,5 +190,36 @@ mod tests {
         let entries = crate::knowledge::store::get_entries_for_project(&db.conn, &hash).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].category, "quality_failure");
+    }
+
+    #[test]
+    fn test_feedback_creates_success_knowledge_on_pass() {
+        // D6 reinforcement: a passing gate must ALSO write a lesson (what went
+        // right), not only failures. Lands as quality_success at confidence 0.7
+        // so the memory suffix (≥0.6) surfaces it.
+        let db = TempDb::new();
+        let report = QualityReport {
+            id: "qr3".to_string(),
+            session_id: "s3".to_string(),
+            checks: vec![QualityCheck {
+                name: "compile".to_string(),
+                status: "passed".to_string(),
+                message: Some("cargo check clean".to_string()),
+            }],
+            overall_status: "passed".to_string(),
+            created_at: chrono::Local::now().to_rfc3339(),
+        };
+
+        create_feedback(&db.conn, &report, "/proj/c", &AgentType::ClaudeCode).unwrap();
+
+        let hash = activity::hash_project_path("/proj/c");
+        let entries = crate::knowledge::store::get_entries_for_project(&db.conn, &hash).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].category, "quality_success");
+        assert!(
+            entries[0].confidence >= 0.6,
+            "success lesson must clear the memory-suffix threshold (≥0.6): {}",
+            entries[0].confidence
+        );
     }
 }
