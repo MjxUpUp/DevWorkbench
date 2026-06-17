@@ -187,6 +187,14 @@ pub struct Session {
     /// column is the source of truth once the session is finalized.
     #[serde(default)]
     pub blocks: Option<serde_json::Value>,
+    /// The Forge task this session is bound to (set when spawned under an
+    /// active task). Drives TaskGuardHook's boundary check: writes inside the
+    /// task's working_dir pass, writes outside are blocked, and a session with
+    /// no task only warns (never bricks the agent). None for sessions spawned
+    /// without a task, or rows predating the v11→v12 migration (column added
+    /// then, defaults NULL).
+    #[serde(default)]
+    pub task_ref: Option<String>,
 }
 
 /// A conversation — a multi-turn dialogue container, the equivalent of a Claude

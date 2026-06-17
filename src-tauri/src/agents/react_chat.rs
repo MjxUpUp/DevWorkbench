@@ -763,6 +763,7 @@ mod tests {
             parent_session_id: None,
             conversation_id: None,
             blocks,
+            task_ref: None,
         }
     }
 

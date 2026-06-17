@@ -23,7 +23,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id, blocks
+                conversation_id, blocks, task_ref
          FROM sessions ORDER BY started_at DESC"
     )?;
 
@@ -49,6 +49,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
         let blocks: Option<serde_json::Value> = blocks_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let task_ref: Option<String> = row.get(15)?;
 
         Ok(Session {
             id: row.get(0)?,
@@ -66,6 +67,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
             blocks,
+            task_ref,
         })
     })?;
 
@@ -113,8 +115,8 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
             (id, project_path, agent_type, status, prompt, model,
              started_at, finished_at, exit_code, output_summary,
              context_snapshot, linked_requirement_id, parent_session_id,
-             conversation_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             conversation_id, task_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             s.id,
             s.project_path,
@@ -130,6 +132,7 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
             s.linked_requirement_id,
             s.parent_session_id,
             s.conversation_id,
+            s.task_ref,
         ],
     )?;
     Ok(())
@@ -207,7 +210,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id, blocks
+                conversation_id, blocks, task_ref
          FROM sessions WHERE project_path = ?1 ORDER BY started_at DESC"
     )?;
 
@@ -233,6 +236,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
         let blocks: Option<serde_json::Value> = blocks_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let task_ref: Option<String> = row.get(15)?;
 
         Ok(Session {
             id: row.get(0)?,
@@ -250,6 +254,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
             blocks,
+            task_ref,
         })
     })?;
 
@@ -375,7 +380,7 @@ pub fn load_turns_for_conversation_db(
         "SELECT id, project_path, agent_type, status, prompt, model,
                 started_at, finished_at, exit_code, output_summary,
                 context_snapshot, linked_requirement_id, parent_session_id,
-                conversation_id, blocks
+                conversation_id, blocks, task_ref
          FROM sessions WHERE conversation_id = ?1 ORDER BY started_at ASC"
     )?;
     let sessions = stmt.query_map(params![conversation_id], |row| {
@@ -397,6 +402,7 @@ pub fn load_turns_for_conversation_db(
         let blocks: Option<serde_json::Value> = blocks_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let task_ref: Option<String> = row.get(15)?;
         Ok(Session {
             id: row.get(0)?,
             project_path: row.get(1)?,
@@ -413,6 +419,7 @@ pub fn load_turns_for_conversation_db(
             parent_session_id: row.get(12)?,
             conversation_id: row.get(13)?,
             blocks,
+            task_ref,
         })
     })?;
     let mut out = Vec::new();
@@ -479,6 +486,7 @@ mod tests {
             parent_session_id: None,
             conversation_id: None,
             blocks: None,
+            task_ref: None,
         }
     }
 

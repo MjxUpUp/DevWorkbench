@@ -132,6 +132,10 @@ export interface Session {
    *  historical session replays via BlocksView instead of the raw terminal log.
    *  null/undefined for raw agents (no agent:event stream) or pre-G1 sessions. */
   blocks?: ChatStreamEvent[] | null;
+  /** Forge task this session is bound to (drives the kernel TaskGuard scope
+   *  check: writes inside the task's working_dir pass, outside are blocked;
+   *  a taskless session only warns, never blocks). null for unbound sessions. */
+  taskRef?: string | null;
   tokenUsage?: number;
   estimatedCost?: number;
 }

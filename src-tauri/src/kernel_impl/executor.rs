@@ -85,6 +85,10 @@ impl Executor for KernelExecutor {
                     Vec::new(),
                     Some(self.db.clone()),
                     crate::kernel_impl::hooks::PermissionMode::Default,
+                    // Direct react-kernel spawn path (non-chat-driver): no task
+                    // binding here yet. None = taskless → TaskGuard warns but
+                    // never blocks (the "never brick" guarantee).
+                    None,
                 )?)
             }
         };
@@ -163,6 +167,7 @@ pub(crate) fn build_react_agent(
     history: Vec<kernel_core::Message>,
     db: Option<DbState>,
     mode: crate::kernel_impl::hooks::PermissionMode,
+    task_ref: Option<&str>,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -291,15 +296,19 @@ pub(crate) fn build_react_agent(
         conversation_id: conversation_id.map(|s| s.to_string()),
     };
     // Mount the kernel hook pipeline (the Forge task-guard / bash-guard /
-    // assertion-check analogs). CommandGuard vetoes destructive shell commands
-    // before they run; AssertionGuard watches file-write diffs for assertion
-    // weakening after the fact. TaskGuard is deliberately deferred to v1.2: it
-    // blocks every WriteFile unless an active Forge task is set, and the chat
-    // path carries no task state yet — mounting it now would brick the agent's
-    // own file-writing tools.
+    // assertion-check analogs). CommandGuard vetoes destructive shell commands;
+    // AssertionGuard watches file-write diffs for assertion weakening; TaskGuard
+    // gates file writes by task boundary — a session bound to a task (task_ref)
+    // may write inside its working_dir, writes outside are blocked, and a
+    // session with NO task only warns (never bricks the agent's own file-writing
+    // tools, the reason it was previously deferred).
     let mut hooks = crate::kernel_impl::hooks::HookManager::new().with_mode(mode);
     hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
     hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
+    hooks.register(Box::new(crate::kernel_impl::hooks::TaskGuardHook::new(
+        task_ref.map(|s| s.to_string()),
+        Some(std::path::PathBuf::from(working_dir)),
+    )));
     Ok(ReactAgent::new_shared(chat, registry, sys_prompt)
         .with_context(ctx)
         .with_history(history)

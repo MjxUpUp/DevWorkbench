@@ -171,7 +171,21 @@ impl PermissionMode {
     }
 }
 
-/// A hook. `before` may veto; `after` observes.
+/// Lifecycle events hooks may observe via [`Hook::on_event`]. The dispatch
+/// points are `UserPromptSubmit` (a turn starting) and `Stop` (the run
+/// finishing) — the seams batch3's user-defined hooks plug into. Built-in
+/// hooks default to no-op; the trait method has a default impl so existing
+/// hooks stay source-compatible.
+#[derive(Debug, Clone)]
+pub enum HookEvent {
+    /// A new user prompt is about to be sent to the model.
+    UserPromptSubmit { prompt: String },
+    /// The agent run is stopping (completed / failed / aborted).
+    Stop { summary: String },
+}
+
+/// A hook. `before` may veto; `after` observes completed actions; `on_event`
+/// observes run-lifecycle events (turn start / stop).
 #[async_trait]
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
@@ -181,6 +195,9 @@ pub trait Hook: Send + Sync {
     async fn after(&self, _outcome: &ActionOutcome) -> Vec<HonestyWarning> {
         Vec::new()
     }
+    /// Observe a lifecycle event (turn start / run stop). Default no-op so
+    /// existing hooks stay compatible; batch3's user hooks override this.
+    async fn on_event(&self, _ev: &HookEvent) {}
 }
 
 /// Registry + dispatcher for hooks.
@@ -251,6 +268,15 @@ impl HookManager {
             all.extend(h.after(outcome).await);
         }
         all
+    }
+
+    /// Dispatch a lifecycle event to every hook's `on_event`. Best-effort:
+    /// `on_event` is observation only (never gates), so it fans out across the
+    /// registered hooks fire-and-forget.
+    pub async fn dispatch_event(&self, ev: &HookEvent) {
+        for h in &self.hooks {
+            h.on_event(ev).await;
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -424,28 +450,31 @@ impl Hook for AssertionGuardHook {
     }
 }
 
-/// Require an active task before allowing file writes (the Forge task-guard
-/// analog — no edits without a tracked task).
+/// Gate file writes by Forge-task boundary (the Forge task-guard analog). A
+/// session bound to a task (`task_ref`) may write inside its `working_dir`;
+/// writes OUTSIDE that dir are blocked (the agent escaped its task scope); a
+/// session with NO task only warns — it never bricks the agent's own
+/// file-writing tools. Previously deferred because the chat path carried no
+/// task state, so a hard Block on every taskless WriteFile would have refused
+/// all writes; the v11→v12 migration + task_ref threading now let the bound
+/// case enforce scope while the unbound case degrades to a warning.
 pub struct TaskGuardHook {
-    has_active_task: std::sync::Mutex<bool>,
+    task_ref: Option<String>,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 impl TaskGuardHook {
-    pub fn new() -> Self {
-        Self {
-            has_active_task: std::sync::Mutex::new(false),
-        }
-    }
-    pub fn set_active(&self, active: bool) {
-        if let Ok(mut g) = self.has_active_task.lock() {
-            *g = active;
-        }
+    pub fn new(
+        task_ref: Option<String>,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self { task_ref, working_dir }
     }
 }
 
 impl Default for TaskGuardHook {
     fn default() -> Self {
-        Self::new()
+        Self::new(None, None)
     }
 }
 
@@ -455,17 +484,58 @@ impl Hook for TaskGuardHook {
         "task_guard"
     }
     async fn before(&self, action: &Action) -> Result<(), BlockReason> {
-        if let Action::WriteFile { .. } = action {
-            let active = self.has_active_task.lock().map(|g| *g).unwrap_or(false);
-            if !active {
-                return Err(BlockReason {
-                    hook: self.name().into(),
-                    message: "file write blocked: no active task (start one via forge task start)".into(),
-                    severity: Severity::Block,
-                });
+        let Action::WriteFile { path, .. } = action else {
+            return Ok(());
+        };
+        match (&self.task_ref, &self.working_dir) {
+            // No task bound: WARN but allow. Severity::Warn is logged by
+            // HookManager::before and does NOT block — the agent keeps working.
+            (None, _) => Err(BlockReason {
+                hook: self.name().into(),
+                message: "file write without an active task (start one via `forge task start`)"
+                    .into(),
+                severity: Severity::Warn,
+            }),
+            // Task bound but working_dir unknown: can't bound-check, allow.
+            (Some(_), None) => Ok(()),
+            // Task bound + working_dir: writes INSIDE pass, OUTSIDE are blocked.
+            (Some(_), Some(dir)) => {
+                if is_within(path, dir) {
+                    Ok(())
+                } else {
+                    Err(BlockReason {
+                        hook: self.name().into(),
+                        message: format!(
+                            "file write outside task scope: {path} is not within {}",
+                            dir.display()
+                        ),
+                        severity: Severity::Block,
+                    })
+                }
             }
         }
-        Ok(())
+    }
+}
+
+/// Is `path` inside `dir`? Relative check via `strip_prefix` — no `canonicalize`
+/// (that requires the path to exist, but the agent often writes a NEW file
+/// whose path doesn't yet). An absolute `path` is checked directly; a relative
+/// one is joined onto `dir` first. Falls back to canonicalizing both when the
+/// lexical check fails (resolves `..` / symlinks); if canonicalize can't
+/// resolve either side, the lexical result stands.
+fn is_within(path: &str, dir: &std::path::Path) -> bool {
+    let p = std::path::Path::new(path);
+    let target = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        dir.join(p)
+    };
+    if target.strip_prefix(dir).is_ok() || target == *dir {
+        return true;
+    }
+    match (std::fs::canonicalize(&target), std::fs::canonicalize(dir)) {
+        (Ok(t), Ok(d)) => t.strip_prefix(&d).is_ok() || t == d,
+        _ => false,
     }
 }
 
@@ -505,20 +575,87 @@ mod tests {
         assert!(findings.iter().any(|f| f.rule == "fatal_to_log"));
     }
 
-    #[tokio::test]
-    async fn task_guard_blocks_write_without_active_task() {
-        let h = TaskGuardHook::new();
-        let action = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
-        let err = h.before(&action).await.unwrap_err();
-        assert_eq!(err.severity, Severity::Block);
+    fn write(path: &str) -> Action {
+        Action::WriteFile { path: path.into(), content_preview: "".into() }
     }
 
     #[tokio::test]
-    async fn task_guard_allows_write_with_active_task() {
-        let h = TaskGuardHook::new();
-        h.set_active(true);
-        let action = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
-        assert!(h.before(&action).await.is_ok());
+    async fn task_guard_warns_write_without_task() {
+        // No task_ref → Severity::Warn (logged, does NOT block). This is the
+        // "never brick" guarantee: a taskless session still writes files.
+        let h = TaskGuardHook::new(None, None);
+        let err = h.before(&write("/proj/x.rs")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Warn, "taskless write must warn, not block");
+    }
+
+    #[tokio::test]
+    async fn task_guard_allows_write_inside_working_dir() {
+        let h = TaskGuardHook::new(
+            Some("feat/x".into()),
+            Some(std::path::PathBuf::from("/proj")),
+        );
+        assert!(h.before(&write("/proj/src/main.rs")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn task_guard_blocks_write_outside_working_dir() {
+        // Task bound to /proj but writing /etc/passwd → Block (escaped scope).
+        let h = TaskGuardHook::new(
+            Some("feat/x".into()),
+            Some(std::path::PathBuf::from("/proj")),
+        );
+        let err = h.before(&write("/etc/passwd")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block);
+        assert!(err.message.contains("outside task scope"), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn task_guard_allows_when_working_dir_unknown() {
+        // Task bound but no working_dir → can't bound-check, allow.
+        let h = TaskGuardHook::new(Some("feat/x".into()), None);
+        assert!(h.before(&write("/anywhere/x.rs")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn task_guard_ignores_non_write_actions() {
+        let h = TaskGuardHook::new(None, None);
+        assert!(h.before(&cmd("cargo build")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_reaches_hook_on_event() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct EventSpy {
+            submits: Arc<AtomicUsize>,
+            stops: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl Hook for EventSpy {
+            fn name(&self) -> &str {
+                "event_spy"
+            }
+            async fn on_event(&self, ev: &HookEvent) {
+                match ev {
+                    HookEvent::UserPromptSubmit { .. } => {
+                        self.submits.fetch_add(1, Ordering::SeqCst);
+                    }
+                    HookEvent::Stop { .. } => {
+                        self.stops.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        let submits = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut mgr = HookManager::new();
+        mgr.register(Box::new(EventSpy { submits: submits.clone(), stops: stops.clone() }));
+        mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "hi".into() }).await;
+        mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "again".into() }).await;
+        mgr.dispatch_event(&HookEvent::Stop { summary: "done".into() }).await;
+        assert_eq!(submits.load(Ordering::SeqCst), 2);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

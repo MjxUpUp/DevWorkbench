@@ -431,6 +431,40 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v11→v12: add `sessions.task_ref TEXT` so a session can be bound to the Forge
+/// task it ran under (drives TaskGuardHook's working_dir boundary check). Same
+/// idempotent shape as v10→v11 — probe the column (fresh DBs already have it
+/// from the static SCHEMA), ALTER only if missing, then bump the version.
+pub fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 12 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
+    // that references the column (same idiom as v10→v11's blocks probe). A
+    // fresh DB already has `task_ref` from the static SCHEMA and skips the ALTER.
+    let col_exists = conn
+        .prepare("SELECT task_ref FROM sessions LIMIT 0")
+        .is_ok();
+    if !col_exists {
+        conn.execute("ALTER TABLE sessions ADD COLUMN task_ref TEXT", [])?;
+        log::info!("Migrated schema v11→v12: added sessions.task_ref column");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (12, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +503,7 @@ mod tests {
             parent_session_id: parent.map(|s| s.to_string()),
             conversation_id: None,
             blocks: None,
+            task_ref: None,
         }
     }
 
@@ -719,5 +754,121 @@ mod tests {
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 11, "version must be 11 on fresh DB");
+    }
+
+    /// A pre-v12 database has a `sessions` table WITH the `blocks` column (added
+    /// by v11) but WITHOUT the `task_ref` column. Build that exact old-schema DB
+    /// (schema_version at 11), run v11→v12, assert the column is added, existing
+    /// data survives, and the version bumps to 12.
+    #[test]
+    fn migrate_v11_to_v12_adds_task_ref_column_to_pre_v12_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("v11.db");
+
+        // 1. Build a pre-v12 DB by hand: schema_version at 11, a sessions table
+        //    WITH blocks (from v11) but WITHOUT task_ref, and one real row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_version (version, applied_at) VALUES (11, '2026-01-01T00:00:00Z');
+                 CREATE TABLE sessions (
+                     id TEXT PRIMARY KEY,
+                     project_path TEXT NOT NULL,
+                     agent_type TEXT NOT NULL,
+                     status TEXT NOT NULL DEFAULT 'running',
+                     prompt TEXT NOT NULL,
+                     model TEXT,
+                     started_at TEXT NOT NULL,
+                     finished_at TEXT,
+                     exit_code INTEGER,
+                     output_summary TEXT,
+                     context_snapshot TEXT,
+                     linked_requirement_id TEXT,
+                     parent_session_id TEXT,
+                     conversation_id TEXT,
+                     blocks TEXT
+                 );
+                 INSERT INTO sessions (id, project_path, agent_type, status, prompt, model,
+                     started_at, finished_at, exit_code, output_summary, context_snapshot,
+                     linked_requirement_id, parent_session_id, conversation_id, blocks)
+                 VALUES ('legacy2', '/p', 'claude_code', 'completed', 'old prompt',
+                     NULL, '2026-01-01T00:00:00Z', NULL, 0, NULL, NULL, NULL, NULL, 'conv-2', NULL);",
+            )
+            .unwrap();
+        }
+
+        // 2. Run v11→v12.
+        let conn = Connection::open(&path).unwrap();
+        migrate_v11_to_v12(&conn).expect("v11→v12 must succeed on a pre-v12 DB");
+
+        // 3. task_ref column added.
+        let has_task_ref: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='task_ref'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_task_ref, 1, "task_ref column must be added");
+
+        // Existing data survives.
+        let prompt: String = conn
+            .query_row("SELECT prompt FROM sessions WHERE id='legacy2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(prompt, "old prompt", "existing data must survive the migration");
+
+        // Legacy session has no task_ref (not backfilled — only bound sessions write it).
+        let task_ref: Option<String> = conn
+            .query_row("SELECT task_ref FROM sessions WHERE id='legacy2'", [], |r| r.get(0))
+            .unwrap();
+        assert!(task_ref.is_none(), "legacy session task_ref must be NULL");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 12, "schema_version must be 12");
+    }
+
+    /// Idempotent: running twice must not double-ALTER (which would abort) and
+    /// must leave exactly one `task_ref` column.
+    #[test]
+    fn migrate_v11_to_v12_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("idem12.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v8_to_v9(&conn).unwrap();
+        migrate_v9_to_v10(&conn).unwrap();
+        migrate_v10_to_v11(&conn).expect("v11 must succeed");
+        migrate_v11_to_v12(&conn).expect("first run must succeed");
+        // Second run short-circuits on version>=12 — no double ALTER, no error.
+        migrate_v11_to_v12(&conn).expect("second run (idempotent) must succeed");
+        let has_task_ref: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='task_ref'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_task_ref, 1, "column must exist exactly once after two runs");
+    }
+
+    /// A fresh DB has `task_ref` from the static SCHEMA already. The probe must
+    /// skip the ALTER (ALTERing an existing column would abort) but still bump
+    /// the version to 12.
+    #[test]
+    fn migrate_v11_to_v12_on_fresh_db_skips_alter_but_records_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh12.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v8_to_v9(&conn).unwrap();
+        migrate_v9_to_v10(&conn).unwrap();
+        migrate_v10_to_v11(&conn).expect("v11 must succeed");
+        migrate_v11_to_v12(&conn).expect("fresh DB v12 migration must succeed");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 12, "version must be 12 on fresh DB");
     }
 }

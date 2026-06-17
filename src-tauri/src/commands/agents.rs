@@ -60,6 +60,7 @@ pub async fn spawn_agent_session(
     conversation_id: Option<String>,
     kernel: bool,
     mode: Option<crate::kernel_impl::hooks::PermissionMode>,
+    task_ref: Option<String>,
 ) -> Result<Session, AppError> {
     // MUST be `async`: react_chat_driver calls `tokio::spawn`, which requires a
     // current Tokio runtime context. A sync Tauri command runs on the main
@@ -87,6 +88,7 @@ pub async fn spawn_agent_session(
             parent_session_id.as_deref(),
             conversation_id.as_deref(),
             mode.unwrap_or_default(),
+            task_ref.as_deref(),
         )?);
     }
     Ok(pty::spawn_pty_agent(
@@ -127,6 +129,7 @@ fn react_chat_driver(
     parent_session_id: Option<&str>,
     conversation_id: Option<&str>,
     mode: crate::kernel_impl::hooks::PermissionMode,
+    task_ref: Option<&str>,
 ) -> Result<Session, String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     log::info!(
@@ -137,7 +140,7 @@ fn react_chat_driver(
     )?;
     let session = pty::build_running_session_row(
         &session_id, project_path, agent_type, prompt, model,
-        &resolved_conv_id, linked_requirement_id, parent_session_id,
+        &resolved_conv_id, linked_requirement_id, parent_session_id, task_ref,
     );
     pty::register_running_session(
         &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
@@ -211,6 +214,7 @@ fn react_chat_driver(
     let model_drv = model.map(|m| m.to_string());
     let prompt_drv = prompt.to_string();
     let conv_drv = resolved_conv_id.clone();
+    let task_ref_drv = task_ref.map(|s| s.to_string());
 
     let handle = tokio::spawn(async move {
         log::info!("[react_chat] task ENTERED sid={sid_drv}");
@@ -223,6 +227,7 @@ fn react_chat_driver(
             history_drv,
             Some(db_drv.clone()),
             mode,
+            task_ref_drv.as_deref(),
         ) {
             Ok(a) => a,
             Err(e) => {

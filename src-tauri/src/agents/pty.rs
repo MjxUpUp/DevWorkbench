@@ -883,6 +883,7 @@ pub(crate) fn build_running_session_row(
     conversation_id: &str,
     linked_requirement_id: Option<&str>,
     parent_session_id: Option<&str>,
+    task_ref: Option<&str>,
 ) -> Session {
     Session {
         id: session_id.to_string(),
@@ -900,6 +901,7 @@ pub(crate) fn build_running_session_row(
         parent_session_id: parent_session_id.map(|s| s.to_string()),
         conversation_id: Some(conversation_id.to_string()),
         blocks: None,
+        task_ref: task_ref.map(|s| s.to_string()),
     }
 }
 
@@ -1101,7 +1103,7 @@ fn spawn_pipe_fallback(
     )?;
     let session = build_running_session_row(
         &session_id, project_path, agent_type, prompt, model,
-        &resolved_conv_id, linked_requirement_id, parent_session_id,
+        &resolved_conv_id, linked_requirement_id, parent_session_id, None,
     );
     register_running_session(
         &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
@@ -1978,6 +1980,7 @@ mod tests {
             parent_session_id: None,
             conversation_id: Some("c1".to_string()),
             blocks: None,
+            task_ref: None,
         }
     }
 
