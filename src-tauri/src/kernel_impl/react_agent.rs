@@ -2340,6 +2340,84 @@ mod tests {
         );
     }
 
+    // --- completion-hook fidelity: real agent stream → FileChanged → persist ---
+    //
+    // The completion hook (commands/agents.rs) consumes a ReactAgent's event
+    // stream, maps each AgentEvent to a ChatStreamEvent, accumulates them, and
+    // on Completed hands the blocks to persist_completion_memory. The hook's
+    // wrapping closure (Tauri AppHandle.emit + tokio::spawn + live model) can't
+    // run in `cargo test`, but everything INSIDE it that matters can: drive a
+    // real ReactAgent with a mock model + ProbeTool (a write_file stand-in that
+    // records calls but writes nothing), consume its ACTUAL stream exactly like
+    // the driver does, then persist. Proves a write the agent really emits flows
+    // unchanged into a queryable react_reflection row — the input shape the hook
+    // depends on, verified end-to-end minus only the GUI glue.
+
+    #[tokio::test]
+    async fn run_stream_filechanged_flows_into_persisted_reflection() {
+        use futures::StreamExt;
+        use kernel_core::Agent;
+        let write_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
+        // turn 0: a write_file tool call → agent executes ProbeTool + emits
+        // FileChanged(src/a.rs); turn 1: bare text → convergence → Done(Completed).
+        let model = ScriptedModel::new(vec![
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![probe_call("write_file", r#"{"path":"src/a.rs","content":"x"}"#)],
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_signature: None,
+            },
+            Message::assistant("done, wrote src/a.rs"),
+        ]);
+        let agent = ReactAgent::new(model, reg, "sys");
+        let mut s = agent.run(go_input()).unwrap();
+
+        // Mirror react_chat_driver's consumption (agents.rs:294-336): every
+        // AgentEvent → map_agent_event → accumulate; capture status + summary.
+        let mut final_blocks: Vec<crate::agents::pty::ChatStreamEvent> = Vec::new();
+        let mut completed = false;
+        let mut summary = String::new();
+        while let Some(Ok(ev)) = s.next().await {
+            if let kernel_core::AgentEvent::Done(o) = &ev {
+                completed = matches!(o.status, kernel_core::AgentRunStatus::Completed);
+                if let Some(sm) = &o.output_summary {
+                    summary = sm.clone();
+                }
+            }
+            final_blocks.extend(crate::agents::react_chat::map_agent_event(ev, 0));
+        }
+        assert!(completed, "agent must converge Completed");
+        assert!(
+            !write_calls.lock().unwrap().is_empty(),
+            "write_file must have actually executed"
+        );
+
+        // The completion hook's core, fed the REAL accumulated blocks (not a
+        // hand-built fixture): a prose summary + a write tool → 2 entries.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("e.db")).unwrap();
+        let hash = crate::activity::hash_project_path("/proj");
+        let n = crate::kernel_impl::session_reflection::persist_completion_memory(
+            &conn, &hash, "sid", "write src/a.rs",
+            if summary.is_empty() { None } else { Some(&summary) },
+            &final_blocks, &crate::models::AgentType::ClaudeCode,
+        );
+        assert_eq!(n, 2, "prose summary + write tool → react_session + react_reflection");
+        let got = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
+        let refl = got
+            .iter()
+            .find(|e| e.category == "react_reflection")
+            .expect("react_reflection written from a real agent stream");
+        // The agent REALLY emitted FileChanged("src/a.rs"); it survived
+        // map_agent_event into the structured reflection content verbatim.
+        assert!(refl.content.contains("src/a.rs"), "real file path landed: {}", refl.content);
+        assert!(refl.content.contains("write_file"), "tool counted: {}", refl.content);
+    }
+
     // --- v1.1: reasoning 双协议贯通 (GLM Interleaved + Preserved Thinking) ---
 
     #[test]
