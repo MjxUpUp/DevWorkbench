@@ -8,7 +8,7 @@ import {
   type NodeState,
 } from '../../stores/orchestrateStore';
 import { BlocksView } from '../chat/BlocksView';
-import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult } from '../../types';
+import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
 
 /** Color per node status — drives the canvas node fill. */
 const STATUS_COLOR: Record<NodeState['status'], string> = {
@@ -45,6 +45,17 @@ export function OrchestrateView() {
 
   const [running, setRunning] = useState(false);
   const [eventLog, setEventLog] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+
+  // Built-in workflow templates (D5): one-click starters that fill the YAML
+  // editor so the user doesn't face a blank DAG. Empty list (backend missing or
+  // rejects) is fine — the editor still works, just without the quick-start
+  // chips. Clicking a chip overwrites the editor with that template's YAML.
+  useEffect(() => {
+    invoke<WorkflowTemplate[]>('list_workflow_templates')
+      .then(setTemplates)
+      .catch(() => setTemplates([]));
+  }, []);
 
   // Subscribe to workflow:progress once. Guard against the unmount-before-
   // resolve race: if the component unmounts while the async listen() is still
@@ -117,6 +128,21 @@ export function OrchestrateView() {
         {/* YAML editor */}
         <section className="orchestrate-yaml">
           <h3>Workflow 定义 (YAML)</h3>
+          {templates.length > 0 && (
+            <div className="yaml-templates">
+              <span className="yaml-templates-label">从模板开始：</span>
+              {templates.map((t) => (
+                <button
+                  key={t.name}
+                  className="btn yaml-template-btn"
+                  title={t.description}
+                  onClick={() => setYaml(t.yamlContent)}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}

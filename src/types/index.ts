@@ -354,6 +354,16 @@ export interface Workflow {
   updatedAt: string;
 }
 
+/** A built-in workflow template (`list_workflow_templates`) — a starter YAML the
+ * user clones into the YAML editor instead of authoring the DAG from scratch.
+ * Mirrors Rust `commands::workflows::WorkflowTemplate` (serde camelCase). */
+export interface WorkflowTemplate {
+  name: string;
+  description: string;
+  category: string;
+  yamlContent: string;
+}
+
 // Note: WorkflowRun / WorkflowStep removed — the static run-tracking model was
 // never written to. Execution is now stream-based via the kernel-compose Graph
 // engine: run_workflow returns a { run_id, output } result and emits live

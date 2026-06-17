@@ -112,6 +112,18 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   skill_catalog: () => [],
   mcp_catalog: () => [],
   mcp_servers: () => [],
+  // D5: workflow template starters + MCP fine-grained CRUD / live-reconnect.
+  // list_workflow_templates returns demo templates so the OrchestrateView chips
+  // render in plain-browser dev mode; the mcp_* stubs are best-effort no-ops
+  // (stateful — the real backend owns them).
+  list_workflow_templates: () => [
+    { name: 'code-review', description: '代码审查 agent + Forge 门禁', category: '质量', yamlContent: 'start: p\nend: g\nnodes:\n  p:\n    type: prompt\n    text: "审查改动"\n  g:\n    type: gate\n    gate: forge\nedges:\n  - { from: p, to: g }\n' },
+    { name: 'refactor', description: '重构 agent + 门禁验收', category: '研发', yamlContent: 'start: p\nend: g\nnodes:\n  p:\n    type: prompt\n    text: "重构模块"\n  a:\n    type: agent\n    agent: claude_code\n  g:\n    type: gate\n    gate: forge\nedges:\n  - { from: p, to: a }\n  - { from: a, to: g }\n' },
+  ],
+  mcp_load_enabled: () => 0,
+  mcp_set_enabled: () => null,
+  mcp_update_server: () => null,
+  mcp_delete_server: () => null,
   scan_git_repos: () => [],
   detect_project_tags: () => [],
 };

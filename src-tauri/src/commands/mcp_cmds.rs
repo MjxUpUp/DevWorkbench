@@ -129,3 +129,114 @@ pub async fn mcp_install_preset(
     crate::config::mcp::save_mcp_config(&config, &config_path)?;
     Ok(())
 }
+
+/// Toggle a server's `enabled` flag in `mcp-servers.toml` AND sync the live
+/// registry: enabling connects (handshake), disabling disconnects. Lets the
+/// user mute a server without losing its config. Errors if the config file or
+/// the named server is absent.
+#[tauri::command]
+pub async fn mcp_set_enabled(
+    registry: State<'_, McpRegistry>,
+    project_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let config_path = std::path::Path::new(&project_path).join("mcp-servers.toml");
+    let mut config = if config_path.is_file() {
+        crate::config::mcp::load_mcp_config(&config_path)?
+    } else {
+        return Err(AppError::Config("mcp-servers.toml not found".into()));
+    };
+    if !crate::config::mcp::set_server_enabled(&mut config, &name, enabled) {
+        return Err(AppError::Config(format!("server '{}' not in config", name)));
+    }
+    // Snapshot the fields before save_mcp_config borrows `config` again.
+    let (command, args, env_map) = {
+        let s = config.servers.iter().find(|s| s.name == name).expect("just set enabled");
+        (s.command.clone(), s.args.clone(), s.env.clone())
+    };
+    crate::config::mcp::save_mcp_config(&config, &config_path)?;
+    if enabled {
+        let env: Vec<(String, String)> = env_map.into_iter().collect();
+        let _ = registry.disconnect(&name); // fresh connect if it was live
+        registry.connect(&name, &command, &args, &env)?;
+    } else {
+        registry.disconnect(&name)?;
+    }
+    Ok(())
+}
+
+/// Replace a server's command/args/env in `mcp-servers.toml` and reconnect the
+/// live registry when it's enabled. Errors if the config file or server absent.
+#[tauri::command]
+pub async fn mcp_update_server(
+    registry: State<'_, McpRegistry>,
+    project_path: String,
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: Option<Vec<(String, String)>>,
+) -> Result<(), AppError> {
+    let config_path = std::path::Path::new(&project_path).join("mcp-servers.toml");
+    let mut config = if config_path.is_file() {
+        crate::config::mcp::load_mcp_config(&config_path)?
+    } else {
+        return Err(AppError::Config("mcp-servers.toml not found".into()));
+    };
+    let env_map: std::collections::HashMap<String, String> =
+        env.unwrap_or_default().into_iter().collect();
+    if !crate::config::mcp::update_server(&mut config, &name, command, args, env_map) {
+        return Err(AppError::Config(format!("server '{}' not in config", name)));
+    }
+    // Read back the (now-updated) fields + whether to reconnect.
+    let (reconnect, command, args, env_map) = {
+        let s = config.servers.iter().find(|s| s.name == name).expect("just updated");
+        (s.enabled, s.command.clone(), s.args.clone(), s.env.clone())
+    };
+    crate::config::mcp::save_mcp_config(&config, &config_path)?;
+    if reconnect {
+        let env: Vec<(String, String)> = env_map.into_iter().collect();
+        let _ = registry.disconnect(&name);
+        registry.connect(&name, &command, &args, &env)?;
+    }
+    Ok(())
+}
+
+/// Delete a server from `mcp-servers.toml` and disconnect it from the live
+/// registry. Idempotent — a missing name (or a project with no config file) is
+/// a no-op, not an error.
+#[tauri::command]
+pub async fn mcp_delete_server(
+    registry: State<'_, McpRegistry>,
+    project_path: String,
+    name: String,
+) -> Result<(), AppError> {
+    let config_path = std::path::Path::new(&project_path).join("mcp-servers.toml");
+    if !config_path.is_file() {
+        return Ok(()); // nothing to delete from
+    }
+    let mut config = crate::config::mcp::load_mcp_config(&config_path)?;
+    if !crate::config::mcp::remove_server(&mut config, &name) {
+        return Ok(()); // not present — idempotent
+    }
+    crate::config::mcp::save_mcp_config(&config, &config_path)?;
+    registry.disconnect(&name)?;
+    Ok(())
+}
+
+/// Reconnect every enabled server from the project's `mcp-servers.toml`. Call
+/// this when a project opens so servers the user previously installed
+/// (`mcp_install_preset`) are live again without re-adding them. Returns the
+/// count newly connected. Per-server failures are logged, never fatal.
+#[tauri::command]
+pub async fn mcp_load_enabled(
+    registry: State<'_, McpRegistry>,
+    project_path: String,
+) -> Result<usize, AppError> {
+    let config_path = std::path::Path::new(&project_path).join("mcp-servers.toml");
+    if !config_path.is_file() {
+        return Ok(0);
+    }
+    let config = crate::config::mcp::load_mcp_config(&config_path)?;
+    registry.connect_from_config(&config)
+}

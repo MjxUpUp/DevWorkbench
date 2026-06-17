@@ -142,6 +142,46 @@ pub fn load_mcp_config(path: &Path) -> Result<McpConfigFile, AppError> {
     parse_mcp_config(&content)
 }
 
+/// Set a named server's `enabled` flag in-place. Returns `false` if the name
+/// isn't in the config (the caller decides whether a missing name is an error
+/// or an idempotent no-op). Pure — performs no I/O; pair with [save_mcp_config]
+/// to persist and a registry sync to (dis)connect.
+pub fn set_server_enabled(config: &mut McpConfigFile, name: &str, enabled: bool) -> bool {
+    if let Some(server) = config.servers.iter_mut().find(|s| s.name == name) {
+        server.enabled = enabled;
+        true
+    } else {
+        false
+    }
+}
+
+/// Replace a named server's `command`/`args`/`env` in-place, preserving its
+/// `enabled` and `target_agents`. Returns `false` if not found. Pure.
+pub fn update_server(
+    config: &mut McpConfigFile,
+    name: &str,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+) -> bool {
+    if let Some(server) = config.servers.iter_mut().find(|s| s.name == name) {
+        server.command = command;
+        server.args = args;
+        server.env = env;
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove a named server. Returns `true` if it was present, `false` for an
+/// idempotent no-op on a name that's already gone. Pure.
+pub fn remove_server(config: &mut McpConfigFile, name: &str) -> bool {
+    let before = config.servers.len();
+    config.servers.retain(|s| s.name != name);
+    config.servers.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +272,68 @@ args = ["-y", "@modelcontextprotocol/server-github"]
     fn test_parse_missing_servers() {
         let result = parse_mcp_config("other = true");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_server_enabled_toggles_known_and_reports_missing() {
+        let mut config = parse_mcp_config(
+            r#"
+[servers.a]
+command = "x"
+[servers.b]
+command = "y"
+"#,
+        )
+        .unwrap();
+        assert!(set_server_enabled(&mut config, "a", false));
+        assert!(!config.servers[0].enabled, "a disabled");
+        assert!(set_server_enabled(&mut config, "b", true));
+        assert!(config.servers[1].enabled, "b enabled");
+        assert!(!set_server_enabled(&mut config, "ghost", true), "missing → false");
+    }
+
+    #[test]
+    fn update_server_replaces_fields_preserves_enabled_and_target_agents() {
+        let mut config = parse_mcp_config(
+            r#"
+[servers.a]
+command = "old"
+target_agents = ["claude"]
+"#,
+        )
+        .unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("K".to_string(), "v".to_string());
+        assert!(update_server(
+            &mut config,
+            "a",
+            "new".to_string(),
+            vec!["--x".to_string()],
+            env,
+        ));
+        let s = &config.servers[0];
+        assert_eq!(s.command, "new");
+        assert_eq!(s.args, vec!["--x".to_string()]);
+        assert_eq!(s.env.get("K"), Some(&"v".to_string()));
+        assert!(s.enabled, "enabled preserved across update");
+        assert_eq!(s.target_agents.len(), 1, "target_agents preserved");
+        assert!(
+            !update_server(&mut config, "ghost", "z".into(), vec![], std::collections::HashMap::new()),
+            "missing → false"
+        );
+    }
+
+    #[test]
+    fn remove_server_is_idempotent() {
+        let mut config = parse_mcp_config(
+            r#"
+[servers.a]
+command = "x"
+"#,
+        )
+        .unwrap();
+        assert!(remove_server(&mut config, "a"), "first remove hits");
+        assert!(config.servers.is_empty());
+        assert!(!remove_server(&mut config, "a"), "second remove is a no-op");
     }
 }

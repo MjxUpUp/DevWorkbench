@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -57,6 +58,16 @@ export function McpSection() {
     try {
       await saveConfig(activeProject.path, { servers });
       const result = await applyConfig(activeProject.path, { servers });
+      // D5: reconnect enabled servers into the live McpRegistry so agents
+      // spawned after this can use them (previously the registry stayed empty
+      // until a manual mcp_install_preset). Best-effort: a failing server is
+      // logged + skipped server-side, and the config was already applied above,
+      // so a reconnect error here must NOT mask the successful apply.
+      try {
+        await invoke('mcp_load_enabled', { projectPath: activeProject.path });
+      } catch {
+        // live reconnect is best-effort — swallow, apply already succeeded
+      }
       setApplyResult(result);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
