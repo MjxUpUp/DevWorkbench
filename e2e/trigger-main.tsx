@@ -8,9 +8,12 @@ import { TriggerMenu } from '../src/components/TriggerMenu';
 // only asserts the menu renders real installed-skill names.
 
 function Harness() {
+  // type from ?type= so the same harness covers $ (skills) and / (slash
+  // commands); defaults to $ for the existing skill tests.
+  const type = (new URLSearchParams(window.location.search).get('type') as '$' | '/' | '@') || '$';
   return (
     <TriggerMenu
-      type="$"
+      type={type}
       position={{ top: 0, left: 0 }}
       onSelect={() => {}}
       onClose={() => {}}

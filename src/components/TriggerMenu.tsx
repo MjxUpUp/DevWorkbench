@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { Skill } from '../types';
+import type { Skill, SlashCommand } from '../types';
 
 interface TriggerMenuItem {
   label: string;
@@ -33,7 +33,19 @@ export function TriggerMenu({ type, onSelect, onClose }: TriggerMenuProps) {
 
   useEffect(() => {
     if (type === '/') {
-      setItems(BUILTIN_COMMANDS);
+      // Real slash commands from the backend (built-in + user-defined). Falls
+      // back to BUILTIN_COMMANDS if the backend is unreachable so the menu
+      // never goes empty. The kernel expands `/name args` at submit time in
+      // spawn_agent_session, so Composer just inserts `/name ` here and the
+      // user appends arguments.
+      setLoading(true);
+      invoke<SlashCommand[]>('list_slash_commands')
+        .then(cmds => {
+          const arr = Array.isArray(cmds) ? cmds : [];
+          setItems(arr.map(c => ({ label: '/' + c.name, desc: c.description ?? '', icon: '⌘' })));
+        })
+        .catch(() => setItems(BUILTIN_COMMANDS))
+        .finally(() => setLoading(false));
     } else if (type === '$') {
       // Real installed skills from the backend. `$` selects an installed,
       // callable skill — Composer injects `[name]` into the prompt and the

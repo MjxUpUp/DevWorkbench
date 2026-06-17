@@ -45,6 +45,27 @@ pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, App
 
 // Agent process lifecycle commands (PTY-based for CLI agents + kernel for the
 // self-hosted ReactAgent).
+
+/// Expand a leading `/name args` into the matched slash command's template
+/// (claude-code argumentSubstitution). Unknown commands pass through. This is
+/// the "submit-time render" seam: the frontend inserts `/plan fix X`, and
+/// spawn renders it to the template with `fix X` in `$ARGUMENTS` BEFORE the
+/// kernel sees it — slash commands are a prompt-template layer over the
+/// kernel, not a kernel feature.
+fn expand_slash_command(db: &crate::db::DbState, prompt: String) -> Result<String, AppError> {
+    let (name, args) = match crate::slash_commands::registry::parse_command(&prompt) {
+        Some(x) => x,
+        None => return Ok(prompt),
+    };
+    let conn = db
+        .get()
+        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
+    match crate::slash_commands::registry::find_by_name(&conn, &name)? {
+        Some(cmd) => Ok(crate::slash_commands::registry::render_template(&cmd.template, &args)),
+        None => Ok(prompt),
+    }
+}
+
 #[tauri::command]
 pub async fn spawn_agent_session(
     app: tauri::AppHandle,
@@ -70,6 +91,7 @@ pub async fn spawn_agent_session(
     // async command body is driven on Tauri's tokio runtime, so the runtime
     // context is present and `tokio::spawn` succeeds. The CLI path
     // (spawn_pty_agent) uses `std::thread::spawn` and never had this issue.
+    let prompt = expand_slash_command(db.inner(), prompt)?;
     if kernel {
         // Self-hosted ReactAgent path: no child process, no PTY. The agent runs
         // as a tokio task driving a BoxStream<AgentEvent>, mapped to the SAME

@@ -140,6 +140,18 @@ export interface Session {
   estimatedCost?: number;
 }
 
+/** A `/`-command prompt template. `name` has no leading slash. The kernel
+ *  expands `/name args` at submit time: `$ARGUMENTS`/`$0` = all args, `$1`..`$n`
+ *  = split tokens. Seeded with /plan /review /test /fix. */
+export interface SlashCommand {
+  id: string;
+  name: string;
+  description: string | null;
+  template: string;
+  category: string | null;
+  createdAt: string;
+}
+
 /**
  * A conversation = the multi-turn topic container (one Claude-Code "session").
  * A `Session` is now one turn inside it. Conversations live under a project;

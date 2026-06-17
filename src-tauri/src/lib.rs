@@ -11,6 +11,7 @@ pub mod quality;
 pub mod mcp;
 pub mod skills;
 pub mod cost;
+pub mod slash_commands;
 pub mod kernel_impl;
 pub mod utils;
 
@@ -209,6 +210,8 @@ pub fn run() {
             commands::skills_cmds::uninstall_skill,
             commands::skills_cmds::skill_catalog,
             commands::skills_cmds::install_skill_from_catalog,
+            commands::slash_cmds::list_slash_commands,
+            commands::slash_cmds::render_slash_command,
             commands::cost_cmds::get_cost_summary,
             commands::cost_cmds::get_cost_trend,
             commands::cost_cmds::load_budget,

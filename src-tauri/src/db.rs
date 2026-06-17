@@ -298,6 +298,32 @@ CREATE TABLE IF NOT EXISTS skills (
     metadata TEXT
 );
 
+CREATE TABLE IF NOT EXISTS slash_commands (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    template TEXT NOT NULL,
+    category TEXT,
+    created_at TEXT NOT NULL
+);
+-- Seed the four built-in slash commands. Idempotent: INSERT OR IGNORE on the
+-- UNIQUE name + fixed ids means re-running SCHEMA on every launch is a no-op
+-- once they exist; a user editing a built-in later is NOT overwritten.
+-- Multi-line string literals store real newlines (SQLite supports them).
+INSERT OR IGNORE INTO slash_commands (id, name, description, template, category, created_at) VALUES
+    ('builtin-plan', 'plan', '计划模式 — 先输出计划再执行', '请先制定计划，确认后再执行。
+
+需求：$ARGUMENTS', 'builtin', '2026-06-18T00:00:00Z'),
+    ('builtin-review', 'review', '代码审查', '请审查以下代码变更，重点关注：正确性、安全性、性能、可读性。逐条给出意见，不要泛泛而谈。
+
+审查范围：$ARGUMENTS', 'builtin', '2026-06-18T00:00:00Z'),
+    ('builtin-test', 'test', '运行测试', '请运行测试套件并报告结果。如果有失败，先定位根因再修复——禁止弱化断言（t.Fatal→t.Log、放宽条件、t.Skip）。
+
+目标：$ARGUMENTS', 'builtin', '2026-06-18T00:00:00Z'),
+    ('builtin-fix', 'fix', '修复问题', '请修复以下问题。先定位根因，不要掩盖症状。
+
+问题：$ARGUMENTS', 'builtin', '2026-06-18T00:00:00Z');
+
 CREATE TABLE IF NOT EXISTS skill_reports (
     id TEXT PRIMARY KEY,
     skill_id TEXT NOT NULL,

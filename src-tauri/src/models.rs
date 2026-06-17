@@ -368,6 +368,26 @@ pub struct SkillReport {
     pub scanned_at: String,
 }
 
+// ---- Slash command types ----
+
+/// A user-defined `/`-command: a named prompt template with `$ARGUMENTS` /
+/// `$0` / `$1`.. placeholders rendered when the user submits `/name args`.
+/// Seeded with the four built-ins (/plan /review /test /fix); the table is the
+/// single source of truth the `/` trigger menu reads from (no more hardcoded
+/// BUILTIN_COMMANDS in the frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    pub id: String,
+    /// Command name WITHOUT the leading slash (e.g. "plan").
+    pub name: String,
+    pub description: Option<String>,
+    /// Prompt template. `$ARGUMENTS`/`$0` = all args; `$1`..`$n` = split tokens.
+    pub template: String,
+    pub category: Option<String>,
+    pub created_at: String,
+}
+
 // ---- Cost types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
