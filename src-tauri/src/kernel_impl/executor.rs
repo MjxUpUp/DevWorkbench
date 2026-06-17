@@ -233,6 +233,16 @@ pub(crate) fn build_react_agent(
     // dropped on a parse hiccup. An empty registry leaves the agent chat-only;
     // a populated one activates the tool loop + ToolCall events end-to-end.
     let mut registry = ToolRegistry::new();
+    // Built-in coding tools FIRST: read_file/glob/grep are read-only so they
+    // enter the sub-agent's read_only_subset (snapshot below), letting a child
+    // investigate too. bash/write_file are NOT read-only → auto-excluded from
+    // the child (a sub-agent can't mutate). Without these the agent could only
+    // dispatch_subagent — it had no way to read a file or run a command itself.
+    registry.push(crate::kernel_impl::builtin_tools::ReadFileTool);
+    registry.push(crate::kernel_impl::builtin_tools::GlobTool);
+    registry.push(crate::kernel_impl::builtin_tools::GrepTool);
+    registry.push(crate::kernel_impl::builtin_tools::BashTool);
+    registry.push(crate::kernel_impl::builtin_tools::WriteFileTool);
     let home = crate::commands::projects::dirs_home();
     for dir in skills_search_dirs(&home, working_dir, &data_dir) {
         for skill in SkillTool::load_dir(&dir) {

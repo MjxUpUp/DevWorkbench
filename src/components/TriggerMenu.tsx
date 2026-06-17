@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import type { Skill } from '../types';
 
 interface TriggerMenuItem {
   label: string;
@@ -22,17 +24,10 @@ const BUILTIN_COMMANDS: TriggerMenuItem[] = [
   { label: '/fix', desc: '修复问题', icon: '🔧' },
 ];
 
-// Placeholder skills for $ trigger
-const PLACEHOLDER_SKILLS: TriggerMenuItem[] = [
-  { label: '新建功能', desc: '创建新功能实现', icon: '✨' },
-  { label: '代码重构', desc: '重构已有代码', icon: '♻️' },
-  { label: '性能优化', desc: '优化性能瓶颈', icon: '⚡' },
-  { label: '安全审计', desc: '安全漏洞扫描', icon: '🛡️' },
-];
-
 export function TriggerMenu({ type, onSelect, onClose }: TriggerMenuProps) {
   const [search, setSearch] = useState('');
   const [items, setItems] = useState<TriggerMenuItem[]>([]);
+  const [loading, setLoading] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -40,7 +35,20 @@ export function TriggerMenu({ type, onSelect, onClose }: TriggerMenuProps) {
     if (type === '/') {
       setItems(BUILTIN_COMMANDS);
     } else if (type === '$') {
-      setItems(PLACEHOLDER_SKILLS);
+      // Real installed skills from the backend. `$` selects an installed,
+      // callable skill — Composer injects `[name]` into the prompt and the
+      // kernel resolves it against the ToolRegistry built from these SKILL.md
+      // files. skill_catalog (discoverable-but-uninstalled) is intentionally
+      // NOT used: picking an uninstalled skill would yield a name the kernel
+      // can't map to a tool.
+      setLoading(true);
+      invoke<Skill[]>('list_skills')
+        .then(skills => {
+          const arr = Array.isArray(skills) ? skills : [];
+          setItems(arr.map(s => ({ label: s.name, desc: s.description ?? '', icon: '⚡' })));
+        })
+        .catch(() => setItems([]))
+        .finally(() => setLoading(false));
     } else if (type === '@') {
       // File listing — will be populated from backend when available
       setItems([
@@ -78,21 +86,29 @@ export function TriggerMenu({ type, onSelect, onClose }: TriggerMenuProps) {
         onChange={e => setSearch(e.target.value)}
         onKeyDown={handleKeyDown}
       />
-      {filtered.map((item, idx) => (
-        <button
-          key={idx}
-          className="trigger-menu-item"
-          onClick={() => onSelect(item)}
-        >
-          <span className="trigger-menu-item-icon">{item.icon || (type === '@' ? '📄' : type === '/' ? '⌘' : '⚡')}</span>
-          <span className="trigger-menu-item-label">{item.label}</span>
-          {item.desc && <span className="trigger-menu-item-desc">{item.desc}</span>}
-        </button>
-      ))}
-      {filtered.length === 0 && (
+      {loading ? (
         <div style={{ padding: '12px 16px', color: 'var(--text-muted)', fontSize: 13, textAlign: 'center' }}>
-          无匹配结果
+          加载技能中...
         </div>
+      ) : (
+        <>
+          {filtered.map((item, idx) => (
+            <button
+              key={idx}
+              className="trigger-menu-item"
+              onClick={() => onSelect(item)}
+            >
+              <span className="trigger-menu-item-icon">{item.icon || (type === '@' ? '📄' : type === '/' ? '⌘' : '⚡')}</span>
+              <span className="trigger-menu-item-label">{item.label}</span>
+              {item.desc && <span className="trigger-menu-item-desc">{item.desc}</span>}
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div style={{ padding: '12px 16px', color: 'var(--text-muted)', fontSize: 13, textAlign: 'center' }}>
+              无匹配结果
+            </div>
+          )}
+        </>
       )}
     </div>
   );

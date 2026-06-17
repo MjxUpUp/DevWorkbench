@@ -1,6 +1,6 @@
 import { useNavigationStore } from '../stores/navigationStore';
 import { ChatView } from './chat/ChatView';
-import { SkillMarketView } from './skills/SkillMarketView';
+import { SkillsSection } from './settings/SkillsSection';
 import { OrchestrateView } from './orchestrate/OrchestrateView';
 import { GitPanel } from './git/GitPanel';
 
@@ -25,7 +25,11 @@ export function MainStage() {
     <main className={`main-stage${isTask ? ' has-git-panel' : ''}`}>
       <div className="main-stage-body">
         {activeView === 'task' && <ChatView />}
-        {activeView === 'skills' && <SkillMarketView />}
+        {activeView === 'skills' && (
+          <div className="main-skills-page">
+            <SkillsSection />
+          </div>
+        )}
         {activeView === 'orchestrate' && <OrchestrateView />}
       </div>
       {isTask && <GitPanel projectPath={activeProject?.path ?? null} />}

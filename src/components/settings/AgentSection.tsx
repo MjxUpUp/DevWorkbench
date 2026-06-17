@@ -17,13 +17,13 @@ export function AgentSection() {
 
   useEffect(() => {
     invoke<ToolStatus[]>('detect_tools')
-      .then(setTools)
+      .then(t => setTools(Array.isArray(t) ? t : []))
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     invoke<TerminalInfo[]>('detect_terminals')
-      .then(setTerminals)
+      .then(t => setTerminals(Array.isArray(t) ? t : []))
       .catch(() => {});
   }, []);
 
