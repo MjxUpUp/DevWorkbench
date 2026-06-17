@@ -165,16 +165,17 @@ pub(crate) fn build_react_agent(
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
-    let (endpoint, api_key, resolved_model) =
+    let (endpoint, api_key, resolved_model, context_window) =
         match crate::config::providers::load_providers_config(&data_dir)
             .ok()
             .and_then(|c| crate::config::providers::resolve_provider(&c, &model_id))
         {
-            Some(r) => (r.endpoint, r.api_key, r.model),
+            Some(r) => (r.endpoint, r.api_key, r.model, r.context_window),
             None => (
                 "https://open.bigmodel.cn/api/anthropic".to_string(),
                 String::new(),
                 model_id,
+                None,
             ),
         };
     // T7 experience flywheel: prepend prior quality-failure lessons so the
@@ -285,13 +286,62 @@ pub(crate) fn build_react_agent(
             crate::kernel_impl::model_router::route_step,
         ))
         .with_budget_check(budget_check)
-        // v1.3 C1: summarize the conversation middle once it exceeds ~24k tokens,
-        // keeping the last 8 turns verbatim. GLM-4.6 has a 128k window but the
-        // thinking budget + tool results + system prompt eat into it; 24k leaves
-        // ample headroom while preventing the unbounded growth that blew long
-        // runs. Summarization rides the raw tool-less model.
-        .with_context_compaction(24_000, 8)
+        // v1.3 C1 + v2.0 fix: summarize the conversation middle once it exceeds a
+        // threshold sized to the MODEL's declared context window (75%), keeping
+        // the last 8 turns verbatim. The old 24k constant only fit GLM-4.6's
+        // 128k window — for an 8k model it never fired (overflow), for a 200k
+        // model it fired far too early (wasted capacity). Window-relative sizing
+        // fixes both; unknown window → conservative 32k default (→ 24k,
+        // unchanged for configs that don't declare one). See `compact_threshold`.
+        .with_context_compaction(compact_threshold(context_window), 8)
         .with_hooks(Arc::new(hooks)))
+}
+
+/// v2.0: size auto-compaction to the model's REAL context window, not a
+/// hardcoded constant. Returns 75% of the window — headroom for the system
+/// prompt (memory + experience suffix), the thinking budget, tool schemas, and
+/// the output. Unknown/zero window → conservative 32k default (→ 24k threshold,
+/// the old hardcoded value), so behaviour is unchanged for configs that don't
+/// declare a window and the compactor never overflows a small model.
+fn compact_threshold(context_window: Option<usize>) -> usize {
+    const DEFAULT_WINDOW: usize = 32_000;
+    const FALLBACK_THRESHOLD: usize = 24_000;
+    let window = context_window.unwrap_or(DEFAULT_WINDOW);
+    if window == 0 {
+        return FALLBACK_THRESHOLD;
+    }
+    window.saturating_mul(3).saturating_div(4)
+}
+
+#[cfg(test)]
+mod compact_threshold_tests {
+    use super::compact_threshold;
+
+    #[test]
+    fn unknown_window_falls_back_to_24k_legacy_default() {
+        // A model that never declared a window must behave exactly as before —
+        // the old hardcoded 24k constant. This is the backward-compat guarantee.
+        assert_eq!(compact_threshold(None), 24_000);
+    }
+
+    #[test]
+    fn declared_window_uses_75_percent() {
+        // 128k GLM → 96k. Under the old hardcoded 24k the agent compacted with
+        // 72k of unused capacity — the headroom this fix recovers.
+        assert_eq!(compact_threshold(Some(128_000)), 96_000);
+        // 200k Claude → 150k.
+        assert_eq!(compact_threshold(Some(200_000)), 150_000);
+        // 8k small model → 6k. Under the old 24k constant this threshold was
+        // unreachable, so an 8k model would overflow before compaction ever ran.
+        assert_eq!(compact_threshold(Some(8_000)), 6_000);
+    }
+
+    #[test]
+    fn zero_window_is_guarded_not_panic() {
+        // A misconfigured `context_window = 0` must not divide-by-zero; fall
+        // back to the legacy threshold rather than crashing the agent build.
+        assert_eq!(compact_threshold(Some(0)), 24_000);
+    }
 }
 
 /// Build the experience-flywheel suffix for the system prompt (v1.2 T7): up

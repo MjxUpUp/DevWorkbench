@@ -24,6 +24,12 @@ pub struct ModelEntry {
     pub label: String,
     #[serde(default)]
     pub enabled: bool,
+    /// The model's context window in tokens (v2.0: drives context auto-compaction
+    /// threshold). Optional — a model with no declared window falls back to a
+    /// conservative default in `build_react_agent`. Declare it so the compactor
+    /// sizes to the REAL window instead of assuming every model is small.
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 /// The full providers configuration file.
@@ -76,6 +82,9 @@ pub struct ResolvedProvider {
     pub endpoint: String,
     pub api_key: String,
     pub model: String,
+    /// The matched model's declared context window, if any (v2.0: drives
+    /// auto-compaction sizing in `build_react_agent`).
+    pub context_window: Option<usize>,
 }
 
 /// Resolve which provider + credentials serve a given model id.
@@ -99,11 +108,18 @@ pub fn resolve_provider(config: &ProvidersConfig, model_id: &str) -> Option<Reso
         if !p.enabled || p.api_key.is_empty() {
             continue;
         }
-        if p.models.iter().any(|m| m.id == resolved_model && m.enabled) {
+        if let Some(matched) = p
+            .models
+            .iter()
+            .find(|m| m.id == resolved_model && m.enabled)
+        {
+            // Carry the matched model's declared window so the executor sizes
+            // auto-compaction to the real model, not a hardcoded constant.
             return Some(ResolvedProvider {
                 endpoint: p.endpoint.clone(),
                 api_key: p.api_key.clone(),
                 model: resolved_model.to_string(),
+                context_window: matched.context_window,
             });
         }
     }
@@ -133,8 +149,8 @@ fn default_providers_config() -> ProvidersConfig {
                 api_key: String::new(),
                 enabled: true,
                 models: vec![
-                    ModelEntry { id: "glm-4.6".to_string(), label: "GLM-4.6".to_string(), enabled: true },
-                    ModelEntry { id: "glm-4-flash".to_string(), label: "GLM-4 Flash".to_string(), enabled: true },
+                    ModelEntry { id: "glm-4.6".to_string(), label: "GLM-4.6".to_string(), enabled: true, context_window: Some(128_000) },
+                    ModelEntry { id: "glm-4-flash".to_string(), label: "GLM-4 Flash".to_string(), enabled: true, context_window: Some(128_000) },
                 ],
             },
             ProviderConfig {
@@ -144,8 +160,8 @@ fn default_providers_config() -> ProvidersConfig {
                 api_key: String::new(),
                 enabled: false,
                 models: vec![
-                    ModelEntry { id: "claude-opus-4-8".to_string(), label: "Claude Opus 4.8".to_string(), enabled: true },
-                    ModelEntry { id: "claude-sonnet-4-6".to_string(), label: "Claude Sonnet 4.6".to_string(), enabled: true },
+                    ModelEntry { id: "claude-opus-4-8".to_string(), label: "Claude Opus 4.8".to_string(), enabled: true, context_window: Some(200_000) },
+                    ModelEntry { id: "claude-sonnet-4-6".to_string(), label: "Claude Sonnet 4.6".to_string(), enabled: true, context_window: Some(200_000) },
                 ],
             },
         ],
@@ -179,6 +195,9 @@ mod tests {
         assert_eq!(r.api_key, "sk-real");
         assert_eq!(r.model, "glm-4.6");
         assert!(r.endpoint.ends_with("/api/anthropic"));
+        // v2.0: the preset GLM window carries through so the executor can size
+        // auto-compaction to the real 128k, not a hardcoded constant.
+        assert_eq!(r.context_window, Some(128_000));
     }
 
     #[test]
