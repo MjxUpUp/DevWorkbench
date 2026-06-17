@@ -3,6 +3,7 @@ import { AppearanceSection } from './AppearanceSection';
 import { AgentSection } from './AgentSection';
 import { ProvidersSection } from './ProvidersSection';
 import { McpSection } from './McpSection';
+import { MemorySection } from './MemorySection';
 import { SkillsSection } from './SkillsSection';
 import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
@@ -47,7 +48,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, placeholder: { title: '子智能体', desc: '配置可被主智能体调用的子智能体', hint: '子智能体配置正在开发中，敬请期待' } },
   { id: 'commands', label: '命令', Icon: IconPlay, placeholder: { title: '命令', desc: '管理自定义斜杠命令', hint: '命令管理功能正在开发中，敬请期待' } },
   { id: 'hooks', label: '钩子', Icon: IconEdit, placeholder: { title: '钩子', desc: '配置生命周期钩子与事件回调', hint: '钩子配置正在开发中，敬请期待' } },
-  { id: 'memory', label: '记忆', Icon: IconStar, placeholder: { title: '记忆', desc: '管理智能体长期记忆条目', hint: '记忆管理功能正在开发中，敬请期待' } },
+  { id: 'memory', label: '记忆', Icon: IconStar, Component: MemorySection },
   { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
   { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection },
   { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' } },

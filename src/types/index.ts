@@ -186,6 +186,38 @@ export interface KnowledgeEntry {
   accessCount: number;
 }
 
+// ---- Skill types (mirror Rust models::Skill, serde camelCase) ----
+
+export interface Skill {
+  id: string;
+  org: string;
+  name: string;
+  version?: string | null;
+  installedAt?: string | null;
+  path?: string | null;
+  qualityScore?: number | null;
+  metadata?: string | null;
+  description?: string | null;
+  icon?: string | null;
+  category?: string | null;
+  securityScore?: number | null;
+  installs?: number | null;
+  rating?: number | null;
+  author?: string | null;
+  compatibleAgents?: string | null;
+  qualityDetails?: string | null;
+  securityDetails?: string | null;
+  configSchema?: string | null;
+}
+
+/** One discoverable skill on disk (Rust skills_cmds::SkillCatalogEntry). */
+export interface SkillCatalogEntry {
+  name: string;
+  description: string;
+  source: string;
+  scope: 'global' | 'project';
+}
+
 // ---- Quality types ----
 
 export interface QualityCheck {
@@ -223,6 +255,10 @@ export interface ModelEntry {
   id: string;
   label: string;
   enabled: boolean;
+  /** Model context window in tokens. Drives auto-compaction threshold
+   * (75% of window). Omitted → backend falls back to a conservative 32k
+   * default. Mirrors Rust `ModelEntry::context_window` (serde camelCase). */
+  contextWindow?: number;
 }
 
 export interface ProviderConfig {

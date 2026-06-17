@@ -868,3 +868,162 @@
   background: var(--surface-0);
   color: var(--text-primary);
 }
+
+/* Model context-window input — narrower than the label/id, mono digits.
+   Overrides the generic `.provider-model-input:not(.provider-model-id)` 140px
+   via equal specificity + later source order. */
+.provider-model-input.provider-model-window {
+  width: 120px;
+  flex: 0 0 120px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 12px);
+}
+
+/* ---- Memory section (记忆) — long-term memory flywheel management ---- */
+.memory-section { max-width: 760px; }
+
+.memory-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-2);
+}
+
+.memory-search-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.memory-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.memory-search-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.memory-scope-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-3);
+}
+
+.memory-empty {
+  padding: var(--space-4, 16px);
+  text-align: center;
+  color: var(--text-tertiary);
+  background: var(--surface-0);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+}
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.memory-card {
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-3);
+}
+
+.memory-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 4px;
+}
+
+.memory-card-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.memory-card-category {
+  font-size: var(--text-xs, 12px);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+
+.memory-card-confidence {
+  margin-left: auto;
+  font-size: var(--text-xs, 12px);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.memory-card-content {
+  margin: 4px 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-card-content.expandable { cursor: pointer; }
+.memory-card-content.expandable:hover { color: var(--text-primary); }
+
+.memory-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs, 12px);
+  color: var(--text-tertiary);
+}
+
+.memory-card-delete {
+  margin-left: auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs, 12px);
+}
+
+.memory-card-delete:hover {
+  background: var(--danger-soft, rgba(221, 51, 51, 0.08));
+  color: var(--danger, #d33);
+}
+
+/* ---- Skills section (技能) — reuses the memory-card shells ---- */
+.skills-subhead {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: var(--space-4, 16px) 0 var(--space-2);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.skills-subhead:first-of-type { margin-top: var(--space-2); }
+
+.skills-source {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 12px);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skills-install-btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: var(--text-xs, 12px);
+}

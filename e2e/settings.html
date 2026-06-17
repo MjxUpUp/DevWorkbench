@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Settings sections E2E harness</title>
+    <!--
+      Same Tauri IPC shim as index.html: a classic head script runs before the
+      deferred module entry, so @tauri-apps/api/core sees __TAURI_INTERNALS__
+      when the settings sections call invoke(). Playwright seeds responses via
+      window.__MOCK_INVOKE__ (addInitScript, even earlier) and every call is
+      recorded into window.__INVOKE_CALLS__ for assertions.
+    -->
+    <script>
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args) => {
+          (window.__INVOKE_CALLS__ = window.__INVOKE_CALLS__ || []).push({ cmd, args });
+          const mock = window.__MOCK_INVOKE__;
+          if (mock && Object.prototype.hasOwnProperty.call(mock, cmd)) {
+            const v = mock[cmd];
+            return typeof v === 'function' ? v(args) : v;
+          }
+          return null;
+        },
+        transformCallback: () => 0,
+        unregisterCallback: () => {},
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./settings-main.tsx"></script>
+  </body>
+</html>

@@ -490,6 +490,25 @@ function ProviderCard({
                     placeholder="模型 id (如 glm-4.6)"
                     onChange={(e) => onPatchModel(idx, { id: e.target.value })}
                   />
+                  <input
+                    className="provider-model-input provider-model-window"
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={m.contextWindow ?? ''}
+                    aria-label="上下文窗口"
+                    placeholder="窗口 tokens (如 128000)"
+                    title="模型上下文窗口（tokens）。留空则后端用保守默认 32k；auto-compact 在 75% 处触发"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      // Empty → undefined (backend Option None → 32k default).
+                      // Otherwise coerce to a non-negative int; NaN/garbage → 0
+                      // which the backend guards (compact_threshold(0)=24k fallback).
+                      onPatchModel(idx, {
+                        contextWindow: v === '' ? undefined : Math.max(0, Math.floor(Number(v) || 0)),
+                      });
+                    }}
+                  />
                   <button
                     className="provider-icon-btn provider-model-remove"
                     aria-label={`删除模型 ${m.label}`}

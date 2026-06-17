@@ -281,4 +281,29 @@ describe('ProvidersSection', () => {
       await screen.findByText('无法加载供应商配置,请检查应用数据目录权限'),
     ).toBeInTheDocument();
   });
+
+  it('persists a model context window through the save round-trip', async () => {
+    const user = userEvent.setup();
+    let savedConfig: ProvidersConfig | null = null;
+    setupInvoke({
+      set_providers_config: (args) => {
+        savedConfig = (args as { config: ProvidersConfig }).config;
+        return undefined;
+      },
+    });
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    // The first model (glm-4.6) starts with no declared window. Type one in.
+    const windowInputs = within(zai).getAllByLabelText('上下文窗口');
+    await user.type(windowInputs[0], '200000');
+
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+
+    await waitFor(() => expect(savedConfig).not.toBeNull());
+    // The edited model carries the window the backend uses to size compaction.
+    expect(savedConfig!.providers[0].models[0].contextWindow).toBe(200000);
+    // A model the user left blank stays undefined → backend 32k default.
+    expect(savedConfig!.providers[0].models[1].contextWindow).toBeUndefined();
+  });
 });
