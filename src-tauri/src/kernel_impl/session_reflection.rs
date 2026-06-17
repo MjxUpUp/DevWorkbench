@@ -139,4 +139,51 @@ mod tests {
         let (title, _) = summarize(&blocks, &long).unwrap();
         assert!(title.chars().count() <= "Reflection: ".chars().count() + 80);
     }
+
+    #[test]
+    fn reflection_flows_blocks_through_to_db_entry() {
+        // Higher-fidelity than the summarize unit tests above: exercise the FULL
+        // data path the completion hook walks (summarize → build_session_reflection
+        // _entry → add_entry → get_entries_for_project) so we know a real
+        // Completed session's blocks land as one QUERYABLE react_reflection row —
+        // not just that summarize formats a string in isolation.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("r.db")).unwrap();
+        let hash = crate::activity::hash_project_path("/proj");
+
+        let blocks = vec![
+            tu("write_file"),
+            tu("read_file"),
+            tr(false),
+            fc("src/a.rs"),
+            ChatStreamEvent::Text { content: "done".into() },
+        ];
+
+        let (title, content) = summarize(&blocks, "改 a.rs 的 bug").unwrap();
+        let entry = crate::knowledge::store::build_session_reflection_entry(
+            &hash,
+            "sid1",
+            &title,
+            &content,
+            &crate::models::AgentType::ClaudeCode,
+        );
+        crate::knowledge::store::add_entry(&conn, &entry).unwrap();
+
+        let got = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
+        let refl = got
+            .iter()
+            .find(|e| e.category == "react_reflection")
+            .expect("react_reflection row must be written + queryable");
+        assert_eq!(refl.source_session_id.as_deref(), Some("sid1"));
+        assert!(
+            refl.content.contains("write_file×1"),
+            "tool counts in content: {}",
+            refl.content
+        );
+        assert!(refl.content.contains("read_file×1"));
+        assert!(refl.content.contains("src/a.rs"));
+        // The pure-chat Text block carries no behavioral signal — must NOT leak
+        // into the structured reflection.
+        assert!(!refl.content.contains("done"));
+    }
 }
