@@ -240,7 +240,7 @@ fn react_chat_driver(
         };
         log::info!("[react_chat] build_react_agent OK sid={sid_drv}");
         let input = AgentInput {
-            prompt: prompt_drv,
+            prompt: prompt_drv.clone(),
             working_dir: Some(pp_drv.clone()),
             model: None,
             resume_from: None,
@@ -322,6 +322,30 @@ fn react_chat_driver(
             kt.remove(&sid_drv);
         }
         let summary = if final_output.is_empty() { None } else { Some(final_output) };
+
+        // v1.3 T2: close the long-term-memory loop. The opaque CLI path feeds
+        // the knowledge flywheel via collect_from_session (log-parsing); the
+        // kernel agent has no log, so write its completed output directly as a
+        // `react_session` entry → the NEXT session's memory_prompt_suffix can
+        // surface it. Best-effort: a DB write failure just logs + continues
+        // (memory is an enhancement, not a gate). Only on Completed so a failed/
+        // degraded run doesn't pollute the project's memory.
+        if final_status == SessionStatus::Completed {
+            if let Some(out) = summary.as_ref() {
+                if let Ok(conn) = db_drv.get() {
+                    let hash = crate::activity::hash_project_path(&pp_drv);
+                    let entry = crate::knowledge::store::build_session_memory_entry(
+                        &hash, &sid_drv, &prompt_drv, out, &at_drv,
+                    );
+                    if let Err(e) = crate::knowledge::store::add_entry(&conn, &entry) {
+                        log::warn!("[react_chat] session-memory write failed for {sid_drv}: {e}");
+                    } else {
+                        log::info!("[react_chat] session-memory recorded for {sid_drv}");
+                    }
+                }
+            }
+        }
+
         pty::finalize_session(
             &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
             final_status, final_exit, summary, None,

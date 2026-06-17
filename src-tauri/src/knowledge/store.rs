@@ -56,6 +56,40 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
     Ok(())
 }
 
+/// Build a `KnowledgeEntry` capturing a completed self-built ReactAgent
+/// session's contribution to long-term memory (v1.3 T2). The opaque CLI path
+/// feeds the knowledge flywheel via [`collect_from_session`] (it reads their
+/// JSONL/sqlite logs); the kernel agent has no such log, so its completed
+/// output is written directly as one `react_session` entry — closing the loop
+/// so the NEXT session's `memory_prompt_suffix` can surface it.
+///
+/// `content` is capped at 1000 chars so a verbose run doesn't bloat the FTS
+/// index or every future system prompt.
+pub fn build_session_memory_entry(
+    project_hash: &str,
+    session_id: &str,
+    title: &str,
+    content: &str,
+    agent_type: &AgentType,
+) -> KnowledgeEntry {
+    let title: String = title.lines().next().unwrap_or(title).chars().take(120).collect();
+    let content: String = content.chars().take(1000).collect();
+    KnowledgeEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_hash: project_hash.to_string(),
+        category: "react_session".to_string(),
+        title,
+        content,
+        source_agent: agent_type.clone(),
+        source_session_id: Some(session_id.to_string()),
+        source_type: "react_agent".to_string(),
+        confidence: 0.6,
+        created_at: chrono::Local::now().to_rfc3339(),
+        updated_at: chrono::Local::now().to_rfc3339(),
+        access_count: 0,
+    }
+}
+
 /// Search knowledge entries using FTS5 full-text search.
 pub fn search_entries(
     conn: &rusqlite::Connection,
@@ -434,5 +468,31 @@ mod tests {
         let after = get_entries_for_project(&db.conn, "proj_a").unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "k1");
+    }
+
+    #[test]
+    fn build_session_memory_entry_caps_content_and_tags_fields() {
+        let e = build_session_memory_entry(
+            "hash1", "sid1", "实现 auto-compact", &"x".repeat(2000), &AgentType::ClaudeCode,
+        );
+        assert_eq!(e.project_hash, "hash1");
+        assert_eq!(e.category, "react_session");
+        assert_eq!(e.source_type, "react_agent");
+        assert_eq!(e.source_session_id.as_deref(), Some("sid1"));
+        assert_eq!(e.source_agent, AgentType::ClaudeCode);
+        assert!((e.confidence - 0.6).abs() < 1e-9);
+        assert_eq!(e.content.chars().count(), 1000, "content capped at 1000 chars");
+        assert_eq!(e.title, "实现 auto-compact");
+        assert!(!e.id.is_empty());
+    }
+
+    #[test]
+    fn build_session_memory_entry_takes_first_line_of_multiline_title() {
+        let e = build_session_memory_entry(
+            "h", "s", "第一行标题\n第二行不该出现", "内容", &AgentType::Codex,
+        );
+        assert_eq!(e.title, "第一行标题");
+        assert!(!e.title.contains("第二行"));
+        assert_eq!(e.source_agent, AgentType::Codex);
     }
 }

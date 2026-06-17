@@ -186,6 +186,11 @@ pub(crate) fn build_react_agent(
     if let Some(dbs) = db.as_ref() {
         if let Ok(conn) = dbs.get() {
             let hash = crate::activity::hash_project_path(working_dir);
+            // v1.3 T2: cross-session long-term memory (general high-confidence
+            // lessons) + v1.2 T7 quality-failure lessons, both prepended to the
+            // system prompt so the ReactAgent reuses what prior sessions learned
+            // — the same flywheel `knowledge/injector` gives the opaque path.
+            sys_prompt.push_str(&memory_prompt_suffix(&conn, &hash));
             sys_prompt.push_str(&experience_prompt_suffix(&conn, &hash));
         }
     }
@@ -297,6 +302,42 @@ fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> 
     format!("\n\n历史质量经验（避免重蹈覆辙）：\n{body}")
 }
 
+/// Build the cross-session long-term-memory suffix (v1.3 T2): up to 5 high-
+/// confidence general entries from THIS project, so the self-built ReactAgent
+/// reuses what prior sessions (opaque CLIs AND earlier kernel runs) learned.
+/// Excludes `quality_failure` (that's [`experience_prompt_suffix`]'s lane) and
+/// keeps only confidence ≥ 0.6, ranked by confidence then recency. Empty → no
+/// prompt bloat.
+fn memory_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> String {
+    let entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
+        .unwrap_or_default();
+    let mut mems: Vec<_> = entries
+        .iter()
+        .filter(|e| e.category != "quality_failure" && e.confidence >= 0.6)
+        .collect();
+    mems.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    let picked: Vec<_> = mems.into_iter().take(5).collect();
+    if picked.is_empty() {
+        return String::new();
+    }
+    let body = picked
+        .iter()
+        .map(|e| {
+            // Cap each entry's content so the system prompt stays bounded —
+            // 200 chars mirrors the knowledge store's dedup window.
+            let c: String = e.content.chars().take(200).collect();
+            format!("- {}: {}", e.title, c)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\n项目长期记忆（跨会话积累，复用历史结论）：\n{body}")
+}
+
 /// Map a kernel-core `AgentEvent` stream onto graph `AgentChunk`s.
 ///
 /// - `Done` → `Final` (becomes the node's output value, propagated to graph
@@ -396,6 +437,70 @@ mod tests {
             !suffix.contains("thiserror"),
             "non-failure category excluded: {suffix}"
         );
+    }
+
+    #[test]
+    fn memory_prompt_suffix_lists_high_confidence_general_entries() {
+        use crate::db;
+        use crate::knowledge::store::add_entry;
+        use crate::models::{AgentType, KnowledgeEntry};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let mk = |id: &str, cat: &str, title: &str, conf: f64| KnowledgeEntry {
+            id: id.into(),
+            project_hash: "h".into(),
+            category: cat.into(),
+            title: title.into(),
+            content: "内容".into(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: None,
+            source_type: "test".into(),
+            confidence: conf,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            access_count: 0,
+        };
+        // High-confidence general insight → included.
+        add_entry(&conn, &mk("k1", "insight", "项目用 thiserror", 0.8)).unwrap();
+        // quality_failure → excluded (that's experience_prompt_suffix's lane).
+        add_entry(&conn, &mk("k2", "quality_failure", "断言被弱化", 0.9)).unwrap();
+        // Low confidence → filtered out.
+        add_entry(&conn, &mk("k3", "insight", "噪声条目", 0.4)).unwrap();
+        let suffix = memory_prompt_suffix(&conn, "h");
+        assert!(suffix.contains("项目长期记忆"), "header present: {suffix}");
+        assert!(suffix.contains("thiserror"), "high-conf insight included: {suffix}");
+        assert!(
+            !suffix.contains("断言被弱化"),
+            "quality_failure excluded: {suffix}"
+        );
+        assert!(!suffix.contains("噪声条目"), "low-confidence filtered: {suffix}");
+    }
+
+    #[test]
+    fn memory_prompt_suffix_empty_when_no_general_entries() {
+        use crate::db;
+        use crate::knowledge::store::add_entry;
+        use crate::models::{AgentType, KnowledgeEntry};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        // Only a quality_failure entry → the memory suffix is empty (no general
+        // high-confidence memory to surface).
+        let e = KnowledgeEntry {
+            id: "k1".into(),
+            project_hash: "h".into(),
+            category: "quality_failure".into(),
+            title: "t".into(),
+            content: "c".into(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: None,
+            source_type: "test".into(),
+            confidence: 0.9,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            access_count: 0,
+        };
+        add_entry(&conn, &e).unwrap();
+        assert_eq!(memory_prompt_suffix(&conn, "h"), "");
     }
 
     #[tokio::test]
