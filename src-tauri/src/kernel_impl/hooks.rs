@@ -185,7 +185,10 @@ pub enum HookEvent {
 }
 
 /// A hook. `before` may veto; `after` observes completed actions; `on_event`
-/// observes run-lifecycle events (turn start / stop).
+/// observes run-lifecycle events (turn start / stop) and may RETURN additional
+/// context strings (e.g. a `UserPromptSubmit` hook that emits project
+/// conventions on stdout). Observation only — never gates; a returned
+/// `Vec<String>` is collected and injected, never blocks.
 #[async_trait]
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
@@ -195,9 +198,14 @@ pub trait Hook: Send + Sync {
     async fn after(&self, _outcome: &ActionOutcome) -> Vec<HonestyWarning> {
         Vec::new()
     }
-    /// Observe a lifecycle event (turn start / run stop). Default no-op so
-    /// existing hooks stay compatible; batch3's user hooks override this.
-    async fn on_event(&self, _ev: &HookEvent) {}
+    /// Observe a lifecycle event (turn start / run stop). Returns additional
+    /// context strings to inject into the run (only meaningful for
+    /// `UserPromptSubmit`; `Stop` hooks return `vec![]` and run for side
+    /// effects). Default empty so the built-in hooks stay source-compatible;
+    /// the D2 user-defined `UserCommandHook` overrides this.
+    async fn on_event(&self, _ev: &HookEvent) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Registry + dispatcher for hooks.
@@ -270,13 +278,18 @@ impl HookManager {
         all
     }
 
-    /// Dispatch a lifecycle event to every hook's `on_event`. Best-effort:
-    /// `on_event` is observation only (never gates), so it fans out across the
-    /// registered hooks fire-and-forget.
-    pub async fn dispatch_event(&self, ev: &HookEvent) {
+    /// Dispatch a lifecycle event to every hook's `on_event`, collecting the
+    /// additional-context strings each hook returns. The collected contexts are
+    /// injected into the run by the caller (e.g. appended to the user prompt for
+    /// `UserPromptSubmit`). Best-effort: `on_event` is observation only (never
+    /// gates), so a hook error is logged via `log::warn!` inside the hook and
+    /// contributes no context rather than aborting the dispatch.
+    pub async fn dispatch_event(&self, ev: &HookEvent) -> Vec<String> {
+        let mut contexts = Vec::new();
         for h in &self.hooks {
-            h.on_event(ev).await;
+            contexts.extend(h.on_event(ev).await);
         }
+        contexts
     }
 
     pub fn count(&self) -> usize {
@@ -636,7 +649,7 @@ mod tests {
             fn name(&self) -> &str {
                 "event_spy"
             }
-            async fn on_event(&self, ev: &HookEvent) {
+            async fn on_event(&self, ev: &HookEvent) -> Vec<String> {
                 match ev {
                     HookEvent::UserPromptSubmit { .. } => {
                         self.submits.fetch_add(1, Ordering::SeqCst);
@@ -645,6 +658,7 @@ mod tests {
                         self.stops.fetch_add(1, Ordering::SeqCst);
                     }
                 }
+                Vec::new()
             }
         }
         let submits = Arc::new(AtomicUsize::new(0));
@@ -656,6 +670,39 @@ mod tests {
         mgr.dispatch_event(&HookEvent::Stop { summary: "done".into() }).await;
         assert_eq!(submits.load(Ordering::SeqCst), 2);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_collects_contexts_from_hooks() {
+        // A hook returning Vec<String> on UserPromptSubmit → dispatch_event
+        // must gather them so the run loop can inject the joined context.
+        struct ContextHook {
+            ctx: String,
+        }
+        #[async_trait]
+        impl Hook for ContextHook {
+            fn name(&self) -> &str {
+                "context_hook"
+            }
+            async fn on_event(&self, ev: &HookEvent) -> Vec<String> {
+                if let HookEvent::UserPromptSubmit { .. } = ev {
+                    vec![self.ctx.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let mut mgr = HookManager::new();
+        mgr.register(Box::new(ContextHook { ctx: "rule-A".into() }));
+        mgr.register(Box::new(ContextHook { ctx: "rule-B".into() }));
+        // Stop dispatch must yield nothing (neither hook returns on Stop).
+        let stop_ctxs = mgr.dispatch_event(&HookEvent::Stop { summary: "x".into() }).await;
+        assert!(stop_ctxs.is_empty(), "Stop yields no context: {stop_ctxs:?}");
+        // Submit dispatch must gather BOTH hooks' contexts in registration order.
+        let submit_ctxs = mgr
+            .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "p".into() })
+            .await;
+        assert_eq!(submit_ctxs, vec!["rule-A".to_string(), "rule-B".to_string()]);
     }
 
     #[tokio::test]

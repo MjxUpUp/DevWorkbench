@@ -324,6 +324,23 @@ INSERT OR IGNORE INTO slash_commands (id, name, description, template, category,
 
 问题：$ARGUMENTS', 'builtin', '2026-06-18T00:00:00Z');
 
+-- D2 user-configurable lifecycle hooks (claude-code command-hook analog). Each
+-- row is one shell command bound to a lifecycle event; build_react_agent loads
+-- the enabled rows and registers a UserCommandHook per row. `event` is one of
+-- 'user_prompt_submit' | 'stop'. `shell` 1 = run via `sh -c` (default, matches
+-- claude-code), 0 = exec the command directly. IF NOT EXISTS makes this safe to
+-- re-apply on every launch (same idempotent pattern as slash_commands above).
+CREATE TABLE IF NOT EXISTS user_hooks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    event TEXT NOT NULL,
+    command TEXT NOT NULL,
+    shell INTEGER NOT NULL DEFAULT 1,
+    timeout_secs INTEGER NOT NULL DEFAULT 30,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS skill_reports (
     id TEXT PRIMARY KEY,
     skill_id TEXT NOT NULL,

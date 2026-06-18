@@ -388,6 +388,59 @@ pub struct SlashCommand {
     pub created_at: String,
 }
 
+// ---- User-configurable lifecycle hooks (D2) ----
+
+/// Which lifecycle event a [`UserHook`] fires on. Mirrors the `event` column;
+/// persisted as the snake_case kebab used in [`HookEvent`] dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserHookEvent {
+    /// Fires when a new user prompt is about to be sent to the model. The
+    /// hook's stdout (exit 0) is injected as additional context.
+    UserPromptSubmit,
+    /// Fires when the agent run stops (completed / failed / aborted). Output is
+    /// ignored — the hook runs for its side effect (notifications, cleanup).
+    Stop,
+}
+
+impl UserHookEvent {
+    /// Persisted column value (snake_case), matching the DB seed/CRUD contract.
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            UserHookEvent::UserPromptSubmit => "user_prompt_submit",
+            UserHookEvent::Stop => "stop",
+        }
+    }
+
+    /// Parse a stored column value back into the enum. Unknown strings error so
+    /// a corrupt row surfaces loudly instead of silently skipping.
+    pub fn from_db(s: &str) -> Result<Self, String> {
+        match s {
+            "user_prompt_submit" => Ok(UserHookEvent::UserPromptSubmit),
+            "stop" => Ok(UserHookEvent::Stop),
+            other => Err(format!("unknown user_hook event: {other}")),
+        }
+    }
+}
+
+/// A user-defined lifecycle hook (D2). One row = one shell command bound to a
+/// single event. Loaded at agent build time and registered into the
+/// HookManager; its `on_event` runs the command and (for UserPromptSubmit)
+/// returns stdout as injected context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserHook {
+    pub id: String,
+    pub name: String,
+    pub event: UserHookEvent,
+    /// Shell command. Run via `sh -c` when `shell` is true (default).
+    pub command: String,
+    pub shell: bool,
+    pub timeout_secs: u64,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
 // ---- Cost types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

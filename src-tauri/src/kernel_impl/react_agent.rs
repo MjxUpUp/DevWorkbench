@@ -1010,29 +1010,61 @@ impl ReactAgent {
         let mut history = Vec::with_capacity(2 + prior_history.len());
         history.push(Message::system(&self.system_prompt));
         history.extend(prior_history);
-        history.push(Message::user(task));
-        for _step in 0..self.max_steps {
-            let resp = model.generate(&history, &opts).await?;
-            history.push(resp.clone());
-            if resp.tool_calls.is_empty() {
-                return Ok(resp.content);
-            }
-            for call in &resp.tool_calls {
-                let result = self.execute_tool_call(call, &self.ctx).await;
-                history.push(Message {
-                    role: Role::Tool,
-                    content: result,
-                    tool_calls: Vec::new(),
-                    tool_call_id: Some(call.id.clone()),
-                    reasoning: None,
-                    reasoning_signature: None,
-                });
+        // D2 lifecycle: dispatch UserPromptSubmit BEFORE the user message enters
+        // history; any contexts the user hooks return are appended to the prompt
+        // as additional context (claude-code additionalContext injection). A
+        // missing HookManager (no hooks) skips straight to the plain prompt.
+        let mut full_task = task.to_string();
+        if let Some(hooks) = &self.hooks {
+            let ctxs = hooks
+                .dispatch_event(&crate::kernel_impl::hooks::HookEvent::UserPromptSubmit {
+                    prompt: task.to_string(),
+                })
+                .await;
+            if !ctxs.is_empty() {
+                full_task.push_str("\n\n[user-hook context]\n");
+                full_task.push_str(&ctxs.join("\n---\n"));
             }
         }
-        Err(Error::Agent(format!(
-            "ReactAgent exceeded {} steps without a final answer",
-            self.max_steps
-        )))
+        history.push(Message::user(&full_task));
+        let result: Result<String, Error> = async {
+            for _step in 0..self.max_steps {
+                let resp = model.generate(&history, &opts).await?;
+                history.push(resp.clone());
+                if resp.tool_calls.is_empty() {
+                    return Ok(resp.content);
+                }
+                for call in &resp.tool_calls {
+                    let result = self.execute_tool_call(call, &self.ctx).await;
+                    history.push(Message {
+                        role: Role::Tool,
+                        content: result,
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(call.id.clone()),
+                        reasoning: None,
+                        reasoning_signature: None,
+                    });
+                }
+            }
+            Err(Error::Agent(format!(
+                "ReactAgent exceeded {} steps without a final answer",
+                self.max_steps
+            )))
+        }
+        .await;
+        // D2 lifecycle: dispatch Stop once on run termination (converged or
+        // step-limited), regardless of outcome. Stop hooks run for side effects
+        // (notifications); their output is ignored by the manager.
+        if let Some(hooks) = &self.hooks {
+            let summary = match &result {
+                Ok(s) => s.clone(),
+                Err(e) => e.to_string(),
+            };
+            hooks
+                .dispatch_event(&crate::kernel_impl::hooks::HookEvent::Stop { summary })
+                .await;
+        }
+        result
     }
 
     /// Collect the list of files changed since the last commit (uncommitted working
@@ -1195,7 +1227,22 @@ impl kernel_core::Agent for ReactAgent {
             let mut history = Vec::with_capacity(2 + prior_history.len());
             history.push(Message::system(&system_prompt));
             history.extend(prior_history.iter().cloned());
-            history.push(Message::user(&task));
+            // D2 lifecycle: dispatch UserPromptSubmit BEFORE the user message
+            // enters history; user-hook stdout (exit 0) is appended to the prompt
+            // as additional context (claude-code additionalContext injection).
+            let mut full_task = task.clone();
+            if let Some(h) = hooks.as_ref() {
+                let ctxs = h
+                    .dispatch_event(&crate::kernel_impl::hooks::HookEvent::UserPromptSubmit {
+                        prompt: task.clone(),
+                    })
+                    .await;
+                if !ctxs.is_empty() {
+                    full_task.push_str("\n\n[user-hook context]\n");
+                    full_task.push_str(&ctxs.join("\n---\n"));
+                }
+            }
+            history.push(Message::user(&full_task));
             // T9: base model for per-step routing. opts.model is overridden each
             // turn when a router is wired; base_model is the "no routing" default
             // (also what route_step falls back to when the turn is high-stakes).
@@ -1473,6 +1520,23 @@ impl kernel_core::Agent for ReactAgent {
                         reasoning_signature: None,
                     });
                 }
+            }
+            // D2 lifecycle: dispatch Stop ONCE at run termination, regardless of
+            // terminal status (degraded / max-steps / completed). Stop hooks run
+            // for side effects (notifications, cleanup); the summary reflects how
+            // the run ended so a hook can branch on success vs failure.
+            if let Some(h) = hooks.as_ref() {
+                let summary = if let Some(reason) = &degraded {
+                    fatal_user_message(*reason).to_string()
+                } else if !converged {
+                    format!(
+                        "Reached the {max_steps}-step tool-call limit without a final answer.",
+                    )
+                } else {
+                    final_output.clone()
+                };
+                h.dispatch_event(&crate::kernel_impl::hooks::HookEvent::Stop { summary })
+                    .await;
             }
             // Honest terminal status: degraded (graceful LLM failure), max-steps
             // (no convergence), or completed (model gave a final answer). Never
@@ -2113,6 +2177,95 @@ mod tests {
             "no stream call when budget exhausted: {:?}",
             seen.lock().unwrap()
         );
+    }
+
+    // --- D2: UserPromptSubmit hook context injection into the run ---
+
+    #[derive(Clone)]
+    struct HistorySpy {
+        reply: String,
+        last_user: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ChatModel for HistorySpy {
+        async fn generate(&self, hist: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            // Record the last user-role message the loop fed us — that's where
+            // the injected hook context must appear.
+            if let Some(m) = hist.iter().rev().find(|m| m.role == Role::User) {
+                *self.last_user.lock().unwrap() = Some(m.content.clone());
+            }
+            Ok(Message::assistant(self.reply.clone()))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            Err(Error::Unsupported("HistorySpy: drive via generate".into()))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_injects_user_hook_context_into_prompt() {
+        // A UserPromptSubmit hook that echoes a sentinel → run_loop must append
+        // that stdout to the user message BEFORE the model sees it. End-to-end
+        // proof that dispatch_event + the injection wiring both work via the
+        // generate path (run_loop / sub-agent).
+        use crate::kernel_impl::hooks::HookManager;
+        use crate::models::UserHookEvent;
+        use crate::user_hooks::UserCommandHook;
+
+        let spy = HistorySpy {
+            reply: "done".into(),
+            last_user: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let last_user = spy.last_user.clone();
+
+        let mut hooks = HookManager::new();
+        hooks.register(Box::new(UserCommandHook::new(
+            "inject".into(),
+            UserHookEvent::UserPromptSubmit,
+            // Cross-platform echo prints the sentinel on stdout.
+            "echo ALWAYS-INJECT-SENTINEL".into(),
+            true,
+            10,
+            std::env::current_dir().ok(),
+        )));
+
+        let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys")
+            .with_hooks(Arc::new(hooks));
+        let out = agent.run_loop("do the thing", ModelOptions::default()).await;
+        assert!(out.is_ok(), "run_loop should converge: {out:?}");
+
+        let captured = last_user.lock().unwrap().clone().expect("model saw a user message");
+        assert!(
+            captured.contains("do the thing"),
+            "original task preserved: {captured}"
+        );
+        assert!(
+            captured.contains("[user-hook context]"),
+            "hook-context fence injected: {captured}"
+        );
+        assert!(
+            captured.contains("ALWAYS-INJECT-SENTINEL"),
+            "hook stdout injected as context: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_without_hooks_passes_plain_prompt() {
+        // No HookManager → the prompt reaches the model verbatim, no fence. This
+        // guards against accidentally injecting the fence when nothing ran.
+        let spy = HistorySpy {
+            reply: "done".into(),
+            last_user: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let last_user = spy.last_user.clone();
+        // No with_hooks → self.hooks is None → dispatch skipped.
+        let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys");
+        agent.run_loop("plain prompt", ModelOptions::default()).await.ok();
+        let captured = last_user.lock().unwrap().clone().expect("user message seen");
+        assert_eq!(captured, "plain prompt", "no fence when no hooks: {captured}");
     }
 
     // --- v1.3: C1 context auto-compaction ---

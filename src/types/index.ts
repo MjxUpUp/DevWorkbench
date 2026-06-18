@@ -153,6 +153,30 @@ export interface SlashCommand {
 }
 
 /**
+ * Lifecycle event a user hook fires on (D2). Mirrors the Rust `UserHookEvent`
+ * serde schema: serialized as snake_case over the wire.
+ *   - 'user_prompt_submit' — stdout (exit 0) injected as context before the turn
+ *   - 'stop' — runs for side effects at run end (output ignored)
+ */
+export type UserHookEvent = 'user_prompt_submit' | 'stop';
+
+/**
+ * A user-configurable lifecycle hook (D2). One row = one shell command bound to
+ * a single event. Mirrors the Rust `UserHook` serde schema (camelCase fields).
+ */
+export interface UserHook {
+  id: string;
+  name: string;
+  event: UserHookEvent;
+  /** Shell command. Run via `sh -c` (Unix) / `cmd /C` (Windows) when `shell` is true. */
+  command: string;
+  shell: boolean;
+  timeoutSecs: number;
+  enabled: boolean;
+  createdAt: string;
+}
+
+/**
  * A conversation = the multi-turn topic container (one Claude-Code "session").
  * A `Session` is now one turn inside it. Conversations live under a project;
  * turns inside a conversation may switch agents (claude → codex → …).

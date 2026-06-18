@@ -216,6 +216,11 @@ pub(crate) fn build_react_agent(
             .map(|conn| crate::cost::agentfare::is_budget_exhausted(&conn).unwrap_or(false))
             .unwrap_or(false)
     });
+    // D2 user-configurable lifecycle hooks: cloned before `db` moves into the
+    // cost sink (same pattern as budget_db above) so we can load the enabled
+    // user_hooks rows and register a UserCommandHook per row after the
+    // HookManager is built. Best-effort — a DB read failure yields no user hooks.
+    let hooks_db = db.clone();
     // Shared as `Arc<dyn ChatModel>` so the subagent dispatcher (v2.0 T2) can
     // hand the SAME model handle to child agents instead of re-wrapping it.
     let chat: Arc<dyn kernel_core::ChatModel> = Arc::new(
@@ -319,6 +324,35 @@ pub(crate) fn build_react_agent(
         task_ref.map(|s| s.to_string()),
         Some(std::path::PathBuf::from(working_dir)),
     )));
+    // D2: register every ENABLED user_hooks row as a UserCommandHook. Each hook
+    // no-ops on events it isn't bound to, so loading both events into one
+    // HookManager is correct — the manager dispatches both UserPromptSubmit and
+    // Stop, and each row only acts on its configured event. A DB read failure is
+    // swallowed (the run proceeds with built-in hooks only).
+    if let Some(dbs) = hooks_db.as_ref() {
+        if let Ok(conn) = dbs.get() {
+            use crate::models::UserHookEvent;
+            let mut rows = crate::user_hooks::registry::load_enabled_by_event(
+                &conn,
+                UserHookEvent::UserPromptSubmit,
+            )
+            .unwrap_or_default();
+            rows.extend(
+                crate::user_hooks::registry::load_enabled_by_event(&conn, UserHookEvent::Stop)
+                    .unwrap_or_default(),
+            );
+            for row in rows {
+                hooks.register(Box::new(crate::user_hooks::UserCommandHook::new(
+                    row.name,
+                    row.event,
+                    row.command,
+                    row.shell,
+                    row.timeout_secs,
+                    Some(std::path::PathBuf::from(working_dir)),
+                )));
+            }
+        }
+    }
     Ok(ReactAgent::new_shared(chat, registry, sys_prompt)
         .with_context(ctx)
         .with_history(history)

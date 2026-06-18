@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod skills;
 pub mod cost;
 pub mod slash_commands;
+pub mod user_hooks;
 pub mod kernel_impl;
 pub mod utils;
 
@@ -220,6 +221,11 @@ pub fn run() {
             commands::slash_cmds::create_slash_command,
             commands::slash_cmds::update_slash_command,
             commands::slash_cmds::delete_slash_command,
+            commands::user_hooks_cmds::list_user_hooks,
+            commands::user_hooks_cmds::create_user_hook,
+            commands::user_hooks_cmds::update_user_hook,
+            commands::user_hooks_cmds::set_user_hook_enabled,
+            commands::user_hooks_cmds::delete_user_hook,
             commands::cost_cmds::get_cost_summary,
             commands::cost_cmds::get_cost_trend,
             commands::cost_cmds::load_budget,
