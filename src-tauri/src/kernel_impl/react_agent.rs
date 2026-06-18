@@ -367,7 +367,12 @@ pub fn shared_glm_circuit() -> Arc<CircuitBreaker> {
 
 /// Extract token usage from an Anthropic SSE line. `message_start` carries
 /// `usage.input_tokens`; `message_delta` carries the cumulative
-/// `usage.output_tokens`. Non-usage lines (and non-`data:` lines) return None.
+/// `usage.output_tokens` AND — on GLM — the real `usage.input_tokens`.
+/// Standard Anthropic reports authoritative input on message_start; GLM puts
+/// a 0 placeholder there and reports input on message_delta. Reading BOTH
+/// fields on message_delta + the caller's `saturating_add` yields the correct
+/// input for either provider (standard = start_input + 0, GLM = 0 +
+/// delta_input) without double-counting. Non-usage / non-`data:` lines → None.
 /// Used to meter cost on the streaming path.
 fn parse_usage(line: &str) -> Option<(u32, u32)> {
     let data = line.trim().strip_prefix("data: ")?;
@@ -383,12 +388,16 @@ fn parse_usage(line: &str) -> Option<(u32, u32)> {
             Some((input, 0))
         }
         "message_delta" => {
-            let output = ev
-                .get("usage")
+            let usage = ev.get("usage");
+            let input = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let output = usage
                 .and_then(|u| u.get("output_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            Some((0, output))
+            Some((input, output))
         }
         _ => None,
     }
@@ -2898,8 +2907,15 @@ mod tests {
     fn parse_usage_extracts_message_start_input_and_delta_output() {
         let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}"#;
         assert_eq!(parse_usage(start), Some((42, 0)));
+        // Standard Anthropic: message_delta carries only output_tokens.
         let delta = r#"data: {"type":"message_delta","usage":{"output_tokens":128}}"#;
         assert_eq!(parse_usage(delta), Some((0, 128)));
+        // GLM: message_delta ALSO carries the real input_tokens (message_start's
+        // is a 0 placeholder). parse_usage reads both → the caller's
+        // saturating_add recovers the real input. Without this the streaming
+        // path undercounted input tokens to 0.
+        let glm_delta = r#"data: {"type":"message_delta","usage":{"input_tokens":16,"output_tokens":10}}"#;
+        assert_eq!(parse_usage(glm_delta), Some((16, 10)));
         // Non-usage event types → None.
         assert_eq!(parse_usage(r#"data: {"type":"content_block_delta"}"#), None);
         // Non-data lines → None.
@@ -3064,16 +3080,17 @@ mod tests {
     }
 
     #[test]
-    fn glm_stream_input_tokens_undercount_is_known_bug() {
-        // KNOWN BUG surfaced by the real fixture: GLM puts the REAL input_tokens
-        // (16) on message_delta, but message_start carries 0. parse_usage reads
-        // input only from message_start → the streaming path undercounts input
-        // tokens to 0. Non-stream `usage_from_response` is unaffected (it reads
-        // the final usage object). Documented here, not silently asserted away.
-        // Fix: parse_usage should also read message_delta.usage.input_tokens.
+    fn glm_stream_input_tokens_recovered_from_message_delta() {
+        // GLM puts the REAL input_tokens (16) on message_delta; message_start
+        // carries 0. parse_usage reads input from BOTH events and saturating_adds
+        // them → 0 + 16 = 16. (Standard Anthropic omits input_tokens on
+        // message_delta → stays at start_input + 0, no double count.) This was a
+        // 0-undercount bug before parse_usage's message_delta branch learned to
+        // read input_tokens.
         let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
-        let (_msgs, input, _output) = replay_sse(sse);
-        assert_eq!(input, 0, "parse_usage ignores message_delta.input_tokens (BUG)");
+        let (_msgs, input, output) = replay_sse(sse);
+        assert_eq!(input, 16, "input_tokens accumulated from message_delta");
+        assert_eq!(output, 10);
     }
 
     #[test]
@@ -3113,5 +3130,65 @@ mod tests {
         assert_eq!(tc.id, "call_frag");
         assert_eq!(tc.function.name, "get_weather");
         assert_eq!(tc.function.arguments, "{\"city\":\"Beijing\"}");
+    }
+
+    // ===== live GLM smoke (#[ignore]: needs GLM_API_KEY, spends tokens) =====
+
+    /// Cost sink that captures the last usage GlmChatModel reported, so the live
+    /// smoke test can assert input_tokens > 0 after the parse_usage fix.
+    struct CapturingSink(std::sync::Mutex<(u32, u32)>);
+
+    impl CapturingSink {
+        fn new() -> Self {
+            Self(std::sync::Mutex::new((0, 0)))
+        }
+    }
+
+    impl crate::cost::sink::CostSink for CapturingSink {
+        fn record(&self, _: &str, input: u32, output: u32, _: f64) {
+            *self.0.lock().unwrap() = (input, output);
+        }
+    }
+
+    #[ignore = "needs a live GLM key in GLM_API_KEY env; spends real tokens"]
+    #[tokio::test]
+    async fn glm_live_stream_meters_real_input_tokens_end_to_end() {
+        // End-to-end against the real GLM endpoint. A streaming call must
+        // (a) complete and yield assistant text, and (b) meter input_tokens > 0
+        // — proving the parse_usage fix works on GLM's real wire format (GLM
+        // reports input on message_delta, where the pre-fix code never looked).
+        // Skipped without GLM_API_KEY so CI stays green; run locally:
+        //   GLM_API_KEY=... cargo test --lib -- --ignored glm_live
+        let key = match std::env::var("GLM_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                eprintln!("GLM_API_KEY unset — skipping live smoke");
+                return;
+            }
+        };
+        use futures::StreamExt;
+        let sink = std::sync::Arc::new(CapturingSink::new());
+        let model = GlmChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
+            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
+        );
+        let stream = model
+            .stream(
+                &[Message::user("Reply with exactly one word: HELLO")],
+                &ModelOptions::default(),
+            )
+            .expect("stream starts");
+        let collected: Vec<Message> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+        let text: String = collected.iter().map(|m| m.content.clone()).collect();
+        let (input, _output) = *sink.0.lock().unwrap();
+        assert!(!text.is_empty(), "live GLM returned text: {text:?}");
+        assert!(
+            input > 0,
+            "input_tokens metered from message_delta after fix, got {input}"
+        );
     }
 }
