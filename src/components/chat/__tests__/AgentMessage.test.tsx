@@ -36,6 +36,13 @@ const base: Session = {
 const noReport: QualityReport | null = null;
 
 describe('AgentMessage — completed-session output', () => {
+  // The full-output / terminal-placeholder / outputSummary paths below belong
+  // ONLY to raw agents (pi/codex): they emit pty bytes, never agent:event
+  // blocks. Structured agents (claude_code/react_kernel/gemini_cli/qwen_code)
+  // render BlocksView in EVERY state (running-empty → waiting hint, running
+  // accumulating, completed → persisted blocks) and NEVER touch these paths —
+  // that's the terminal-flicker fix. So these terminal-path cases use
+  // agentType: 'pi' (raw); the structured path has its own tests below.
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset only the in-memory block map (new in this change). ptyOutput is
@@ -50,7 +57,7 @@ describe('AgentMessage — completed-session output', () => {
     const fullReply = 'A'.repeat(5000);
     vi.mocked(invoke).mockResolvedValue(fullReply);
 
-    render(<AgentMessage session={{ ...base, outputSummary: '...tail' }} running={false} qualityReport={noReport} />);
+    render(<AgentMessage session={{ ...base, agentType: 'pi', outputSummary: '...tail' }} running={false} qualityReport={noReport} />);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('read_session_output_cmd', { sessionId: 's1' });
@@ -67,7 +74,7 @@ describe('AgentMessage — completed-session output', () => {
     // so the user still sees something rather than an empty reply.
     vi.mocked(invoke).mockResolvedValue(null);
 
-    render(<AgentMessage session={{ ...base, outputSummary: 'only summary left' }} running={false} qualityReport={noReport} />);
+    render(<AgentMessage session={{ ...base, agentType: 'pi', outputSummary: 'only summary left' }} running={false} qualityReport={noReport} />);
 
     await waitFor(() => {
       expect(screen.getByText('only summary left')).toBeInTheDocument();
@@ -112,7 +119,7 @@ describe('AgentMessage — completed-session output', () => {
     // Never-resolving promise simulates the load window.
     vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
 
-    render(<AgentMessage session={base} running={false} qualityReport={noReport} />);
+    render(<AgentMessage session={{ ...base, agentType: 'pi' }} running={false} qualityReport={noReport} />);
 
     // Output not ready yet (promise pending) → terminal placeholder must be mounted.
     expect(screen.getByTestId('terminal-stub')).toBeInTheDocument();
@@ -188,7 +195,7 @@ describe('AgentMessage — completed-session output', () => {
     vi.mocked(invoke).mockResolvedValue('raw agent full output');
 
     render(
-      <AgentMessage session={{ ...base, blocks: null }} running={false} qualityReport={noReport} />
+      <AgentMessage session={{ ...base, agentType: 'pi', blocks: null }} running={false} qualityReport={noReport} />
     );
 
     // No blocks → the terminal stub mounts (the full-output path), and the

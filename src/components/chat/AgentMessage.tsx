@@ -76,7 +76,19 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
     session.agentType === 'react_kernel' ||
     session.agentType === 'gemini_cli' ||
     session.agentType === 'qwen_code';
-  const showBlocks = useBlocks || (isStructured && running);
+  // Structured agents reach the BlocksView form in EVERY state — running with
+  // zero blocks (gateway holding the response → waiting hint), running with
+  // accumulating blocks, AND completed (persisted session.blocks). The previous
+  // `(isStructured && running)` gate left a hole: on `agent:completed` the live
+  // sessionBlocks Map is cleared and refreshSessions' DB read is async, so for a
+  // frame `useBlocks=false` + `running=false` → showBlocks=false → the render
+  // fell through to the terminal/loading branch → a terminal box flashed before
+  // the persisted blocks loaded (the "终端闪现" symptom). Dropping `&& running`
+  // closes it: structured agents NEVER render the terminal form, matching the
+  // design intent stated in the comment above. An empty BlocksView (completed
+  // turn whose blocks are still loading) is harmless and self-corrects on the
+  // next render once session.blocks arrives.
+  const showBlocks = useBlocks || isStructured;
 
   // Completed session → load the full reply text once. Falls back to the
   // (truncated) outputSummary if the log file is gone, so something always shows.
