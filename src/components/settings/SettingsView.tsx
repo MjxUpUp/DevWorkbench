@@ -8,6 +8,7 @@ import { SkillsSection } from './SkillsSection';
 import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
 import { PluginsSection } from './PluginsSection';
+import { CommandsSection } from './CommandsSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
@@ -47,7 +48,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'skills', label: '技能', Icon: IconSparkles, Component: SkillsSection },
   { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection },
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, placeholder: { title: '子智能体', desc: '配置可被主智能体调用的子智能体', hint: '子智能体配置正在开发中，敬请期待' } },
-  { id: 'commands', label: '命令', Icon: IconPlay, placeholder: { title: '命令', desc: '管理自定义斜杠命令', hint: '命令管理功能正在开发中，敬请期待' } },
+  { id: 'commands', label: '命令', Icon: IconPlay, Component: CommandsSection },
   { id: 'hooks', label: '钩子', Icon: IconEdit, placeholder: { title: '钩子', desc: '配置生命周期钩子与事件回调', hint: '钩子配置正在开发中，敬请期待' } },
   { id: 'memory', label: '记忆', Icon: IconStar, Component: MemorySection },
   { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
