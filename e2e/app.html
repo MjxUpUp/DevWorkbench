@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>App full-mount E2E harness</title>
+    <!--
+      Full-App mount shim — drives the ENTIRE real App.tsx in a plain browser
+      with a Playwright test steering it through: select project → type prompt →
+      send → receive a REAL GLM wire (recorded by the Rust fixture test) over the
+      `agent:event` channel → render in the live ChatView/BlocksView.
+
+      Unlike chat.html (which mounts a single BlocksView and needs no events),
+      this harness must emulate the Tauri event system too: `@tauri-apps/api`'s
+      `listen` calls `invoke('plugin:event|listen', {event, target, handler})`
+      where `handler` is a callback id from `transformCallback`. So this shim:
+        - transformCallback: registers the real callback fn in a Map, returns id
+        - invoke('plugin:event|listen'): records event→[cbId], resolves an rid
+        - window.__EMIT_EVENT__(event, payload): fires every registered cb with
+          {id, event, payload} — the Tauri Event<T> shape handlers expect. The
+          test calls this to feed the recorded GLM wire into agentStore's
+          `agent:event` listener (which appends to sessionBlocks → BlocksView).
+
+      dev/tauriMock.ts's transformCallback is a STUB (`() => 0`, no callbacks
+      fire) — fine for plain dev browsing but useless here. So app-main.tsx
+      mounts App WITHOUT calling installDevMock(); this inline shim owns
+      __TAURI_INTERNALS__ entirely.
+    -->
+    <script>
+      (function () {
+        const callbacks = new Map(); // cbId -> wrapper fn (from core.js transformCallback)
+        let nextCbId = 1;
+        let nextRid = 1;
+        const eventListeners = Object.create(null); // eventName -> [cbId,...]
+        // rid -> {event, cbId}: plugin:event|unlisten only knows the rid that
+        // plugin:event|listen resolved with, so we map it back to the cbId to
+        // actually remove the listener. Without this, StrictMode's mount→unmount→
+        // remount of App leaves the first agent:event listener alive alongside
+        // the second → every event fires appendBlock twice → text blocks double
+        // ("TheThe package package…"). Real Tauri's unlisten removes; this must too.
+        const listenerRids = new Map();
+
+        // Mutable mock DB. spawn_agent_session pushes a running turn + its
+        // conversation; the test mutates a completed turn's `blocks` before
+        // emitting `agent:completed` (mirrors backend persisting blocks).
+        const state = {
+          projects: [
+            { id: 'p1', name: 'Dev Workbench', description: '主项目', path: 'E:/DevWorkbench', tags: ['tauri', 'react'], cover_image: null, open_count: 1, last_opened_at: null, starred: true, created_at: '2025-01-01T00:00:00.000Z', last_opened_tools: [], workspace_tools: [] },
+          ],
+          sessions: [],
+          conversations: [],
+        };
+        let spawnCount = 0;
+
+        window.__MOCK_STATE__ = state;
+
+        // Fire every listener registered for `event`. The test drives the live
+        // app by calling this with the recorded GLM wire as agent:event payloads.
+        window.__EMIT_EVENT__ = function (event, payload) {
+          const ids = eventListeners[event] || [];
+          for (const id of ids) {
+            const fn = callbacks.get(id);
+            if (fn) fn({ id: 0, event: event, payload: payload });
+          }
+        };
+
+        window.__TAURI_INTERNALS__ = {
+          metadata: {
+            currentWindow: { label: 'main' },
+            currentWebview: { label: 'main', windowLabel: 'main' },
+          },
+          transformCallback: function (fn /*, once */) {
+            const id = nextCbId++;
+            callbacks.set(id, fn);
+            return id;
+          },
+          unregisterCallback: function (id) { callbacks.delete(id); },
+          invoke: function (cmd, args) {
+            args = args || {};
+            switch (cmd) {
+              // --- event plugin (listen/unlisten/emit) ---
+              case 'plugin:event|listen': {
+                const ev = args.event;
+                const cbId = args.handler;
+                (eventListeners[ev] || (eventListeners[ev] = [])).push(cbId);
+                const rid = nextRid++;
+                listenerRids.set(rid, { event: ev, cbId: cbId });
+                return Promise.resolve(rid);
+              }
+              case 'plugin:event|unlisten': {
+                const rid = args.eventId;
+                const entry = listenerRids.get(rid);
+                if (entry) {
+                  const arr = eventListeners[entry.event];
+                  if (arr) {
+                    const idx = arr.indexOf(entry.cbId);
+                    if (idx >= 0) arr.splice(idx, 1);
+                  }
+                  callbacks.delete(entry.cbId);
+                  listenerRids.delete(rid);
+                }
+                return Promise.resolve();
+              }
+              case 'plugin:event|emit':
+              case 'plugin:event|emit_to':
+                return Promise.resolve();
+
+              // --- notification plugin (App's agent:completed listener) ---
+              case 'plugin:notification|isPermissionGranted':
+                return Promise.resolve(false);
+              case 'plugin:notification|requestPermission':
+                return Promise.resolve('denied');
+              case 'plugin:notification|notify':
+              case 'plugin:notification|register':
+              case 'plugin:notification|create_channel':
+              case 'plugin:notification|list_channels':
+                return Promise.resolve(null);
+
+              // --- window + app plugins (TitleBar: max button, version badge) ---
+              case 'plugin:window|is_maximized':
+              case 'plugin:window|is_minimized':
+              case 'plugin:window|is_fullscreen':
+              case 'plugin:window|is_focused':
+              case 'plugin:window|is_decorated':
+              case 'plugin:window|is_resizable':
+                return Promise.resolve(false);
+              case 'plugin:window|inner_position':
+              case 'plugin:window|outer_position':
+                return Promise.resolve({ x: 0, y: 0 });
+              case 'plugin:window|scale_factor':
+                return Promise.resolve(1);
+              case 'plugin:window|set_maximized':
+              case 'plugin:window|set_minimized':
+              case 'plugin:window|set_fullscreen':
+              case 'plugin:window|start_dragging':
+              case 'plugin:window|minimize':
+              case 'plugin:window|toggle_maximize':
+              case 'plugin:window|unmaximize':
+              case 'plugin:window|close':
+              case 'plugin:window|set_focus':
+                return Promise.resolve();
+              case 'plugin:app|version':
+                return Promise.resolve('0.0.0-e2e');
+              case 'plugin:app|name':
+                return Promise.resolve('Dev Workbench');
+              case 'plugin:app|tauri_version':
+                return Promise.resolve('2.0.0');
+
+              // --- App mount: projects / settings / agents / tools / providers ---
+              case 'load_projects':
+                return Promise.resolve(state.projects);
+              case 'load_settings':
+                return Promise.resolve({ theme: 'light', scan_directories: [], tool_paths: {}, preferred_terminal: '', cli_flags: {} });
+              case 'discover_agents_cmd':
+                return Promise.resolve([
+                  { agentType: 'claude_code', displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/local/bin/claude', supportsResume: true },
+                ]);
+              case 'recommend_agent_for_project':
+                return Promise.resolve('claude_code');
+              case 'detect_tools':
+                return Promise.resolve([{ name: 'claude', installed: true, path: '/usr/local/bin/claude' }]);
+              case 'get_providers_config':
+                return Promise.resolve({
+                  providers: [{ id: 'glm', name: '智谱 GLM', kind: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKeyEnv: 'GLM_API_KEY', models: [{ id: 'glm-4.6', label: 'GLM-4.6', enabled: true }], enabled: true }],
+                  active: 'glm',
+                });
+              case 'get_git_status':
+                return Promise.resolve({ branch: 'main', ahead: 0, behind: 0, modified: [], staged: [], untracked: [] });
+
+              // --- chat data: turns / conversations / completion side-effects ---
+              case 'load_sessions':
+                return Promise.resolve(state.sessions);
+              case 'list_conversations': {
+                const pp = String(args.projectPath ?? '');
+                return Promise.resolve(state.conversations.filter((c) => c.projectPath === pp));
+              }
+              case 'update_conversation':
+                return Promise.resolve(null);
+              case 'read_session_output_cmd':
+                return Promise.resolve(null);
+              case 'get_quality_report_for_session':
+                return Promise.resolve(null);
+              case 'get_project_activity':
+              case 'get_recent_activity':
+                return Promise.resolve([]);
+
+              // --- THE send entry point: spawn_agent_session ---
+              // Returns a running Session carrying a fresh conversationId, exactly
+              // like react_chat_driver → register_running_session does. The test
+              // can predict ids (sess-1 / conv-1) to drive the event stream.
+              case 'spawn_agent_session': {
+                spawnCount++;
+                const now = '2026-06-18T10:00:00.000Z';
+                const sessionId = 'sess-' + spawnCount;
+                const conversationId = 'conv-' + spawnCount;
+                const projectPath = String(args.projectPath ?? '');
+                const prompt = String(args.prompt ?? '');
+                const agentType = String(args.agentType ?? 'claude_code');
+                const session = {
+                  id: sessionId,
+                  prompt: prompt,
+                  agentType: agentType,
+                  status: 'running',
+                  projectPath: projectPath,
+                  startedAt: now,
+                  finishedAt: null,
+                  model: args.model ?? null,
+                  exitCode: null,
+                  outputSummary: null,
+                  contextSnapshot: null,
+                  linkedRequirementId: null,
+                  parentSessionId: null,
+                  conversationId: conversationId,
+                  blocks: [],
+                };
+                state.sessions.push(session);
+                state.conversations.push({
+                  id: conversationId,
+                  projectPath: projectPath,
+                  title: prompt.slice(0, 40) || '新对话',
+                  lastAgent: agentType,
+                  status: 'active',
+                  startedAt: now,
+                  lastActivityAt: now,
+                  pinned: false,
+                });
+                return Promise.resolve(session);
+              }
+
+              default:
+                console.warn('[e2e-shim] unhandled invoke: ' + cmd, args);
+                return Promise.resolve(null);
+            }
+          },
+        };
+
+        // event.js _unlisten touches this before invoking plugin:event|unlisten.
+        window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: function () {} };
+
+        console.info('[e2e-shim] full App mount shim installed');
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./app-main.tsx"></script>
+  </body>
+</html>
