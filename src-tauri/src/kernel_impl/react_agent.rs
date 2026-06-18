@@ -1016,14 +1016,28 @@ impl ReactAgent {
         // missing HookManager (no hooks) skips straight to the plain prompt.
         let mut full_task = task.to_string();
         if let Some(hooks) = &self.hooks {
-            let ctxs = hooks
+            // D2 lifecycle: dispatch UserPromptSubmit BEFORE the user message
+            // enters history. Ok(ctxs) → stdout injected as additional context
+            // (claude-code additionalContext). Err → v2 exit-2 block: a user hook
+            // refused the prompt; don't enter the turn, return the reason so the
+            // user sees why their prompt was refused.
+            match hooks
                 .dispatch_event(&crate::kernel_impl::hooks::HookEvent::UserPromptSubmit {
                     prompt: task.to_string(),
                 })
-                .await;
-            if !ctxs.is_empty() {
-                full_task.push_str("\n\n[user-hook context]\n");
-                full_task.push_str(&ctxs.join("\n---\n"));
+                .await
+            {
+                Ok(ctxs) if !ctxs.is_empty() => {
+                    full_task.push_str("\n\n[user-hook context]\n");
+                    full_task.push_str(&ctxs.join("\n---\n"));
+                }
+                Ok(_) => {}
+                Err(reason) => {
+                    return Ok(format!(
+                        "[用户钩子阻止本轮提交 · {}] {}",
+                        reason.hook, reason.message
+                    ));
+                }
             }
         }
         history.push(Message::user(&full_task));
@@ -1060,7 +1074,9 @@ impl ReactAgent {
                 Ok(s) => s.clone(),
                 Err(e) => e.to_string(),
             };
-            hooks
+            // Stop dispatch is best-effort: a hook's exit-2 cannot "un-stop" a
+            // run, so the Err is intentionally dropped (the run already ended).
+            let _ = hooks
                 .dispatch_event(&crate::kernel_impl::hooks::HookEvent::Stop { summary })
                 .await;
         }
@@ -1128,6 +1144,19 @@ impl ReactAgent {
             if let Err(reason) = hooks.before(&action).await {
                 return format!("[blocked by {}: {}]", reason.hook, reason.message);
             }
+            // v2 PreToolUse user-hook dispatch: a user hook (exit 2) refusing
+            // this tool call short-circuits before the tool runs — the block
+            // reason becomes the tool result, mirroring the built-in gate above.
+            // (claude-code PreToolUse semantics.)
+            if let Err(reason) = hooks
+                .dispatch_event(&crate::kernel_impl::hooks::HookEvent::PreToolUse {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                })
+                .await
+            {
+                return format!("[blocked by {}: {}]", reason.hook, reason.message);
+            }
         }
         // v2.0 C6: dry-run simulation. In DryRun mode the gate lets every action
         // through (DryRun blocks nothing); HERE is where side-effecting tools are
@@ -1157,6 +1186,18 @@ impl ReactAgent {
                 .unwrap_or_else(|e| format!("[tool error: {e}]")),
             None => format!("[unknown tool: {}]", call.function.name),
         };
+        // v2 PostToolUse user-hook dispatch: observation only — the tool already
+        // ran, so a hook's exit-2 is logged inside the hook and dropped here
+        // (never blocks retroactively). Best-effort.
+        if let Some(hooks) = &self.hooks {
+            let _ = hooks
+                .dispatch_event(&crate::kernel_impl::hooks::HookEvent::PostToolUse {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                    result: result.clone(),
+                })
+                .await;
+        }
         if let Some(hooks) = &self.hooks {
             let post_diff =
                 if matches!(&action, crate::kernel_impl::hooks::Action::WriteFile { .. }) {
@@ -1232,14 +1273,35 @@ impl kernel_core::Agent for ReactAgent {
             // as additional context (claude-code additionalContext injection).
             let mut full_task = task.clone();
             if let Some(h) = hooks.as_ref() {
-                let ctxs = h
+                // Ok(ctxs) → inject stdout as context. Err → v2 exit-2 block: a
+                // user hook refused the prompt; end the stream with the block
+                // reason (no turn entered, no model call).
+                match h
                     .dispatch_event(&crate::kernel_impl::hooks::HookEvent::UserPromptSubmit {
                         prompt: task.clone(),
                     })
-                    .await;
-                if !ctxs.is_empty() {
-                    full_task.push_str("\n\n[user-hook context]\n");
-                    full_task.push_str(&ctxs.join("\n---\n"));
+                    .await
+                {
+                    Ok(ctxs) if !ctxs.is_empty() => {
+                        full_task.push_str("\n\n[user-hook context]\n");
+                        full_task.push_str(&ctxs.join("\n---\n"));
+                    }
+                    Ok(_) => {}
+                    Err(reason) => {
+                        let msg = format!(
+                            "[用户钩子阻止本轮提交 · {}] {}",
+                            reason.hook, reason.message
+                        );
+                        yield AgentEvent::Token(msg.clone());
+                        yield AgentEvent::Done(AgentOutcome {
+                            status: AgentRunStatus::Completed,
+                            files_changed: Vec::new(),
+                            exit_code: Some(0),
+                            output_summary: Some(msg),
+                            honesty: None,
+                        });
+                        return;
+                    }
                 }
             }
             history.push(Message::user(&full_task));
@@ -1535,7 +1597,10 @@ impl kernel_core::Agent for ReactAgent {
                 } else {
                     final_output.clone()
                 };
-                h.dispatch_event(&crate::kernel_impl::hooks::HookEvent::Stop { summary })
+                // Best-effort: a Stop hook's exit-2 cannot un-stop the run, so
+                // drop the Err (the run already ended).
+                let _ = h
+                    .dispatch_event(&crate::kernel_impl::hooks::HookEvent::Stop { summary })
                     .await;
             }
             // Honest terminal status: degraded (graceful LLM failure), max-steps
@@ -2266,6 +2331,91 @@ mod tests {
         agent.run_loop("plain prompt", ModelOptions::default()).await.ok();
         let captured = last_user.lock().unwrap().clone().expect("user message seen");
         assert_eq!(captured, "plain prompt", "no fence when no hooks: {captured}");
+    }
+
+    // --- v2: exit-2 blocking (UserPromptSubmit + PreToolUse) ---
+
+    #[tokio::test]
+    async fn run_loop_submit_hook_exit2_blocks_without_entering_turn() {
+        // v2: a UserPromptSubmit hook exiting 2 must REFUSE the turn — run_loop
+        // returns the block reason as its answer and NEVER calls the model
+        // (HistorySpy.last_user stays None). Proves dispatch_event's Err path
+        // short-circuits before the user message enters history.
+        use crate::kernel_impl::hooks::HookManager;
+        use crate::models::UserHookEvent;
+        use crate::user_hooks::UserCommandHook;
+
+        let spy = HistorySpy {
+            reply: "should-not-reach".into(),
+            last_user: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let last_user = spy.last_user.clone();
+
+        let mut hooks = HookManager::new();
+        hooks.register(Box::new(UserCommandHook::new(
+            "gate".into(),
+            UserHookEvent::UserPromptSubmit,
+            if cfg!(target_os = "windows") {
+                "cmd /C exit 2".into()
+            } else {
+                "exit 2".into()
+            },
+            true,
+            10,
+            std::env::current_dir().ok(),
+        )));
+
+        let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys").with_hooks(Arc::new(hooks));
+        let out = agent.run_loop("do the thing", ModelOptions::default()).await;
+        let answer = out.expect("block returns Ok with the reason, not Err");
+        assert!(
+            answer.contains("用户钩子阻止本轮提交"),
+            "block reason surfaced as the answer: {answer}"
+        );
+        // The model was never called — the turn was refused before history.push.
+        assert!(
+            last_user.lock().unwrap().is_none(),
+            "no user message reached the model on a blocked submit"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_hook_exit2_blocks_tool_invocation() {
+        // v2: a PreToolUse hook exiting 2 refuses the tool — execute_tool_call
+        // returns the block reason and the tool body never runs (claude-code
+        // PreToolUse semantics via the dispatch seam in execute_tool_call).
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "write_file", read_only: false, calls: calls.clone() });
+
+        let mut hooks = crate::kernel_impl::hooks::HookManager::new();
+        hooks.register(Box::new(crate::user_hooks::UserCommandHook::new(
+            "no-writes".into(),
+            crate::models::UserHookEvent::PreToolUse,
+            if cfg!(target_os = "windows") {
+                "cmd /C exit 2".into()
+            } else {
+                "exit 2".into()
+            },
+            true,
+            10,
+            std::env::current_dir().ok(),
+        )));
+        let agent = ReactAgent::new(ScriptedModel::new(vec![]), reg, "sys")
+            .with_hooks(Arc::new(hooks));
+        let ctx = ToolContext::default();
+
+        let r = agent
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .await;
+        assert!(
+            r.contains("[blocked by user-hook:no-writes:"),
+            "PreToolUse exit-2 must surface the block reason: {r}"
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "blocked tool must NOT be invoked"
+        );
     }
 
     // --- v1.3: C1 context auto-compaction ---

@@ -172,23 +172,38 @@ impl PermissionMode {
 }
 
 /// Lifecycle events hooks may observe via [`Hook::on_event`]. The dispatch
-/// points are `UserPromptSubmit` (a turn starting) and `Stop` (the run
-/// finishing) — the seams batch3's user-defined hooks plug into. Built-in
-/// hooks default to no-op; the trait method has a default impl so existing
-/// hooks stay source-compatible.
+/// points cover the full claude-code lifecycle: `UserPromptSubmit` (a turn
+/// starting), `PreToolUse`/`PostToolUse` (around each tool invocation), and
+/// `Stop` (the run finishing). Built-in hooks default to no-op; the trait
+/// method has a default impl so existing hooks stay source-compatible.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
     /// A new user prompt is about to be sent to the model.
     UserPromptSubmit { prompt: String },
+    /// A tool is about to be invoked. `tool` is the tool name; `arguments` is
+    /// its raw JSON arguments string. Returning `Err` (a user hook's exit 2)
+    /// BLOCKS the invocation — the tool does not run and the block reason is
+    /// surfaced as the tool result.
+    PreToolUse { tool: String, arguments: String },
+    /// A tool has just returned. `result` is the tool's output string. This is
+    /// observation-only — a returned `Err` is logged but cannot retroactively
+    /// block an already-executed tool.
+    PostToolUse {
+        tool: String,
+        arguments: String,
+        result: String,
+    },
     /// The agent run is stopping (completed / failed / aborted).
     Stop { summary: String },
 }
 
 /// A hook. `before` may veto; `after` observes completed actions; `on_event`
-/// observes run-lifecycle events (turn start / stop) and may RETURN additional
-/// context strings (e.g. a `UserPromptSubmit` hook that emits project
-/// conventions on stdout). Observation only — never gates; a returned
-/// `Vec<String>` is collected and injected, never blocks.
+/// observes run-lifecycle events (turn start / tool call / run stop) and may
+/// RETURN additional context strings (e.g. a `UserPromptSubmit` hook that emits
+/// project conventions on stdout) OR refuse the event with `Err` (a user hook's
+/// exit 2): on `UserPromptSubmit`/`PreToolUse` the refusal BLOCKS (the turn / the
+/// tool call is refused); on `Stop`/`PostToolUse` it is logged but has no effect
+/// (you can't retroactively stop a run or un-execute a tool).
 #[async_trait]
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
@@ -198,13 +213,14 @@ pub trait Hook: Send + Sync {
     async fn after(&self, _outcome: &ActionOutcome) -> Vec<HonestyWarning> {
         Vec::new()
     }
-    /// Observe a lifecycle event (turn start / run stop). Returns additional
-    /// context strings to inject into the run (only meaningful for
-    /// `UserPromptSubmit`; `Stop` hooks return `vec![]` and run for side
-    /// effects). Default empty so the built-in hooks stay source-compatible;
-    /// the D2 user-defined `UserCommandHook` overrides this.
-    async fn on_event(&self, _ev: &HookEvent) -> Vec<String> {
-        Vec::new()
+    /// Observe a lifecycle event. Returns additional context strings to inject
+    /// into the run (only meaningful for `UserPromptSubmit`), or `Err` to refuse
+    /// the event — the caller decides whether the refusal blocks (Submit /
+    /// PreToolUse) or is ignored (Stop / PostToolUse). Default `Ok(empty)` so
+    /// built-in hooks stay source-compatible; the D2 `UserCommandHook` overrides
+    /// this, mapping the command's exit code (0→context, 2→block, else→warn).
+    async fn on_event(&self, _ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
+        Ok(Vec::new())
     }
 }
 
@@ -279,17 +295,24 @@ impl HookManager {
     }
 
     /// Dispatch a lifecycle event to every hook's `on_event`, collecting the
-    /// additional-context strings each hook returns. The collected contexts are
-    /// injected into the run by the caller (e.g. appended to the user prompt for
-    /// `UserPromptSubmit`). Best-effort: `on_event` is observation only (never
-    /// gates), so a hook error is logged via `log::warn!` inside the hook and
-    /// contributes no context rather than aborting the dispatch.
-    pub async fn dispatch_event(&self, ev: &HookEvent) -> Vec<String> {
+    /// additional-context strings each hook returns. Returns `Err` on the FIRST
+    /// hook that refuses (a user hook's exit 2) — short-circuiting so a block is
+    /// honored immediately and no later hook runs for that event. The caller
+    /// decides whether the refusal blocks (Submit / PreToolUse) or is ignored
+    /// (Stop / PostToolUse). A hook that merely warns (non-2 exit) logs inside
+    /// `on_event` and returns `Ok(empty)`, so it never short-circuits.
+    pub async fn dispatch_event(
+        &self,
+        ev: &HookEvent,
+    ) -> Result<Vec<String>, BlockReason> {
         let mut contexts = Vec::new();
         for h in &self.hooks {
-            contexts.extend(h.on_event(ev).await);
+            match h.on_event(ev).await {
+                Ok(ctx) => contexts.extend(ctx),
+                Err(reason) => return Err(reason),
+            }
         }
-        contexts
+        Ok(contexts)
     }
 
     pub fn count(&self) -> usize {
@@ -649,25 +672,26 @@ mod tests {
             fn name(&self) -> &str {
                 "event_spy"
             }
-            async fn on_event(&self, ev: &HookEvent) -> Vec<String> {
+            async fn on_event(&self, ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
                 match ev {
                     HookEvent::UserPromptSubmit { .. } => {
                         self.submits.fetch_add(1, Ordering::SeqCst);
                     }
+                    HookEvent::PreToolUse { .. } | HookEvent::PostToolUse { .. } => {}
                     HookEvent::Stop { .. } => {
                         self.stops.fetch_add(1, Ordering::SeqCst);
                     }
                 }
-                Vec::new()
+                Ok(Vec::new())
             }
         }
         let submits = Arc::new(AtomicUsize::new(0));
         let stops = Arc::new(AtomicUsize::new(0));
         let mut mgr = HookManager::new();
         mgr.register(Box::new(EventSpy { submits: submits.clone(), stops: stops.clone() }));
-        mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "hi".into() }).await;
-        mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "again".into() }).await;
-        mgr.dispatch_event(&HookEvent::Stop { summary: "done".into() }).await;
+        let _ = mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "hi".into() }).await;
+        let _ = mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "again".into() }).await;
+        let _ = mgr.dispatch_event(&HookEvent::Stop { summary: "done".into() }).await;
         assert_eq!(submits.load(Ordering::SeqCst), 2);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
@@ -684,25 +708,83 @@ mod tests {
             fn name(&self) -> &str {
                 "context_hook"
             }
-            async fn on_event(&self, ev: &HookEvent) -> Vec<String> {
-                if let HookEvent::UserPromptSubmit { .. } = ev {
+            async fn on_event(&self, ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
+                Ok(if let HookEvent::UserPromptSubmit { .. } = ev {
                     vec![self.ctx.clone()]
                 } else {
                     Vec::new()
-                }
+                })
             }
         }
         let mut mgr = HookManager::new();
         mgr.register(Box::new(ContextHook { ctx: "rule-A".into() }));
         mgr.register(Box::new(ContextHook { ctx: "rule-B".into() }));
         // Stop dispatch must yield nothing (neither hook returns on Stop).
-        let stop_ctxs = mgr.dispatch_event(&HookEvent::Stop { summary: "x".into() }).await;
+        let stop_ctxs = mgr.dispatch_event(&HookEvent::Stop { summary: "x".into() }).await.unwrap();
         assert!(stop_ctxs.is_empty(), "Stop yields no context: {stop_ctxs:?}");
         // Submit dispatch must gather BOTH hooks' contexts in registration order.
         let submit_ctxs = mgr
             .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "p".into() })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(submit_ctxs, vec!["rule-A".to_string(), "rule-B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_short_circuits_on_block() {
+        // v2: a hook returning Err (user-hook exit 2) must short-circuit — the
+        // FIRST blocking hook ends dispatch, later hooks do NOT run for that
+        // event, and the caller receives Err to honor the block.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct BlockHook;
+        #[async_trait]
+        impl Hook for BlockHook {
+            fn name(&self) -> &str {
+                "block_hook"
+            }
+            async fn on_event(&self, ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
+                if let HookEvent::UserPromptSubmit { prompt } = ev {
+                    if prompt.contains("forbidden") {
+                        return Err(BlockReason {
+                            hook: "block_hook".into(),
+                            message: "prompt contained forbidden token".into(),
+                            severity: Severity::Block,
+                        });
+                    }
+                }
+                Ok(Vec::new())
+            }
+        }
+        let ran = Arc::new(AtomicUsize::new(0));
+        struct Counter(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Hook for Counter {
+            fn name(&self) -> &str {
+                "counter"
+            }
+            async fn on_event(&self, _ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+        }
+        let mut mgr = HookManager::new();
+        mgr.register(Box::new(BlockHook));
+        mgr.register(Box::new(Counter(ran.clone())));
+        // A forbidden prompt: BlockHook short-circuits BEFORE Counter runs.
+        let res = mgr
+            .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "forbidden thing".into() })
+            .await;
+        let reason = res.expect_err("block must surface as Err");
+        assert_eq!(reason.severity, Severity::Block);
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "later hook must not run after a block");
+        // A clean prompt: no block, Counter runs.
+        let res = mgr
+            .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "ok".into() })
+            .await
+            .unwrap();
+        assert!(res.is_empty());
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "counter runs on a clean prompt");
     }
 
     #[tokio::test]

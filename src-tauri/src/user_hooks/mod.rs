@@ -1,16 +1,14 @@
 //! D2 user-configurable lifecycle hooks. A [`UserCommandHook`] wraps one
 //! `user_hooks` row as a [`Hook`] that fires on a single [`HookEvent`] (turn
-//! start / run stop), runs the configured shell command with a claude-code-style
-//! event JSON on stdin, and (for `UserPromptSubmit`) returns stdout as injected
-//! context. This is the user-facing half of the lifecycle-hook layer; the
-//! built-in CommandGuard/AssertionGuard/TaskGuard hooks (always on) live in
+//! start / tool call / run stop), runs the configured shell command with a
+//! claude-code-style event JSON on stdin, and maps the exit code to the
+//! claude-code protocol: 0 → stdout injected as context (`UserPromptSubmit`
+//! only), 2 → BLOCK the event (honored on `UserPromptSubmit` / `PreToolUse` —
+//! the turn / tool call is refused; ignored on `Stop` / `PostToolUse` where
+//! blocking is nonsensical), other → warn + no effect. This is the user-facing
+//! half of the lifecycle-hook layer; the built-in
+//! CommandGuard/AssertionGuard/TaskGuard hooks (always on) live in
 //! `kernel_impl/hooks.rs`.
-//!
-//! v1 scope (see design doc): command-type hooks only, `UserPromptSubmit` +
-//! `Stop` events only, exit-code protocol honored but NON-blocking (the
-//! `Hook::on_event` contract is "observation only, never gates" — exit 2 logs a
-//! warning rather than refusing the turn; full gating needs a future trait
-//! evolution).
 
 pub mod registry;
 
@@ -22,7 +20,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::kernel_impl::hooks::{Hook, HookEvent};
+use crate::kernel_impl::hooks::{BlockReason, Hook, HookEvent, Severity};
 use crate::models::UserHookEvent;
 
 /// A single user-configured lifecycle hook. Built at agent-construct time from
@@ -56,6 +54,8 @@ impl UserCommandHook {
     fn matches(&self, ev: &HookEvent) -> bool {
         match (&self.event, ev) {
             (UserHookEvent::UserPromptSubmit, HookEvent::UserPromptSubmit { .. }) => true,
+            (UserHookEvent::PreToolUse, HookEvent::PreToolUse { .. }) => true,
+            (UserHookEvent::PostToolUse, HookEvent::PostToolUse { .. }) => true,
             (UserHookEvent::Stop, HookEvent::Stop { .. }) => true,
             _ => false,
         }
@@ -63,7 +63,8 @@ impl UserCommandHook {
 }
 
 /// The stdin payload sent to every hook command (claude-code protocol, minimal).
-/// `hook_event_name` lets one command serve multiple events if it inspects stdin.
+/// `hook_event_name` lets one command serve multiple events if it inspects stdin;
+/// the tool fields are populated only for PreToolUse / PostToolUse.
 #[derive(Serialize)]
 struct HookPayload<'a> {
     hook_event_name: &'a str,
@@ -71,6 +72,12 @@ struct HookPayload<'a> {
     prompt: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_input: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_response: Option<&'a str>,
 }
 
 impl<'a> HookPayload<'a> {
@@ -80,11 +87,37 @@ impl<'a> HookPayload<'a> {
                 hook_event_name: "UserPromptSubmit",
                 prompt: Some(prompt),
                 summary: None,
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
+            },
+            HookEvent::PreToolUse { tool, arguments } => HookPayload {
+                hook_event_name: "PreToolUse",
+                prompt: None,
+                summary: None,
+                tool_name: Some(tool),
+                tool_input: Some(arguments),
+                tool_response: None,
+            },
+            HookEvent::PostToolUse {
+                tool,
+                arguments,
+                result,
+            } => HookPayload {
+                hook_event_name: "PostToolUse",
+                prompt: None,
+                summary: None,
+                tool_name: Some(tool),
+                tool_input: Some(arguments),
+                tool_response: Some(result),
             },
             HookEvent::Stop { summary } => HookPayload {
                 hook_event_name: "Stop",
                 prompt: None,
                 summary: Some(summary),
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
             },
         }
     }
@@ -97,11 +130,13 @@ impl<'a> HookPayload<'a> {
     }
 }
 
-/// Outcome of running one hook command. `stdout` is set only on a clean exit 0
-/// (the only case that yields injectable context); everything else is a warning
-/// that's logged by the caller and yields no context.
+/// Outcome of running one hook command. `Context` = clean exit 0 with stdout
+/// (injectable for UserPromptSubmit); `Block` = exit 2 (the command asked to
+/// refuse — honored as a hard block on Submit/PreToolUse, ignored on
+/// Stop/PostToolUse); `Warn` = anything else (logged, yields nothing).
 enum RunOutcome {
     Context(String),
+    Block(String),
     Warn(String),
 }
 
@@ -175,13 +210,11 @@ impl UserCommandHook {
                 match code {
                     0 => RunOutcome::Context(stdout.trim_end().to_string()),
                     2 => {
-                        // claude-code BLOCKS here; v1 honors the on_event
-                        // non-gating contract → warn + no context. Logged by caller.
-                        RunOutcome::Warn(format!(
-                            "hook {} requested block (exit 2): {}",
-                            self.name,
-                            stderr.trim()
-                        ))
+                        // claude-code BLOCKS on exit 2. v2 honors it: the caller
+                        // turns this into a hard block on Submit/PreToolUse (the
+                        // turn / tool call is refused). The stderr message is the
+                        // human-readable reason the command wrote.
+                        RunOutcome::Block(stderr.trim().to_string())
                     }
                     other => RunOutcome::Warn(format!(
                         "hook {} failed (exit {other}): {}",
@@ -207,27 +240,56 @@ impl Hook for UserCommandHook {
         self.name.as_str()
     }
 
-    async fn on_event(&self, ev: &HookEvent) -> Vec<String> {
-        // Only Stop hooks produce side-effects worth running for their own sake;
-        // for UserPromptSubmit the stdout becomes context. A hook whose event
-        // doesn't match the dispatched one is a no-op (defensive — load time
-        // already filters by event).
+    async fn on_event(&self, ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
+        // Only a hook whose configured event matches the dispatched one acts;
+        // others no-op (defensive — load time already filters by event).
         if !self.matches(ev) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let payload = HookPayload::from_event(ev);
         match self.run(&payload).await {
             RunOutcome::Context(ctx) => {
+                // Only UserPromptSubmit yields injectable context. Tool events'
+                // exit-0 stdout is intentionally NOT injected (v1 keeps the model
+                // clean; a tool hook's job is allow/refuse, not feed prose).
                 if matches!(self.event, UserHookEvent::UserPromptSubmit) && !ctx.is_empty() {
-                    vec![ctx]
+                    Ok(vec![ctx])
                 } else {
-                    // Stop hooks (or empty stdout) carry no injectable context.
-                    Vec::new()
+                    Ok(Vec::new())
+                }
+            }
+            RunOutcome::Block(msg) => {
+                // exit 2 — honor the block ONLY where blocking is meaningful:
+                // UserPromptSubmit (refuse the turn) and PreToolUse (refuse the
+                // tool call). On Stop / PostToolUse a block is nonsensical (can't
+                // un-stop or un-execute) → log and no-op so a misconfigured hook
+                // never aborts an otherwise-finished run.
+                match self.event {
+                    UserHookEvent::UserPromptSubmit | UserHookEvent::PreToolUse => {
+                        Err(BlockReason {
+                            hook: format!("user-hook:{}", self.name),
+                            message: if msg.is_empty() {
+                                "hook requested block (exit 2)".into()
+                            } else {
+                                msg
+                            },
+                            severity: Severity::Block,
+                        })
+                    }
+                    UserHookEvent::Stop | UserHookEvent::PostToolUse => {
+                        log::warn!(
+                            "[user-hook:{}] exit-2 block ignored on {:?}: {}",
+                            self.name,
+                            self.event,
+                            msg
+                        );
+                        Ok(Vec::new())
+                    }
                 }
             }
             RunOutcome::Warn(msg) => {
                 log::warn!("[user-hook:{}] {}", self.name, msg);
-                Vec::new()
+                Ok(Vec::new())
             }
         }
     }
@@ -257,8 +319,94 @@ mod tests {
             working_dir(),
         );
         let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
-        let ctxs = h.on_event(&ev).await;
+        let ctxs = h.on_event(&ev).await.unwrap();
         assert_eq!(ctxs, vec!["CONTEXT-FROM-HOOK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn submit_hook_exit2_blocks_the_turn() {
+        // v2: exit 2 on UserPromptSubmit → Err(BlockReason, severity Block).
+        // The run loop refuses to enter the turn (claude-code's exit-2 contract).
+        let h = UserCommandHook::new(
+            "gate".into(),
+            UserHookEvent::UserPromptSubmit,
+            if cfg!(target_os = "windows") {
+                "cmd /C exit 2".into()
+            } else {
+                "exit 2".into()
+            },
+            true,
+            10,
+            working_dir(),
+        );
+        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let err = h.on_event(&ev).await.expect_err("exit 2 must block Submit");
+        assert_eq!(err.severity, Severity::Block);
+        assert_eq!(err.hook, "user-hook:gate");
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_hook_exit2_blocks_the_tool() {
+        // A PreToolUse hook exiting 2 → Err (the tool call is refused). exit 0
+        // → Ok(empty): tool-event stdout is intentionally NOT injected.
+        let blocking = UserCommandHook::new(
+            "no-bash".into(),
+            UserHookEvent::PreToolUse,
+            if cfg!(target_os = "windows") {
+                "cmd /C exit 2".into()
+            } else {
+                "exit 2".into()
+            },
+            true,
+            10,
+            working_dir(),
+        );
+        let ev_block = HookEvent::PreToolUse {
+            tool: "bash".into(),
+            arguments: "{\"command\":\"rm -rf x\"}".into(),
+        };
+        let err = blocking.on_event(&ev_block).await.expect_err("exit 2 blocks tool");
+        assert_eq!(err.severity, Severity::Block);
+
+        let allowing = UserCommandHook::new(
+            "allow".into(),
+            UserHookEvent::PreToolUse,
+            if cfg!(target_os = "windows") {
+                "echo would-log".into()
+            } else {
+                "echo would-log".into()
+            },
+            true,
+            10,
+            working_dir(),
+        );
+        let ctxs = allowing.on_event(&ev_block).await.unwrap();
+        assert!(ctxs.is_empty(), "PreToolUse exit-0 stdout is NOT injected: {ctxs:?}");
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_hook_exit2_is_ignored_not_block() {
+        // A PostToolUse hook exiting 2 cannot retroactively un-execute the tool,
+        // so the block is logged and dropped → Ok(empty), never Err.
+        let h = UserCommandHook::new(
+            "late-gate".into(),
+            UserHookEvent::PostToolUse,
+            if cfg!(target_os = "windows") {
+                "cmd /C exit 2".into()
+            } else {
+                "exit 2".into()
+            },
+            true,
+            10,
+            working_dir(),
+        );
+        let ev = HookEvent::PostToolUse {
+            tool: "write_file".into(),
+            arguments: "{}".into(),
+            result: "ok".into(),
+        };
+        let ctxs = h.on_event(&ev).await.unwrap();
+        assert!(ctxs.is_empty(), "PostToolUse block must be ignored, not propagated");
     }
 
     #[tokio::test]
@@ -273,7 +421,7 @@ mod tests {
             working_dir(),
         );
         let ev = HookEvent::Stop { summary: "done".into() };
-        let ctxs = h.on_event(&ev).await;
+        let ctxs = h.on_event(&ev).await.unwrap();
         assert!(ctxs.is_empty(), "Stop hooks must not inject context: {ctxs:?}");
     }
 
@@ -289,12 +437,12 @@ mod tests {
             working_dir(),
         );
         let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
-        assert!(h.on_event(&ev).await.is_empty());
+        assert!(h.on_event(&ev).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn failing_hook_warns_and_yields_no_context() {
-        // exit non-zero → warn, no context, no panic. `false` exits 1.
+        // exit non-zero (not 2) → warn, no context, no Err. `false` exits 1.
         let h = UserCommandHook::new(
             "fails".into(),
             UserHookEvent::UserPromptSubmit,
@@ -308,7 +456,8 @@ mod tests {
             working_dir(),
         );
         let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
-        assert!(h.on_event(&ev).await.is_empty());
+        let ctxs = h.on_event(&ev).await.unwrap();
+        assert!(ctxs.is_empty());
     }
 
     #[tokio::test]
@@ -328,7 +477,7 @@ mod tests {
             working_dir(),
         );
         let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
-        let res = h.on_event(&ev).await;
+        let res = h.on_event(&ev).await.unwrap();
         assert!(res.is_empty(), "timed-out hook yields no context: {res:?}");
     }
 
@@ -346,6 +495,27 @@ mod tests {
         assert!(p2.contains("\"hook_event_name\":\"Stop\""));
         assert!(p2.contains("\"summary\":\"done\""));
         assert!(!p2.contains("prompt"));
+
+        // PreToolUse carries tool + tool_input, no tool_response.
+        let pre = HookEvent::PreToolUse {
+            tool: "bash".into(),
+            arguments: "{\"command\":\"ls\"}".into(),
+        };
+        let p3 = HookPayload::from_event(&pre).to_stdin();
+        assert!(p3.contains("\"hook_event_name\":\"PreToolUse\""));
+        assert!(p3.contains("\"tool_name\":\"bash\""));
+        assert!(p3.contains("\"tool_input\":\"{\\\"command\\\":\\\"ls\\\"}\""));
+        assert!(!p3.contains("tool_response"), "PreToolUse has no tool_response");
+
+        // PostToolUse carries tool + tool_input + tool_response.
+        let post = HookEvent::PostToolUse {
+            tool: "write_file".into(),
+            arguments: "{}".into(),
+            result: "wrote 3 lines".into(),
+        };
+        let p4 = HookPayload::from_event(&post).to_stdin();
+        assert!(p4.contains("\"hook_event_name\":\"PostToolUse\""));
+        assert!(p4.contains("\"tool_response\":\"wrote 3 lines\""));
     }
 
     #[test]
@@ -360,5 +530,23 @@ mod tests {
         );
         assert!(submit_hook.matches(&HookEvent::UserPromptSubmit { prompt: "p".into() }));
         assert!(!submit_hook.matches(&HookEvent::Stop { summary: "s".into() }));
+
+        let pre_hook = UserCommandHook::new(
+            "pre".into(),
+            UserHookEvent::PreToolUse,
+            "x".into(),
+            true,
+            5,
+            None,
+        );
+        assert!(pre_hook.matches(&HookEvent::PreToolUse {
+            tool: "bash".into(),
+            arguments: "{}".into(),
+        }));
+        assert!(!pre_hook.matches(&HookEvent::PostToolUse {
+            tool: "bash".into(),
+            arguments: "{}".into(),
+            result: "".into(),
+        }));
     }
 }

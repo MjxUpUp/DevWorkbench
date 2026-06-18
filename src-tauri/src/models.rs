@@ -398,6 +398,12 @@ pub enum UserHookEvent {
     /// Fires when a new user prompt is about to be sent to the model. The
     /// hook's stdout (exit 0) is injected as additional context.
     UserPromptSubmit,
+    /// Fires before each tool invocation. Exit 2 BLOCKS that tool call (the
+    /// tool does not run; the block reason becomes its result).
+    PreToolUse,
+    /// Fires after each tool returns. Observation only — exit 2 is logged but
+    /// cannot retroactively un-execute the tool.
+    PostToolUse,
     /// Fires when the agent run stops (completed / failed / aborted). Output is
     /// ignored — the hook runs for its side effect (notifications, cleanup).
     Stop,
@@ -408,6 +414,8 @@ impl UserHookEvent {
     pub fn as_db(&self) -> &'static str {
         match self {
             UserHookEvent::UserPromptSubmit => "user_prompt_submit",
+            UserHookEvent::PreToolUse => "pre_tool_use",
+            UserHookEvent::PostToolUse => "post_tool_use",
             UserHookEvent::Stop => "stop",
         }
     }
@@ -417,6 +425,8 @@ impl UserHookEvent {
     pub fn from_db(s: &str) -> Result<Self, String> {
         match s {
             "user_prompt_submit" => Ok(UserHookEvent::UserPromptSubmit),
+            "pre_tool_use" => Ok(UserHookEvent::PreToolUse),
+            "post_tool_use" => Ok(UserHookEvent::PostToolUse),
             "stop" => Ok(UserHookEvent::Stop),
             other => Err(format!("unknown user_hook event: {other}")),
         }
