@@ -1,0 +1,1 @@
+{"id":"msg_202606181545492cb551f5107846d5","type":"message","role":"assistant","model":"glm-4.6","content":[{"type":"text","text":"PONG"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":15,"output_tokens":3,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0},"service_tier":"standard"}}

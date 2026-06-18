@@ -2987,4 +2987,131 @@ mod tests {
         );
         assert_eq!(plain["messages"][0]["content"], "hi");
     }
+
+    // ===== GLM real-response fixtures =====
+    //
+    // Replay responses recorded from a live GLM (Anthropic-compatible) endpoint
+    // through the pure parse functions (`decode_anthropic_message`,
+    // `handle_sse_line`, `parse_usage`, `usage_from_response`). No HTTP, no key,
+    // fully deterministic. These are the ONLY tests exercising the parse layer
+    // against GLM's actual wire format: GLM-specific usage fields, '\n' emitted
+    // as a standalone text_delta, tool_use content_block accumulation.
+    //
+    // Fixtures: tests/fixtures/glm/. To re-record (needs a live key) rerun the
+    // curl commands; the fixtures intentionally contain NO credential.
+
+    /// Replay an SSE byte stream through the same per-line loop `stream()` runs
+    /// (split on '\n', trim, `parse_usage` + `handle_sse_line`). Returns the
+    /// yielded Messages and accumulated (input, output) usage. No HTTP — the
+    /// unit-test harness for the streaming parse path.
+    fn replay_sse(sse: &str) -> (Vec<Message>, u32, u32) {
+        let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
+        let mut sig_buf = String::new();
+        let mut msgs = Vec::new();
+        let mut usage_in = 0u32;
+        let mut usage_out = 0u32;
+        for raw in sse.split('\n') {
+            let line = raw.trim();
+            if let Some((i, o)) = parse_usage(line) {
+                usage_in = usage_in.saturating_add(i);
+                usage_out = usage_out.saturating_add(o);
+            }
+            if let Some(msg) = handle_sse_line(line, &mut tool_bufs, &mut sig_buf) {
+                msgs.push(msg);
+            }
+        }
+        (msgs, usage_in, usage_out)
+    }
+
+    #[test]
+    fn decode_anthropic_message_parses_real_glm_nonstream() {
+        // Real GLM non-stream response carries GLM-specific usage extensions
+        // (cache_read_input_tokens / server_tool_use / service_tier). The
+        // decoder must extract text and ignore the extras.
+        let raw = include_str!("../../tests/fixtures/glm/nonstream_text.json");
+        let v: Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let msg = decode_anthropic_message(&v).expect("decode succeeds");
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.content, "PONG");
+        assert!(msg.tool_calls.is_empty(), "no tool_use in a plain reply");
+        assert!(msg.reasoning.is_none(), "no thinking block");
+    }
+
+    #[test]
+    fn usage_from_response_reads_real_glm_usage() {
+        // GLM usage object has standard input/output_tokens plus extras;
+        // usage_from_response reads only input/output.
+        let raw = include_str!("../../tests/fixtures/glm/nonstream_text.json");
+        let v: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(usage_from_response(&v), (15, 3));
+    }
+
+    #[test]
+    fn handle_sse_line_streams_real_glm_text_deltas() {
+        // Real GLM streams `count 1..5` and emits '\n' as its OWN text_delta —
+        // the per-token fragmentation GLM uses. Deltas must concatenate to
+        // "1\n2\n3\n4\n5". (GLM fragmentation is the historically flaky path.)
+        let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
+        let (msgs, _in, output) = replay_sse(sse);
+        let text: String = msgs
+            .iter()
+            .filter(|m| !m.content.is_empty())
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(text, "1\n2\n3\n4\n5");
+        assert_eq!(output, 10, "output_tokens from message_delta");
+        assert!(msgs.iter().all(|m| m.tool_calls.is_empty()));
+    }
+
+    #[test]
+    fn glm_stream_input_tokens_undercount_is_known_bug() {
+        // KNOWN BUG surfaced by the real fixture: GLM puts the REAL input_tokens
+        // (16) on message_delta, but message_start carries 0. parse_usage reads
+        // input only from message_start → the streaming path undercounts input
+        // tokens to 0. Non-stream `usage_from_response` is unaffected (it reads
+        // the final usage object). Documented here, not silently asserted away.
+        // Fix: parse_usage should also read message_delta.usage.input_tokens.
+        let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
+        let (_msgs, input, _output) = replay_sse(sse);
+        assert_eq!(input, 0, "parse_usage ignores message_delta.input_tokens (BUG)");
+    }
+
+    #[test]
+    fn handle_sse_line_assembles_real_glm_tool_use() {
+        // Real GLM tool_use stream: index 0 text block, index 1 tool_use block.
+        // GLM sent the whole partial_json in one input_json_delta; message_stop
+        // reassembles it into a terminal tool_calls Message (id/name/args).
+        let sse = include_str!("../../tests/fixtures/glm/stream_tool_use.sse");
+        let (msgs, _in, _out) = replay_sse(sse);
+        let terminal = msgs.last().expect("message_stop yields terminal tool_calls");
+        assert!(!terminal.tool_calls.is_empty(), "tool_use reassembled");
+        let tc = &terminal.tool_calls[0];
+        assert_eq!(tc.function.name, "get_weather");
+        assert_eq!(tc.function.arguments, "{\"city\":\"Beijing\"}");
+        assert!(!tc.id.is_empty(), "tool_use id carried from content_block_start");
+        // The text block before the tool_use still streamed inline.
+        let text: String = msgs
+            .iter()
+            .take_while(|m| m.tool_calls.is_empty())
+            .filter(|m| !m.content.is_empty())
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(text.contains("Beijing"), "preamble text streamed: {text}");
+    }
+
+    #[test]
+    fn handle_sse_line_accumulates_fragmented_tool_use_input() {
+        // The real recording sent partial_json in one chunk; this hand-split
+        // variant fragments {"city":"Beijing"} across 3 input_json_delta events
+        // ("{\"ci" / "ty\":\"Be" / "ijing\"}"). GLM fragments long tool args in
+        // practice, so the slot.2.push_str accumulation is a must-test path.
+        let sse = include_str!("../../tests/fixtures/glm/stream_tool_use_fragmented.sse");
+        let (msgs, _in, _out) = replay_sse(sse);
+        let terminal = msgs.last().expect("terminal tool_calls");
+        assert_eq!(terminal.tool_calls.len(), 1);
+        let tc = &terminal.tool_calls[0];
+        assert_eq!(tc.id, "call_frag");
+        assert_eq!(tc.function.name, "get_weather");
+        assert_eq!(tc.function.arguments, "{\"city\":\"Beijing\"}");
+    }
 }
