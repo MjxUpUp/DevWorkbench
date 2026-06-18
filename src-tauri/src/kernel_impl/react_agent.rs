@@ -3333,4 +3333,67 @@ mod tests {
             "wire payload carries the kind discriminator the TS union narrows on: {json}"
         );
     }
+
+    /// Records a real GLM run's wire events to e2e/fixtures/ so the front-end
+    /// Playwright suite renders BlocksView against genuine model output instead
+    /// of hand-written mocks. Run once locally with a keyed GUI provider, then
+    /// commit the fixture (it carries no credentials):
+    ///   cargo test --lib -- --ignored record_real_glm_wire --nocapture
+    #[ignore = "writes e2e/fixtures/agent-blocks-real.json; needs keyed GUI provider; spends tokens"]
+    #[tokio::test]
+    async fn record_real_glm_wire_to_e2e_fixture() {
+        use kernel_core::{Agent, AgentInput};
+        let home = crate::commands::projects::dirs_home();
+        let data_dir = home.join(".dev-workbench");
+        let has_key = crate::config::providers::load_providers_config(&data_dir)
+            .ok()
+            .and_then(|c| crate::config::providers::resolve_provider(&c, "glm-4.6"))
+            .map(|r| !r.api_key.is_empty())
+            .unwrap_or(false);
+        if !has_key {
+            eprintln!("no keyed GUI provider — skipping recording");
+            return;
+        }
+        // build_react_agent's default registry wires read_file/glob/grep/bash, so
+        // a tool-asking prompt yields real tool_use + tool_result blocks in the
+        // wire — the multi-block shape BlocksView must render. Calling
+        // build_react_agent directly (not react_chat_driver) skips the shadow-git
+        // checkpoint, leaving the working tree untouched.
+        let working_dir = env!("CARGO_MANIFEST_DIR").to_string();
+        let agent = crate::kernel_impl::executor::build_react_agent(
+            Some("glm-4.6"),
+            None,
+            &working_dir,
+            None,
+            Vec::new(),
+            None,
+            crate::kernel_impl::hooks::PermissionMode::default(),
+            None,
+        )
+        .expect("build_react_agent");
+        let mut stream = agent
+            .run(AgentInput {
+                prompt: "Use the read_file tool to read Cargo.toml, then reply in one short sentence with the package name.".into(),
+                working_dir: Some(working_dir.clone()),
+                model: None,
+                resume_from: None,
+            })
+            .expect("agent run starts");
+        use futures::StreamExt;
+        let mut wire: Vec<crate::agents::pty::ChatStreamEvent> = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.unwrap();
+            wire.extend(crate::agents::react_chat::map_agent_event(ev, 0));
+        }
+        assert!(!wire.is_empty(), "live run produced no wire events");
+        let json = serde_json::to_string_pretty(&wire).expect("serialize wire");
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("e2e")
+            .join("fixtures")
+            .join("agent-blocks-real.json");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, &json).unwrap();
+        eprintln!("recorded {} wire events to {}", wire.len(), out.display());
+    }
 }

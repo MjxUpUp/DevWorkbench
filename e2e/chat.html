@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>BlocksView real-GLM E2E harness</title>
+    <!--
+      Tauri IPC shim (same shape as index.html). BlocksView here is a pure props
+      component fed by the imported real-GLM fixture, so no invoke is needed —
+      the shim is kept only so any child reaching for __TAURI_INTERNALS__ doesn't
+      throw.
+    -->
+    <script>
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args) => {
+          (window.__INVOKE_CALLS__ = window.__INVOKE_CALLS__ || []).push({ cmd, args });
+          const mock = window.__MOCK_INVOKE__;
+          if (mock && Object.prototype.hasOwnProperty.call(mock, cmd)) {
+            const v = mock[cmd];
+            return typeof v === 'function' ? v(args) : v;
+          }
+          return null;
+        },
+        transformCallback: () => 0,
+        unregisterCallback: () => {},
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./chat-main.tsx"></script>
+  </body>
+</html>
