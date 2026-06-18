@@ -3257,4 +3257,80 @@ mod tests {
             "cost sink saw output_tokens>0 from the full live loop, got {output}"
         );
     }
+
+    #[ignore = "reads the GUI's real ~/.dev-workbench/providers.toml (the only key store); spends real tokens"]
+    #[tokio::test]
+    async fn build_react_agent_wires_real_gui_provider_to_live_glm_and_maps_wire_events() {
+        // The assembly + wire-mapping layers the unit smoke bypasses — driven
+        // with a LIVE model so a regression in any of them surfaces here, not
+        // only in mock-driven tests. This is the exact path the front-end
+        // triggers over IPC, minus the GUI transport (AppHandle/emit, a thin
+        // wrapper the project has no Tauri-mock precedent for):
+        //   build_react_agent reads the GUI's real providers.toml (the ONLY key
+        //   store — no env config), resolve_provider maps the default model,
+        //   the agent runs against live GLM, and every AgentEvent flows through
+        //   the SAME map_agent_event react_chat_driver serializes to the
+        //   agent:event wire the front-end types/index.ts deserializes.
+        // Skipped when the GUI provider has no key (CI / fresh install); run on
+        // a machine where Settings → Providers holds a keyed GLM entry:
+        //   cargo test --lib -- --ignored build_react_agent_wires
+        use kernel_core::{Agent, AgentEvent, AgentInput};
+        let home = crate::commands::projects::dirs_home();
+        let data_dir = home.join(".dev-workbench");
+        let has_key = crate::config::providers::load_providers_config(&data_dir)
+            .ok()
+            .and_then(|c| crate::config::providers::resolve_provider(&c, "glm-4.6"))
+            .map(|r| !r.api_key.is_empty())
+            .unwrap_or(false);
+        if !has_key {
+            eprintln!(
+                "no keyed GUI provider in {data_dir:?} — skipping live assembly smoke"
+            );
+            return;
+        }
+        let agent = crate::kernel_impl::executor::build_react_agent(
+            Some("glm-4.6"),
+            None,
+            ".",
+            None,
+            Vec::new(),
+            None,
+            crate::kernel_impl::hooks::PermissionMode::default(),
+            None,
+        )
+        .expect("build_react_agent assembles from GUI provider config");
+        let mut stream = agent
+            .run(AgentInput {
+                prompt: "Reply with exactly one word: PONG".into(),
+                working_dir: None,
+                model: None,
+                resume_from: None,
+            })
+            .expect("agent run starts");
+        use futures::StreamExt;
+        let mut done = false;
+        let mut wire: Vec<crate::agents::pty::ChatStreamEvent> = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.unwrap();
+            if matches!(ev, AgentEvent::Done(_)) {
+                done = true;
+            }
+            wire.extend(crate::agents::react_chat::map_agent_event(ev, 0));
+        }
+        assert!(done, "agent never reached Done through the real assembly path");
+        assert!(
+            !wire.is_empty(),
+            "map_agent_event produced no wire events from the live run"
+        );
+        // The wire events ARE the agent:event payload the front-end
+        // types/index.ts deserializes; they must serialize to {kind: ...} JSON
+        // (the TS union discriminator), proving map_agent_event output is valid
+        // wire — not just valid Rust enums.
+        let json = serde_json::to_string(&wire)
+            .expect("wire events serialize to agent:event JSON");
+        assert!(
+            json.contains("\"kind\""),
+            "wire payload carries the kind discriminator the TS union narrows on: {json}"
+        );
+    }
 }
