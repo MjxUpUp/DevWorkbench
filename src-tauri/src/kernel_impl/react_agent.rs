@@ -634,6 +634,34 @@ impl ToolRegistry {
             tools: self.tools.iter().filter(|t| t.is_read_only()).cloned().collect(),
         }
     }
+
+    /// Return a new registry holding only the tools whose name starts with one
+    /// of the `allowed` prefixes (D1 `tools_allow`). A tool is kept iff SOME
+    /// non-empty prefix is a prefix of its name; empty/blank prefixes are
+    /// ignored (a `""` entry would otherwise match every name and silently
+    /// defeat the allowlist). Callers gate on a non-empty `allowed` — passing
+    /// `&[]` here keeps everything, matching "empty allowlist = inherit".
+    ///
+    /// This is the named-spec analogue of [`ToolRegistry::read_only_subset`]:
+    /// that narrows by capability (read-only), this narrows by a declared
+    /// name-prefix allowlist. Applied to a `read_only_subset` it's an
+    /// intersection (read-only AND name-matching), so a child bound to
+    /// `tools_allow: ["skill__web_search"]` gets only that tool even if the
+    /// read-only set is larger.
+    pub fn restrict_to_prefixes(&self, allowed: &[String]) -> ToolRegistry {
+        let prefixes: Vec<&str> = allowed.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        if prefixes.is_empty() {
+            return self.clone();
+        }
+        ToolRegistry {
+            tools: self
+                .tools
+                .iter()
+                .filter(|t| prefixes.iter().any(|p| t.info().name.starts_with(p)))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +712,28 @@ impl SubAgentTool {
     ) -> Self {
         Self { model, read_only_tools, max_steps, named }
     }
+
+    /// Build the child's tool registry for a dispatch. A non-empty `tools_allow`
+    /// narrows the read-only subset to the matching name-prefixes (D1); an empty
+    /// list inherits the full read-only subset (the anonymous-worker behaviour).
+    /// Extracted from [`SubAgentTool::invoke`] so the D1 narrowing is
+    /// unit-testable in isolation, without driving a model run. Warns when an
+    /// explicit allowlist matches nothing — the child would then run toolless,
+    /// which is almost certainly a spec typo, not intent.
+    fn child_tool_registry(&self, tools_allow: &[String]) -> ToolRegistry {
+        let restricted = self.read_only_tools.restrict_to_prefixes(tools_allow);
+        // restrict_to_prefixes returns the full set when no non-empty prefix is
+        // given (empty allowlist = inherit). Only warn when an EXPLICIT non-empty
+        // allowlist still matched nothing — that's the typo case worth surfacing.
+        let has_real_prefix = tools_allow.iter().any(|s| !s.is_empty());
+        if has_real_prefix && restricted.is_empty() {
+            log::warn!(
+                "[subagent] tools_allow {tools_allow:?} matched no read-only tools; \
+                 child runs toolless — likely a spec typo"
+            );
+        }
+        restricted
+    }
 }
 
 #[async_trait]
@@ -728,32 +778,25 @@ impl Tool for SubAgentTool {
         let requested = parsed
             .as_ref()
             .and_then(|v| v.get("subagent").and_then(|s| s.as_str()).map(str::to_owned));
-        // Resolve the worker prompt: a matching named spec overrides the
-        // anonymous default. An unknown name is NOT an error — it degrades to
-        // the anonymous worker so the agent's dispatch still succeeds. Owned
-        // String, not a borrow of self.named: a `&str` borrowing self would have
-        // to outlive 'static across the awaited run_loop (an async borrow of
-        // self across an await point), which the borrow checker rejects.
-        let worker_prompt: String = match &requested {
-            Some(name) => self
-                .named
-                .iter()
-                .find(|s| &s.name == name)
-                .and_then(|s| {
-                    if s.system_prompt.trim().is_empty() {
-                        None
-                    } else {
-                        Some(s.system_prompt.clone())
-                    }
-                })
-                .unwrap_or_else(|| default_worker_prompt().to_string()),
-            None => default_worker_prompt().to_string(),
-        };
-        // NOTE: tools_allow narrowing is deferred — narrowing ToolRegistry by
-        // name-prefix needs a filtering helper; today the named spec's leverage
-        // is its system_prompt, and the tool subset stays the full read-only set.
+        // Resolve the matched named spec (system_prompt + tools_allow). A
+        // matching name whose system_prompt is blank — or an unknown name —
+        // degrades to the anonymous worker, so a typo never stalls the dispatch.
+        // Clone BOTH owned fields in one pass so no borrow of self.named is held
+        // across the awaited run_loop (an async borrow of self across an await
+        // point is rejected by the borrow checker).
+        let (worker_prompt, tools_allow): (String, Vec<String>) = requested
+            .as_ref()
+            .and_then(|name| self.named.iter().find(|s| &s.name == name))
+            .filter(|s| !s.system_prompt.trim().is_empty())
+            .map(|s| (s.system_prompt.clone(), s.tools_allow.clone()))
+            .unwrap_or_else(|| (default_worker_prompt().to_string(), Vec::new()));
+        // D1 tools_allow enforcement: a named spec may narrow the child's tools
+        // to a name-prefix allowlist (e.g. only skill__web_search + read_file).
+        // An anonymous worker, or a spec with an empty list, inherits the full
+        // read-only subset.
+        let child_tools = self.child_tool_registry(&tools_allow);
         let child =
-            ReactAgent::new_shared(Arc::clone(&self.model), self.read_only_tools.clone(), worker_prompt.as_str())
+            ReactAgent::new_shared(Arc::clone(&self.model), child_tools, worker_prompt.as_str())
                 .with_context(ctx.clone())
                 .with_max_steps(self.max_steps);
         match child.run_loop(&task, ModelOptions::default()).await {
@@ -1595,6 +1638,12 @@ mod tests {
         }
     }
 
+    /// A read-only ProbeTool with the given name and a throwaway call log — for
+    /// registry-narrowing tests that only care about WHICH tools survive.
+    fn read_only_probe(name: &'static str) -> ProbeTool {
+        ProbeTool { name, read_only: true, calls: Arc::new(Mutex::new(Vec::new())) }
+    }
+
     #[tokio::test]
     async fn dry_run_simulates_side_effects_runs_read_only_for_real() {
         let write_calls = Arc::new(Mutex::new(Vec::new()));
@@ -1800,6 +1849,82 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("[子 agent 结论]"), "unknown name → anonymous worker: {out}");
+    }
+
+    // --- D1: tools_allow name-prefix narrowing ---
+
+    #[test]
+    fn restrict_to_prefixes_keeps_matching_and_drops_rest() {
+        let mut reg = ToolRegistry::new();
+        reg.push(read_only_probe("skill__web_search"));
+        reg.push(read_only_probe("read_file"));
+        reg.push(read_only_probe("bash"));
+        // Prefixes match by name-prefix: "skill__" catches skill__web_search,
+        // "read_file" catches read_file, "bash" has no allowed prefix → dropped.
+        let mut names: Vec<String> = reg
+            .restrict_to_prefixes(&["skill__".into(), "read_file".into()])
+            .infos()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["read_file".to_string(), "skill__web_search".to_string()]);
+    }
+
+    #[test]
+    fn restrict_to_prefixes_empty_allowlist_keeps_everything() {
+        let mut reg = ToolRegistry::new();
+        reg.push(read_only_probe("a"));
+        reg.push(read_only_probe("b"));
+        // Empty allowlist = inherit the full set (anonymous-worker contract).
+        assert_eq!(reg.restrict_to_prefixes(&[]).len(), 2);
+    }
+
+    #[test]
+    fn restrict_to_prefixes_ignores_blank_prefix_entry() {
+        // A stray "" must NOT match every name (that would silently disable the
+        // allowlist). It's dropped; a list of ONLY blanks behaves like empty.
+        let mut reg = ToolRegistry::new();
+        reg.push(read_only_probe("a"));
+        reg.push(read_only_probe("b"));
+        assert_eq!(
+            reg.restrict_to_prefixes(&["".into()]).len(),
+            2,
+            "blank-only allowlist inherits all (not 'match everything per-tool')"
+        );
+        // A mix of blank + real applies only the real prefix.
+        let restricted = reg.restrict_to_prefixes(&["".into(), "a".into()]);
+        assert_eq!(restricted.len(), 1);
+        assert_eq!(restricted.infos()[0].name, "a");
+    }
+
+    #[test]
+    fn child_tool_registry_empty_allowlist_inherits_full_readonly_set() {
+        let mut reg = ToolRegistry::new();
+        reg.push(read_only_probe("skill__web_search"));
+        reg.push(read_only_probe("read_file"));
+        reg.push(read_only_probe("bash"));
+        let tool = SubAgentTool::new(shared_gen_model("x"), reg, 4, Vec::new());
+        // Anonymous worker (no tools_allow) → full read-only subset.
+        assert_eq!(tool.child_tool_registry(&[]).len(), 3);
+    }
+
+    #[test]
+    fn child_tool_registry_nonempty_allowlist_narrows_to_matching() {
+        let mut reg = ToolRegistry::new();
+        reg.push(read_only_probe("skill__web_search"));
+        reg.push(read_only_probe("read_file"));
+        reg.push(read_only_probe("bash"));
+        let tool = SubAgentTool::new(shared_gen_model("x"), reg, 4, Vec::new());
+        // Named spec bound to tools_allow: [skill__web_search] → only that tool.
+        let mut names: Vec<String> = tool
+            .child_tool_registry(&["skill__web_search".into()])
+            .infos()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["skill__web_search".to_string()]);
     }
 
     #[test]
