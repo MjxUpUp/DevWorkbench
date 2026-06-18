@@ -36,3 +36,59 @@ pub async fn render_slash_command(
         None => Err(AppError::Config(format!("unknown slash command: /{name}"))),
     }
 }
+
+/// Create a user-defined slash command. `name` carries no leading slash and
+/// must be unique (builtins are seeded separately). Closes the dive_02 gap: the
+/// UI can now let users AUTHOR their own `/` commands, not just consume builtins.
+#[tauri::command]
+pub async fn create_slash_command(
+    db: State<'_, DbState>,
+    name: String,
+    description: Option<String>,
+    template: String,
+    category: Option<String>,
+) -> Result<SlashCommand, AppError> {
+    let conn = db
+        .get()
+        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
+    crate::slash_commands::registry::create_command(
+        &conn,
+        &name,
+        description.as_deref(),
+        &template,
+        category.as_deref(),
+    )
+}
+
+/// Update a user command's fields by id. Built-ins (category=builtin) are
+/// protected server-side — the call errors instead of mutating the seeded baseline.
+#[tauri::command]
+pub async fn update_slash_command(
+    db: State<'_, DbState>,
+    id: String,
+    name: String,
+    description: Option<String>,
+    template: String,
+    category: Option<String>,
+) -> Result<(), AppError> {
+    let conn = db
+        .get()
+        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
+    crate::slash_commands::registry::update_command(
+        &conn,
+        &id,
+        &name,
+        description.as_deref(),
+        &template,
+        category.as_deref(),
+    )
+}
+
+/// Delete a user command by id. Built-ins are protected server-side.
+#[tauri::command]
+pub async fn delete_slash_command(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
+    let conn = db
+        .get()
+        .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
+    crate::slash_commands::registry::delete_command(&conn, &id)
+}

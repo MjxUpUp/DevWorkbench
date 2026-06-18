@@ -32,6 +32,93 @@ pub fn find_by_name(conn: &Connection, name: &str) -> Result<Option<SlashCommand
     }
 }
 
+/// Look up by primary key (id). Mirrors [`find_by_name`]'s shape.
+pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<SlashCommand>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, template, category, created_at \
+         FROM slash_commands WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map([id], row_to_command)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+/// Whether a command is a seeded builtin (protected from edit/delete). init_db
+/// re-seeds builtins every launch via `INSERT OR IGNORE`, so user edits to them
+/// would be silently reverted anyway — better to refuse up front.
+fn is_builtin(cmd: &SlashCommand) -> bool {
+    cmd.category.as_deref() == Some("builtin")
+}
+
+/// Create a user-defined slash command. `name` must be unique and carry no
+/// leading slash. Closes the dive_02 gap: previously you could only CONSUME
+/// builtins, never author one. Returns the created row (re-read so the caller
+/// gets the generated id + created_at).
+pub fn create_command(
+    conn: &Connection,
+    name: &str,
+    description: Option<&str>,
+    template: &str,
+    category: Option<&str>,
+) -> Result<SlashCommand, AppError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO slash_commands (id, name, description, template, category, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, name, description, template, category, now],
+    )
+    .map_err(|e| {
+        // UNIQUE(name) clash (incl. shadowing a builtin) → friendly message.
+        if matches!(
+            e,
+            rusqlite::Error::SqliteFailure(ref f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation
+        ) {
+            AppError::Config(format!("slash command /{name} 已存在"))
+        } else {
+            AppError::from(e)
+        }
+    })?;
+    find_by_name(conn, name)?
+        .ok_or_else(|| AppError::Config("insert succeeded but row not found".into()))
+}
+
+/// Update a command's editable fields by id. Built-ins are protected. Errors if
+/// the id is absent or names a builtin.
+pub fn update_command(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    template: &str,
+    category: Option<&str>,
+) -> Result<(), AppError> {
+    let existing = find_by_id(conn, id)?
+        .ok_or_else(|| AppError::Config(format!("slash command {id} 不存在")))?;
+    if is_builtin(&existing) {
+        return Err(AppError::Config("内置命令不可编辑（category=builtin）".into()));
+    }
+    conn.execute(
+        "UPDATE slash_commands SET name=?1, description=?2, template=?3, category=?4 WHERE id=?5",
+        rusqlite::params![name, description, template, category, id],
+    )?;
+    Ok(())
+}
+
+/// Delete a command by id. Built-ins are protected (same reason as update).
+/// Errors if absent or builtin.
+pub fn delete_command(conn: &Connection, id: &str) -> Result<(), AppError> {
+    let existing = find_by_id(conn, id)?
+        .ok_or_else(|| AppError::Config(format!("slash command {id} 不存在")))?;
+    if is_builtin(&existing) {
+        return Err(AppError::Config("内置命令不可删除（category=builtin）".into()));
+    }
+    conn.execute("DELETE FROM slash_commands WHERE id=?1", [id])?;
+    Ok(())
+}
+
 fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<SlashCommand> {
     Ok(SlashCommand {
         id: row.get(0)?,
@@ -144,5 +231,84 @@ mod tests {
         assert!(rendered.contains("do X"), "args substituted in");
         assert!(!rendered.contains("$ARGUMENTS"), "placeholder must be substituted away");
         assert!(find_by_name(&conn, "nope").unwrap().is_none(), "unknown name → None");
+    }
+
+    // ---- D2 CRUD: user can author/edit/delete commands; builtins protected ----
+
+    #[test]
+    fn create_then_find_and_list() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("c.db")).unwrap();
+        let cmd =
+            create_command(&conn, "myreview", Some("my review"), "Review: $ARGUMENTS", Some("user"))
+                .unwrap();
+        assert_eq!(cmd.name, "myreview");
+        assert_eq!(cmd.category.as_deref(), Some("user"));
+        // Read back by name AND by id — both must resolve to the same row.
+        let by_name = find_by_name(&conn, "myreview").unwrap().expect("findable by name");
+        assert_eq!(by_name.id, cmd.id);
+        assert_eq!(by_name.template, "Review: $ARGUMENTS");
+        let by_id = find_by_id(&conn, &cmd.id).unwrap().expect("findable by id");
+        assert_eq!(by_id.name, "myreview");
+        let all = list_slash_commands(&conn).unwrap();
+        assert!(
+            all.iter().any(|c| c.name == "myreview"),
+            "user command appears in list alongside builtins"
+        );
+    }
+
+    #[test]
+    fn create_duplicate_name_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("c.db")).unwrap();
+        create_command(&conn, "dup", None, "t", None).unwrap();
+        let err = create_command(&conn, "dup", None, "t", None);
+        assert!(err.is_err(), "duplicate user name must error");
+    }
+
+    #[test]
+    fn create_shadowing_builtin_name_errors() {
+        // 'plan' is a seeded builtin → the UNIQUE(name) constraint must refuse
+        // a user command trying to shadow it (no silent override of /plan).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("c.db")).unwrap();
+        let err = create_command(&conn, "plan", None, "evil", None);
+        assert!(err.is_err(), "must not shadow builtin /plan");
+    }
+
+    #[test]
+    fn update_changes_fields_and_blocks_builtin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("c.db")).unwrap();
+        let cmd = create_command(&conn, "u", Some("d"), "old", Some("user")).unwrap();
+        update_command(&conn, &cmd.id, "u2", Some("d2"), "new", Some("user")).unwrap();
+        let after = find_by_id(&conn, &cmd.id).unwrap().unwrap();
+        assert_eq!(after.name, "u2");
+        assert_eq!(after.template, "new");
+        // Built-in is protected from edit.
+        let builtin = find_by_name(&conn, "plan").unwrap().unwrap();
+        assert!(
+            update_command(&conn, &builtin.id, "plan", None, "x", Some("builtin")).is_err(),
+            "builtin must not be editable"
+        );
+    }
+
+    #[test]
+    fn delete_removes_user_and_blocks_builtin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::init_db(&tmp.path().join("c.db")).unwrap();
+        let cmd = create_command(&conn, "del", None, "t", Some("user")).unwrap();
+        delete_command(&conn, &cmd.id).unwrap();
+        assert!(
+            find_by_id(&conn, &cmd.id).unwrap().is_none(),
+            "user command gone after delete"
+        );
+        let builtin = find_by_name(&conn, "plan").unwrap().unwrap();
+        assert!(
+            delete_command(&conn, &builtin.id).is_err(),
+            "builtin must not be deletable"
+        );
+        // plan still present after the refused delete.
+        assert!(find_by_name(&conn, "plan").unwrap().is_some());
     }
 }
