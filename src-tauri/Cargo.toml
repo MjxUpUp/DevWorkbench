@@ -41,6 +41,9 @@ chrono = { version = "0.4", features = ["serde"] }
 git2 = { version = "0.20", features = ["vendored-openssl"] }
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
+# Hook matcher regex mode (claude-code `matchesPattern` 3rd mode). Already in
+# the lock transitively; declared direct so user_hooks can `use regex::Regex`.
+regex = "1"
 toml = "0.8"
 thiserror = "2"
 sha2 = "0.10"

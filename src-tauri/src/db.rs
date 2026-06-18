@@ -338,6 +338,9 @@ CREATE TABLE IF NOT EXISTS user_hooks (
     shell INTEGER NOT NULL DEFAULT 1,
     timeout_secs INTEGER NOT NULL DEFAULT 30,
     enabled INTEGER NOT NULL DEFAULT 1,
+    -- Optional tool-name matcher (claude-code `matcher`), meaningful only for
+    -- pre_tool_use / post_tool_use. NULL = match all. v12→v13 column.
+    matcher TEXT,
     created_at TEXT NOT NULL
 );
 

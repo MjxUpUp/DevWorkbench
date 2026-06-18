@@ -17,7 +17,8 @@ pub async fn list_user_hooks(db: State<'_, DbState>) -> Result<Vec<UserHook>, Ap
     crate::user_hooks::registry::list_user_hooks(&conn)
 }
 
-/// Create a user hook. `name` must be unique.
+/// Create a user hook. `name` must be unique. `matcher` scopes a tool-event hook
+/// to specific tools (claude-code `matcher`); None/empty = match all.
 #[tauri::command]
 pub async fn create_user_hook(
     db: State<'_, DbState>,
@@ -27,6 +28,7 @@ pub async fn create_user_hook(
     shell: Option<bool>,
     timeout_secs: Option<u64>,
     enabled: Option<bool>,
+    matcher: Option<String>,
 ) -> Result<UserHook, AppError> {
     let conn = db
         .get()
@@ -39,6 +41,7 @@ pub async fn create_user_hook(
         shell.unwrap_or(true),
         timeout_secs.unwrap_or(30),
         enabled.unwrap_or(true),
+        matcher.as_deref(),
     )
 }
 
@@ -53,12 +56,13 @@ pub async fn update_user_hook(
     shell: bool,
     timeout_secs: u64,
     enabled: bool,
+    matcher: Option<String>,
 ) -> Result<(), AppError> {
     let conn = db
         .get()
         .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
     crate::user_hooks::registry::update_hook(
-        &conn, &id, &name, event, &command, shell, timeout_secs, enabled,
+        &conn, &id, &name, event, &command, shell, timeout_secs, enabled, matcher.as_deref(),
     )
 }
 

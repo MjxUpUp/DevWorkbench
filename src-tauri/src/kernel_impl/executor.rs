@@ -325,31 +325,37 @@ pub(crate) fn build_react_agent(
         Some(std::path::PathBuf::from(working_dir)),
     )));
     // D2: register every ENABLED user_hooks row as a UserCommandHook. Each hook
-    // no-ops on events it isn't bound to, so loading both events into one
-    // HookManager is correct — the manager dispatches both UserPromptSubmit and
-    // Stop, and each row only acts on its configured event. A DB read failure is
-    // swallowed (the run proceeds with built-in hooks only).
+    // no-ops on events it isn't bound to, so loading all four events into one
+    // HookManager is correct — the manager dispatches every HookEvent and each
+    // row only acts on its configured event (Pre/PostToolUse rows additionally
+    // gate on their matcher at dispatch time). A DB read failure is swallowed
+    // (the run proceeds with built-in hooks only).
     if let Some(dbs) = hooks_db.as_ref() {
         if let Ok(conn) = dbs.get() {
             use crate::models::UserHookEvent;
-            let mut rows = crate::user_hooks::registry::load_enabled_by_event(
-                &conn,
+            let mut rows = Vec::new();
+            for ev in [
                 UserHookEvent::UserPromptSubmit,
-            )
-            .unwrap_or_default();
-            rows.extend(
-                crate::user_hooks::registry::load_enabled_by_event(&conn, UserHookEvent::Stop)
-                    .unwrap_or_default(),
-            );
+                UserHookEvent::PreToolUse,
+                UserHookEvent::PostToolUse,
+                UserHookEvent::Stop,
+            ] {
+                rows.extend(
+                    crate::user_hooks::registry::load_enabled_by_event(&conn, ev).unwrap_or_default(),
+                );
+            }
             for row in rows {
-                hooks.register(Box::new(crate::user_hooks::UserCommandHook::new(
-                    row.name,
-                    row.event,
-                    row.command,
-                    row.shell,
-                    row.timeout_secs,
-                    Some(std::path::PathBuf::from(working_dir)),
-                )));
+                hooks.register(Box::new(
+                    crate::user_hooks::UserCommandHook::new(
+                        row.name,
+                        row.event,
+                        row.command,
+                        row.shell,
+                        row.timeout_secs,
+                        Some(std::path::PathBuf::from(working_dir)),
+                    )
+                    .with_matcher(row.matcher.clone()),
+                ));
             }
         }
     }

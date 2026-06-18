@@ -178,3 +178,58 @@ test('capability-overview: aggregates built-ins + skills + MCP tools (read-only)
   // add-server form (that belongs to the separate MCP servers config page).
   await expect(cap.getByPlaceholder('Server 名称 (如 filesystem)')).toHaveCount(0);
 });
+
+test('hooks: lists existing rows and creates a pre_tool_use hook with a matcher', async ({ page }) => {
+  await seedMock(page, {
+    get_providers_config: EMPTY_PROVIDERS,
+    get_knowledge_for_project: EMPTY,
+    list_skills: EMPTY,
+    skill_catalog: EMPTY,
+    list_user_hooks: [
+      {
+        id: 'h1',
+        name: 'load-conventions',
+        event: 'user_prompt_submit',
+        command: 'cat .cursorrules',
+        shell: true,
+        timeoutSecs: 30,
+        enabled: true,
+        matcher: null,
+        createdAt: '2026-06-01',
+      },
+    ],
+    create_user_hook: null,
+  });
+  await page.goto('/settings.html');
+
+  const hooks = page.locator('[data-e2e="hooks"]');
+
+  // The seeded hook renders with its event badge + command. Scope the command
+  // check to the card paragraph so it doesn't also match the <code> token in the
+  // section's description text.
+  await expect(hooks.getByText('load-conventions')).toBeVisible();
+  await expect(hooks.locator('p.memory-card-content').filter({ hasText: 'cat .cursorrules' })).toBeVisible();
+
+  // Open the create form, switch to a tool event (reveals the matcher field),
+  // fill name + matcher + command, save.
+  await hooks.getByRole('button', { name: '+ 新建钩子' }).click();
+  await hooks.getByPlaceholder('例如 load-conventions').fill('no-write');
+  await hooks.getByRole('combobox').selectOption('pre_tool_use');
+  await hooks.getByPlaceholder('例如 write_file|edit').fill('write_file|edit');
+  await hooks
+    .getByPlaceholder('cat .cursorrules 2>/dev/null || echo 无项目规则')
+    .fill('cmd /C exit 2');
+  await hooks.getByRole('button', { name: '保存' }).click();
+
+  const all = await calls(page);
+  const create = all.find((c) => c.cmd === 'create_user_hook');
+  expect(create, 'create_user_hook must fire').toBeTruthy();
+  expect(create!.args).toMatchObject({
+    name: 'no-write',
+    event: 'pre_tool_use',
+    command: 'cmd /C exit 2',
+    matcher: 'write_file|edit',
+    shell: true,
+    enabled: true,
+  });
+});

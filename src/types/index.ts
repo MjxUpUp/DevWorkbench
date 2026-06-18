@@ -156,9 +156,11 @@ export interface SlashCommand {
  * Lifecycle event a user hook fires on (D2). Mirrors the Rust `UserHookEvent`
  * serde schema: serialized as snake_case over the wire.
  *   - 'user_prompt_submit' — stdout (exit 0) injected as context before the turn
+ *   - 'pre_tool_use'    — before each tool call; exit 2 BLOCKS that tool
+ *   - 'post_tool_use'   — after each tool returns; observation only (exit 2 logged)
  *   - 'stop' — runs for side effects at run end (output ignored)
  */
-export type UserHookEvent = 'user_prompt_submit' | 'stop';
+export type UserHookEvent = 'user_prompt_submit' | 'pre_tool_use' | 'post_tool_use' | 'stop';
 
 /**
  * A user-configurable lifecycle hook (D2). One row = one shell command bound to
@@ -173,6 +175,12 @@ export interface UserHook {
   shell: boolean;
   timeoutSecs: number;
   enabled: boolean;
+  /**
+   * Optional tool-name matcher (claude-code `matcher`), meaningful only for
+   * pre_tool_use / post_tool_use. null/empty = match all. Three modes: exact
+   * (`write_file`), pipe alternation (`write_file|edit`), regex (`^write_`).
+   */
+  matcher: string | null;
   createdAt: string;
 }
 

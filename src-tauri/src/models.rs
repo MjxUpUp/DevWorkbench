@@ -448,6 +448,13 @@ pub struct UserHook {
     pub shell: bool,
     pub timeout_secs: u64,
     pub enabled: bool,
+    /// Optional tool-name matcher (claude-code `matcher`), meaningful only for
+    /// PreToolUse / PostToolUse. `None` / empty / `"*"` = match all. Three modes:
+    /// literal exact, pipe `|` alternation, regex (see `matches_pattern`).
+    /// `#[serde(default)]` so rows / payloads predating the v12→v13 migration
+    /// (no column) still deserialize as None.
+    #[serde(default)]
+    pub matcher: Option<String>,
     pub created_at: String,
 }
 

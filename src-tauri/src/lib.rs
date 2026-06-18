@@ -114,6 +114,8 @@ pub fn run() {
                     .expect("Failed to run v10 to v11 blocks column migration");
                 migrate::migrate_v11_to_v12(&conn)
                     .expect("Failed to run v11 to v12 task_ref column migration");
+                migrate::migrate_v12_to_v13(&conn)
+                    .expect("Failed to run v12 to v13 user_hooks.matcher column migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {

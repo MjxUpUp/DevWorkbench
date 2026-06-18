@@ -12,7 +12,7 @@ use crate::models::{UserHook, UserHookEvent};
 /// reads this to render the management list.
 pub fn list_user_hooks(conn: &Connection) -> Result<Vec<UserHook>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, event, command, shell, timeout_secs, enabled, created_at \
+        "SELECT id, name, event, command, shell, timeout_secs, enabled, matcher, created_at \
          FROM user_hooks ORDER BY name",
     )?;
     let rows = stmt.query_map([], row_to_hook)?;
@@ -26,7 +26,7 @@ pub fn list_user_hooks(conn: &Connection) -> Result<Vec<UserHook>, AppError> {
 /// Look up a single hook by primary key (id).
 pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<UserHook>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, event, command, shell, timeout_secs, enabled, created_at \
+        "SELECT id, name, event, command, shell, timeout_secs, enabled, matcher, created_at \
          FROM user_hooks WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map([id], row_to_hook)?;
@@ -45,7 +45,7 @@ pub fn load_enabled_by_event(
     event: UserHookEvent,
 ) -> Result<Vec<UserHook>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, event, command, shell, timeout_secs, enabled, created_at \
+        "SELECT id, name, event, command, shell, timeout_secs, enabled, matcher, created_at \
          FROM user_hooks WHERE enabled = 1 AND event = ?1 ORDER BY name",
     )?;
     let rows = stmt.query_map([event.as_db()], row_to_hook)?;
@@ -57,7 +57,8 @@ pub fn load_enabled_by_event(
 }
 
 /// Create a user hook. `name` must be unique. Returns the created row (re-read so
-/// the caller gets the generated id + created_at).
+/// the caller gets the generated id + created_at). `matcher` is stored verbatim;
+/// None/empty become NULL (match-all). Meaningful only for tool events.
 pub fn create_hook(
     conn: &Connection,
     name: &str,
@@ -66,12 +67,16 @@ pub fn create_hook(
     shell: bool,
     timeout_secs: u64,
     enabled: bool,
+    matcher: Option<&str>,
 ) -> Result<UserHook, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now().to_rfc3339();
+    // Normalize: trim, then drop to None so empty == match-all (single canonical
+    // representation; matches `matches_pattern` which treats None/"" identically).
+    let matcher_norm = matcher.map(str::trim).filter(|m| !m.is_empty());
     conn.execute(
-        "INSERT INTO user_hooks (id, name, event, command, shell, timeout_secs, enabled, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO user_hooks (id, name, event, command, shell, timeout_secs, enabled, matcher, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
             id,
             name,
@@ -80,6 +85,7 @@ pub fn create_hook(
             shell as i64,
             timeout_secs as i64,
             enabled as i64,
+            matcher_norm,
             now,
         ],
     )
@@ -108,14 +114,16 @@ pub fn update_hook(
     shell: bool,
     timeout_secs: u64,
     enabled: bool,
+    matcher: Option<&str>,
 ) -> Result<(), AppError> {
     // Existence check first so an absent id errors with a clear message rather
     // than silently updating zero rows.
     find_by_id(conn, id)?
         .ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
+    let matcher_norm = matcher.map(str::trim).filter(|m| !m.is_empty());
     conn.execute(
-        "UPDATE user_hooks SET name=?1, event=?2, command=?3, shell=?4, timeout_secs=?5, enabled=?6 \
-         WHERE id=?7",
+        "UPDATE user_hooks SET name=?1, event=?2, command=?3, shell=?4, timeout_secs=?5, enabled=?6, \
+         matcher=?7 WHERE id=?8",
         rusqlite::params![
             name,
             event.as_db(),
@@ -123,6 +131,7 @@ pub fn update_hook(
             shell as i64,
             timeout_secs as i64,
             enabled as i64,
+            matcher_norm,
             id,
         ],
     )?;
@@ -164,7 +173,8 @@ fn row_to_hook(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserHook> {
         shell: row.get::<_, i64>(4)? != 0,
         timeout_secs: row.get::<_, i64>(5)? as u64,
         enabled: row.get::<_, i64>(6)? != 0,
-        created_at: row.get(7)?,
+        matcher: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
@@ -194,6 +204,7 @@ mod tests {
             true,
             30,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(h.name, "load-conventions");
@@ -201,6 +212,7 @@ mod tests {
         assert!(h.shell);
         assert_eq!(h.timeout_secs, 30);
         assert!(h.enabled);
+        assert!(h.matcher.is_none(), "submit hook has no matcher by default");
 
         let by_id = find_by_id(&conn, &h.id).unwrap().expect("findable by id");
         assert_eq!(by_id.name, "load-conventions");
@@ -211,54 +223,20 @@ mod tests {
     #[test]
     fn create_duplicate_name_errors() {
         let conn = fresh();
-        create_hook(
-            &conn,
-            "dup",
-            UserHookEvent::Stop,
-            "echo done",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
-        let err = create_hook(&conn, "dup", UserHookEvent::Stop, "x", true, 10, true);
+        create_hook(&conn, "dup", UserHookEvent::Stop, "echo done", true, 10, true, None).unwrap();
+        let err = create_hook(&conn, "dup", UserHookEvent::Stop, "x", true, 10, true, None);
         assert!(err.is_err(), "duplicate name must error");
     }
 
     #[test]
     fn load_enabled_by_event_filters_event_and_disabled() {
         let conn = fresh();
-        let a = create_hook(
-            &conn,
-            "a",
-            UserHookEvent::UserPromptSubmit,
-            "echo a",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
-        create_hook(
-            &conn,
-            "b",
-            UserHookEvent::Stop,
-            "echo b",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
+        let a = create_hook(&conn, "a", UserHookEvent::UserPromptSubmit, "echo a", true, 10, true, None)
+            .unwrap();
+        create_hook(&conn, "b", UserHookEvent::Stop, "echo b", true, 10, true, None).unwrap();
         // Disabled submit hook must NOT appear in the enabled load.
-        create_hook(
-            &conn,
-            "c",
-            UserHookEvent::UserPromptSubmit,
-            "echo c",
-            true,
-            10,
-            false,
-        )
-        .unwrap();
+        create_hook(&conn, "c", UserHookEvent::UserPromptSubmit, "echo c", true, 10, false, None)
+            .unwrap();
 
         let submits = load_enabled_by_event(&conn, UserHookEvent::UserPromptSubmit).unwrap();
         assert_eq!(submits.len(), 1, "only enabled submit hooks: {submits:?}");
@@ -272,16 +250,7 @@ mod tests {
     #[test]
     fn update_changes_fields() {
         let conn = fresh();
-        let h = create_hook(
-            &conn,
-            "h",
-            UserHookEvent::Stop,
-            "old",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
+        let h = create_hook(&conn, "h", UserHookEvent::Stop, "old", true, 10, true, None).unwrap();
         update_hook(
             &conn,
             &h.id,
@@ -291,6 +260,7 @@ mod tests {
             false,
             60,
             false,
+            None,
         )
         .unwrap();
         let after = find_by_id(&conn, &h.id).unwrap().unwrap();
@@ -313,7 +283,8 @@ mod tests {
             "c",
             true,
             10,
-            true
+            true,
+            None
         )
         .is_err());
     }
@@ -321,16 +292,7 @@ mod tests {
     #[test]
     fn set_enabled_toggles_flag() {
         let conn = fresh();
-        let h = create_hook(
-            &conn,
-            "h",
-            UserHookEvent::Stop,
-            "c",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
+        let h = create_hook(&conn, "h", UserHookEvent::Stop, "c", true, 10, true, None).unwrap();
         set_enabled(&conn, &h.id, false).unwrap();
         assert!(!find_by_id(&conn, &h.id).unwrap().unwrap().enabled);
         set_enabled(&conn, &h.id, true).unwrap();
@@ -340,16 +302,7 @@ mod tests {
     #[test]
     fn delete_removes_hook() {
         let conn = fresh();
-        let h = create_hook(
-            &conn,
-            "h",
-            UserHookEvent::Stop,
-            "c",
-            true,
-            10,
-            true,
-        )
-        .unwrap();
+        let h = create_hook(&conn, "h", UserHookEvent::Stop, "c", true, 10, true, None).unwrap();
         delete_hook(&conn, &h.id).unwrap();
         assert!(find_by_id(&conn, &h.id).unwrap().is_none());
         // Deleting again (absent id) errors.
@@ -358,9 +311,83 @@ mod tests {
 
     #[test]
     fn event_db_round_trip() {
-        for ev in [UserHookEvent::UserPromptSubmit, UserHookEvent::Stop] {
+        for ev in [
+            UserHookEvent::UserPromptSubmit,
+            UserHookEvent::PreToolUse,
+            UserHookEvent::PostToolUse,
+            UserHookEvent::Stop,
+        ] {
             assert_eq!(UserHookEvent::from_db(ev.as_db()).unwrap(), ev);
         }
         assert!(UserHookEvent::from_db("bogus").is_err());
+    }
+
+    #[test]
+    fn matcher_round_trips_and_loads_by_event() {
+        // A PreToolUse hook with a matcher persists + reloads verbatim, and
+        // load_enabled_by_event surfaces it (so the executor seam can wire it).
+        let conn = fresh();
+        create_hook(
+            &conn,
+            "no-write",
+            UserHookEvent::PreToolUse,
+            "cmd /C exit 2",
+            true,
+            10,
+            true,
+            Some("write_file|edit"),
+        )
+        .unwrap();
+        let loaded = load_enabled_by_event(&conn, UserHookEvent::PreToolUse).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].matcher.as_deref(), Some("write_file|edit"));
+
+        // A PostToolUse hook with a regex matcher.
+        create_hook(
+            &conn,
+            "log-reads",
+            UserHookEvent::PostToolUse,
+            "echo saw-a-read",
+            true,
+            10,
+            true,
+            Some("^read_"),
+        )
+        .unwrap();
+        let posts = load_enabled_by_event(&conn, UserHookEvent::PostToolUse).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].matcher.as_deref(), Some("^read_"));
+    }
+
+    #[test]
+    fn matcher_empty_and_whitespace_normalize_to_none() {
+        // Empty / whitespace-only matchers collapse to NULL (match-all) on both
+        // create and update, so the DB never stores a "filter" that's actually a
+        // no-op — single canonical representation.
+        let conn = fresh();
+        let h = create_hook(&conn, "h", UserHookEvent::PreToolUse, "c", true, 10, true, Some("   "))
+            .unwrap();
+        assert!(h.matcher.is_none(), "whitespace matcher normalizes to None");
+        assert!(
+            find_by_id(&conn, &h.id).unwrap().unwrap().matcher.is_none(),
+            "stored as NULL"
+        );
+
+        update_hook(
+            &conn,
+            &h.id,
+            "h",
+            UserHookEvent::PreToolUse,
+            "c",
+            true,
+            10,
+            true,
+            Some(""),
+        )
+        .unwrap();
+        assert!(
+            find_by_id(&conn, &h.id).unwrap().unwrap().matcher.is_none(),
+            "empty update normalizes to None"
+        );
     }
 }

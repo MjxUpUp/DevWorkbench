@@ -465,6 +465,39 @@ pub fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v12→v13: add `user_hooks.matcher TEXT` so a Pre/PostToolUse hook can scope to
+/// specific tools (claude-code `matcher` field — literal / pipe / regex). Same
+/// idempotent shape as v10→v11 / v11→v12: probe the column (fresh DBs already
+/// have it from the static SCHEMA), ALTER only if missing, then bump the
+/// version. NULL default = match all, so pre-existing rows behave unchanged.
+pub fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 13 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
+    // that references the column (same idiom as v10→v11's blocks probe). A fresh
+    // DB already has `matcher` from the static SCHEMA and skips the ALTER.
+    let col_exists = conn.prepare("SELECT matcher FROM user_hooks LIMIT 0").is_ok();
+    if !col_exists {
+        conn.execute("ALTER TABLE user_hooks ADD COLUMN matcher TEXT", [])?;
+        log::info!("Migrated schema v12→v13: added user_hooks.matcher column");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (13, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

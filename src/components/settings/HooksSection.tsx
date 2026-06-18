@@ -24,6 +24,8 @@ interface FormState {
   shell: boolean;
   timeoutSecs: number;
   enabled: boolean;
+  /** Tool-name matcher; null = match all. Only meaningful for tool events. */
+  matcher: string | null;
 }
 
 const EMPTY_FORM: FormState = {
@@ -33,6 +35,7 @@ const EMPTY_FORM: FormState = {
   shell: true,
   timeoutSecs: 30,
   enabled: true,
+  matcher: null,
 };
 
 function toForm(h: UserHook): FormState {
@@ -43,13 +46,20 @@ function toForm(h: UserHook): FormState {
     shell: h.shell,
     timeoutSecs: h.timeoutSecs,
     enabled: h.enabled,
+    matcher: h.matcher,
   };
 }
 
 const EVENT_LABEL: Record<UserHookEvent, string> = {
   user_prompt_submit: '提交时',
+  pre_tool_use: '工具调用前',
+  post_tool_use: '工具调用后',
   stop: '停止时',
 };
+
+/** Tool events are the only ones where a matcher scopes which tools fire. */
+const isToolEvent = (e: UserHookEvent): boolean =>
+  e === 'pre_tool_use' || e === 'post_tool_use';
 
 export function HooksSection() {
   const [hooks, setHooks] = useState<UserHook[]>([]);
@@ -105,6 +115,9 @@ export function HooksSection() {
     }
     setSaving(true);
     try {
+      // Matcher only applies to tool events; null it otherwise so the backend
+      // stores a clean match-all row regardless of any stale input.
+      const matcher = isToolEvent(form.event) ? form.matcher : null;
       if (editingId) {
         await invoke('update_user_hook', {
           id: editingId,
@@ -114,6 +127,7 @@ export function HooksSection() {
           shell: form.shell,
           timeoutSecs: form.timeoutSecs,
           enabled: form.enabled,
+          matcher,
         });
         success(`已更新钩子 ${name}`);
       } else {
@@ -124,6 +138,7 @@ export function HooksSection() {
           shell: form.shell,
           timeoutSecs: form.timeoutSecs,
           enabled: form.enabled,
+          matcher,
         });
         success(`已创建钩子 ${name}`);
       }
@@ -193,12 +208,35 @@ export function HooksSection() {
               <select
                 className="provider-input"
                 value={form.event}
-                onChange={(e) => setForm({ ...form, event: e.target.value as UserHookEvent })}
+                onChange={(e) => {
+                  const event = e.target.value as UserHookEvent;
+                  // Leaving tool events discards any matcher — it's meaningless
+                  // for submit/stop, so don't persist a stale value into the row.
+                  setForm({ ...form, event, matcher: isToolEvent(event) ? form.matcher : null });
+                }}
               >
                 <option value="user_prompt_submit">提交时（stdout 注入上下文）</option>
+                <option value="pre_tool_use">工具调用前（exit 2 阻断该工具）</option>
+                <option value="post_tool_use">工具调用后（观察，exit 2 仅记录）</option>
                 <option value="stop">停止时（副作用）</option>
               </select>
             </label>
+            {isToolEvent(form.event) && (
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span className="settings-section-desc">
+                  工具匹配（留空=全部；支持 <code>write_file|edit</code> 或正则 <code>^write_</code>）
+                </span>
+                <input
+                  className="provider-input"
+                  value={form.matcher ?? ''}
+                  onChange={(e) =>
+                    setForm({ ...form, matcher: e.target.value.trim() === '' ? null : e.target.value })
+                  }
+                  placeholder="例如 write_file|edit"
+                  style={{ fontFamily: 'monospace' }}
+                />
+              </label>
+            )}
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span className="settings-section-desc">命令（经 shell 执行）</span>
               <textarea
@@ -270,6 +308,11 @@ export function HooksSection() {
             <p className="memory-card-content" style={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap' }}>
               {h.command}
             </p>
+            {h.matcher && (
+              <p className="memory-card-meta" style={{ margin: 0, fontFamily: 'monospace', fontSize: 11 }}>
+                匹配: {h.matcher}
+              </p>
+            )}
             <div className="memory-card-meta">
               <button
                 className="memory-card-delete"

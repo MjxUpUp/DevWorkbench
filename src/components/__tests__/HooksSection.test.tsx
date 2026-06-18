@@ -17,6 +17,7 @@ const SUBMIT_HOOK: UserHook = {
   shell: true,
   timeoutSecs: 30,
   enabled: true,
+  matcher: null,
   createdAt: '2026-06-01',
 };
 const STOP_HOOK: UserHook = {
@@ -27,6 +28,7 @@ const STOP_HOOK: UserHook = {
   shell: true,
   timeoutSecs: 10,
   enabled: false,
+  matcher: null,
   createdAt: '2026-06-02',
 };
 
@@ -91,6 +93,38 @@ describe('HooksSection', () => {
         shell: true,
         timeoutSecs: 30,
         enabled: true,
+        matcher: null, // submit event → matcher not applicable
+      });
+    });
+  });
+
+  it('creates a pre_tool_use hook and sends the matcher', async () => {
+    renderSection();
+    await screen.findByText('load-conventions');
+    fireEvent.click(screen.getByText('+ 新建钩子'));
+    fireEvent.change(screen.getByPlaceholderText('例如 load-conventions'), {
+      target: { value: 'no-write' },
+    });
+    // Switch to a tool event — this reveals the matcher input.
+    fireEvent.change(screen.getByDisplayValue('提交时（stdout 注入上下文）'), {
+      target: { value: 'pre_tool_use' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('例如 write_file|edit'), {
+      target: { value: 'write_file|edit' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('cat .cursorrules 2>/dev/null || echo 无项目规则'), {
+      target: { value: 'cmd /C exit 2' },
+    });
+    fireEvent.click(screen.getByText('保存'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('create_user_hook', {
+        name: 'no-write',
+        event: 'pre_tool_use',
+        command: 'cmd /C exit 2',
+        shell: true,
+        timeoutSecs: 30,
+        enabled: true,
+        matcher: 'write_file|edit',
       });
     });
   });
