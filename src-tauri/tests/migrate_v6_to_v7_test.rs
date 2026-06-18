@@ -34,6 +34,7 @@ fn make_session(id: &str) -> Session {
         parent_session_id: None,
         conversation_id: None,
         blocks: None,
+        task_ref: None,
     }
 }
 

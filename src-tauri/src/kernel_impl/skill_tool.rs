@@ -1,10 +1,17 @@
 //! Skill-tool wrapper — exposes one installed Skill (SKILL.md) as a `Tool`.
 //!
-//! Anthropic Agent Skills semantics: a skill's SKILL.md frontmatter declares
-//! its name + description (the "Use when:" trigger text the model matches
-//! against); invoking the tool returns the skill's full body so the agent reads
-//! the procedure and follows it. This makes every skill callable by a
-//! transparent agent like any other tool.
+//! Anthropic Agent Skills semantics, with progressive disclosure:
+//!   Tier 1 — name + description live in ToolInfo (always visible to the model,
+//!            it matches the "Use when:" trigger text to decide invocation).
+//!   Tier 2 — invoking the tool returns the SKILL.md body (the procedure).
+//!   Tier 3 — the same invoke appends a manifest of the skill's bundled
+//!            resources (references/, scripts/, assets/) with absolute paths,
+//!            so the agent reads/runs them ON DEMAND via read_file/bash rather
+//!            than having them all pre-loaded into context.
+//! A skill directory thus carries not just SKILL.md but a small tree of support
+//! files; this module surfaces that tree to the agent so a multi-file skill
+//! (e.g. body that says "加载 references/x.md") actually has those references
+//! reachable instead of dangling.
 
 use std::path::{Path, PathBuf};
 
@@ -26,19 +33,42 @@ pub struct SkillTool {
     description: String,
     /// The full SKILL.md body (returned on invoke, so the agent reads it).
     body: String,
-    /// Source SKILL.md path (provenance for future reload/diagnostics; not
-    /// read on the current invoke path).
-    #[allow(dead_code)]
+    /// Source SKILL.md path — provenance, and the read_file target when the
+    /// body is truncated past the invoke char cap.
     path: PathBuf,
+    /// SKILL.md's parent dir — the root a skill's relative resource paths
+    /// (`references/x.md`, `scripts/run.sh`, ...) resolve against.
+    base_dir: PathBuf,
 }
 
+/// Hard cap on how much of the SKILL.md body one invoke returns. Beyond this
+/// the agent is pointed at the source file to read the rest. GLM-4.6's 128k
+/// window tolerates ~32k chars (≈8–16k tokens) for a single skill read.
+const SKILL_BODY_MAX_CHARS: usize = 32_000;
+
+/// Cap on the number of resource lines emitted in one invoke, so a pathological
+/// assets/ tree can't blow out the response. Extra entries collapse to one
+/// `... (N more)` line.
+const SKILL_MAX_RESOURCES: usize = 64;
+
+/// Files larger than this are still listed but tagged `(large)` so the agent
+/// thinks twice before read_file-ing them.
+const SKILL_LARGE_FILE_BYTES: u64 = 256 * 1024;
+
 impl SkillTool {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, body: impl Into<String>, path: PathBuf) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        body: impl Into<String>,
+        path: PathBuf,
+        base_dir: PathBuf,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             body: body.into(),
             path,
+            base_dir,
         }
     }
 
@@ -49,7 +79,10 @@ impl SkillTool {
     }
 
     /// Parse SKILL.md text (split out for testing).
+    /// `parse_text` derives `base_dir` from `path.parent()` itself, so callers
+    /// (including tests) keep the two-argument signature.
     pub fn parse_text(raw: &str, path: PathBuf) -> Result<Self, Error> {
+        let base_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone());
         let (fm, body) = split_frontmatter(raw);
         // Try strict YAML first — handles well-formed frontmatter including the
         // optional `metadata:` block. But third-party SKILL.md files in the
@@ -67,7 +100,7 @@ impl SkillTool {
             Err(_) => extract_name_desc(&fm)
                 .ok_or_else(|| Error::Tool("parse frontmatter: missing name".into()))?,
         };
-        Ok(Self::new(name, description, body, path))
+        Ok(Self::new(name, description, body, path, base_dir))
     }
 
     /// Load all skills from a directory tree (recursively finds SKILL.md).
@@ -112,15 +145,212 @@ impl Tool for SkillTool {
     }
 
     async fn invoke(&self, _arguments: &str, _ctx: &ToolContext) -> Result<String, Error> {
-        // Return the full skill body — the agent reads it and follows it.
-        // Truncate to a sane bound so a huge skill doesn't blow the context.
-        let bounded: String = self.body.chars().take(16_000).collect();
-        Ok(bounded)
+        // Progressive disclosure Tier 2 + Tier 3 in one response: the body
+        // (possibly truncated to SKILL_BODY_MAX_CHARS) followed by a manifest
+        // of bundled resources with absolute paths. The agent then reads/runs
+        // those on demand via read_file/bash — it never gets the whole skill
+        // tree dumped up front, which is the whole point of progressive
+        // disclosure.
+        let body_out = truncate_body(&self.body, SKILL_BODY_MAX_CHARS, &self.path);
+        let resources = scan_skill_resources(&self.base_dir);
+        let appendix = format_resources_appendix(&resources);
+        Ok(format!("{body_out}{appendix}"))
     }
 
     fn is_read_only(&self) -> bool {
         true // reading a skill never mutates state
     }
+}
+
+/// Return the skill body, truncating past `max_chars` with a pointer back to
+/// the source file so the agent can read_file the full text if it needs the tail.
+fn truncate_body(body: &str, max_chars: usize, source: &Path) -> String {
+    let count = body.chars().count();
+    if count <= max_chars {
+        return body.to_string();
+    }
+    let bounded: String = body.chars().take(max_chars).collect();
+    let remaining = count - max_chars;
+    format!(
+        "{bounded}\n\n...(skill body truncated, {remaining} more chars; read_file \"{}\" 取全文)\n",
+        source.display()
+    )
+}
+
+/// A bundled skill resource (one file under references/ scripts/ or assets/).
+#[derive(Debug, Clone)]
+struct SkillResource {
+    /// Path relative to the skill base dir, forward-slash separated for display.
+    rel: String,
+    /// Native absolute path (Windows backslashes) — the value the agent passes
+    /// to read_file/bash.
+    abs: PathBuf,
+    kind: SkillResKind,
+    /// File exceeds SKILL_LARGE_FILE_BYTES — surfaced as a `(large)` tag.
+    large: bool,
+}
+
+/// The three conventional resource subdirs a skill may bundle. Declaration
+/// order fixes the manifest section order (Reference → Script → Asset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SkillResKind {
+    Reference,
+    Script,
+    Asset,
+}
+
+impl SkillResKind {
+    const ALL: [SkillResKind; 3] = [
+        SkillResKind::Reference,
+        SkillResKind::Script,
+        SkillResKind::Asset,
+    ];
+
+    /// The conventional subdir name under a skill's base dir.
+    fn dir(self) -> &'static str {
+        match self {
+            SkillResKind::Reference => "references",
+            SkillResKind::Script => "scripts",
+            SkillResKind::Asset => "assets",
+        }
+    }
+
+    /// (section heading, usage hint) — kept together so they never drift.
+    fn section(self) -> (&'static str, &'static str) {
+        match self {
+            SkillResKind::Reference => ("References", "(read_file 读绝对路径)"),
+            SkillResKind::Script => ("Scripts", "(bash 执行)"),
+            SkillResKind::Asset => ("Assets", "(二进制,勿 read_file,按路径引用)"),
+        }
+    }
+}
+
+/// Scan ONLY the three conventional resource subdirs under `base_dir`, each
+/// recursively. Sibling files/dirs (e.g. a SKILL.md living at a repo root next
+/// to src/) are deliberately ignored so unrelated source never leaks into the
+/// manifest. Errors are logged and skipped — scanning never panics.
+fn scan_skill_resources(base_dir: &Path) -> Vec<SkillResource> {
+    let mut out = Vec::new();
+    for kind in SkillResKind::ALL {
+        let subdir = base_dir.join(kind.dir());
+        if let Err(e) = collect_resources(&subdir, kind.dir(), kind, &mut out) {
+            log::warn!("scan skill {} in {}: {e}", kind.dir(), base_dir.display());
+        }
+    }
+    // Stable order: by kind (Reference < Script < Asset), then relative path.
+    out.sort_by(|a, b| (a.kind, a.rel.as_str()).cmp(&(b.kind, b.rel.as_str())));
+    out
+}
+
+/// Recursively collect resource files under `dir`, prefixing each entry's rel
+/// path with `rel_prefix` (the conventional subdir name, or `<subdir>/<nest>`
+/// on recursion). Missing dir is a no-op (most skills have 0–1 resource kinds).
+fn collect_resources(
+    dir: &Path,
+    rel_prefix: &str,
+    kind: SkillResKind,
+    out: &mut Vec<SkillResource>,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else { continue };
+        // Skip dotfiles (VCS / editor cruft) — convention hygiene.
+        if name.starts_with('.') {
+            continue;
+        }
+        let p = entry.path();
+        let rel = if rel_prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        let meta = match std::fs::metadata(&p) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("stat skill resource {}: {e}", p.display());
+                continue;
+            }
+        };
+        if meta.is_dir() {
+            collect_resources(&p, &rel, kind, out)?;
+        } else {
+            // references/ is text-only by convention — drop anything that looks
+            // binary (NUL byte in the first 8KB) so a stray image doesn't end
+            // up as a read_file target. scripts/assets may be binary, so they
+            // skip the sniff and are listed as-is.
+            if kind == SkillResKind::Reference && looks_binary(&p) {
+                log::warn!("skip binary reference {}: not text", p.display());
+                continue;
+            }
+            out.push(SkillResource {
+                rel,
+                abs: p,
+                kind,
+                large: meta.len() > SKILL_LARGE_FILE_BYTES,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Heuristic binary sniff: a NUL byte in the first 8KB means binary. An IO
+/// error is treated as "not binary" so a transient failure never silently drops
+/// a reference.
+fn looks_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let n = f.read(&mut buf).unwrap_or(0);
+    buf[..n].contains(&0)
+}
+
+/// Render the resource manifest appendix, or empty string when there are no
+/// resources (keeps single-file skills' invoke output clean — no `---` fence).
+fn format_resources_appendix(resources: &[SkillResource]) -> String {
+    if resources.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    s.push_str("\n\n---\n\n## Skill resources(按需加载,勿预读全部)\n");
+
+    // Walk kinds in declaration order so sections are stable; emit entries
+    // until the global SKILL_MAX_RESOURCES cap, then fold the rest into one
+    // "... (N more)" line so a huge assets/ tree can't dominate the response.
+    let mut emitted = 0usize;
+    for kind in SkillResKind::ALL {
+        let group: Vec<&SkillResource> = resources.iter().filter(|r| r.kind == kind).collect();
+        if group.is_empty() {
+            continue;
+        }
+        let (heading, hint) = kind.section();
+        s.push_str(&format!("\n{heading} {hint}:\n"));
+        for r in &group {
+            if emitted >= SKILL_MAX_RESOURCES {
+                break;
+            }
+            let large_tag = if r.large { " (large)" } else { "" };
+            s.push_str(&format!("- {}{large_tag}  ->  {}\n", r.rel, r.abs.display()));
+            emitted += 1;
+        }
+    }
+    let more = resources.len().saturating_sub(emitted);
+    if more > 0 {
+        s.push_str(&format!("- ... ({more} more)\n"));
+    }
+
+    // How-to line: relative path in the body ↔ absolute path in the manifest.
+    // Plain push_str (not format!) so the literal braces survive unescaped.
+    s.push_str("\n调用:read_file {file_path:\"<绝对路径>\"};脚本:bash {command:\"bash \\\"<绝对路径>\\\"\"}。\n");
+    s.push_str("body 内 references/x.md 即清单中对应绝对路径。\n");
+    s
 }
 
 /// Split a SKILL.md into (frontmatter_yaml, body_markdown).
@@ -184,6 +414,7 @@ fn strip_wrap_quotes(s: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     const SAMPLE_SKILL_MD: &str = "---\nname: agent-delegation\ndescription: \"Use when: dispatching tasks. SKIP: pure chat.\"\nmetadata:\n  pattern: reviewer\n---\n\n# Delegation Protocol\n\nDelegate execution, not understanding.\n";
 
@@ -205,9 +436,13 @@ mod tests {
 
     #[test]
     fn invoke_returns_body() {
+        // Single-file skill (path has no resource subdirs beside it): invoke
+        // returns the body with NO appendix — the manifest is omitted when
+        // there's nothing to list.
         let t = SkillTool::parse_text(SAMPLE_SKILL_MD, PathBuf::from("/x/SKILL.md")).unwrap();
         let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
         assert!(out.contains("Delegate execution"));
+        assert!(!out.contains("Skill resources"));
     }
 
     #[test]
@@ -259,6 +494,226 @@ mod tests {
         assert!(SkillTool::parse_text(raw, PathBuf::from("/x/SKILL.md")).is_err());
     }
 
+    // ---- progressive-disclosure (Tier 3) helpers + invoke ----
+
+    /// Write a text file under `dir` (creating parent dirs as needed).
+    fn write_file(dir: &Path, rel: &str, content: &str) {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, content).unwrap();
+    }
+
+    /// Write raw bytes (for binary fixtures like a PNG asset).
+    fn write_file_bytes(dir: &Path, rel: &str, content: &[u8]) {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, content).unwrap();
+    }
+
+    /// Core: a multi-file skill's invoke returns the body AND lists its
+    /// references with absolute paths the agent can hand to read_file.
+    #[test]
+    fn invoke_returns_body_and_resources_for_multifile_skill() {
+        let dir = tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: crg\ndescription: gate\n---\n\n# Code Review Gate\n加载 [references/a.md] 和 [references/b.md]\n",
+        );
+        write_file(dir.path(), "references/a.md", "A");
+        write_file(dir.path(), "references/b.md", "B");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("Code Review Gate"));
+        assert!(out.contains("References"));
+        assert!(out.contains("references/a.md"));
+        assert!(out.contains("references/b.md"));
+        // absolute paths are emitted so the agent can copy them into read_file
+        let a_abs = dir.path().join("references").join("a.md");
+        assert!(out.contains(&a_abs.display().to_string()));
+        // usage instruction is present
+        assert!(out.contains("read_file"));
+    }
+
+    #[test]
+    fn invoke_omits_appendix_for_singlefile_skill() {
+        let dir = tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: solo\ndescription: d\n---\n\n# Just body\nNo resources.\n",
+        );
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        // Body only — no `---` fence, no "Skill resources" heading.
+        assert!(out.contains("Just body"));
+        assert!(!out.contains("---"));
+        assert!(!out.contains("Skill resources"));
+    }
+
+    #[test]
+    fn invoke_lists_scripts_section() {
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(dir.path(), "scripts/run.sh", "#!/bin/bash\necho hi");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("Scripts"));
+        assert!(out.contains("scripts/run.sh"));
+        assert!(out.contains("bash"));
+    }
+
+    #[test]
+    fn invoke_lists_assets_section() {
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        // Binary bytes incl. a NUL — assets may be binary (no sniff on assets/).
+        write_file_bytes(dir.path(), "assets/icon.png", &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x0D]);
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("Assets"));
+        assert!(out.contains("assets/icon.png"));
+        assert!(out.contains("勿 read_file"));
+    }
+
+    #[test]
+    fn invoke_resource_paths_absolute_and_native() {
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(dir.path(), "references/x.md", "X");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        let x_abs = dir.path().join("references").join("x.md");
+        assert!(out.contains(&x_abs.display().to_string()));
+    }
+
+    #[test]
+    fn invoke_truncates_long_body_and_points_to_source() {
+        let dir = tempdir().unwrap();
+        let skill_md = dir.path().join("SKILL.md");
+        let body = "A".repeat(40_000);
+        let raw = format!("---\nname: big\ndescription: d\n---\n\n{body}");
+        std::fs::write(&skill_md, raw).unwrap();
+
+        let t = SkillTool::parse_file(&skill_md).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("truncated"));
+        // notice points back at the source SKILL.md for read_file
+        assert!(out.contains(&skill_md.display().to_string()));
+        // The body portion (before the truncation notice) is exactly the cap of
+        // A's. Splitting at the notice marker isolates the truncated body from
+        // the notice+path — the tempdir path may itself contain 'A' (e.g.
+        // C:\Users\Administrator\AppData), so counting A's over the whole `out`
+        // would be flaky. If truncation never fired, no marker exists and
+        // body_part is the full 40000 A's → assertion fails.
+        let body_part = out.split("...(skill body truncated").next().unwrap();
+        assert_eq!(body_part.matches('A').count(), SKILL_BODY_MAX_CHARS);
+    }
+
+    #[test]
+    fn scan_ignores_sibling_dirs() {
+        // A SKILL.md at a repo root sits next to unrelated source — the scanner
+        // must only touch references/scripts/assets, never src/.
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(dir.path(), "src/main.rs", "fn main(){}");
+        write_file(dir.path(), "references/x.md", "X");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("references/x.md"));
+        assert!(!out.contains("src/main.rs"));
+        assert!(!out.contains("main.rs"));
+    }
+
+    #[test]
+    fn scan_recurses_into_nested_resource_dirs() {
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(dir.path(), "references/sub/deep.md", "deep");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("references/sub/deep.md"));
+    }
+
+    #[test]
+    fn base_dir_set_to_skill_md_parent() {
+        let dir = tempdir().unwrap();
+        let skill_md = dir.path().join("SKILL.md");
+        std::fs::write(&skill_md, "---\nname: s\ndescription: d\n---\n\n# Body\n").unwrap();
+
+        let t = SkillTool::parse_file(&skill_md).unwrap();
+
+        assert_eq!(t.base_dir, dir.path());
+    }
+
+    #[test]
+    fn invoke_handles_empty_references_dir() {
+        // An empty references/ dir must not crash and must not emit a section.
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        std::fs::create_dir_all(dir.path().join("references")).unwrap();
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(!out.contains("Skill resources"));
+        assert!(!out.contains("References"));
+        assert!(out.contains("Body"));
+    }
+
+    #[test]
+    fn scan_drops_binary_references_but_keeps_text() {
+        // references/ is text-only: a NUL-byte file is skipped, a sibling text
+        // file is kept. (Assets have no such sniff — see invoke_lists_assets_section.)
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file_bytes(dir.path(), "references/img.png", &[0x89, 0x50, 0x00, 0x0D]);
+        write_file(dir.path(), "references/notes.md", "text");
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        assert!(out.contains("references/notes.md"));
+        assert!(!out.contains("img.png"));
+    }
+
+    #[test]
+    fn resource_list_caps_at_max_with_more_indicator() {
+        // 70 references exceeds SKILL_MAX_RESOURCES (64) → 64 lines + "(6 more)".
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        for i in 0..70 {
+            write_file(dir.path(), &format!("references/r{i:02}.md"), "x");
+        }
+
+        let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
+        let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
+
+        // 70 - 64 = 6 more
+        assert!(out.contains("(6 more)"));
+        // the cap applied: r00..r63 present, r64.. absent (sorted alpha, r64 > r63)
+        assert!(out.contains("references/r63.md"));
+        assert!(!out.contains("references/r64.md"));
+    }
+
     /// Live check against the real `~/.agents/skills`: the three skills that
     /// serde_yaml used to skip (malformed frontmatter) must now load. Ignored by
     /// default — it touches a machine-specific catalog — run with
@@ -286,5 +741,24 @@ mod tests {
                 "{expected} still missing — frontmatter fallback did not recover it. Loaded: {names:?}"
             );
         }
+    }
+
+    /// Live progressive-disclosure smoke against a real multi-file skill in the
+    /// global catalog (e.g. code-review-gate with its references/ tree). Ignored
+    /// by default — run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "touches the real ~/.agents/skills catalog; run with --ignored"]
+    fn invoke_real_multifile_skill_lists_references() {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        let Some(home) = home else { return };
+        let catalog = std::path::PathBuf::from(home).join(".agents").join("skills");
+        let skills = SkillTool::load_dir(&catalog);
+        let Some(crg) = skills.into_iter().find(|s| s.name == "code-review-gate") else {
+            eprintln!("no code-review-gate skill installed; nothing to assert");
+            return;
+        };
+        let out = futures::executor::block_on(crg.invoke("", &ToolContext::default())).unwrap();
+        assert!(out.contains("References"), "multi-file skill must list its references: {out}");
+        assert!(out.contains("references/"), "expected reference paths in the manifest: {out}");
     }
 }
