@@ -220,6 +220,46 @@ describe('ProvidersSection', () => {
     });
   });
 
+  it('enables the test button for a freshly-added provider once a model lands (testModel sync)', async () => {
+    // Regression: a provider created in-session mounts its card with models=[]
+    // → useState initialises testModel='' and stays '' after the user adds a
+    // model (key={p.id} is stable, so adding a model re-renders without
+    // remounting). That left the 测试连接 button permanently disabled — the
+    // "新增的供应商没办法测试链接" symptom. The useEffect now re-syncs testModel
+    // to the first enabled model when the list changes.
+    const user = userEvent.setup();
+    let probeArgs: Record<string, unknown> | null = null;
+    setupInvoke({
+      test_provider_connection: (args) => {
+        probeArgs = args as Record<string, unknown>;
+        return { ok: true, status: 200, message: 'ok' };
+      },
+    });
+    render(<ProvidersSection />);
+    await zaiCard();
+
+    await user.click(screen.getByRole('button', { name: '+ 添加供应商' }));
+    const newCard = screen.getByDisplayValue('新供应商').closest('.provider-card') as HTMLElement;
+
+    // Before any model: testModel='' → button disabled.
+    const testBtn = within(newCard).getByRole('button', { name: '测试连接' });
+    expect(testBtn).toBeDisabled();
+
+    // Add a model row and name its id.
+    await user.click(within(newCard).getByRole('button', { name: '+ 添加模型' }));
+    const idInputs = within(newCard).getAllByLabelText('模型 ID');
+    await user.clear(idInputs[0]);
+    await user.type(idInputs[0], 'fresh-model');
+
+    // testModel syncs to the freshly-added model → button enabled.
+    await waitFor(() => expect(testBtn).toBeEnabled());
+
+    // Probing carries the synced model id, not the stale ''.
+    await user.click(testBtn);
+    await waitFor(() => expect(probeArgs).not.toBeNull());
+    expect(probeArgs!.model).toBe('fresh-model');
+  });
+
   it('adds a new provider card on demand', async () => {
     const user = userEvent.setup();
     setupInvoke();

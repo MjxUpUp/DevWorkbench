@@ -386,6 +386,19 @@ function ProviderCard({
   // Local: which model the connectivity probe targets (default = first enabled).
   const firstEnabledModel = p.models.find((m) => m.enabled)?.id ?? p.models[0]?.id ?? '';
   const [testModel, setTestModel] = useState(firstEnabledModel);
+  // Sync testModel when the model list changes. useState's initial value runs
+  // only ONCE at mount, so a provider created in-session mounts with models=[]
+  // → testModel='' and stays '' even after the user adds a model (the card's
+  // key={p.id} is stable, so adding a model re-renders without remounting).
+  // That left the 测试连接 button permanently disabled (disabled={... || !testModel})
+  // for freshly-added providers — the "新增的供应商没办法测试链接" symptom. Re-sync
+  // when the selection becomes empty/stale, falling back to the first enabled.
+  useEffect(() => {
+    setTestModel((prev) => {
+      if (prev && p.models.some((m) => m.id === prev)) return prev;
+      return firstEnabledModel;
+    });
+  }, [firstEnabledModel, p.models]);
 
   const endpointErr = errorFor('endpoint');
   const apiKeyErr = errorFor('apiKey');
