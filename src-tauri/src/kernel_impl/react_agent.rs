@@ -3191,4 +3191,70 @@ mod tests {
             "input_tokens metered from message_delta after fix, got {input}"
         );
     }
+
+    #[ignore = "needs a live GLM key in GLM_API_KEY env; spends real tokens"]
+    #[tokio::test]
+    async fn glm_live_react_agent_runs_full_loop_and_meters_cost() {
+        // The deepest backend end-to-end check without the GUI: a real
+        // ReactAgent drives its reason->act->observe loop against live GLM.
+        // This wires together every layer the front-end would reach over IPC —
+        // the system prompt, the streaming GLM call, SSE parsing, the agent run
+        // loop emitting Token + Done, and the cost sink receiving real usage —
+        // so a regression in any of them surfaces here, not just in the
+        // stream()-only smoke above. No tools => single turn (GLM replies with
+        // text, no tool_calls, loop ends after one model round); the tool-calling
+        // loop itself is covered by the mock-driven self_agent_e2e_test, while
+        // here the point is the LIVE wire format flowing through the whole agent.
+        // Skipped without GLM_API_KEY so CI stays green; run locally:
+        //   GLM_API_KEY=... cargo test --lib -- --ignored glm_live
+        let key = match std::env::var("GLM_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                eprintln!("GLM_API_KEY unset — skipping live smoke");
+                return;
+            }
+        };
+        use futures::StreamExt;
+        use kernel_core::{Agent, AgentEvent, AgentInput};
+        let sink = std::sync::Arc::new(CapturingSink::new());
+        let model = GlmChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
+            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
+        );
+        let agent = ReactAgent::new(
+            model,
+            ToolRegistry::new(),
+            "You are a concise assistant.",
+        );
+        let mut stream = agent
+            .run(AgentInput {
+                prompt: "Reply with exactly one word: PONG".into(),
+                working_dir: None,
+                model: None,
+                resume_from: None,
+            })
+            .expect("agent run starts");
+        let mut done = false;
+        let mut text = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                AgentEvent::Token(t) => text.push_str(&t),
+                AgentEvent::Done(_) => done = true,
+                _ => {}
+            }
+        }
+        let (input, output) = *sink.0.lock().unwrap();
+        assert!(done, "agent never reached Done; text so far: {text:?}");
+        assert!(
+            !text.is_empty(),
+            "agent produced no assistant text: {text:?}"
+        );
+        assert!(
+            input > 0,
+            "cost sink saw input_tokens>0 from the full live loop, got {input}"
+        );
+        assert!(
+            output > 0,
+            "cost sink saw output_tokens>0 from the full live loop, got {output}"
+        );
+    }
 }
