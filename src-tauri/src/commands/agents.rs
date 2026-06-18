@@ -189,23 +189,32 @@ fn react_chat_driver(
     match crate::quality::experience::list_forge_reviews(std::path::Path::new(project_path)) {
         Ok(reviews) => {
             let pending = crate::quality::experience::pending_mandatory(&reviews);
-            let resolved = crate::quality::experience::resolved_or_accepted(&reviews);
-            if !pending.is_empty() || !resolved.is_empty() {
+            let accepted = crate::quality::experience::accepted_only(&reviews);
+            let resolved = crate::quality::experience::resolved_not_accepted(&reviews);
+            if !pending.is_empty() || !accepted.is_empty() || !resolved.is_empty() {
                 if let Ok(conn) = db_conn.get() {
                     let hash = crate::activity::hash_project_path(project_path);
-                    // Flywheel BOTH ways: replay pending lessons INTO the store,
-                    // and purge resolved/accepted ones OUT — so a lesson leaves
-                    // once the user heeds it, instead of accumulating forever.
+                    // Flywheel BOTH ways, with a split exit: replay pending
+                    // lessons INTO the store (project-local + one global per
+                    // dimension); ACCEPTED reviews purge their lessons OUT (full
+                    // exit — the user signed off); RESOLVED-only reviews DECAY
+                    // confidence (soft exit — improvement stays on record for
+                    // tracking). Global lessons are cross-project aggregates and
+                    // are never purged/decayed by a single project's resolve.
                     let res = crate::quality::experience::replay_to_knowledge(
                         &conn, project_path, &pending, agent_type,
                     );
                     let purged =
                         crate::quality::experience::purge_lessons_for_resolved_reviews(
+                            &conn, &hash, &accepted,
+                        );
+                    let decayed =
+                        crate::quality::experience::decay_confidence_for_resolved_reviews(
                             &conn, &hash, &resolved,
                         );
                     log::info!(
-                        "[experience] replayed {} lessons ({} skipped), purged {} resolved for {session_id}",
-                        res.replayed, res.skipped, purged
+                        "[experience] replayed {} lessons ({} skipped, {} global), purged {} accepted, decayed {} resolved for {session_id}",
+                        res.replayed, res.skipped, res.promoted_global, purged, decayed
                     );
                 }
             }

@@ -661,12 +661,26 @@ mod compact_threshold_tests {
 /// repeating them. Empty when there are none (or the DB read fails) → no prompt
 /// bloat.
 fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> String {
-    let entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
+    // Project-local quality failures first (most relevant to THIS project), then
+    // the GLOBAL cross-project layer (D6) so a lesson learned in another project
+    // also steers this run. Project-local takes priority so the token budget
+    // spends on the most specific lessons before the generic global ones.
+    let global = crate::quality::experience::GLOBAL_PROJECT_HASH;
+    let mut entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
         .unwrap_or_default();
-    let failures: Vec<_> = entries
+    entries.extend(
+        crate::knowledge::store::get_entries_for_project(conn, global).unwrap_or_default(),
+    );
+    let project_failures: Vec<_> = entries
         .iter()
-        .filter(|e| e.category == "quality_failure")
+        .filter(|e| e.category == "quality_failure" && e.project_hash != global)
         .collect();
+    let global_failures: Vec<_> = entries
+        .iter()
+        .filter(|e| e.category == "quality_failure" && e.project_hash == global)
+        .collect();
+    let mut failures = project_failures;
+    failures.extend(global_failures);
     if failures.is_empty() {
         return String::new();
     }
@@ -850,6 +864,38 @@ mod tests {
             suffix.contains("<memory-context>") && suffix.contains("</memory-context>"),
             "experience must be fenced against injection: {suffix}"
         );
+    }
+
+    #[test]
+    fn experience_prompt_suffix_merges_global_layer() {
+        // D6 cross-project retrieval: a project-local quality_failure AND a
+        // global one (under __global__) must BOTH surface in the suffix, so a
+        // lesson learned in another project steers this run too.
+        use crate::db;
+        use crate::knowledge::store::add_entry;
+        use crate::models::{AgentType, KnowledgeEntry};
+        use crate::quality::experience::GLOBAL_PROJECT_HASH;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let mk = |id: &str, hash: &str, title: &str| KnowledgeEntry {
+            id: id.into(),
+            project_hash: hash.into(),
+            category: "quality_failure".into(),
+            title: title.into(),
+            content: "c".into(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: None,
+            source_type: "forge_experience".into(),
+            confidence: 0.8,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            access_count: 0,
+        };
+        add_entry(&conn, &mk("local", "h", "本项目短板")).unwrap();
+        add_entry(&conn, &mk("glob", GLOBAL_PROJECT_HASH, "[通用] testing")).unwrap();
+        let suffix = experience_prompt_suffix(&conn, "h");
+        assert!(suffix.contains("本项目短板"), "project-local surfaces: {suffix}");
+        assert!(suffix.contains("[通用] testing"), "global layer surfaces: {suffix}");
     }
 
     #[test]

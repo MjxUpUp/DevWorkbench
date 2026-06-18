@@ -18,6 +18,15 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Virtual project_hash for the GLOBAL experience layer (D6). Lessons written
+/// under this hash are cross-project: every project's `experience_prompt_suffix`
+/// pulls them in addition to its own, so a quality lesson learned in one project
+/// (e.g. "no test file changes detected") benefits the others instead of being
+/// re-learned the hard way. Replay promotes one global lesson per *dimension*
+/// (deduped by title `[通用] {dimension}`), so the global layer aggregates
+/// recurring failure modes without per-task noise.
+pub const GLOBAL_PROJECT_HASH: &str = "__global__";
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LowDimension {
@@ -59,6 +68,10 @@ pub struct ReplayResult {
     pub replayed: usize,
     /// Lessons already present (dedup-skipped — replay is idempotent).
     pub skipped: usize,
+    /// First-time cross-project (global) lessons promoted this call — one per
+    /// newly-seen dimension. Subsequent reviews of an already-global dimension
+    /// do NOT re-promote (deduped by `[通用] {dimension}` title).
+    pub promoted_global: usize,
 }
 
 /// Run `forge experience list --json` and parse the reviews. Empty vec (not an
@@ -120,9 +133,28 @@ pub fn replay_to_knowledge(
         .map(|e| e.content.chars().take(200).collect::<String>())
         .collect();
 
+    // Global layer: one lesson per dimension (deduped by title). Promoted on
+    // FIRST sight of a dimension so every project benefits immediately; later
+    // projects (or a second review in the same call) with the same dimension
+    // find it already present and skip. The set is mutable so a dimension seen
+    // twice in ONE replay call promotes once, not twice — the authority for
+    // `promoted_global` is set membership, not add_entry's silent content dedup
+    // (which returns Ok on a dup and would otherwise double-count). The global
+    // detail is whatever the first-seen review reported (first-write wins);
+    // acceptable for v1 — budget selection + confidence decay keep the injected
+    // set small and relevant.
+    let mut global_titles: HashSet<String> =
+        crate::knowledge::store::get_entries_for_project(conn, GLOBAL_PROJECT_HASH)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.category == "quality_failure")
+            .map(|e| e.title)
+            .collect();
+
     let now = chrono::Local::now().to_rfc3339();
     let mut replayed = 0usize;
     let mut skipped = 0usize;
+    let mut promoted_global = 0usize;
     for r in reviews {
         for dim in &r.low_dimensions {
             let content = format!(
@@ -132,41 +164,125 @@ pub fn replay_to_knowledge(
             let prefix: String = content.chars().take(200).collect();
             if existing.contains(&prefix) {
                 skipped += 1;
-                continue;
-            }
-            let entry = KnowledgeEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                project_hash: hash.clone(),
-                category: "quality_failure".to_string(),
-                title: format!("[{}] {}", dim.dimension, dim.detail),
-                content,
-                source_agent: agent_type.clone(),
-                source_session_id: None,
-                source_type: "forge_experience".to_string(),
-                confidence: 0.85,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                access_count: 0,
-            };
-            if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
-                replayed += 1;
             } else {
-                skipped += 1;
+                let entry = KnowledgeEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    project_hash: hash.clone(),
+                    category: "quality_failure".to_string(),
+                    title: format!("[{}] {}", dim.dimension, dim.detail),
+                    content,
+                    source_agent: agent_type.clone(),
+                    source_session_id: None,
+                    source_type: "forge_experience".to_string(),
+                    confidence: 0.85,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    access_count: 0,
+                };
+                if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
+                    replayed += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+
+            // Global promotion: dimension-level lesson under __global__, shared
+            // across projects. Lower confidence (0.7) — it's an inferred
+            // cross-project pattern, not a project-specific finding. The set is
+            // the dedup authority: insert BEFORE add_entry so a second sighting
+            // of the same dimension (in this call or a later one) never
+            // double-counts, regardless of add_entry's own content dedup.
+            let g_title = format!("[通用] {}", dim.dimension);
+            if global_titles.insert(g_title.clone()) {
+                let g_content = format!(
+                    "跨项目反复出现的质量短板（{dim} 维度）：{detail}",
+                    dim = dim.dimension,
+                    detail = dim.detail
+                );
+                let g_entry = KnowledgeEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    project_hash: GLOBAL_PROJECT_HASH.to_string(),
+                    category: "quality_failure".to_string(),
+                    title: g_title,
+                    content: g_content,
+                    source_agent: agent_type.clone(),
+                    source_session_id: None,
+                    source_type: "forge_experience_global".to_string(),
+                    confidence: 0.7,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    access_count: 0,
+                };
+                let _ = crate::knowledge::store::add_entry(conn, &g_entry);
+                promoted_global += 1;
             }
         }
     }
-    ReplayResult { replayed, skipped }
+    ReplayResult {
+        replayed,
+        skipped,
+        promoted_global,
+    }
 }
 
-/// Filter to reviews the user has RESOLVED or ACCEPTED — the ones whose lessons
-/// must LEAVE the knowledge base so the experience flywheel isn't one-way.
-/// Without this, a lesson written for a pending review stays injected forever
-/// even after the user heeds and resolves it. Pure (no I/O) → unit-testable.
-pub fn resolved_or_accepted(reviews: &[ForgeExperienceReview]) -> Vec<&ForgeExperienceReview> {
+/// Reviews the user has ACCEPTED — their lessons leave the knowledge base
+/// ENTIRELY (full flywheel exit via [`purge_lessons_for_resolved_reviews`]).
+/// "Accepted" = the user signed off on the improvement; the lesson no longer
+/// needs to nag. Pure (no I/O) → unit-testable.
+pub fn accepted_only(reviews: &[ForgeExperienceReview]) -> Vec<&ForgeExperienceReview> {
     reviews
         .iter()
-        .filter(|r| (r.status == "resolved" || r.status == "accepted") && r.mandatory)
+        .filter(|r| r.status == "accepted" && r.mandatory)
         .collect()
+}
+
+/// Reviews the user has RESOLVED but NOT accepted — their lessons stay in the
+/// knowledge base but get their confidence DECAYED (improvement tracking via
+/// [`decay_confidence_for_resolved_reviews`]). "Resolved" = addressed, but the
+/// pattern is worth keeping on record (it may recur), so the flywheel soft-exits
+/// instead of hard-deleting. Pure (no I/O) → unit-testable.
+pub fn resolved_not_accepted(reviews: &[ForgeExperienceReview]) -> Vec<&ForgeExperienceReview> {
+    reviews
+        .iter()
+        .filter(|r| r.status == "resolved" && r.mandatory)
+        .collect()
+}
+
+/// Decay the confidence of project-local `quality_failure` lessons whose review
+/// was RESOLVED (not accepted) — the soft-exit counterpart to replay. The lesson
+/// stays (improvement tracking) but its confidence halves (floored at 0.1) so it
+/// sorts behind fresh lessons and eventually falls out of the token-budget
+/// window. Matches the same `"Forge 任务 {task_ref} 评分"` marker as purge (whole
+/// marker — never a bare task_ref substring, so a short ref that happens to be a
+/// substring of another never cross-decays). GLOBAL lessons are NOT decayed
+/// here: they are cross-project aggregates (`source_type = forge_experience_global`),
+/// not tied to one project's resolve. Returns the count of lessons decayed.
+pub fn decay_confidence_for_resolved_reviews(
+    conn: &Connection,
+    project_hash: &str,
+    reviews: &[&ForgeExperienceReview],
+) -> usize {
+    if reviews.is_empty() {
+        return 0;
+    }
+    let markers: Vec<String> = reviews
+        .iter()
+        .map(|r| format!("Forge 任务 {} 评分", r.task_ref))
+        .collect();
+    let candidates = crate::knowledge::store::get_entries_for_project(conn, project_hash)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.category == "quality_failure" && e.source_type == "forge_experience");
+    let mut decayed = 0usize;
+    for entry in candidates {
+        if markers.iter().any(|m| entry.content.contains(m)) {
+            let new_conf = (entry.confidence * 0.5).max(0.1);
+            if crate::knowledge::store::set_entry_confidence(conn, &entry.id, new_conf).is_ok() {
+                decayed += 1;
+            }
+        }
+    }
+    decayed
 }
 
 /// Reverse of [`replay_to_knowledge`]: remove the `quality_failure` lessons
@@ -273,17 +389,34 @@ mod tests {
         let res1 = replay_to_knowledge(&conn, "/proj", &refs, &AgentType::ClaudeCode);
         assert_eq!(res1.replayed, 2, "two distinct dimensions → two entries: {res1:?}");
         assert_eq!(res1.skipped, 0);
+        // Both dimensions are first-seen → two global lessons promoted.
+        assert_eq!(res1.promoted_global, 2, "one global per new dimension: {res1:?}");
 
-        // Replay again → idempotent, both skipped.
+        // Replay again → idempotent: project-local both skipped, global both
+        // already present (no re-promotion).
         let res2 = replay_to_knowledge(&conn, "/proj", &refs, &AgentType::ClaudeCode);
         assert_eq!(res2.replayed, 0);
         assert_eq!(res2.skipped, 2);
+        assert_eq!(res2.promoted_global, 0, "global deduped by dimension title");
 
         let hash = activity::hash_project_path("/proj");
         let entries = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
         let qf = entries.iter().filter(|e| e.category == "quality_failure").count();
         assert_eq!(qf, 2, "no duplicates after two replays");
         assert!(entries.iter().all(|e| e.source_type == "forge_experience"));
+
+        // Global layer holds exactly one lesson per dimension (2), each titled
+        // `[通用] {dimension}` and source_type forge_experience_global.
+        let globals = crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH)
+            .unwrap();
+        let gqf: Vec<_> = globals
+            .iter()
+            .filter(|e| e.category == "quality_failure")
+            .collect();
+        assert_eq!(gqf.len(), 2, "one global per dimension: {gqf:?}");
+        assert!(gqf.iter().all(|e| e.source_type == "forge_experience_global"));
+        assert!(globals.iter().any(|e| e.title == "[通用] testing"));
+        assert!(globals.iter().any(|e| e.title == "[通用] tool-selection"));
     }
 
     #[test]
@@ -295,10 +428,26 @@ mod tests {
         let refs = vec![&r1, &r2];
         let res = replay_to_knowledge(&conn, "/proj", &refs, &AgentType::ClaudeCode);
         assert_eq!(res.replayed, 2, "distinct task_ref must not collide: {res:?}");
+        // Same dimension twice → only ONE global lesson (deduped by title).
+        assert_eq!(res.promoted_global, 1, "same dimension → one global: {res:?}");
     }
 
     #[test]
-    fn resolved_or_accepted_filters_status_and_flag() {
+    fn accepted_only_filters_status_and_flag() {
+        let reviews = vec![
+            rev("a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]),
+            rev("b", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]),
+            rev("c", 50.0, true, "accepted", &[("testing", 20.0, "no tests")]),
+            rev("d", 50.0, false, "accepted", &[("testing", 20.0, "no tests")]),
+            rev("e", 50.0, true, "rejected", &[("testing", 20.0, "no tests")]),
+        ];
+        let got = accepted_only(&reviews);
+        let refs: Vec<&str> = got.iter().map(|r| r.task_ref.as_str()).collect();
+        assert_eq!(refs, vec!["c"], "only accepted + mandatory");
+    }
+
+    #[test]
+    fn resolved_not_accepted_filters_status_and_flag() {
         let reviews = vec![
             rev("a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]),
             rev("b", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]),
@@ -306,9 +455,9 @@ mod tests {
             rev("d", 50.0, false, "resolved", &[("testing", 20.0, "no tests")]),
             rev("e", 50.0, true, "rejected", &[("testing", 20.0, "no tests")]),
         ];
-        let got = resolved_or_accepted(&reviews);
+        let got = resolved_not_accepted(&reviews);
         let refs: Vec<&str> = got.iter().map(|r| r.task_ref.as_str()).collect();
-        assert_eq!(refs, vec!["b", "c"], "only resolved/accepted + mandatory");
+        assert_eq!(refs, vec!["b"], "only resolved (not accepted) + mandatory");
     }
 
     #[test]
@@ -346,5 +495,78 @@ mod tests {
         let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
         replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
         assert_eq!(purge_lessons_for_resolved_reviews(&conn, &hash, &[]), 0);
+    }
+
+    #[test]
+    fn decay_halves_confidence_of_resolved_only() {
+        // feat/a resolved (not accepted) → its project-local lesson's confidence
+        // halves; the lesson STAYS (improvement tracking, unlike purge's delete).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let hash = activity::hash_project_path("/proj");
+        let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
+
+        let before = crate::knowledge::store::get_entries_for_project(&conn, &hash)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.content.contains("feat/a"))
+            .unwrap();
+        assert!((before.confidence - 0.85).abs() < 1e-6, "starts at 0.85");
+
+        let r_resolved = rev("feat/a", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]);
+        let decayed = decay_confidence_for_resolved_reviews(&conn, &hash, &[&r_resolved]);
+        assert_eq!(decayed, 1);
+
+        let after = crate::knowledge::store::get_entries_for_project(&conn, &hash)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.content.contains("feat/a"))
+            .unwrap();
+        // 0.85 * 0.5 = 0.425 — halved but NOT removed.
+        assert!((after.confidence - 0.425).abs() < 1e-6, "decayed to 0.425: {after:?}");
+    }
+
+    #[test]
+    fn decay_leaves_global_and_unrelated_untouched() {
+        // Decay matches by task_ref marker on PROJECT-LOCAL lessons only. A global
+        // lesson (no task_ref) and an unrelated project lesson must keep their
+        // confidence — decay never cross-fires on a bare dimension match.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let hash = activity::hash_project_path("/proj");
+        let r1 = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r2 = rev("feat/b", 50.0, true, "pending", &[("tooling", 20.0, "x")]);
+        replay_to_knowledge(&conn, "/proj", &[&r1, &r2], &AgentType::ClaudeCode);
+
+        // Resolve ONLY feat/a.
+        let r1_resolved = rev("feat/a", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]);
+        let decayed = decay_confidence_for_resolved_reviews(&conn, &hash, &[&r1_resolved]);
+        assert_eq!(decayed, 1, "only feat/a's lesson decays");
+
+        // feat/b's project lesson untouched (still 0.85).
+        let b = crate::knowledge::store::get_entries_for_project(&conn, &hash)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.content.contains("feat/b"))
+            .unwrap();
+        assert!((b.confidence - 0.85).abs() < 1e-6, "unrelated lesson keeps 0.85: {b:?}");
+
+        // Global lessons are NEVER decayed (cross-project aggregate, source_type
+        // forge_experience_global is excluded by decay's filter).
+        let globals = crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH)
+            .unwrap();
+        assert!(globals.iter().all(|e| (e.confidence - 0.7).abs() < 1e-6),
+            "global confidence unchanged: {globals:?}");
+    }
+
+    #[test]
+    fn decay_is_noop_with_empty_resolved_list() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let hash = activity::hash_project_path("/proj");
+        let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
+        assert_eq!(decay_confidence_for_resolved_reviews(&conn, &hash, &[]), 0);
     }
 }

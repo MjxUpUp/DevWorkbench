@@ -293,6 +293,24 @@ pub fn delete_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppErro
     Ok(())
 }
 
+/// Set the confidence of a knowledge entry and bump `updated_at` (D6 improvement
+/// tracking). Resolved-but-not-accepted reviews decay their lessons' confidence
+/// instead of deleting them, so the experience flywheel keeps a traceable record
+/// of what was improved — purge (full exit) is reserved for accepted reviews.
+/// Bumps `updated_at` so the decayed row sorts as recent in recency rankings.
+pub fn set_entry_confidence(
+    conn: &rusqlite::Connection,
+    id: &str,
+    confidence: f64,
+) -> Result<(), AppError> {
+    let now = chrono::Local::now().to_rfc3339();
+    conn.execute(
+        "UPDATE knowledge_entries SET confidence = ?1, updated_at = ?2 WHERE id = ?3",
+        params![confidence, now, id],
+    )?;
+    Ok(())
+}
+
 fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Error> {
     let agent_type_str: String = row.get(5)?;
     let agent_type: AgentType =
@@ -488,6 +506,24 @@ mod tests {
         let after = get_entries_for_project(&db.conn, "proj_a").unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "k1");
+    }
+
+    #[test]
+    fn set_entry_confidence_updates_confidence_and_bumps_updated_at() {
+        // D6 improvement tracking: decaying a resolved lesson lowers confidence
+        // (not deletes) and bumps updated_at so the row re-sorts as recent.
+        let db = TempDb::new();
+        let mut e = make_entry("k1", "proj_a", "no tests", "Forge 任务 x 评分 … no tests");
+        e.confidence = 0.85;
+        let stamp = "2020-01-01T00:00:00+08:00";
+        e.updated_at = stamp.into();
+        add_entry(&db.conn, &e).unwrap();
+
+        set_entry_confidence(&db.conn, "k1", 0.425).unwrap();
+        let got = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(got.len(), 1);
+        assert!((got[0].confidence - 0.425).abs() < 1e-6, "confidence updated: {got:?}");
+        assert_ne!(got[0].updated_at, stamp, "updated_at bumped");
     }
 
     #[test]
