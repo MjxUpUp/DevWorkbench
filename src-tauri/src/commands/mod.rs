@@ -16,3 +16,4 @@ pub mod provider_cmds;
 pub mod experience;
 pub mod slash_cmds;
 pub mod user_hooks_cmds;
+pub mod subagents_cmds;

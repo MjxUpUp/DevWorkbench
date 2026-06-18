@@ -177,6 +177,31 @@ export interface UserHook {
 }
 
 /**
+ * Scope where a sub-agent lives. Mirrors the Rust `scope` param of
+ * save_subagent / delete_subagent.
+ *   - 'global'  — ~/.agents/subagents (shared across projects)
+ *   - 'project' — <project>/.agents/subagents (versioned with the repo)
+ */
+export type SubAgentScope = 'global' | 'project';
+
+/**
+ * A named sub-agent (D1) surfaced to the UI. One row = one
+ * `.agents/subagents/<name>/AGENT.md`. The kernel loads these at agent build
+ * time, so the main agent can delegate by name via dispatch_subagent.
+ * Mirrors the Rust `SubAgentInfo` serde schema (camelCase fields).
+ */
+export interface SubAgentInfo {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  /** Tool-name prefixes the child is restricted to (empty = full read-only set). */
+  toolsAllow: string[];
+  scope: string;
+  /** Absolute path of the AGENT.md on disk (for display). */
+  sourcePath: string;
+}
+
+/**
  * A conversation = the multi-turn topic container (one Claude-Code "session").
  * A `Session` is now one turn inside it. Conversations live under a project;
  * turns inside a conversation may switch agents (claude → codex → …).
