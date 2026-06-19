@@ -12,12 +12,13 @@ import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
+import { MissionSection } from './MissionSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconInbox,
   IconUser, IconPlay, IconEdit, IconStar,
-  IconDashboard, IconCode, IconChat, IconX,
+  IconDashboard, IconCode, IconChat, IconX, IconOrchestrate,
 } from '../Icons';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -34,7 +35,7 @@ type SettingsIcon = React.FC<{ size?: number; className?: string }>;
 export type SettingsSection =
   | 'agent-tools' | 'providers' | 'capability'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
-  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';
+  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding' | 'mission';
 
 interface SectionDef {
   id: SettingsSection;
@@ -57,6 +58,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
   { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection },
   { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection },
+  { id: 'mission', label: '任务编排', Icon: IconOrchestrate, Component: MissionSection },
   { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' } },
 ];
 
