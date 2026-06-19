@@ -149,22 +149,34 @@ impl GlmChatModel {
     }
 
     fn build_body(&self, model: &str, messages: &[Message], opts: &ModelOptions, stream: bool) -> Value {
-        let msgs: Vec<Value> = messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(|m| match m.role {
-                Role::Tool => {
-                    // M5: Anthropic expects tool results as user-role messages with
-                    // a tool_result content block (not assistant text).
-                    json!({
-                        "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
-                            "content": m.content,
-                        }],
-                    })
-                }
+        // M5 + parallel-tool-use fix: Anthropic requires ALL tool_results for one
+        // assistant turn to live in a SINGLE user message (an array of
+        // tool_result blocks), and messages must strictly alternate user/
+        // assistant. Our internal history stores one Role::Tool Message per
+        // executed call (see the run loop), so a turn that issued N parallel
+        // tool_use calls yields N consecutive Tool Messages. Serializing each
+        // into its own user message would emit N back-to-back user messages and
+        // trip the provider's 400: "tool_use ids were found without tool_result
+        // blocks immediately after". Merge consecutive Tool Messages into one
+        // user message here, at the wire boundary — the internal
+        // one-Message-per-call representation stays intact.
+        let mut msgs: Vec<Value> = Vec::with_capacity(messages.len());
+        let mut pending_tool_results: Vec<Value> = Vec::new();
+        for m in messages.iter().filter(|m| m.role != Role::System) {
+            if m.role == Role::Tool {
+                pending_tool_results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
+                    "content": m.content,
+                }));
+                continue;
+            }
+            // A non-Tool message: flush any accumulated tool_results as one
+            // user message before serializing the next turn.
+            if !pending_tool_results.is_empty() {
+                msgs.push(json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }));
+            }
+            let entry = match m.role {
                 Role::User => json!({ "role": "user", "content": m.content }),
                 _ => {
                     // Assistant. When the prior turn carried reasoning, replay
@@ -217,8 +229,14 @@ impl GlmChatModel {
                         }
                     }
                 }
-            })
-            .collect();
+            };
+            msgs.push(entry);
+        }
+        // Flush trailing tool_results: history can legitimately end on Tool
+        // messages (the run loop appends them and re-invokes the model).
+        if !pending_tool_results.is_empty() {
+            msgs.push(json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }));
+        }
         let system: String = messages
             .iter()
             .filter(|m| m.role == Role::System)
@@ -3133,6 +3151,124 @@ mod tests {
             false,
         );
         assert_eq!(plain["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn build_body_merges_parallel_tool_results_into_one_user_message() {
+        // Reproduces session 34f2c468's instant 400: an assistant turn that
+        // issues TWO parallel tool_use calls. The run loop appends one
+        // Role::Tool Message per result, so history carries two consecutive
+        // Tool Messages. build_body MUST merge them into a single user message
+        // (array of tool_result blocks) — emitting two back-to-back user
+        // messages trips Anthropic's 400: "tool_use ids were found without
+        // tool_result blocks immediately after".
+        use kernel_core::{FunctionCall, Message, ModelOptions, Role, ToolCall};
+        let assistant_turn = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_00".into(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "read_file".into(),
+                        arguments: r#"{"file_path":"package.json"}"#.into(),
+                    },
+                },
+                ToolCall {
+                    id: "call_01".into(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "glob".into(),
+                        arguments: r#"{"pattern":"*"}"#.into(),
+                    },
+                },
+            ],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let tool_a = Message {
+            role: Role::Tool,
+            content: "PKG".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("call_00".into()),
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let tool_b = Message {
+            role: Role::Tool,
+            content: "f1\nf2".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("call_01".into()),
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let history = vec![Message::user("list files"), assistant_turn, tool_a, tool_b];
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let body = model.build_body("glm-4.6", &history, &ModelOptions::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        // Merge: 4 internal non-system messages → 3 wire messages (no back-to-back user).
+        assert_eq!(
+            msgs.len(),
+            3,
+            "parallel tool_results must merge into one user message"
+        );
+        // Strict alternation — the protocol property this fix restores.
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        // The merged user message carries BOTH tool_result blocks, in order.
+        let merged = &msgs[2]["content"];
+        assert_eq!(merged.as_array().unwrap().len(), 2);
+        assert_eq!(merged[0]["type"], "tool_result");
+        assert_eq!(merged[0]["tool_use_id"], "call_00");
+        assert_eq!(merged[0]["content"], "PKG");
+        assert_eq!(merged[1]["tool_use_id"], "call_01");
+        assert_eq!(merged[1]["content"], "f1\nf2");
+    }
+
+    #[test]
+    fn build_body_keeps_single_tool_result_in_one_user_message() {
+        // Regression guard: a single-tool turn (the overwhelmingly common case)
+        // must stay exactly one user message with one tool_result block — the
+        // merge path must not split or duplicate it.
+        use kernel_core::{FunctionCall, Message, ModelOptions, Role, ToolCall};
+        let assistant_turn = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_00".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"file_path":"a"}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let tool = Message {
+            role: Role::Tool,
+            content: "A".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("call_00".into()),
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let body = model.build_body(
+            "glm-4.6",
+            &[Message::user("go"), assistant_turn, tool],
+            &ModelOptions::default(),
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        let last = &msgs[2];
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"].as_array().unwrap().len(), 1);
+        assert_eq!(last["content"][0]["tool_use_id"], "call_00");
     }
 
     // ===== GLM real-response fixtures =====
