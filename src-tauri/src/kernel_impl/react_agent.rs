@@ -3727,6 +3727,215 @@ mod tests {
         );
     }
 
+    /// 真HTTP验证修复:GLM在一个turn并行发起2+个tool_use时,第二轮请求经
+    /// build_body合并连续Tool Message后不再被provider以400拒绝——会话
+    /// 34f2c468的精确失败场景(修复前连续user消息→400;修复后合并成一条
+    /// user→通过)。prompt强烈引导并行,但模型是否真并行是自主行为:并行
+    /// 则完全复刻34f2c468并验证修复;串行则至少证明真HTTP的tool往返不破。
+    ///   cargo test --lib -- --ignored live_glm_parallel_tool_use --nocapture
+    #[ignore = "live GLM; needs keyed GUI provider; spends tokens"]
+    #[tokio::test]
+    async fn live_glm_parallel_tool_use_does_not_400_on_followup_turn() {
+        use kernel_core::{Agent, AgentEvent, AgentInput};
+        let home = crate::commands::projects::dirs_home();
+        let data_dir = home.join(".dev-workbench");
+        let has_key = crate::config::providers::load_providers_config(&data_dir)
+            .ok()
+            .and_then(|c| crate::config::providers::resolve_provider(&c, "glm-4.6"))
+            .map(|r| !r.api_key.is_empty())
+            .unwrap_or(false);
+        if !has_key {
+            eprintln!("no keyed GUI provider — skipping live parallel-tool-use smoke");
+            return;
+        }
+        let working_dir = env!("CARGO_MANIFEST_DIR").to_string();
+        let agent = crate::kernel_impl::executor::build_react_agent(
+            Some("glm-4.6"),
+            None,
+            &working_dir,
+            None,
+            Vec::new(),
+            None,
+            crate::kernel_impl::hooks::PermissionMode::default(),
+            None,
+            None,
+        )
+        .expect("build_react_agent");
+        // 强引导并行:"一次性发出两个tool调用,不要分开做"。
+        let mut stream = agent
+            .run(AgentInput {
+                prompt: "Do BOTH in a single response — issue both tool calls together in one turn, do NOT do them one at a time: (1) read_file on Cargo.toml, (2) glob with pattern '*.toml'. Then reply in ONE short sentence with the package name and the count of .toml files.".into(),
+                working_dir: Some(working_dir),
+                model: None,
+                resume_from: None,
+            })
+            .expect("agent run starts");
+        use futures::StreamExt;
+        let mut done_status: Option<kernel_core::AgentRunStatus> = None;
+        let mut tool_uses_seen = 0usize;
+        let mut summary = String::new();
+        let mut stream_err = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev {
+                Ok(AgentEvent::Done(o)) => {
+                    done_status = Some(o.status);
+                    if let Some(s) = o.output_summary {
+                        summary = s;
+                    }
+                }
+                Ok(other) => {
+                    // 嗅探tool_use wire事件(粗略计数,观察模型用了几个工具)。
+                    for w in crate::agents::react_chat::map_agent_event(other, 0) {
+                        let s = serde_json::to_string(&w).unwrap_or_default();
+                        if s.contains("tool_use") || s.contains("ToolUse") {
+                            tool_uses_seen += 1;
+                        }
+                    }
+                }
+                Err(e) => stream_err = e.to_string(),
+            }
+        }
+        eprintln!(
+            "live parallel-tool-use smoke: status={:?} tool_uses_seen={} summary={:?} err={:?}",
+            done_status, tool_uses_seen, summary, stream_err
+        );
+        assert!(stream_err.is_empty(), "stream error (possible 400): {stream_err}");
+        let status = done_status.expect("agent never reached Done");
+        // 环境问题(GLM key失效)≠ 代码问题(400)。has_key 只查 key 非空,
+        // 运行时才发现 key 失效——此时优雅跳过,不假装通过;只有真400/
+        // 非Completed(非auth原因)才判fail,保留对34f2c468修复的严格断言。
+        if matches!(status, kernel_core::AgentRunStatus::Failed)
+            && summary.to_lowercase().contains("authentication")
+        {
+            eprintln!(
+                "SKIP: GUI GLM key failed authentication — live e2e needs a valid key. summary: {summary}"
+            );
+            return;
+        }
+        assert!(
+            matches!(status, kernel_core::AgentRunStatus::Completed),
+            "agent did not complete (status={:?}) — parallel tool_use may have 400'd the followup turn. summary: {summary}",
+            status
+        );
+        assert!(
+            tool_uses_seen >= 1,
+            "no tool_use observed in wire — agent didn't use tools"
+        );
+    }
+
+    /// 确定性真HTTP验证修复(不依赖模型自主选择并行):手工复刻34f2c468的
+    /// history——assistant一个turn发2个并行tool_use,run loop push 2条连续
+    /// Tool Message——经build_body合并成一条user后,真POST到GLM endpoint,
+    /// 断言provider接受(不再400 "tool_use ids were found without tool_result
+    /// blocks immediately after")。key走env(GLM_API_KEY),回退GUI toml,不落盘。
+    ///   GLM_API_KEY=... cargo test --lib -- --ignored live_glm_accepts_merged --nocapture
+    #[ignore = "live GLM POST; needs GLM_API_KEY or keyed GUI provider; spends tokens"]
+    #[tokio::test]
+    async fn live_glm_accepts_merged_parallel_tool_use_body() {
+        use kernel_core::{FunctionCall, Role, ToolCall};
+        // env key优先(不落盘,符合"密钥仅用环境变量"),回退GUI toml。
+        let key = std::env::var("GLM_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| {
+                let home = crate::commands::projects::dirs_home();
+                crate::config::providers::load_providers_config(&home.join(".dev-workbench"))
+                    .ok()
+                    .and_then(|c| crate::config::providers::resolve_provider(&c, "glm-4.6"))
+                    .map(|r| r.api_key)
+                    .unwrap_or_default()
+            });
+        if key.is_empty() {
+            eprintln!("SKIP: no GLM_API_KEY env and no keyed GUI provider");
+            return;
+        }
+        // 复刻34f2c468的history:assistant一个turn两个并行tool_use + 两条
+        // 连续Tool Message。修复前build_body→两条user→400;修复后→一条user。
+        let history = vec![
+            Message::user("List the package name and the files."),
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_00".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "read_file".into(),
+                            arguments: r#"{"file_path":"Cargo.toml"}"#.into(),
+                        },
+                    },
+                    ToolCall {
+                        id: "call_01".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "glob".into(),
+                            arguments: r#"{"pattern":"*.toml"}"#.into(),
+                        },
+                    },
+                ],
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_signature: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "name = \"x\"".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_00".into()),
+                reasoning: None,
+                reasoning_signature: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "Cargo.toml\ntauri.conf.toml".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_01".into()),
+                reasoning: None,
+                reasoning_signature: None,
+            },
+        ];
+        let glm = GlmChatModel::bigmodel(&key, "glm-4.6");
+        let body = glm.build_body("glm-4.6", &history, &ModelOptions::default(), false);
+        // 本地wire合规(合并+严格交替)——复刻的history经修复后必须满足。
+        let wire = body["messages"].as_array().unwrap();
+        for w in wire.windows(2) {
+            assert_ne!(w[0]["role"], w[1]["role"], "local wire has back-to-back roles");
+        }
+        // 真POST到GLM。修复前这个body会400;修复后应被接受。
+        let client = reqwest::Client::new();
+        let resp = client
+            .post("https://open.bigmodel.cn/api/anthropic/v1/messages")
+            .bearer_auth(&key)
+            .json(&body)
+            .send()
+            .await
+            .expect("HTTP send");
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let head = &text[..text.len().min(300)];
+        eprintln!("live merged-body POST: status={} resp_head={}", status, head);
+        // 环境问题(key失效)→ 优雅skip,不假装通过。
+        if status.as_u16() == 401 || text.contains("authentication") {
+            eprintln!("SKIP: key failed authentication: {}", head);
+            return;
+        }
+        // 核心回归断言:绝不再因tool_use/tool_result结构被400(34f2c468 bug)。
+        let structure_400 = status.as_u16() == 400
+            && (text.contains("tool_result") || text.contains("tool_use ids"));
+        assert!(
+            !structure_400,
+            "REGRESSION: provider 400'd on tool_result structure (the 34f2c468 bug): {} {}",
+            status, head
+        );
+        // 否则期望成功(2xx)。
+        assert!(
+            status.is_success(),
+            "provider rejected merged body (non-auth): {} {}",
+            status, head
+        );
+    }
+
     /// Records a real GLM run's wire events to e2e/fixtures/ so the front-end
     /// Playwright suite renders BlocksView against genuine model output instead
     /// of hand-written mocks. Run once locally with a keyed GUI provider, then
