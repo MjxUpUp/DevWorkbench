@@ -3,17 +3,24 @@ import type { ReactNode } from 'react';
 
 export type ToastType = 'success' | 'error' | 'info';
 
+/** Optional inline action (e.g. an "撤销" undo button on a delete toast). */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: number;
   message: string;
   type: ToastType;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  toast: (type: ToastType, message: string) => void;
-  success: (message: string) => void;
-  error: (message: string) => void;
-  info: (message: string) => void;
+  toast: (type: ToastType, message: string, action?: ToastAction) => void;
+  success: (message: string, action?: ToastAction) => void;
+  error: (message: string, action?: ToastAction) => void;
+  info: (message: string, action?: ToastAction) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -26,17 +33,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
-  const addToast = useCallback((type: ToastType, message: string) => {
+  const addToast = useCallback((type: ToastType, message: string, action?: ToastAction) => {
     const id = ++nextId.current;
-    setToasts(prev => [...prev, { id, message, type }]);
+    setToasts(prev => [...prev, { id, message, type, action }]);
     setTimeout(() => removeToast(id), 3000);
   }, [removeToast]);
 
   const value: ToastContextValue = {
     toast: addToast,
-    success: (message) => addToast('success', message),
-    error: (message) => addToast('error', message),
-    info: (message) => addToast('info', message),
+    success: (message, action) => addToast('success', message, action),
+    error: (message, action) => addToast('error', message, action),
+    info: (message, action) => addToast('info', message, action),
   };
 
   return (
@@ -46,6 +53,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map(t => (
           <div key={t.id} className={`toast toast-${t.type}`} onClick={() => removeToast(t.id)}>
             <span className="toast-message">{t.message}</span>
+            {t.action && (
+              <button
+                className="toast-action"
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  t.action!.onClick();
+                  removeToast(t.id);
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
           </div>
         ))}
       </div>

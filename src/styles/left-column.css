@@ -202,6 +202,38 @@
   white-space: nowrap;
 }
 
+/* A3: per-conversation archive/delete actions. Hidden until hover/active so the
+   title keeps the full width by default; the actions slide in on hover or when
+   the row is selected. */
+.left-column-conversation-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.left-column-conversation:hover .left-column-conversation-actions,
+.left-column-conversation.active .left-column-conversation-actions {
+  opacity: 1;
+}
+.left-column-conversation-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.6;
+}
+.left-column-conversation-action:hover {
+  opacity: 1;
+}
+
 /* Footer — user profile with dropdown menu */
 .left-column-user-wrap {
   position: relative;

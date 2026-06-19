@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { Project } from '../types';
 import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate, IconTrash } from './Icons';
 import type { IconProps } from './Icons';
@@ -6,6 +7,7 @@ import type { ViewId } from '../stores/navigationStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAgentStore } from '../stores/agentStore';
+import { useToast } from './Toast';
 
 /**
  * Primary navigation — aligns to the target layout:
@@ -142,6 +144,42 @@ function ConversationList({
   // never triggered a re-render, and the list stayed "暂无对话" forever.
   const allConversations = useAgentStore((s) => s.conversations);
   const refreshConversations = useAgentStore((s) => s.refreshConversations);
+  const toast = useToast();
+
+  // A3 archive (soft-hide) + delete (soft-delete with an undo toast that
+  // restores the row to 'active'). Both go through the backend lifecycle
+  // commands so the status column stays the single source of truth.
+  const handleArchive = async (id: string) => {
+    try {
+      await invoke('archive_conversation', { id });
+      await refreshConversations(projectPath);
+      toast.info('已归档');
+    } catch (e) {
+      toast.error(`归档失败: ${e}`);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await invoke('delete_conversation', { id });
+      await refreshConversations(projectPath);
+      toast.success('对话已删除', {
+        label: '撤销',
+        onClick: async () => {
+          try {
+            await invoke('restore_conversation', { id });
+            await refreshConversations(projectPath);
+            toast.info('已恢复');
+          } catch (err) {
+            toast.error(`恢复失败: ${err}`);
+          }
+        },
+      });
+    } catch (e) {
+      toast.error(`删除失败: ${e}`);
+    }
+  };
+
   const conversations = useMemo(
     () =>
       allConversations
@@ -180,16 +218,46 @@ function ConversationList({
   return (
     <div className="left-column-conversations">
       {conversations.map((c) => (
-        <button
+        <div
           key={c.id}
           className={`left-column-conversation ${selectedId === c.id ? 'active' : ''}`}
           onClick={() => onSelect(c.id)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onSelect(c.id);
+            }
+          }}
+          role="button"
+          tabIndex={0}
           title={c.title}
-          type="button"
         >
           {c.pinned && <span className="left-column-conversation-pin">📌</span>}
           <span className="left-column-conversation-title">{c.title}</span>
-        </button>
+          <span
+            className="left-column-conversation-actions"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="left-column-conversation-action"
+              aria-label="归档"
+              title="归档"
+              onClick={() => handleArchive(c.id)}
+            >
+              📦
+            </button>
+            <button
+              type="button"
+              className="left-column-conversation-action"
+              aria-label="删除"
+              title="删除"
+              onClick={() => handleDelete(c.id)}
+            >
+              <IconTrash size={13} />
+            </button>
+          </span>
+        </div>
       ))}
     </div>
   );

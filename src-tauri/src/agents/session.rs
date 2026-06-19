@@ -298,12 +298,20 @@ fn parse_agent_type(s: Option<String>) -> Option<AgentType> {
 pub fn load_conversations_for_project_db(
     conn: &rusqlite::Connection,
     project_path: &str,
+    include_archived: bool,
 ) -> Result<Vec<Conversation>, AppError> {
-    let mut stmt = conn.prepare(
+    // Soft-delete model: archived/deleted rows are hidden unless explicitly
+    // requested, so the sidebar only shows active conversations by default.
+    let sql = if include_archived {
         "SELECT id, project_path, title, last_agent, status, started_at, last_activity_at, pinned
          FROM conversations WHERE project_path = ?1
          ORDER BY pinned DESC, last_activity_at DESC"
-    )?;
+    } else {
+        "SELECT id, project_path, title, last_agent, status, started_at, last_activity_at, pinned
+         FROM conversations WHERE project_path = ?1 AND status = 'active'
+         ORDER BY pinned DESC, last_activity_at DESC"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![project_path], |row| {
         let last_agent_str: Option<String> = row.get(3)?;
         Ok(Conversation {
@@ -364,6 +372,35 @@ pub fn update_conversation_db(
     let rows = conn.execute(&sql, params.as_slice())?;
     if rows == 0 {
         return Err(AppError::NotFound(format!("Conversation {} 不存在", id)));
+    }
+    Ok(())
+}
+
+/// Set a conversation's lifecycle status (`active` | `archived` | `deleted`).
+///
+/// Soft-delete model: archived/deleted rows remain in the table so the action
+/// is undoable (restore to `active`); `load_conversations_for_project_db` hides
+/// them unless `include_archived` is set. Rejects any other status string so a
+/// frontend typo can't smuggle an undocumented state into the column.
+pub fn set_conversation_status_db(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    match status {
+        "active" | "archived" | "deleted" => {}
+        other => {
+            return Err(AppError::Internal(format!(
+                "非法对话状态 {other:?},允许 active|archived|deleted"
+            )));
+        }
+    }
+    let rows = conn.execute(
+        "UPDATE conversations SET status = ?1 WHERE id = ?2",
+        params![status, id],
+    )?;
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Conversation {id} 不存在")));
     }
     Ok(())
 }
@@ -545,6 +582,98 @@ mod tests {
         let result = update_session_db(&conn, "s1", patch);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("无效 status"));
+    }
+
+    // --- A3 conversation archive/delete (soft-delete model) ---
+
+    fn make_conv(id: &str, project: &str, status: &str) -> Conversation {
+        Conversation {
+            id: id.to_string(),
+            project_path: project.to_string(),
+            title: format!("conv-{id}"),
+            last_agent: None,
+            status: status.to_string(),
+            started_at: chrono::Local::now().to_rfc3339(),
+            last_activity_at: chrono::Local::now().to_rfc3339(),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn archived_and_deleted_are_hidden_unless_requested() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_conversation_db(&conn, &make_conv("c1", "/p", "active")).unwrap();
+        insert_conversation_db(&conn, &make_conv("c2", "/p", "active")).unwrap();
+
+        set_conversation_status_db(&conn, "c1", "archived").unwrap();
+        set_conversation_status_db(&conn, "c2", "deleted").unwrap();
+
+        let active = load_conversations_for_project_db(&conn, "/p", false).unwrap();
+        assert_eq!(
+            active.len(),
+            0,
+            "archived + deleted hidden from the default sidebar view"
+        );
+
+        let all = load_conversations_for_project_db(&conn, "/p", true).unwrap();
+        assert_eq!(all.len(), 2, "include_archived surfaces both rows");
+    }
+
+    #[test]
+    fn set_conversation_status_restore_round_trip() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_conversation_db(&conn, &make_conv("c1", "/p", "active")).unwrap();
+
+        set_conversation_status_db(&conn, "c1", "deleted").unwrap();
+        assert_eq!(
+            load_conversations_for_project_db(&conn, "/p", false)
+                .unwrap()
+                .len(),
+            0,
+            "soft-deleted hides from sidebar"
+        );
+
+        // Undo path: the frontend toast restores to 'active'.
+        set_conversation_status_db(&conn, "c1", "active").unwrap();
+        assert_eq!(
+            load_conversations_for_project_db(&conn, "/p", false)
+                .unwrap()
+                .len(),
+            1,
+            "restore brings the conversation back to the sidebar"
+        );
+    }
+
+    #[test]
+    fn set_conversation_status_rejects_invalid_status() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_conversation_db(&conn, &make_conv("c1", "/p", "active")).unwrap();
+
+        let err = set_conversation_status_db(&conn, "c1", "frozen").unwrap_err();
+        assert!(
+            matches!(err, crate::error::AppError::Internal(_)),
+            "undocumented status rejected: {err:?}"
+        );
+        // The rejected write must not have mutated the row.
+        assert_eq!(
+            load_conversations_for_project_db(&conn, "/p", true).unwrap()[0].status,
+            "active"
+        );
+    }
+
+    #[test]
+    fn set_conversation_status_missing_id_is_not_found() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        let err = set_conversation_status_db(&conn, "ghost", "archived").unwrap_err();
+        assert!(
+            matches!(err, crate::error::AppError::NotFound(_)),
+            "missing conversation → NotFound: {err:?}"
+        );
     }
 
     #[test]

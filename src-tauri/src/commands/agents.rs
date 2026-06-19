@@ -463,9 +463,16 @@ fn react_chat_driver(
 pub fn list_conversations(
     db: State<'_, DbState>,
     project_path: String,
+    include_archived: Option<bool>,
 ) -> Result<Vec<Conversation>, AppError> {
     let conn = db.get()?;
-    session::load_conversations_for_project_db(&conn, &project_path)
+    // include_archived defaults to false: the sidebar shows only active
+    // conversations; archived/deleted are soft-hidden until explicitly requested.
+    session::load_conversations_for_project_db(
+        &conn,
+        &project_path,
+        include_archived.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -476,6 +483,31 @@ pub fn update_conversation(
 ) -> Result<(), AppError> {
     let conn = db.get()?;
     session::update_conversation_db(&conn, &id, patch)
+}
+
+/// Archive a conversation (soft-hide from the sidebar, undoable). Sets
+/// status='archived'; load_conversations filters it out unless include_archived.
+#[tauri::command]
+pub fn archive_conversation(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
+    let conn = db.get()?;
+    session::set_conversation_status_db(&conn, &id, "archived")
+}
+
+/// Delete a conversation (soft-delete, undoable within the frontend undo
+/// window). Sets status='deleted'; the row stays so the undo can restore it to
+/// 'active' via set_conversation_status_db.
+#[tauri::command]
+pub fn delete_conversation(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
+    let conn = db.get()?;
+    session::set_conversation_status_db(&conn, &id, "deleted")
+}
+
+/// Restore an archived/deleted conversation back to the sidebar (undo path for
+/// both archive and delete). Sets status='active'.
+#[tauri::command]
+pub fn restore_conversation(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
+    let conn = db.get()?;
+    session::set_conversation_status_db(&conn, &id, "active")
 }
 
 #[tauri::command]

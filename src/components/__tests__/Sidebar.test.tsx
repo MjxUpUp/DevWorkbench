@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Sidebar } from '../Sidebar';
+import { ToastProvider } from '../Toast';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -67,7 +68,7 @@ describe('Sidebar', () => {
     useProjectStore.setState({
       projects: [makeProject('p1', 'Alpha', 'E:/Alpha'), makeProject('p2', 'Beta', 'E:/Beta')],
     });
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
     expect(screen.getByRole('button', { name: '移除 Alpha' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '移除 Beta' })).toBeInTheDocument();
   });
@@ -77,7 +78,7 @@ describe('Sidebar', () => {
     useProjectStore.setState({
       projects: [makeProject('p1', 'Alpha', 'E:/Alpha')],
     });
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
 
     await user.click(screen.getByRole('button', { name: '移除 Alpha' }));
 
@@ -91,7 +92,7 @@ describe('Sidebar', () => {
   it('opens the command-palette modal (not a view) when the 搜索 button is clicked', async () => {
     const user = userEvent.setup();
     useNavigationStore.setState({ commandPaletteOpen: false, activeView: 'task' });
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
 
     await user.click(screen.getByRole('button', { name: '搜索' }));
 
@@ -120,7 +121,7 @@ describe('Sidebar', () => {
       ],
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
 
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
 
     // Both conversations render under the active project.
     expect(screen.getByText('newer topic')).toBeInTheDocument();
@@ -129,6 +130,53 @@ describe('Sidebar', () => {
     // Clicking selects it in navigation state.
     await user.click(screen.getByText('newer topic'));
     expect(useNavigationStore.getState().selectedConversationId).toBe('c-new');
+  });
+
+  it('archives a conversation via the 📦 action button', async () => {
+    const user = userEvent.setup();
+    const proj = makeProject('p1', 'Alpha', 'E:/Alpha');
+    useProjectStore.setState({ projects: [proj], loading: false, error: null });
+    useNavigationStore.setState({
+      activeProject: proj,
+      activeView: 'task',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    useAgentStore.setState({
+      conversations: [makeConversation('c1', 'topic', 'E:/Alpha')],
+    } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
+
+    render(<ToastProvider><Sidebar /></ToastProvider>);
+
+    await user.click(screen.getByRole('button', { name: '归档' }));
+    expect(invoke).toHaveBeenCalledWith('archive_conversation', { id: 'c1' });
+  });
+
+  it('deletes a conversation and the undo toast restores it', async () => {
+    const user = userEvent.setup();
+    const proj = makeProject('p1', 'Alpha', 'E:/Alpha');
+    useProjectStore.setState({ projects: [proj], loading: false, error: null });
+    useNavigationStore.setState({
+      activeProject: proj,
+      activeView: 'task',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    useAgentStore.setState({
+      conversations: [makeConversation('c1', 'topic', 'E:/Alpha')],
+    } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
+
+    render(<ToastProvider><Sidebar /></ToastProvider>);
+
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    expect(invoke).toHaveBeenCalledWith('delete_conversation', { id: 'c1' });
+
+    // The undo toast surfaces a 撤销 action; clicking it restores the row.
+    const undo = await screen.findByRole('button', { name: '撤销' });
+    await user.click(undo);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('restore_conversation', { id: 'c1' }),
+    );
   });
 
   it('does not flash the empty state while the first conversation refresh is in flight', () => {
@@ -151,7 +199,7 @@ describe('Sidebar', () => {
       refreshConversations: () => new Promise<void>(() => {}),
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
 
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
 
     // No empty-state text while the first load is still pending.
     expect(screen.queryByText('暂无对话')).toBeNull();
@@ -174,7 +222,7 @@ describe('Sidebar', () => {
       refreshConversations: () => Promise.resolve(),
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
 
-    render(<Sidebar />);
+    render(<ToastProvider><Sidebar /></ToastProvider>);
 
     expect(await screen.findByText('暂无对话')).toBeInTheDocument();
   });
