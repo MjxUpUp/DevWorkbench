@@ -3004,6 +3004,131 @@ mod tests {
         assert!(refl.content.contains("write_file"), "tool counted: {}", refl.content);
     }
 
+    /// ScriptedModel that ALSO records every history snapshot passed into
+    /// `stream()` — so a test can assert what the REAL run loop fed back to the
+    /// model on a later turn (e.g. consecutive Role::Tool Messages produced by
+    /// parallel tool_use). Shares script/call/seen across the with_tools clone.
+    #[derive(Clone)]
+    struct CapturingModel {
+        script: Arc<Vec<Message>>,
+        call: Arc<std::sync::atomic::AtomicUsize>,
+        seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl CapturingModel {
+        fn new(script: Vec<Message>, seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>) -> Self {
+            Self {
+                script: Arc::new(script),
+                call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                seen,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatModel for CapturingModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err(Error::Unsupported("CapturingModel: drive via stream()".into()))
+        }
+        fn stream(&self, msgs: &[Message], _opts: &ModelOptions) -> Result<MessageStream, Error> {
+            self.seen.lock().unwrap().push(msgs.to_vec());
+            let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let msg = self
+                .script
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| Message::assistant(String::new()));
+            Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_parallel_tool_use_feeds_merged_history_into_build_body() {
+        // Internal E2E (everything real except the live HTTP hop): drive the
+        // REAL ReactAgent run loop with a model that emits TWO parallel
+        // tool_use calls in one turn, capture the history it hands back on
+        // turn 2, then feed that REAL history through the REAL
+        // GlmChatModel::build_body. Spans the full bug chain behind session
+        // 34f2c468's 400 — run loop → consecutive Role::Tool Messages →
+        // build_body merge — not just the build_body pure function alone.
+        use kernel_core::Agent;
+        let read_calls = Arc::new(Mutex::new(Vec::new()));
+        let glob_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = ToolRegistry::new();
+        reg.push(ProbeTool { name: "read_file", read_only: true, calls: read_calls.clone() });
+        reg.push(ProbeTool { name: "glob", read_only: true, calls: glob_calls.clone() });
+
+        // Turn 0: assistant requests read_file AND glob in ONE message (the
+        // parallel-tool-use shape). Turn 1: bare text → convergence.
+        let turn0 = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![
+                kernel_core::ToolCall {
+                    id: "call_00".into(),
+                    call_type: "function".into(),
+                    function: kernel_core::FunctionCall {
+                        name: "read_file".into(),
+                        arguments: r#"{"file_path":"package.json"}"#.into(),
+                    },
+                },
+                kernel_core::ToolCall {
+                    id: "call_01".into(),
+                    call_type: "function".into(),
+                    function: kernel_core::FunctionCall {
+                        name: "glob".into(),
+                        arguments: r#"{"pattern":"*"}"#.into(),
+                    },
+                },
+            ],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let model = CapturingModel::new(vec![turn0, Message::assistant("done")], seen.clone());
+
+        let agent = ReactAgent::new(model, reg, "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        // Both parallel tools actually executed (the loop dispatched BOTH).
+        assert_eq!(read_calls.lock().unwrap().len(), 1, "read_file executed");
+        assert_eq!(glob_calls.lock().unwrap().len(), 1, "glob executed");
+
+        // Turn-2 history carries the assistant turn + a Role::Tool Message per
+        // call → two CONSECUTIVE Tool Messages. Pre-fix build_body serialized
+        // these into two back-to-back user messages → Anthropic 400.
+        let histories = seen.lock().unwrap();
+        assert!(histories.len() >= 2, "model invoked on turn 2");
+        let turn2 = histories.last().unwrap();
+        let tail: Vec<&Message> = turn2.iter().rev().take(2).collect();
+        assert_eq!(tail[1].role, Role::Tool);
+        assert_eq!(tail[1].tool_call_id.as_deref(), Some("call_00"));
+        assert_eq!(tail[0].role, Role::Tool, "consecutive Tool messages");
+        assert_eq!(tail[0].tool_call_id.as_deref(), Some("call_01"));
+
+        // Feed that REAL turn-2 history through the REAL GlmChatModel
+        // build_body: the two consecutive Tool Messages MUST merge into ONE
+        // user message, restoring strict user/assistant alternation.
+        let glm = GlmChatModel::bigmodel("k", "glm-4.6");
+        let body = glm.build_body("glm-4.6", turn2, &ModelOptions::default(), false);
+        let wire = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = wire.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        for w in wire.windows(2) {
+            assert_ne!(w[0]["role"], w[1]["role"], "back-to-back roles: {:?}", roles);
+        }
+        let merged = wire.last().unwrap();
+        assert_eq!(merged["role"], "user");
+        let results = merged["content"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "both tool_results merged into one user message");
+        assert_eq!(results[0]["tool_use_id"], "call_00");
+        assert_eq!(results[1]["tool_use_id"], "call_01");
+    }
+
     // --- v1.1: reasoning 双协议贯通 (GLM Interleaved + Preserved Thinking) ---
 
     #[test]
