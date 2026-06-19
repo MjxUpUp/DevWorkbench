@@ -5,6 +5,7 @@ pub mod config;
 pub mod cost;
 pub mod db;
 pub mod error;
+pub mod eval;
 pub mod kernel_impl;
 pub mod knowledge;
 pub mod mcp;
@@ -118,6 +119,8 @@ pub fn run() {
                     .expect("Failed to run v13 to v14 llm_traces table migration");
                 migrate::migrate_v14_to_v15(&conn)
                     .expect("Failed to run v14 to v15 trace_settings + index migration");
+                migrate::migrate_v15_to_v16(&conn)
+                    .expect("Failed to run v15 to v16 eval_runs migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -197,6 +200,9 @@ pub fn run() {
             commands::mission::mission_load_prd,
             commands::mission::mission_apply,
             commands::mission::mission_status,
+            commands::eval::eval_run_session,
+            commands::eval::list_eval_runs,
+            commands::eval::eval_trend,
             commands::agents::stop_agent_session,
             commands::agents::load_sessions,
             commands::agents::read_session_output_cmd,

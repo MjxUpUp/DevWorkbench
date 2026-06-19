@@ -413,6 +413,24 @@ CREATE TABLE IF NOT EXISTS trace_settings (
 );
 INSERT OR IGNORE INTO trace_settings (id, retention_days, last_vacuum_at, updated_at)
 VALUES (1, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+
+-- B7 trajectory-eval runs (one row per scored session). score in [0,1], grade
+-- in {optimal, suboptimal, incorrect}; trajectory_json/reference_json are the
+-- full snapshots for replay. Backs the regression-curve trend query.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    conversation_id TEXT,
+    matcher TEXT NOT NULL,
+    score REAL NOT NULL,
+    grade TEXT NOT NULL,
+    steps INTEGER NOT NULL,
+    trajectory_json TEXT,
+    reference_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_session ON eval_runs(session_id);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
 ";
 
 /// Open (or create) the SQLite database at `db_path`, create all tables.

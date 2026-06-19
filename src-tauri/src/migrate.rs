@@ -589,6 +589,46 @@ pub fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v15→v16: create the `eval_runs` table for B7 trajectory evaluation (one row
+/// per scored session, supporting the daily regression-curve trend query).
+/// Idempotent — `CREATE TABLE IF NOT EXISTS`.
+pub fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 16 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS eval_runs (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            conversation_id TEXT,
+            matcher TEXT NOT NULL,
+            score REAL NOT NULL,
+            grade TEXT NOT NULL,
+            steps INTEGER NOT NULL,
+            trajectory_json TEXT,
+            reference_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_session ON eval_runs(session_id);
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);",
+    )?;
+    log::info!("Migrated schema v15→v16: created eval_runs (B7 trajectory eval)");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (16, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

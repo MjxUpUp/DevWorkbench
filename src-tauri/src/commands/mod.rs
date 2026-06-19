@@ -19,3 +19,4 @@ pub mod slash_cmds;
 pub mod user_hooks_cmds;
 pub mod subagents_cmds;
 pub mod trace;
+pub mod eval;
