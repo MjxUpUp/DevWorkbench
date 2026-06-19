@@ -534,6 +534,120 @@ pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A1 — pty usage → cost_records
+// ---------------------------------------------------------------------------
+//
+// The survival-line 断链: claude/codex/gemini/qwen CLI runs went through pty,
+// their stream-json `result` event carried token usage (+ sometimes USD cost),
+// but NOTHING recorded it to `cost_records`. Only the GLM kernel path
+// (DbCostSink on GlmChatModel) ever inserted rows — so the Dashboard's cost /
+// token totals silently omitted every CLI agent run. This closes that gap.
+//
+// Blueprints: cline `claude-code.ts:52-206` (chunk-type dispatch — only the
+// terminal `result` chunk carries usage), `:177` (Anthropic `input_tokens`
+// ALREADY includes cache tokens — record verbatim, never re-add), `:50/66/192`
+// (subscription fallback: when the CLI reports no `total_cost_usd` — subscription
+// apiKeySource=="none", or qwen/gemini which never report cost — compute locally
+// from the pricing table instead of a silent 0).
+
+/// Token usage + optional provider-reported cost extracted from a stream-json
+/// `result` event. Mirrors what cline pulls from the claude result chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PtyUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    /// Provider-reported USD cost (claude `result.total_cost_usd`). `None` when
+    /// the CLI doesn't report cost → downstream falls back to local pricing.
+    pub cost_usd: Option<f64>,
+}
+
+/// Extract token usage + cost from one stream-json `result` event line.
+/// Returns `None` for non-result lines, malformed JSON, or a result with no
+/// usable token fields.
+///
+/// Token field paths differ per CLI (all verified from captured events):
+///   - claude: `stats.input_tokens` / `stats.output_tokens` + top-level `total_cost_usd`.
+///   - qwen (reuses the claude parser): top-level `usage.input_tokens` / `usage.output_tokens`, no cost.
+///   - gemini: nested `stats.input_tokens` / `stats.output_tokens`, no cost.
+///
+/// `stats` is tried first (claude/gemini), then `usage` (qwen). Tokens are
+/// recorded AS-IS (Anthropic `input_tokens` already includes cache, so no
+/// re-derivation — the cline `:177` double-count trap can't trigger here).
+pub fn extract_pty_usage(line: &str) -> Option<PtyUsage> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(|s| s.as_str()) != Some("result") {
+        return None;
+    }
+    let stats = v.get("stats");
+    let usage = v.get("usage");
+    let inp = stats
+        .and_then(|s| s.get("input_tokens"))
+        .or_else(|| usage.and_then(|u| u.get("input_tokens")))
+        .and_then(|n| n.as_u64());
+    let out = stats
+        .and_then(|s| s.get("output_tokens"))
+        .or_else(|| usage.and_then(|u| u.get("output_tokens")))
+        .and_then(|n| n.as_u64());
+    let (input_tokens, output_tokens) = match (inp, out) {
+        (Some(i), Some(o)) => (i as u32, o as u32),
+        // A result with no token fields carries nothing bookable.
+        _ => return None,
+    };
+    let cost_usd = v.get("total_cost_usd").and_then(|c| c.as_f64());
+    Some(PtyUsage {
+        input_tokens,
+        output_tokens,
+        cost_usd,
+    })
+}
+
+/// Record one pty CLI run's usage into `cost_records`, fire-and-forget.
+///
+/// Runs on a plain `std::thread` (NOT `tokio::spawn_blocking`) because the pty
+/// reader is itself a bare std::thread with no runtime in scope — mirroring the
+/// existing `{sid}.log` write pattern in the same reader. A cost-write failure
+/// is logged and never breaks the agent stream.
+///
+/// Subscription fallback (cline `claude-code.ts:50/66/192`): when the CLI
+/// reports no `total_cost_usd` (subscription, or qwen/gemini), compute from the
+/// local pricing table. An unknown model honestly records cost 0 rather than a
+/// guess — the tokens are still booked, so usage visibility is preserved.
+fn record_pty_usage(
+    db: crate::db::DbState,
+    session_id: &str,
+    agent_type: &str,
+    model: &str,
+    usage: &PtyUsage,
+) {
+    let cost = usage.cost_usd.unwrap_or_else(|| {
+        crate::cost::pricing::cost(
+            usage.input_tokens,
+            usage.output_tokens,
+            crate::cost::pricing::pricing_for(model),
+        )
+    });
+    let rec = crate::models::CostRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: Some(session_id.to_string()),
+        agent_type: agent_type.to_string(),
+        model: model.to_string(),
+        input_tokens: usage.input_tokens as i64,
+        output_tokens: usage.output_tokens as i64,
+        cost_usd: cost,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let sid = session_id.to_string();
+    std::thread::spawn(move || match db.get() {
+        Ok(conn) => {
+            if let Err(e) = crate::cost::agentfare::insert_cost_record(&conn, &rec) {
+                log::warn!("[pty-cost] insert failed sid={sid}: {e}");
+            }
+        }
+        Err(e) => log::warn!("[pty-cost] db lock failed sid={sid}: {e}"),
+    });
+}
+
 /// Render parsed blocks into ANSI-styled text for the terminal. Returns None
 /// when there is nothing to show (zero blocks). Output is byte-identical to
 /// the old single-pass renderer — the render contract the terminal replay and
@@ -1242,6 +1356,14 @@ fn spawn_pipe_fallback(
     let agent_type_reader = agent_type.clone();
     let last_activity_reader = last_activity.clone();
     let session_blocks_reader = Arc::clone(&session_blocks);
+    // A1 — capture what the pty cost recorder needs: the DB handle, the agent's
+    // CLI name (cost_records.agent_type), and the model (pricing lookup; falls
+    // back to the CLI name when DevWorkbench let the CLI pick its own default).
+    let db_reader = db_conn.clone();
+    let agent_str_reader = agent_type.command_name().to_string();
+    let model_str_reader = model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| agent_str_reader.clone());
     std::thread::spawn(move || {
         let mut output_log: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
@@ -1291,6 +1413,26 @@ fn spawn_pipe_fallback(
                             Err(_) => break,
                         };
                         let blocks = parse_fn(&line);
+                        // A1 — the terminal `result` line carries the run's
+                        // token usage (+ claude's USD cost). Record it to
+                        // cost_records so CLI runs show up in the Dashboard
+                        // (previously only the GLM kernel path was booked). The
+                        // all-zero guard drops auth-failure error results that
+                        // genuinely burned no tokens.
+                        if let Some(usage) = extract_pty_usage(&line) {
+                            if usage.input_tokens > 0
+                                || usage.output_tokens > 0
+                                || usage.cost_usd.unwrap_or(0.0) > 0.0
+                            {
+                                record_pty_usage(
+                                    db_reader.clone(),
+                                    &sid_reader,
+                                    &agent_str_reader,
+                                    &model_str_reader,
+                                    &usage,
+                                );
+                            }
+                        }
                         if blocks.is_empty() {
                             continue; // system / api_retry noise — neither channel cares
                         }
@@ -2684,6 +2826,83 @@ mod tests {
                 secs: 0
             }],
         );
+    }
+
+    // ---- A1: extract_pty_usage (CLI result → cost_records seam) ----
+
+    #[test]
+    fn extract_pty_usage_claude_stats_with_cost() {
+        // claude result: tokens nested under `stats`, USD cost top-level.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":12000,"stats":{"total_tokens":1500,"input_tokens":1000,"output_tokens":500},"total_cost_usd":0.0123,"session_id":"abc"}"#;
+        assert_eq!(
+            extract_pty_usage(line),
+            Some(PtyUsage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                cost_usd: Some(0.0123),
+            }),
+        );
+    }
+
+    #[test]
+    fn extract_pty_usage_qwen_top_level_usage_no_cost() {
+        // qwen result: tokens under top-level `usage`; never reports cost.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":8000,"usage":{"input_tokens":2200,"output_tokens":300}}"#;
+        assert_eq!(
+            extract_pty_usage(line),
+            Some(PtyUsage {
+                input_tokens: 2200,
+                output_tokens: 300,
+                cost_usd: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn extract_pty_usage_gemini_nested_stats_no_cost() {
+        // gemini result: tokens nested under `stats` (same path as claude), no
+        // cost field. Verifies the stats-first lookup covers gemini too.
+        let line = r#"{"type":"result","status":"success","stats":{"duration_ms":45000,"total_tokens":900,"input_tokens":700,"output_tokens":200}}"#;
+        assert_eq!(
+            extract_pty_usage(line),
+            Some(PtyUsage {
+                input_tokens: 700,
+                output_tokens: 200,
+                cost_usd: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn extract_pty_usage_non_result_and_malformed_return_none() {
+        // assistant / system / user lines and malformed JSON carry no usage.
+        assert_eq!(extract_pty_usage(r#"{"type":"assistant","message":{"content":[]}}"#), None);
+        assert_eq!(extract_pty_usage(r#"{"type":"system","subtype":"init"}"#), None);
+        assert_eq!(extract_pty_usage("not json"), None);
+        assert_eq!(extract_pty_usage(""), None);
+    }
+
+    #[test]
+    fn extract_pty_usage_result_without_token_fields_returns_none() {
+        // A result with neither stats nor usage → nothing bookable → None.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":100}"#;
+        assert_eq!(extract_pty_usage(line), None);
+    }
+
+    #[test]
+    fn extract_pty_usage_all_zero_error_result_is_some_but_filtered_upstream() {
+        // The auth-failure error result carries explicit 0/0 tokens. extract
+        // returns Some(0,0,None) — honest about what the CLI reported — and the
+        // call site's `> 0` guard drops it so it never books a phantom row.
+        // (cline claude-code.ts:177: input_tokens recorded verbatim incl. cache.)
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let usage = extract_pty_usage(line).expect("explicit zeros are still Some");
+        assert_eq!(usage, PtyUsage { input_tokens: 0, output_tokens: 0, cost_usd: None });
+        // The guard the reader applies:
+        let bookable = usage.input_tokens > 0
+            || usage.output_tokens > 0
+            || usage.cost_usd.unwrap_or(0.0) > 0.0;
+        assert!(!bookable, "all-zero result must not book a cost row");
     }
 
     #[test]
