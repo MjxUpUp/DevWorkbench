@@ -72,13 +72,15 @@ impl UserCommandHook {
     /// into the same HookManager (we pre-filter by event at load time, but keep
     /// the guard defensive).
     fn matches(&self, ev: &HookEvent) -> bool {
-        match (&self.event, ev) {
-            (UserHookEvent::UserPromptSubmit, HookEvent::UserPromptSubmit { .. }) => true,
-            (UserHookEvent::PreToolUse, HookEvent::PreToolUse { .. }) => true,
-            (UserHookEvent::PostToolUse, HookEvent::PostToolUse { .. }) => true,
-            (UserHookEvent::Stop, HookEvent::Stop { .. }) => true,
-            _ => false,
-        }
+        matches!(
+            (&self.event, ev),
+            (
+                UserHookEvent::UserPromptSubmit,
+                HookEvent::UserPromptSubmit { .. }
+            ) | (UserHookEvent::PreToolUse, HookEvent::PreToolUse { .. })
+                | (UserHookEvent::PostToolUse, HookEvent::PostToolUse { .. })
+                | (UserHookEvent::Stop, HookEvent::Stop { .. })
+        )
     }
 
     /// Should this hook fire for `ev`? Event-bound check first, then — for tool
@@ -123,7 +125,7 @@ impl UserCommandHook {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|');
         if is_simple {
-            if let Some(_) = m.find('|') {
+            if m.find('|').is_some() {
                 return m.split('|').any(|seg| seg.trim() == match_query);
             }
             return m == match_query;

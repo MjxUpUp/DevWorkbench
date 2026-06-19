@@ -68,7 +68,7 @@ pub fn parse_mcp_config(content: &str) -> Result<McpConfigFile, AppError> {
                     })
                     .collect()
             })
-            .unwrap_or_else(|| crate::models::AgentType::all());
+            .unwrap_or_else(crate::models::AgentType::all);
 
         servers.push(crate::models::McpServerConfig {
             name: name.clone(),
@@ -265,7 +265,10 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         assert_eq!(loaded.servers.len(), 1);
         assert_eq!(loaded.servers[0].name, "github");
         assert_eq!(loaded.servers[0].env.len(), 2);
-        assert_eq!(loaded.servers[0].env.get("API_KEY"), Some(&"secret123".to_string()));
+        assert_eq!(
+            loaded.servers[0].env.get("API_KEY"),
+            Some(&"secret123".to_string())
+        );
     }
 
     #[test]
@@ -289,7 +292,10 @@ command = "y"
         assert!(!config.servers[0].enabled, "a disabled");
         assert!(set_server_enabled(&mut config, "b", true));
         assert!(config.servers[1].enabled, "b enabled");
-        assert!(!set_server_enabled(&mut config, "ghost", true), "missing → false");
+        assert!(
+            !set_server_enabled(&mut config, "ghost", true),
+            "missing → false"
+        );
     }
 
     #[test]
@@ -318,7 +324,13 @@ target_agents = ["claude"]
         assert!(s.enabled, "enabled preserved across update");
         assert_eq!(s.target_agents.len(), 1, "target_agents preserved");
         assert!(
-            !update_server(&mut config, "ghost", "z".into(), vec![], std::collections::HashMap::new()),
+            !update_server(
+                &mut config,
+                "ghost",
+                "z".into(),
+                vec![],
+                std::collections::HashMap::new()
+            ),
             "missing → false"
         );
     }

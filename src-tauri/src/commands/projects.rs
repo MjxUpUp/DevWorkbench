@@ -50,9 +50,14 @@ const PROJECT_COLUMNS: &str = "\
     last_opened_at, starred, created_at, last_opened_tools, workspace_tools";
 
 fn load_all_projects(conn: &rusqlite::Connection) -> Result<Vec<Project>, String> {
-    let sql = format!("SELECT {} FROM projects ORDER BY created_at DESC", PROJECT_COLUMNS);
+    let sql = format!(
+        "SELECT {} FROM projects ORDER BY created_at DESC",
+        PROJECT_COLUMNS
+    );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| row_to_project(row)).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], row_to_project)
+        .map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for p in rows {
         result.push(p.map_err(|e| e.to_string())?);
@@ -72,7 +77,10 @@ pub fn load_projects(db: State<'_, DbState>) -> Result<Vec<Project>, String> {
 pub fn add_project(db: State<'_, DbState>, project: Project) -> Result<Vec<Project>, String> {
     let conn = db.get().map_err(|e| e.to_string())?;
     conn.execute(
-        &format!("INSERT OR IGNORE INTO projects ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", PROJECT_COLUMNS),
+        &format!(
+            "INSERT OR IGNORE INTO projects ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            PROJECT_COLUMNS
+        ),
         params![
             project.id,
             project.name,
@@ -87,14 +95,16 @@ pub fn add_project(db: State<'_, DbState>, project: Project) -> Result<Vec<Proje
             serde_json::to_string(&project.last_opened_tools).map_err(|e| e.to_string())?,
             serde_json::to_string(&project.workspace_tools).map_err(|e| e.to_string())?,
         ],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     load_all_projects(&conn)
 }
 
 #[tauri::command]
 pub fn remove_project(db: State<'_, DbState>, id: String) -> Result<Vec<Project>, String> {
     let conn = db.get().map_err(|e| e.to_string())?;
-    let rows = conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
+    let rows = conn
+        .execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     if rows == 0 {
         return Err(format!("项目 {} 不存在", id));
@@ -103,7 +113,11 @@ pub fn remove_project(db: State<'_, DbState>, id: String) -> Result<Vec<Project>
 }
 
 #[tauri::command]
-pub fn update_project(db: State<'_, DbState>, id: String, patch: serde_json::Value) -> Result<Vec<Project>, String> {
+pub fn update_project(
+    db: State<'_, DbState>,
+    id: String,
+    patch: serde_json::Value,
+) -> Result<Vec<Project>, String> {
     let conn = db.get().map_err(|e| e.to_string())?;
 
     let mut set_clauses: Vec<String> = Vec::new();
@@ -122,9 +136,14 @@ pub fn update_project(db: State<'_, DbState>, id: String, patch: serde_json::Val
         param_values.push(Box::new(v.to_string()));
     }
     if let Some(arr) = patch.get("tags").and_then(|v| v.as_array()) {
-        let tags: Vec<String> = arr.iter().filter_map(|t| t.as_str().map(String::from)).collect();
+        let tags: Vec<String> = arr
+            .iter()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
         set_clauses.push("tags = ?".into());
-        param_values.push(Box::new(serde_json::to_string(&tags).map_err(|e| e.to_string())?));
+        param_values.push(Box::new(
+            serde_json::to_string(&tags).map_err(|e| e.to_string())?,
+        ));
     }
     if let Some(v) = patch.get("coverImage").or_else(|| patch.get("cover_image")) {
         let val: Option<String> = v.as_str().map(String::from);
@@ -135,17 +154,32 @@ pub fn update_project(db: State<'_, DbState>, id: String, patch: serde_json::Val
         set_clauses.push("starred = ?".into());
         param_values.push(Box::new(v as i32));
     }
-    if let Some(arr) = patch.get("workspaceTools").or_else(|| patch.get("workspace_tools")).and_then(serde_json::Value::as_array) {
-        let tools: Vec<String> = arr.iter().filter_map(|t| t.as_str().map(String::from)).collect();
+    if let Some(arr) = patch
+        .get("workspaceTools")
+        .or_else(|| patch.get("workspace_tools"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let tools: Vec<String> = arr
+            .iter()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
         set_clauses.push("workspace_tools = ?".into());
-        param_values.push(Box::new(serde_json::to_string(&tools).map_err(|e| e.to_string())?));
+        param_values.push(Box::new(
+            serde_json::to_string(&tools).map_err(|e| e.to_string())?,
+        ));
     }
 
     if !set_clauses.is_empty() {
-        let sql = format!("UPDATE projects SET {} WHERE id = ?", set_clauses.join(", "));
+        let sql = format!(
+            "UPDATE projects SET {} WHERE id = ?",
+            set_clauses.join(", ")
+        );
         param_values.push(Box::new(id.clone()));
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let rows = conn.execute(&sql, param_refs.as_slice()).map_err(|e| e.to_string())?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = conn
+            .execute(&sql, param_refs.as_slice())
+            .map_err(|e| e.to_string())?;
         if rows == 0 {
             return Err(format!("项目 {} 不存在", id));
         }
@@ -161,18 +195,25 @@ pub fn update_project_open(db: State<'_, DbState>, id: String) -> Result<Vec<Pro
     conn.execute(
         "UPDATE projects SET open_count = open_count + 1, last_opened_at = ?1 WHERE id = ?2",
         params![now, id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     load_all_projects(&conn)
 }
 
 #[tauri::command]
-pub fn record_tool_open(db: State<'_, DbState>, id: String, tool_name: String) -> Result<Vec<Project>, String> {
+pub fn record_tool_open(
+    db: State<'_, DbState>,
+    id: String,
+    tool_name: String,
+) -> Result<Vec<Project>, String> {
     let conn = db.get().map_err(|e| e.to_string())?;
-    let tools_json: String = conn.query_row(
-        "SELECT last_opened_tools FROM projects WHERE id = ?1",
-        params![id],
-        |row| row.get(0),
-    ).map_err(|e| format!("项目 {} 不存在: {}", id, e))?;
+    let tools_json: String = conn
+        .query_row(
+            "SELECT last_opened_tools FROM projects WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("项目 {} 不存在: {}", id, e))?;
 
     let mut tools: Vec<String> = serde_json::from_str(&tools_json).unwrap_or_default();
     tools.retain(|t| t != &tool_name);
@@ -181,8 +222,12 @@ pub fn record_tool_open(db: State<'_, DbState>, id: String, tool_name: String) -
 
     conn.execute(
         "UPDATE projects SET last_opened_tools = ?1 WHERE id = ?2",
-        params![serde_json::to_string(&tools).map_err(|e| e.to_string())?, id],
-    ).map_err(|e| e.to_string())?;
+        params![
+            serde_json::to_string(&tools).map_err(|e| e.to_string())?,
+            id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
 
     load_all_projects(&conn)
 }
@@ -228,7 +273,10 @@ pub fn load_settings_from_db(conn: &rusqlite::Connection) -> Result<AppSettings,
 }
 
 /// Internal settings saver — can be called from other modules with a Connection.
-pub fn save_settings_to_db(conn: &rusqlite::Connection, settings: &AppSettings) -> Result<(), String> {
+pub fn save_settings_to_db(
+    conn: &rusqlite::Connection,
+    settings: &AppSettings,
+) -> Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO settings (id, scan_directories, tool_paths, theme, preferred_terminal, cli_flags) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
         params![

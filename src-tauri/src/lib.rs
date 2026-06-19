@@ -1,20 +1,25 @@
-pub mod commands;
-pub mod models;
-pub mod agents;
-pub mod error;
-pub mod db;
-pub mod migrate;
+// Tauri #[command] fns and internal spawn/build/CRUD helpers legitimately take
+// many params (framework convention + inherent complexity); refactoring them to
+// param structs is low-value and out of scope. Suppressed project-wide.
+#![allow(clippy::too_many_arguments)]
+
 pub mod activity;
-pub mod knowledge;
+pub mod agents;
+pub mod commands;
 pub mod config;
-pub mod quality;
-pub mod mcp;
-pub mod skills;
 pub mod cost;
-pub mod trace;
-pub mod slash_commands;
-pub mod user_hooks;
+pub mod db;
+pub mod error;
 pub mod kernel_impl;
+pub mod knowledge;
+pub mod mcp;
+pub mod migrate;
+pub mod models;
+pub mod quality;
+pub mod skills;
+pub mod slash_commands;
+pub mod trace;
+pub mod user_hooks;
 pub mod utils;
 
 use tauri::Manager;
@@ -45,9 +50,8 @@ pub fn run() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let line = format!(
-            "[{secs}] [PANIC] thread panicked at {location}: {msg}\nbacktrace:\n{bt}"
-        );
+        let line =
+            format!("[{secs}] [PANIC] thread panicked at {location}: {msg}\nbacktrace:\n{bt}");
         log::error!("{line}");
         eprintln!("{line}");
         // Flush-safe mirror of the panic to a dedicated file — the buffered
@@ -81,34 +85,32 @@ pub fn run() {
         .setup(|app| {
             {
                 #[cfg(debug_assertions)]
-                let log_builder = tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info);
+                let log_builder =
+                    tauri_plugin_log::Builder::default().level(log::LevelFilter::Info);
                 #[cfg(not(debug_assertions))]
                 let log_builder = tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
-                    .targets([
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
-                    ]);
+                    .targets([tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                    )]);
                 app.handle().plugin(log_builder.build())?;
             }
 
             // Initialize SQLite database (connection pool + schema + pragmas)
             let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
             let db_path = data_dir.join("data.db");
-            let db_state = db::DbState::open(&db_path)
-                .expect("Failed to initialize database");
+            let db_state = db::DbState::open(&db_path).expect("Failed to initialize database");
 
             // Run migrations on one pooled connection (idempotent).
             {
-                let conn = db_state.get()
+                let conn = db_state
+                    .get()
                     .expect("Failed to get DB connection from pool for migrations");
 
-                migrate::migrate_v6_to_v7(&conn, &data_dir)
-                    .expect("Failed to run data migration");
+                migrate::migrate_v6_to_v7(&conn, &data_dir).expect("Failed to run data migration");
                 migrate::migrate_v7_to_v8(&conn, &data_dir)
                     .expect("Failed to run projects/settings migration");
-                migrate::migrate_v8_to_v9(&conn)
-                    .expect("Failed to run v8 to v9 schema migration");
+                migrate::migrate_v8_to_v9(&conn).expect("Failed to run v8 to v9 schema migration");
                 migrate::migrate_v9_to_v10(&conn)
                     .expect("Failed to run v9 to v10 conversation migration");
                 migrate::migrate_v10_to_v11(&conn)
@@ -201,7 +203,7 @@ pub fn run() {
             commands::agents::read_session_output_cmd,
             commands::agents::list_conversations,
             commands::agents::update_conversation,
-                                                                        commands::agents::pty_write_cmd,
+            commands::agents::pty_write_cmd,
             commands::agents::pty_resize_cmd,
             commands::agents::get_project_activity,
             commands::agents::get_recent_activity,

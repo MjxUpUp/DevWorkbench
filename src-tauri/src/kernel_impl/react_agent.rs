@@ -33,6 +33,12 @@ use crate::kernel_impl::llm_recovery::{
 };
 use crate::trace::{truncate, LlmTrace, TraceSink};
 
+/// Injectable audit callback signature (project audit: cargo check + assertion
+/// weakening scan). Shared by the config field, the builder, and test stubs.
+type AuditFn = Arc<dyn Fn(&std::path::Path, &str) -> Value + Send + Sync>;
+/// Per-step model router callback: (history, base_model) -> chosen model_id.
+type ModelRouterFn = Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // GlmChatModel
 // ---------------------------------------------------------------------------
@@ -1085,12 +1091,12 @@ pub struct ReactAgent {
     max_verify: usize,
     /// Injectable audit fn (tests stub it; production leaves None → uses
     /// honesty::audit_project). Signature matches audit_project.
-    audit_fn: Option<Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>>,
+    audit_fn: Option<AuditFn>,
     /// Per-step model router (v1.2 T9). If set, before each `stream` call the
     /// loop asks it `(&history, base_model) -> model_id` and overrides
     /// `opts.model`. Same-provider routing (glm-4.6 ↔ glm-4-flash), so
     /// endpoint/key stay constant. None = single fixed model (the old behavior).
-    model_router: Option<Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>>,
+    model_router: Option<ModelRouterFn>,
     /// Cost budget hard-limit check (v1.2 T10). If set, called at the top of
     /// every turn; returning true halts the run gracefully
     /// (`FatalReason::Budget`) before spending another LLM call. None = unlimited.
@@ -1205,10 +1211,7 @@ impl ReactAgent {
 
     /// Inject a custom audit function (tests). Production leaves this unset so
     /// the agent uses `honesty::audit_project`.
-    pub fn with_audit_fn(
-        mut self,
-        f: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync>,
-    ) -> Self {
+    pub fn with_audit_fn(mut self, f: AuditFn) -> Self {
         self.audit_fn = Some(f);
         self
     }
@@ -1218,10 +1221,7 @@ impl ReactAgent {
     /// overrides `opts.model` for that turn. Production wires
     /// [`crate::kernel_impl::model_router::route_step`] (rule-based glm-4-flash
     /// for low-stakes turns); tests inject a stub.
-    pub fn with_model_router(
-        mut self,
-        f: Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>,
-    ) -> Self {
+    pub fn with_model_router(mut self, f: ModelRouterFn) -> Self {
         self.model_router = Some(f);
         self
     }
@@ -1641,7 +1641,7 @@ impl kernel_core::Agent for ReactAgent {
                     match bound.stream(&history, &opts) {
                         Ok(s) => break Ok(s),
                         Err(e) => {
-                            let err = Error::from(e);
+                            let err = e;
                             if should_retry(&err, attempt) {
                                 log::warn!(
                                     "[ReactAgent] transient LLM error, retry {}/{}: {}",
@@ -1677,7 +1677,7 @@ impl kernel_core::Agent for ReactAgent {
                         Err(e) => {
                             // Mid-stream drop: tokens already emitted, can't
                             // cleanly retry the partial turn → degrade.
-                            let err = Error::from(e);
+                            let err = e;
                             degraded = Some(match classify_llm_error(&err) {
                                 LlmErrorKind::Fatal(r) => r,
                                 LlmErrorKind::Retryable => FatalReason::Generic,
@@ -2680,8 +2680,7 @@ mod tests {
         // router before each stream call.
         let model = RecordingModel::new(Message::assistant("done"));
         let seen = model.seen.clone();
-        let router: Arc<dyn Fn(&[Message], &str) -> String + Send + Sync> =
-            Arc::new(|_, _| "routed-sentinel".to_string());
+        let router: ModelRouterFn = Arc::new(|_, _| "routed-sentinel".to_string());
         let agent = ReactAgent::new(model, ToolRegistry::new(), "sys").with_model_router(router);
         let s = agent.run(go_input()).unwrap();
         let outcome = collect_outcome(s).await.expect("must emit Done");
@@ -3211,14 +3210,13 @@ mod tests {
         // (verify_count == max_verify) and completes.
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_fn = calls.clone();
-        let audit_fn: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync> =
-            Arc::new(move |_, _| {
-                calls_for_fn.fetch_add(1, Ordering::SeqCst);
-                serde_json::json!({
-                    "status": "failed",
-                    "findings": [{"rule": "test", "severity": "error", "message": "broken"}]
-                })
-            });
+        let audit_fn: AuditFn = Arc::new(move |_, _| {
+            calls_for_fn.fetch_add(1, Ordering::SeqCst);
+            serde_json::json!({
+                "status": "failed",
+                "findings": [{"rule": "test", "severity": "error", "message": "broken"}]
+            })
+        });
         let ctx = kernel_core::ToolContext {
             working_dir: Some("/tmp/nonexistent".into()),
             conversation_id: None,
@@ -3243,11 +3241,10 @@ mod tests {
         let model = ScriptedModel::new(vec![Message::assistant("done")]);
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_fn = calls.clone();
-        let audit_fn: Arc<dyn Fn(&std::path::Path, &str) -> serde_json::Value + Send + Sync> =
-            Arc::new(move |_, _| {
-                calls_for_fn.fetch_add(1, Ordering::SeqCst);
-                serde_json::json!({"status": "failed"})
-            });
+        let audit_fn: AuditFn = Arc::new(move |_, _| {
+            calls_for_fn.fetch_add(1, Ordering::SeqCst);
+            serde_json::json!({"status": "failed"})
+        });
         let ctx = kernel_core::ToolContext {
             working_dir: Some("/tmp/nonexistent".into()),
             conversation_id: None,

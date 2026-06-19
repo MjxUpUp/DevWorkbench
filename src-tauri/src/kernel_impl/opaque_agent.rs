@@ -19,8 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
-    Error,
-    Agent, AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
+    Agent, AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus, Error,
 };
 use tauri::Listener;
 
@@ -70,7 +69,6 @@ impl OpaqueAgent {
     }
 }
 
-
 /// RAII guard that unregisters Tauri event listeners on drop. Ensures
 /// listeners are cleaned up even when the agent stream is dropped early
 /// (cancellation), fixing the leak where unlisten was only reached after Done.
@@ -88,7 +86,7 @@ impl ListenerGuard {
 impl Drop for ListenerGuard {
     fn drop(&mut self) {
         for id in self.ids.drain(..) {
-            let _ = self.app.unlisten(id);
+            self.app.unlisten(id);
         }
     }
 }
@@ -113,7 +111,8 @@ impl Agent for OpaqueAgent {
     fn run(
         &self,
         input: AgentInput,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
+    ) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error>
+    {
         let app = self.app.clone();
         let processes = self.processes.clone();
         let db = self.db.clone();
@@ -122,10 +121,7 @@ impl Agent for OpaqueAgent {
             agent_type,
             AgentType::ClaudeCode | AgentType::GeminiCli | AgentType::QwenCode
         );
-        let working_dir = input
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| ".".to_string());
+        let working_dir = input.working_dir.clone().unwrap_or_else(|| ".".to_string());
         let prompt = input.prompt.clone();
         let model = input.model.clone();
         let resume_from = input.resume_from.clone();
@@ -197,7 +193,7 @@ impl Agent for OpaqueAgent {
                     // an AppHandle. The lock spans the decode (pending IS the FIFO queue);
                     // no contention in practice — each session owns its own pending and the
                     // reader thread emits events serially.
-                    for ae in decode_agent_event_payload(&v, &sid_ev, &mut *guard) {
+                    for ae in decode_agent_event_payload(&v, &sid_ev, &mut guard) {
                         let _ = tx_ev.try_send(AgentMsg::Structured(ae));
                     }
                 });
@@ -340,8 +336,7 @@ fn decode_agent_event_payload(
     let Some(event_val) = payload.get("event") else {
         return Vec::new();
     };
-    let Ok(wire) =
-        serde_json::from_value::<crate::agents::pty::ChatStreamEvent>(event_val.clone())
+    let Ok(wire) = serde_json::from_value::<crate::agents::pty::ChatStreamEvent>(event_val.clone())
     else {
         return Vec::new();
     };
@@ -368,10 +363,7 @@ fn decode_agent_event_payload(
 /// Raw-channel-specific invariant with no claude counterpart — is unit-testable
 /// without an AppHandle. NO `pending: &mut VecDeque` param (unlike the claude
 /// helper): the Raw path has no FIFO ToolUse↔ToolResult pairing to maintain.
-fn decode_pty_output_payload(
-    payload: &serde_json::Value,
-    session_id: &str,
-) -> Option<String> {
+fn decode_pty_output_payload(payload: &serde_json::Value, session_id: &str) -> Option<String> {
     if payload.get("sessionId").and_then(|s| s.as_str()) != Some(session_id) {
         return None;
     }
@@ -447,7 +439,10 @@ mod tests {
         };
         assert!(caps.interruptible);
         assert!(caps.resumable);
-        assert!(!caps.injectable_tools, "opaque agents reject injected tools");
+        assert!(
+            !caps.injectable_tools,
+            "opaque agents reject injected tools"
+        );
     }
 
     // ---- decode_agent_event_payload (agent:event listener decode layer) ----
@@ -502,7 +497,11 @@ mod tests {
         });
         let out = decode_agent_event_payload(&payload, "s1", &mut pending);
         assert!(out.is_empty(), "other-session event must be filtered");
-        assert_eq!(pending.len(), 1, "pending must be untouched for filtered events");
+        assert_eq!(
+            pending.len(),
+            1,
+            "pending must be untouched for filtered events"
+        );
         assert_eq!(pending.front().unwrap().0, "A");
     }
 
@@ -580,14 +579,16 @@ mod tests {
                 "sessionId": "s1",
                 "event": { "kind": "tool_use", "name": "Read", "input": { "file_path": "/x" } },
             }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         let succeeded = decode_agent_event_payload(
             &json!({
                 "sessionId": "s1",
                 "event": { "kind": "tool_result", "content": "file body", "is_error": false },
             }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         assert_eq!(started.len(), 1);
         assert_eq!(succeeded.len(), 1);
@@ -605,23 +606,30 @@ mod tests {
         let mut pending = VecDeque::new();
         let text = decode_agent_event_payload(
             &json!({ "sessionId": "s1", "event": { "kind": "text", "content": "reading" } }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         let tool_use = decode_agent_event_payload(
             &json!({ "sessionId": "s1", "event": { "kind": "tool_use", "name": "Read", "input": {} } }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         let tool_res = decode_agent_event_payload(
             &json!({ "sessionId": "s1", "event": { "kind": "tool_result", "content": "ok", "is_error": false } }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         let result = decode_agent_event_payload(
             &json!({ "sessionId": "s1", "event": { "kind": "result", "is_error": false, "secs": 3 } }),
-            "s1", &mut pending,
+            "s1",
+            &mut pending,
         );
         let all: Vec<AgentEvent> = [text, tool_use, tool_res].into_iter().flatten().collect();
         assert_eq!(all.len(), 3, "text + tool_use + tool_result → 3 events");
-        assert!(result.is_empty(), "Result block must NOT emit (Done owned by agent:completed)");
+        assert!(
+            result.is_empty(),
+            "Result block must NOT emit (Done owned by agent:completed)"
+        );
         match &all[0] {
             AgentEvent::Token(s) => assert_eq!(s, "reading"),
             other => panic!("expected Token, got {:?}", other),
@@ -636,10 +644,8 @@ mod tests {
     #[test]
     fn decode_pty_output_matching_session_emits_decoded_text() {
         // Happy path: matching session + ASCII byte array → decoded string.
-        let out = decode_pty_output_payload(
-            &json!({ "sessionId": "s1", "data": [104, 105] }),
-            "s1",
-        );
+        let out =
+            decode_pty_output_payload(&json!({ "sessionId": "s1", "data": [104, 105] }), "s1");
         assert_eq!(out.as_deref(), Some("hi"));
     }
 
@@ -649,10 +655,7 @@ mod tests {
         // each listening the SAME global pty:output channel filtered by its own
         // sid. A payload for a different session must yield None (listener
         // skips) — symmetric to the claude channel's cross-session guard.
-        let out = decode_pty_output_payload(
-            &json!({ "sessionId": "other", "data": [104] }),
-            "s1",
-        );
+        let out = decode_pty_output_payload(&json!({ "sessionId": "other", "data": [104] }), "s1");
         assert!(out.is_none());
     }
 
@@ -661,10 +664,8 @@ mod tests {
         // `==` is EXACT, not starts_with. Two UUID-like sessions sharing a
         // prefix ("s1" vs "s1prefix") must NOT cross-trigger. (The claude
         // channel's test set is missing this boundary — added here on raw.)
-        let out = decode_pty_output_payload(
-            &json!({ "sessionId": "s1prefix", "data": [104] }),
-            "s1",
-        );
+        let out =
+            decode_pty_output_payload(&json!({ "sessionId": "s1prefix", "data": [104] }), "s1");
         assert!(out.is_none());
     }
 
@@ -677,16 +678,12 @@ mod tests {
     #[test]
     fn decode_pty_output_data_not_array() {
         // data as a string or number is not a byte array → None.
-        assert!(decode_pty_output_payload(
-            &json!({ "sessionId": "s1", "data": "hi" }),
-            "s1",
-        )
-        .is_none());
-        assert!(decode_pty_output_payload(
-            &json!({ "sessionId": "s1", "data": 42 }),
-            "s1",
-        )
-        .is_none());
+        assert!(
+            decode_pty_output_payload(&json!({ "sessionId": "s1", "data": "hi" }), "s1",).is_none()
+        );
+        assert!(
+            decode_pty_output_payload(&json!({ "sessionId": "s1", "data": 42 }), "s1",).is_none()
+        );
     }
 
     #[test]
@@ -716,10 +713,8 @@ mod tests {
         // (Some(256)), but u8::try_from(256) rejects it — so it drops via the
         // SAME u8::try_from branch as the integer 256 above, NOT via the
         // as_u64-None branch that 1.5 takes. Pinning the distinction.
-        let float_out = decode_pty_output_payload(
-            &json!({ "sessionId": "s1", "data": [256.0] }),
-            "s1",
-        );
+        let float_out =
+            decode_pty_output_payload(&json!({ "sessionId": "s1", "data": [256.0] }), "s1");
         assert_eq!(float_out.as_deref(), Some(""));
     }
 
@@ -730,10 +725,7 @@ mod tests {
         // claude channel has no byte decode). Pins: no panic, replacement
         // semantics — a CLI emitting non-UTF-8 bytes (Windows paths, broken
         // emoji) still surfaces, just with U+FFFD.
-        let out = decode_pty_output_payload(
-            &json!({ "sessionId": "s1", "data": [255, 65] }),
-            "s1",
-        );
+        let out = decode_pty_output_payload(&json!({ "sessionId": "s1", "data": [255, 65] }), "s1");
         assert_eq!(out.as_deref(), Some("\u{FFFD}A"));
     }
 

@@ -74,7 +74,8 @@ impl SkillTool {
 
     /// Parse a single SKILL.md file into a SkillTool.
     pub fn parse_file(path: &Path) -> Result<Self, Error> {
-        let raw = std::fs::read_to_string(path).map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
         Self::parse_text(&raw, path.to_path_buf())
     }
 
@@ -82,7 +83,10 @@ impl SkillTool {
     /// `parse_text` derives `base_dir` from `path.parent()` itself, so callers
     /// (including tests) keep the two-argument signature.
     pub fn parse_text(raw: &str, path: PathBuf) -> Result<Self, Error> {
-        let base_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone());
+        let base_dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.clone());
         let (fm, body) = split_frontmatter(raw);
         // Try strict YAML first — handles well-formed frontmatter including the
         // optional `metadata:` block. But third-party SKILL.md files in the
@@ -258,7 +262,9 @@ fn collect_resources(
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else { continue };
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
         // Skip dotfiles (VCS / editor cruft) — convention hygiene.
         if name.starts_with('.') {
             continue;
@@ -337,7 +343,11 @@ fn format_resources_appendix(resources: &[SkillResource]) -> String {
                 break;
             }
             let large_tag = if r.large { " (large)" } else { "" };
-            s.push_str(&format!("- {}{large_tag}  ->  {}\n", r.rel, r.abs.display()));
+            s.push_str(&format!(
+                "- {}{large_tag}  ->  {}\n",
+                r.rel,
+                r.abs.display()
+            ));
             emitted += 1;
         }
     }
@@ -561,7 +571,11 @@ mod tests {
     #[test]
     fn invoke_lists_scripts_section() {
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         write_file(dir.path(), "scripts/run.sh", "#!/bin/bash\necho hi");
 
         let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
@@ -575,9 +589,17 @@ mod tests {
     #[test]
     fn invoke_lists_assets_section() {
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         // Binary bytes incl. a NUL — assets may be binary (no sniff on assets/).
-        write_file_bytes(dir.path(), "assets/icon.png", &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x0D]);
+        write_file_bytes(
+            dir.path(),
+            "assets/icon.png",
+            &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x0D],
+        );
 
         let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
         let out = futures::executor::block_on(t.invoke("", &ToolContext::default())).unwrap();
@@ -590,7 +612,11 @@ mod tests {
     #[test]
     fn invoke_resource_paths_absolute_and_native() {
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         write_file(dir.path(), "references/x.md", "X");
 
         let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
@@ -629,7 +655,11 @@ mod tests {
         // A SKILL.md at a repo root sits next to unrelated source — the scanner
         // must only touch references/scripts/assets, never src/.
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         write_file(dir.path(), "src/main.rs", "fn main(){}");
         write_file(dir.path(), "references/x.md", "X");
 
@@ -644,7 +674,11 @@ mod tests {
     #[test]
     fn scan_recurses_into_nested_resource_dirs() {
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         write_file(dir.path(), "references/sub/deep.md", "deep");
 
         let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
@@ -668,7 +702,11 @@ mod tests {
     fn invoke_handles_empty_references_dir() {
         // An empty references/ dir must not crash and must not emit a section.
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         std::fs::create_dir_all(dir.path().join("references")).unwrap();
 
         let t = SkillTool::parse_file(&dir.path().join("SKILL.md")).unwrap();
@@ -684,7 +722,11 @@ mod tests {
         // references/ is text-only: a NUL-byte file is skipped, a sibling text
         // file is kept. (Assets have no such sniff — see invoke_lists_assets_section.)
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         write_file_bytes(dir.path(), "references/img.png", &[0x89, 0x50, 0x00, 0x0D]);
         write_file(dir.path(), "references/notes.md", "text");
 
@@ -699,7 +741,11 @@ mod tests {
     fn resource_list_caps_at_max_with_more_indicator() {
         // 70 references exceeds SKILL_MAX_RESOURCES (64) → 64 lines + "(6 more)".
         let dir = tempdir().unwrap();
-        write_file(dir.path(), "SKILL.md", "---\nname: s\ndescription: d\n---\n\n# Body\n");
+        write_file(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: s\ndescription: d\n---\n\n# Body\n",
+        );
         for i in 0..70 {
             write_file(dir.path(), &format!("references/r{i:02}.md"), "x");
         }
@@ -723,7 +769,9 @@ mod tests {
     fn loads_real_global_skills_without_skipping() {
         let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
         let Some(home) = home else { return };
-        let dir = std::path::PathBuf::from(home).join(".agents").join("skills");
+        let dir = std::path::PathBuf::from(home)
+            .join(".agents")
+            .join("skills");
         if !dir.is_dir() {
             eprintln!("no ~/.agents/skills on this machine; nothing to assert");
             return;
@@ -737,7 +785,7 @@ mod tests {
             "session-continuity",
         ] {
             assert!(
-                names.iter().any(|n| *n == expected),
+                names.contains(&expected),
                 "{expected} still missing — frontmatter fallback did not recover it. Loaded: {names:?}"
             );
         }
@@ -751,14 +799,22 @@ mod tests {
     fn invoke_real_multifile_skill_lists_references() {
         let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
         let Some(home) = home else { return };
-        let catalog = std::path::PathBuf::from(home).join(".agents").join("skills");
+        let catalog = std::path::PathBuf::from(home)
+            .join(".agents")
+            .join("skills");
         let skills = SkillTool::load_dir(&catalog);
         let Some(crg) = skills.into_iter().find(|s| s.name == "code-review-gate") else {
             eprintln!("no code-review-gate skill installed; nothing to assert");
             return;
         };
         let out = futures::executor::block_on(crg.invoke("", &ToolContext::default())).unwrap();
-        assert!(out.contains("References"), "multi-file skill must list its references: {out}");
-        assert!(out.contains("references/"), "expected reference paths in the manifest: {out}");
+        assert!(
+            out.contains("References"),
+            "multi-file skill must list its references: {out}"
+        );
+        assert!(
+            out.contains("references/"),
+            "expected reference paths in the manifest: {out}"
+        );
     }
 }

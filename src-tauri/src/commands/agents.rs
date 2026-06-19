@@ -1,17 +1,17 @@
 use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
+use crate::agents::kernel_tasks::KernelTasks;
 use crate::agents::pty;
+use crate::agents::react_chat;
 use crate::agents::session;
 use crate::db::DbState;
 use crate::error::AppError;
-use crate::models::{AgentType, Conversation, Session};
-use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
-use crate::agents::kernel_tasks::KernelTasks;
-use crate::agents::react_chat;
 use crate::kernel_impl::executor;
 use crate::mcp::registry::McpRegistry;
 use crate::models::SessionStatus;
+use crate::models::{AgentType, Conversation, Session};
 use kernel_core::{Agent, AgentEvent, AgentInput, AgentRunStatus};
+use std::sync::Arc;
+use tauri::{Emitter, Manager, State};
 
 /// Tauri managed state wrapping AgentProcesses (PTY-based)
 pub struct AgentState(pub Arc<pty::AgentProcesses>);
@@ -32,7 +32,7 @@ pub fn recommend_agent_for_project(tags: Vec<String>) -> Result<Option<AgentType
 #[tauri::command]
 pub fn load_sessions(db: State<'_, DbState>) -> Result<Vec<Session>, AppError> {
     let conn = db.get()?;
-    crate::agents::session::load_sessions_from_db(&conn).map_err(AppError::from)
+    crate::agents::session::load_sessions_from_db(&conn)
 }
 
 /// Read the FULL (ANSI-stripped) output for a session, for the completed-session terminal view.
@@ -61,7 +61,10 @@ fn expand_slash_command(db: &crate::db::DbState, prompt: String) -> Result<Strin
         .get()
         .map_err(|e| AppError::Config(format!("Lock error: {e}")))?;
     match crate::slash_commands::registry::find_by_name(&conn, &name)? {
-        Some(cmd) => Ok(crate::slash_commands::registry::render_template(&cmd.template, &args)),
+        Some(cmd) => Ok(crate::slash_commands::registry::render_template(
+            &cmd.template,
+            &args,
+        )),
         None => Ok(prompt),
     }
 }
@@ -158,14 +161,31 @@ fn react_chat_driver(
         "[react_chat] driver START sid={session_id} agent={agent_type:?} model={model:?} conv={conversation_id:?}"
     );
     let resolved_conv_id = pty::resolve_or_create_conversation(
-        &db_conn, conversation_id, project_path, prompt, agent_type,
+        &db_conn,
+        conversation_id,
+        project_path,
+        prompt,
+        agent_type,
     )?;
     let session = pty::build_running_session_row(
-        &session_id, project_path, agent_type, prompt, model,
-        &resolved_conv_id, linked_requirement_id, parent_session_id, task_ref,
+        &session_id,
+        project_path,
+        agent_type,
+        prompt,
+        model,
+        &resolved_conv_id,
+        linked_requirement_id,
+        parent_session_id,
+        task_ref,
     );
     pty::register_running_session(
-        &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
+        &db_conn,
+        app,
+        &session,
+        conversation_id,
+        &resolved_conv_id,
+        project_path,
+        agent_type,
     )?;
 
     // Shadow-git checkpoint at session start: snapshot the working tree so the
@@ -202,16 +222,17 @@ fn react_chat_driver(
                     // tracking). Global lessons are cross-project aggregates and
                     // are never purged/decayed by a single project's resolve.
                     let res = crate::quality::experience::replay_to_knowledge(
-                        &conn, project_path, &pending, agent_type,
+                        &conn,
+                        project_path,
+                        &pending,
+                        agent_type,
                     );
-                    let purged =
-                        crate::quality::experience::purge_lessons_for_resolved_reviews(
-                            &conn, &hash, &accepted,
-                        );
-                    let decayed =
-                        crate::quality::experience::decay_confidence_for_resolved_reviews(
-                            &conn, &hash, &resolved,
-                        );
+                    let purged = crate::quality::experience::purge_lessons_for_resolved_reviews(
+                        &conn, &hash, &accepted,
+                    );
+                    let decayed = crate::quality::experience::decay_confidence_for_resolved_reviews(
+                        &conn, &hash, &resolved,
+                    );
                     log::info!(
                         "[experience] replayed {} lessons ({} skipped, {} global), purged {} accepted, decayed {} resolved for {session_id}",
                         res.replayed, res.skipped, res.promoted_global, purged, decayed
@@ -267,9 +288,16 @@ fn react_chat_driver(
             Err(e) => {
                 log::error!("[react_chat] build_react_agent failed for {}: {e}", sid_drv);
                 pty::finalize_session(
-                    &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
-                    SessionStatus::Failed, None,
-                    Some(format!("Agent init failed: {e}")), None, None,
+                    &db_drv,
+                    &app_drv,
+                    &sid_drv,
+                    &pp_drv,
+                    &at_drv,
+                    SessionStatus::Failed,
+                    None,
+                    Some(format!("Agent init failed: {e}")),
+                    None,
+                    None,
                 );
                 return;
             }
@@ -286,9 +314,16 @@ fn react_chat_driver(
             Err(e) => {
                 log::error!("[react_chat] agent.run failed for {}: {e}", sid_drv);
                 pty::finalize_session(
-                    &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
-                    SessionStatus::Failed, None,
-                    Some(format!("Agent run failed: {e}")), None, None,
+                    &db_drv,
+                    &app_drv,
+                    &sid_drv,
+                    &pp_drv,
+                    &at_drv,
+                    SessionStatus::Failed,
+                    None,
+                    Some(format!("Agent run failed: {e}")),
+                    None,
+                    None,
                 );
                 return;
             }
@@ -315,8 +350,16 @@ fn react_chat_driver(
                         Some(final_output.clone())
                     };
                     pty::finalize_session(
-                        &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
-                        SessionStatus::Failed, None, summary, None, None,
+                        &db_drv,
+                        &app_drv,
+                        &sid_drv,
+                        &pp_drv,
+                        &at_drv,
+                        SessionStatus::Failed,
+                        None,
+                        summary,
+                        None,
+                        None,
                     );
                     return;
                 }
@@ -357,7 +400,11 @@ fn react_chat_driver(
         if let Some(kt) = app_drv.try_state::<KernelTasks>() {
             kt.remove(&sid_drv);
         }
-        let summary = if final_output.is_empty() { None } else { Some(final_output) };
+        let summary = if final_output.is_empty() {
+            None
+        } else {
+            Some(final_output)
+        };
 
         // v1.3 T2 + D6: close the long-term-memory loop. A Completed kernel-
         // agent session has no CLI log, so write its knowledge contributions
@@ -372,8 +419,13 @@ fn react_chat_driver(
             if let Ok(conn) = db_drv.get() {
                 let hash = crate::activity::hash_project_path(&pp_drv);
                 let written = crate::kernel_impl::session_reflection::persist_completion_memory(
-                    &conn, &hash, &sid_drv, &prompt_drv,
-                    summary.as_deref(), &final_blocks, &at_drv,
+                    &conn,
+                    &hash,
+                    &sid_drv,
+                    &prompt_drv,
+                    summary.as_deref(),
+                    &final_blocks,
+                    &at_drv,
                 );
                 if written > 0 {
                     log::info!("[react_chat] {written} knowledge entries recorded for {sid_drv}");
@@ -382,8 +434,15 @@ fn react_chat_driver(
         }
 
         pty::finalize_session(
-            &db_drv, &app_drv, &sid_drv, &pp_drv, &at_drv,
-            final_status, final_exit, summary, None,
+            &db_drv,
+            &app_drv,
+            &sid_drv,
+            &pp_drv,
+            &at_drv,
+            final_status,
+            final_exit,
+            summary,
+            None,
             Some(final_blocks),
         );
     });
@@ -399,9 +458,12 @@ fn react_chat_driver(
 // cover listing / renaming / archiving for the sidebar.
 
 #[tauri::command]
-pub fn list_conversations(db: State<'_, DbState>, project_path: String) -> Result<Vec<Conversation>, AppError> {
+pub fn list_conversations(
+    db: State<'_, DbState>,
+    project_path: String,
+) -> Result<Vec<Conversation>, AppError> {
     let conn = db.get()?;
-    session::load_conversations_for_project_db(&conn, &project_path).map_err(AppError::from)
+    session::load_conversations_for_project_db(&conn, &project_path)
 }
 
 #[tauri::command]
@@ -411,7 +473,7 @@ pub fn update_conversation(
     patch: serde_json::Value,
 ) -> Result<(), AppError> {
     let conn = db.get()?;
-    session::update_conversation_db(&conn, &id, patch).map_err(AppError::from)
+    session::update_conversation_db(&conn, &id, patch)
 }
 
 #[tauri::command]
@@ -481,35 +543,48 @@ pub fn pty_resize_cmd(
 
 // Activity commands
 #[tauri::command]
-pub fn get_project_activity(db: State<'_, DbState>, project_path: String) -> Result<Vec<crate::models::ActivityEvent>, AppError> {
+pub fn get_project_activity(
+    db: State<'_, DbState>,
+    project_path: String,
+) -> Result<Vec<crate::models::ActivityEvent>, AppError> {
     let conn = db.get()?;
-    crate::activity::get_events_for_project(&conn, &project_path).map_err(AppError::from)
+    crate::activity::get_events_for_project(&conn, &project_path)
 }
 
 #[tauri::command]
-pub fn get_recent_activity(db: State<'_, DbState>, limit: Option<usize>) -> Result<Vec<crate::models::ActivityEvent>, AppError> {
+pub fn get_recent_activity(
+    db: State<'_, DbState>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::models::ActivityEvent>, AppError> {
     let conn = db.get()?;
-    crate::activity::get_recent_events(&conn, limit.unwrap_or(50)).map_err(AppError::from)
+    crate::activity::get_recent_events(&conn, limit.unwrap_or(50))
 }
 
 // Knowledge commands
 #[tauri::command]
-pub fn search_knowledge(db: State<'_, DbState>, query: String, limit: Option<usize>) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
+pub fn search_knowledge(
+    db: State<'_, DbState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
     let conn = db.get()?;
-    crate::knowledge::store::search_entries(&conn, &query, limit.unwrap_or(20)).map_err(AppError::from)
+    crate::knowledge::store::search_entries(&conn, &query, limit.unwrap_or(20))
 }
 
 #[tauri::command]
-pub fn get_knowledge_for_project(db: State<'_, DbState>, project_path: String) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
+pub fn get_knowledge_for_project(
+    db: State<'_, DbState>,
+    project_path: String,
+) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
     let conn = db.get()?;
     let hash = crate::activity::hash_project_path(&project_path);
-    crate::knowledge::store::get_entries_for_project(&conn, &hash).map_err(AppError::from)
+    crate::knowledge::store::get_entries_for_project(&conn, &hash)
 }
 
 #[tauri::command]
 pub fn delete_knowledge_entry(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
     let conn = db.get()?;
-    crate::knowledge::store::delete_entry(&conn, &id).map_err(AppError::from)
+    crate::knowledge::store::delete_entry(&conn, &id)
 }
 
 // Config commands
@@ -519,31 +594,41 @@ pub fn load_mcp_config(project_path: String) -> Result<crate::models::McpConfigF
     if !path.exists() {
         return Ok(crate::models::McpConfigFile { servers: vec![] });
     }
-    crate::config::mcp::load_mcp_config(&path).map_err(AppError::from)
+    crate::config::mcp::load_mcp_config(&path)
 }
 
 #[tauri::command]
-pub fn save_mcp_config(project_path: String, config: crate::models::McpConfigFile) -> Result<(), AppError> {
+pub fn save_mcp_config(
+    project_path: String,
+    config: crate::models::McpConfigFile,
+) -> Result<(), AppError> {
     let path = std::path::Path::new(&project_path).join("mcp-servers.toml");
-    crate::config::mcp::save_mcp_config(&config, &path).map_err(AppError::from)
+    crate::config::mcp::save_mcp_config(&config, &path)
 }
 
 #[tauri::command]
-pub fn apply_mcp_config(project_path: String, config: crate::models::McpConfigFile) -> Result<Vec<String>, AppError> {
+pub fn apply_mcp_config(
+    project_path: String,
+    config: crate::models::McpConfigFile,
+) -> Result<Vec<String>, AppError> {
     let path = std::path::Path::new(&project_path);
-    crate::config::adapters::apply_translations(&config, path).map_err(AppError::from)
+    crate::config::adapters::apply_translations(&config, path)
 }
 
 // Quality commands
 #[tauri::command]
-pub fn get_quality_reports(db: State<'_, DbState>) -> Result<Vec<crate::models::QualityReport>, AppError> {
+pub fn get_quality_reports(
+    db: State<'_, DbState>,
+) -> Result<Vec<crate::models::QualityReport>, AppError> {
     let conn = db.get()?;
-    crate::quality::report::get_all_reports(&conn).map_err(AppError::from)
+    crate::quality::report::get_all_reports(&conn)
 }
 
 #[tauri::command]
-pub fn get_quality_report_for_session(db: State<'_, DbState>, session_id: String) -> Result<Option<crate::models::QualityReport>, AppError> {
+pub fn get_quality_report_for_session(
+    db: State<'_, DbState>,
+    session_id: String,
+) -> Result<Option<crate::models::QualityReport>, AppError> {
     let conn = db.get()?;
-    crate::quality::report::get_report_for_session(&conn, &session_id).map_err(AppError::from)
+    crate::quality::report::get_report_for_session(&conn, &session_id)
 }
-

@@ -81,7 +81,7 @@ fn test_save_and_load_projects() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].name, "Alpha");
     assert_eq!(loaded[1].name, "Beta");
-    assert_eq!(loaded[1].starred, true);
+    assert!(loaded[1].starred);
     assert_eq!(loaded[0].tags, vec!["Test"]);
 }
 
@@ -185,7 +185,9 @@ fn test_save_and_load_settings() {
         scan_directories: vec!["E:\\Projects".to_string()],
         tool_paths: std::collections::HashMap::new(),
     };
-    settings.tool_paths.insert("claude".to_string(), "/usr/local/bin/claude".to_string());
+    settings
+        .tool_paths
+        .insert("claude".to_string(), "/usr/local/bin/claude".to_string());
 
     let json = serde_json::to_string_pretty(&settings).unwrap();
     fs::write(&file_path, &json).unwrap();
@@ -197,7 +199,10 @@ fn test_save_and_load_settings() {
 
     assert_eq!(loaded.scan_directories.len(), 1);
     assert_eq!(loaded.scan_directories[0], "E:\\Projects");
-    assert_eq!(loaded.tool_paths.get("claude").unwrap(), "/usr/local/bin/claude");
+    assert_eq!(
+        loaded.tool_paths.get("claude").unwrap(),
+        "/usr/local/bin/claude"
+    );
 }
 
 // === Git Scanner Tests ===
@@ -257,7 +262,15 @@ fn validate_command(cmd: &str) -> Result<(), String> {
         return Ok(());
     }
     for ch in cmd.chars() {
-        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' && ch != '/' && ch != '\\' && ch != ':' {
+        if !ch.is_alphanumeric()
+            && ch != '-'
+            && ch != '_'
+            && ch != '.'
+            && ch != ' '
+            && ch != '/'
+            && ch != '\\'
+            && ch != ':'
+        {
             return Err(format!("命令包含非法字符: '{}'", ch));
         }
     }
@@ -311,7 +324,7 @@ fn test_open_in_finder_validates_path() {
 
 #[test]
 fn test_filter_recent_projects() {
-    let projects = vec![
+    let projects = [
         create_test_project("p1", "Alpha", "/a", false),
         Project {
             id: "p2".to_string(),
@@ -328,19 +341,20 @@ fn test_filter_recent_projects() {
     ];
 
     // Filter: only projects with last_opened_at, sorted by date desc
-    let mut recent: Vec<&Project> = projects.iter()
+    let mut recent: Vec<&Project> = projects
+        .iter()
         .filter(|p| p.last_opened_at.is_some())
         .collect();
     recent.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
 
     assert_eq!(recent.len(), 2);
-    assert_eq!(recent[0].name, "Beta");  // more recent
+    assert_eq!(recent[0].name, "Beta"); // more recent
     assert_eq!(recent[1].name, "Gamma"); // older
 }
 
 #[test]
 fn test_filter_starred_projects() {
-    let projects = vec![
+    let projects = [
         create_test_project("p1", "Alpha", "/a", true),
         create_test_project("p2", "Beta", "/b", false),
         create_test_project("p3", "Gamma", "/c", true),
@@ -354,18 +368,33 @@ fn test_filter_starred_projects() {
 
 #[test]
 fn test_search_filter() {
-    let projects = vec![
-        Project { name: "DevWorkbench".to_string(), description: "Tauri app".to_string(), tags: vec!["Rust".to_string()], path: "E:\\DevWorkbench".to_string(), ..create_test_project("p1", "DevWorkbench", "E:\\DevWorkbench", false) },
-        Project { name: "My Website".to_string(), description: "Blog".to_string(), tags: vec!["Next.js".to_string()], path: "E:\\website".to_string(), ..create_test_project("p2", "My Website", "E:\\website", false) },
+    let projects = [
+        Project {
+            name: "DevWorkbench".to_string(),
+            description: "Tauri app".to_string(),
+            tags: vec!["Rust".to_string()],
+            path: "E:\\DevWorkbench".to_string(),
+            ..create_test_project("p1", "DevWorkbench", "E:\\DevWorkbench", false)
+        },
+        Project {
+            name: "My Website".to_string(),
+            description: "Blog".to_string(),
+            tags: vec!["Next.js".to_string()],
+            path: "E:\\website".to_string(),
+            ..create_test_project("p2", "My Website", "E:\\website", false)
+        },
     ];
 
     let q = "rust";
-    let filtered: Vec<&Project> = projects.iter().filter(|p| {
-        p.name.to_lowercase().contains(q) ||
-        p.description.to_lowercase().contains(q) ||
-        p.tags.iter().any(|t| t.to_lowercase().contains(q)) ||
-        p.path.to_lowercase().contains(q)
-    }).collect();
+    let filtered: Vec<&Project> = projects
+        .iter()
+        .filter(|p| {
+            p.name.to_lowercase().contains(q)
+                || p.description.to_lowercase().contains(q)
+                || p.tags.iter().any(|t| t.to_lowercase().contains(q))
+                || p.path.to_lowercase().contains(q)
+        })
+        .collect();
 
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "DevWorkbench");
@@ -374,10 +403,22 @@ fn test_search_filter() {
 // === Editor Whitelist Tests ===
 
 const ALLOWED_EDITORS: &[&str] = &[
-    "code", "cursor", "windsurf", "zed", "subl",
-    "vim", "nvim", "emacs", "idea", "webstorm",
-    "clion", "goland", "pycharm", "rustrover",
-    "pi", "codex",
+    "code",
+    "cursor",
+    "windsurf",
+    "zed",
+    "subl",
+    "vim",
+    "nvim",
+    "emacs",
+    "idea",
+    "webstorm",
+    "clion",
+    "goland",
+    "pycharm",
+    "rustrover",
+    "pi",
+    "codex",
 ];
 
 fn is_allowed_editor(editor: &str) -> bool {
@@ -386,8 +427,7 @@ fn is_allowed_editor(editor: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or(editor);
     ALLOWED_EDITORS.iter().any(|&allowed| {
-        name.eq_ignore_ascii_case(allowed)
-            || name.eq_ignore_ascii_case(&format!("{}.exe", allowed))
+        name.eq_ignore_ascii_case(allowed) || name.eq_ignore_ascii_case(&format!("{}.exe", allowed))
     })
 }
 
@@ -400,7 +440,9 @@ fn test_editor_whitelist_allows_known_editors() {
     assert!(is_allowed_editor("nvim"));
     assert!(is_allowed_editor("Code.exe"));
     #[cfg(target_os = "windows")]
-    assert!(is_allowed_editor("C:\\Program Files\\Microsoft VS Code\\Code.exe"));
+    assert!(is_allowed_editor(
+        "C:\\Program Files\\Microsoft VS Code\\Code.exe"
+    ));
     #[cfg(not(target_os = "windows"))]
     assert!(is_allowed_editor("/usr/local/bin/code"));
 }
@@ -458,7 +500,9 @@ fn test_record_tool_open_truncates_at_five() {
     // Most recent should be at front
     assert_eq!(projects[0].last_opened_tools[0], "windsurf");
     // Oldest (claude) should be dropped
-    assert!(!projects[0].last_opened_tools.contains(&"claude".to_string()));
+    assert!(!projects[0]
+        .last_opened_tools
+        .contains(&"claude".to_string()));
 }
 
 #[test]
@@ -519,17 +563,30 @@ fn detect_tags(dir: &std::path::Path) -> Vec<String> {
         tags.push("Node.js".to_string());
         if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
             if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-                let mut all_deps: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                let mut all_deps: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
                 if let Some(obj) = pkg.get("dependencies").and_then(|v| v.as_object()) {
-                    for k in obj.keys() { all_deps.insert(k.as_str()); }
+                    for k in obj.keys() {
+                        all_deps.insert(k.as_str());
+                    }
                 }
                 if let Some(obj) = pkg.get("devDependencies").and_then(|v| v.as_object()) {
-                    for k in obj.keys() { all_deps.insert(k.as_str()); }
+                    for k in obj.keys() {
+                        all_deps.insert(k.as_str());
+                    }
                 }
-                if all_deps.contains("react") { tags.push("React".to_string()); }
-                if all_deps.contains("next") { tags.push("Next.js".to_string()); }
-                if all_deps.contains("vue") { tags.push("Vue".to_string()); }
-                if all_deps.contains("express") { tags.push("Express".to_string()); }
+                if all_deps.contains("react") {
+                    tags.push("React".to_string());
+                }
+                if all_deps.contains("next") {
+                    tags.push("Next.js".to_string());
+                }
+                if all_deps.contains("vue") {
+                    tags.push("Vue".to_string());
+                }
+                if all_deps.contains("express") {
+                    tags.push("Express".to_string());
+                }
             }
         }
     }
@@ -558,7 +615,11 @@ fn test_detect_nodejs_react_typescript() {
         "dependencies": { "react": "^18.0.0" },
         "devDependencies": { "@types/react": "^18.0.0" }
     });
-    std::fs::write(dir.path().join("package.json"), serde_json::to_string(&pkg).unwrap()).unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        serde_json::to_string(&pkg).unwrap(),
+    )
+    .unwrap();
     std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
 
     let tags = detect_tags(dir.path());
@@ -570,7 +631,11 @@ fn test_detect_nodejs_react_typescript() {
 #[test]
 fn test_detect_rust() {
     let dir = tempfile::TempDir::new().unwrap();
-    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test\"\n",
+    )
+    .unwrap();
 
     let tags = detect_tags(dir.path());
     assert!(tags.contains(&"Rust".to_string()));
@@ -594,9 +659,17 @@ fn test_detect_multiple_stacks() {
     let pkg = serde_json::json!({
         "dependencies": { "next": "^14.0.0", "react": "^18.0.0" }
     });
-    std::fs::write(dir.path().join("package.json"), serde_json::to_string(&pkg).unwrap()).unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        serde_json::to_string(&pkg).unwrap(),
+    )
+    .unwrap();
     std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
-    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test\"\n",
+    )
+    .unwrap();
 
     let tags = detect_tags(dir.path());
     assert!(tags.contains(&"Node.js".to_string()));

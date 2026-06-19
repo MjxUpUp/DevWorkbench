@@ -196,7 +196,7 @@ pub fn detect_project_tags(project_path: String) -> Result<Vec<String>, String> 
 }
 
 /// 检查 HashSet 中是否有任何元素以指定前缀开头
-fn has_prefix<'a>(set: &HashSet<&'a str>, prefix: &str) -> bool {
+fn has_prefix(set: &HashSet<&str>, prefix: &str) -> bool {
     set.iter().any(|k| k.starts_with(prefix))
 }
 

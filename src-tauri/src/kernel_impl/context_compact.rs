@@ -108,7 +108,10 @@ pub async fn summarize_middle(
     // Reassemble: keep system + the summary + the recent tail verbatim.
     let mut compacted = Vec::with_capacity(2 + keep_recent);
     compacted.push(history[0].clone());
-    compacted.push(Message::user(format!("[此前对话摘要]\n{}", summary_msg.content)));
+    compacted.push(Message::user(format!(
+        "[此前对话摘要]\n{}",
+        summary_msg.content
+    )));
     compacted.extend(history[summarize_end..].iter().cloned());
     Ok(Some(compacted))
 }
@@ -224,7 +227,10 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_none(), "too short to compact");
-        assert!(model.calls().is_empty(), "no LLM call when nothing to compact");
+        assert!(
+            model.calls().is_empty(),
+            "no LLM call when nothing to compact"
+        );
     }
 
     #[tokio::test]
@@ -251,7 +257,10 @@ mod tests {
         assert_eq!(out[0].role, Role::System);
         assert_eq!(out[0].content, "sys-prompt");
         assert_eq!(out[1].role, Role::User);
-        assert!(out[1].content.contains("这是摘要"), "summary message present");
+        assert!(
+            out[1].content.contains("这是摘要"),
+            "summary message present"
+        );
         // tail preserved verbatim in order
         assert_eq!(out[2].content, "tail-a");
         assert_eq!(out[3].content, "tail-tool");
@@ -300,8 +309,12 @@ mod tests {
         for i in 0..6 {
             hist.push(msg(Role::User, &format!("m {i}")));
         }
-        let mut opts = ModelOptions::default();
-        opts.thinking = Some(kernel_core::ThinkingConfig { budget_tokens: 1024 });
+        let opts = ModelOptions {
+            thinking: Some(kernel_core::ThinkingConfig {
+                budget_tokens: 1024,
+            }),
+            ..Default::default()
+        };
         let out = summarize_middle(&hist, &OptSpyModel, &opts, 2)
             .await
             .unwrap();

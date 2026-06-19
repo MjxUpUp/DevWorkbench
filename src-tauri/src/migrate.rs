@@ -68,12 +68,18 @@ pub fn migrate_v6_to_v7(conn: &Connection, data_dir: &Path) -> Result<(), AppErr
         let _ = fs::rename(&sessions_live, &sessions_bak);
     }
 
-    log::info!("v0.6→v0.7 migration: imported {} sessions from sessions.json", imported);
+    log::info!(
+        "v0.6→v0.7 migration: imported {} sessions from sessions.json",
+        imported
+    );
     Ok(())
 }
 
 fn insert_session(conn: &Connection, s: &Session) -> Result<(), AppError> {
-    let snapshot_json = s.context_snapshot.as_ref().map(|cs| serde_json::to_string(cs).unwrap_or_default());
+    let snapshot_json = s
+        .context_snapshot
+        .as_ref()
+        .map(|cs| serde_json::to_string(cs).unwrap_or_default());
     conn.execute(
         "INSERT OR IGNORE INTO sessions
             (id, project_path, agent_type, status, prompt, model,
@@ -298,14 +304,16 @@ pub fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
             "SELECT id, project_path, prompt, agent_type, started_at, parent_session_id
              FROM sessions",
         )?;
-        let mapped = stmt.query_map([], |r| Ok(Row {
-            id: r.get(0)?,
-            project_path: r.get(1)?,
-            prompt: r.get(2)?,
-            agent_type: r.get(3)?,
-            started_at: r.get(4)?,
-            parent_session_id: r.get(5)?,
-        }))?;
+        let mapped = stmt.query_map([], |r| {
+            Ok(Row {
+                id: r.get(0)?,
+                project_path: r.get(1)?,
+                prompt: r.get(2)?,
+                agent_type: r.get(3)?,
+                started_at: r.get(4)?,
+                parent_session_id: r.get(5)?,
+            })
+        })?;
         mapped.collect::<Result<Vec<_>, _>>()?
     };
 
@@ -416,9 +424,7 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
     // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
     // that references the column (same idiom as v9→v10's conversation_id probe).
     // A fresh DB already has `blocks` from the static SCHEMA and skips the ALTER.
-    let col_exists = conn
-        .prepare("SELECT blocks FROM sessions LIMIT 0")
-        .is_ok();
+    let col_exists = conn.prepare("SELECT blocks FROM sessions LIMIT 0").is_ok();
     if !col_exists {
         conn.execute("ALTER TABLE sessions ADD COLUMN blocks TEXT", [])?;
         log::info!("Migrated schema v10→v11: added sessions.blocks column");
@@ -485,7 +491,9 @@ pub fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
     // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
     // that references the column (same idiom as v10→v11's blocks probe). A fresh
     // DB already has `matcher` from the static SCHEMA and skips the ALTER.
-    let col_exists = conn.prepare("SELECT matcher FROM user_hooks LIMIT 0").is_ok();
+    let col_exists = conn
+        .prepare("SELECT matcher FROM user_hooks LIMIT 0")
+        .is_ok();
     if !col_exists {
         conn.execute("ALTER TABLE user_hooks ADD COLUMN matcher TEXT", [])?;
         log::info!("Migrated schema v12→v13: added user_hooks.matcher column");
@@ -693,9 +701,9 @@ mod tests {
     /// `idx_sessions_conversation ON sessions(conversation_id)` *before* any
     /// migration ran, so opening such a DB aborted the whole SCHEMA batch with
     /// `no such column: conversation_id` and the app panicked on every launch.
-    /// This builds that exact old-schema DB, re-opens it (which re-runs SCHEMA
-    /// + migration the way lib.rs does), and asserts it survives with the
-    /// column + index present and the existing session backfilled.
+    /// This builds that exact old-schema DB, re-opens it (which re-runs
+    /// SCHEMA + migration the way lib.rs does), and asserts it survives with
+    /// the column + index present and the existing session backfilled.
     #[test]
     fn pre_v10_db_without_conversation_id_column_opens_and_migrates() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -743,14 +751,25 @@ mod tests {
         // 3. The column now exists, the index is in place, and the legacy
         //    session was backfilled into a conversation.
         let has_col: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='conversation_id'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='conversation_id'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(has_col, 1, "conversation_id column must be added");
 
         let conv_id: Option<String> = conn
-            .query_row("SELECT conversation_id FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT conversation_id FROM sessions WHERE id='legacy1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(conv_id.is_some(), "legacy session must be backfilled into a conversation");
+        assert!(
+            conv_id.is_some(),
+            "legacy session must be backfilled into a conversation"
+        );
 
         // The index must exist (fresh-DB path used to skip it).
         let idx_count: i64 = conn
@@ -816,18 +835,29 @@ mod tests {
 
         // Existing data survives.
         let prompt: String = conn
-            .query_row("SELECT prompt FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .query_row("SELECT prompt FROM sessions WHERE id='legacy1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(prompt, "old prompt", "existing data must survive the migration");
+        assert_eq!(
+            prompt, "old prompt",
+            "existing data must survive the migration"
+        );
 
         // Legacy session has no blocks (not backfilled — only newly finalized sessions write blocks).
         let blocks: Option<String> = conn
-            .query_row("SELECT blocks FROM sessions WHERE id='legacy1'", [], |r| r.get(0))
+            .query_row("SELECT blocks FROM sessions WHERE id='legacy1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(blocks.is_none(), "legacy session blocks must be NULL");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 11, "schema_version must be 11");
     }
@@ -851,7 +881,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(has_blocks, 1, "column must exist exactly once after two runs");
+        assert_eq!(
+            has_blocks, 1,
+            "column must exist exactly once after two runs"
+        );
     }
 
     /// A fresh DB has `blocks` from the static SCHEMA already. The probe must
@@ -867,7 +900,11 @@ mod tests {
         migrate_v10_to_v11(&conn).expect("fresh DB v11 migration must succeed");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 11, "version must be 11 on fresh DB");
     }
@@ -930,18 +967,31 @@ mod tests {
 
         // Existing data survives.
         let prompt: String = conn
-            .query_row("SELECT prompt FROM sessions WHERE id='legacy2'", [], |r| r.get(0))
+            .query_row("SELECT prompt FROM sessions WHERE id='legacy2'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(prompt, "old prompt", "existing data must survive the migration");
+        assert_eq!(
+            prompt, "old prompt",
+            "existing data must survive the migration"
+        );
 
         // Legacy session has no task_ref (not backfilled — only bound sessions write it).
         let task_ref: Option<String> = conn
-            .query_row("SELECT task_ref FROM sessions WHERE id='legacy2'", [], |r| r.get(0))
+            .query_row(
+                "SELECT task_ref FROM sessions WHERE id='legacy2'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(task_ref.is_none(), "legacy session task_ref must be NULL");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 12, "schema_version must be 12");
     }
@@ -966,7 +1016,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(has_task_ref, 1, "column must exist exactly once after two runs");
+        assert_eq!(
+            has_task_ref, 1,
+            "column must exist exactly once after two runs"
+        );
     }
 
     /// A fresh DB has `task_ref` from the static SCHEMA already. The probe must
@@ -983,7 +1036,11 @@ mod tests {
         migrate_v11_to_v12(&conn).expect("fresh DB v12 migration must succeed");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 12, "version must be 12 on fresh DB");
     }
@@ -1008,7 +1065,11 @@ mod tests {
         assert_eq!(table_exists, 1, "llm_traces table must exist");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 14, "version must be 14 on fresh DB");
     }
@@ -1022,7 +1083,11 @@ mod tests {
         migrate_v13_to_v14(&conn).expect("first run must succeed");
         migrate_v13_to_v14(&conn).expect("second run (idempotent) must succeed");
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 14);
     }
@@ -1105,7 +1170,11 @@ mod tests {
         assert_eq!(retention, None, "default retention_days is NULL = infinite");
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 15, "version must be 15 on fresh DB");
     }
@@ -1119,7 +1188,11 @@ mod tests {
         migrate_v14_to_v15(&conn).expect("first run must succeed");
         migrate_v14_to_v15(&conn).expect("second run (idempotent) must succeed");
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 15);
     }
@@ -1133,7 +1206,8 @@ mod tests {
         let path = tmp.path().join("legacy15.db");
         let conn = db::init_db(&path).unwrap();
         conn.execute("DROP TABLE trace_settings", []).unwrap();
-        conn.execute("DROP INDEX IF EXISTS idx_llm_traces_created", []).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_llm_traces_created", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (14, ?1)",
             [chrono::Utc::now().to_rfc3339()],
@@ -1149,7 +1223,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(table_exists, 1, "trace_settings must be created on pre-v15 DB");
+        assert_eq!(
+            table_exists, 1,
+            "trace_settings must be created on pre-v15 DB"
+        );
 
         let index_exists: i64 = conn
             .query_row(
@@ -1158,10 +1235,17 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(index_exists, 1, "idx_llm_traces_created must be created on pre-v15 DB");
+        assert_eq!(
+            index_exists, 1,
+            "idx_llm_traces_created must be created on pre-v15 DB"
+        );
 
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 15, "version bumped to 15");
     }

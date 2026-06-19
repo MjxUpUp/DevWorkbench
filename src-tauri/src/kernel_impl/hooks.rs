@@ -20,7 +20,10 @@ pub enum Action {
     /// The agent is about to run a shell command.
     RunCommand { command: String },
     /// The agent is about to write/patch a file.
-    WriteFile { path: String, content_preview: String },
+    WriteFile {
+        path: String,
+        content_preview: String,
+    },
     /// The agent is about to invoke a tool (named).
     CallTool { tool: String, arguments: String },
 }
@@ -42,9 +45,7 @@ pub struct ActionOutcome {
 /// Built-in tool names: `write_file` / `WriteFile` / `write` → WriteFile;
 /// `bash` / `Bash` / `exec` / `shell` / `cmd` → RunCommand.
 pub fn classify_action(tool_name: &str, arguments: &str) -> Action {
-    let args_val = || -> Option<serde_json::Value> {
-        serde_json::from_str(arguments).ok()
-    };
+    let args_val = || -> Option<serde_json::Value> { serde_json::from_str(arguments).ok() };
     if matches!(
         tool_name,
         "write_file" | "WriteFile" | "write" | "Write" | "patch"
@@ -301,10 +302,7 @@ impl HookManager {
     /// decides whether the refusal blocks (Submit / PreToolUse) or is ignored
     /// (Stop / PostToolUse). A hook that merely warns (non-2 exit) logs inside
     /// `on_event` and returns `Ok(empty)`, so it never short-circuits.
-    pub async fn dispatch_event(
-        &self,
-        ev: &HookEvent,
-    ) -> Result<Vec<String>, BlockReason> {
+    pub async fn dispatch_event(&self, ev: &HookEvent) -> Result<Vec<String>, BlockReason> {
         let mut contexts = Vec::new();
         for h in &self.hooks {
             match h.on_event(ev).await {
@@ -324,7 +322,6 @@ impl HookManager {
 // Built-in hooks
 // ---------------------------------------------------------------------------
 
-
 /// Best-effort: extract a shell command string from a tool's JSON arguments
 /// (looks for "command"/"cmd"/"script" keys).
 fn extract_command_from_args(args: &str) -> Option<String> {
@@ -341,15 +338,10 @@ fn extract_command_from_args(args: &str) -> Option<String> {
 /// detection (the Forge bash-guard analog) instead of naive substring matching,
 /// so `rm -rf /home/user/old-build` (legitimate) is NOT blocked while
 /// `rm -rf /` (wipe root) IS.
+#[derive(Default)]
 pub struct CommandGuardHook {
     /// User-configurable allowlist of command prefixes that bypass the guard.
     allowlist: Vec<String>,
-}
-
-impl Default for CommandGuardHook {
-    fn default() -> Self {
-        Self { allowlist: Vec::new() }
-    }
 }
 
 impl CommandGuardHook {
@@ -386,10 +378,17 @@ impl CommandGuardHook {
                 if let Some(t) = target {
                     let t = t.trim_matches('"').trim_matches('\'');
                     // Block wiping root, home root, or system dirs.
-                    let dangerous = t == "/" || t == "~" || t == "/*"
-                        || t == "/home" || t == "/usr" || t == "/bin"
-                        || t == "/etc" || t == "/var" || t == "/boot"
-                        || t.starts_with("/dev/sd") || t.starts_with("/dev/nvme");
+                    let dangerous = t == "/"
+                        || t == "~"
+                        || t == "/*"
+                        || t == "/home"
+                        || t == "/usr"
+                        || t == "/bin"
+                        || t == "/etc"
+                        || t == "/var"
+                        || t == "/boot"
+                        || t.starts_with("/dev/sd")
+                        || t.starts_with("/dev/nvme");
                     if dangerous {
                         return Some(BlockReason {
                             hook: "command_guard".into(),
@@ -411,7 +410,8 @@ impl CommandGuardHook {
         }
 
         // Filesystem format / disk wipe.
-        if prog == "mkfs" || joined.contains("dd if=/dev/zero of=/dev/")
+        if prog == "mkfs"
+            || joined.contains("dd if=/dev/zero of=/dev/")
             || joined.contains("dd if=/dev/urandom of=/dev/")
         {
             return Some(BlockReason {
@@ -500,11 +500,11 @@ pub struct TaskGuardHook {
 }
 
 impl TaskGuardHook {
-    pub fn new(
-        task_ref: Option<String>,
-        working_dir: Option<std::path::PathBuf>,
-    ) -> Self {
-        Self { task_ref, working_dir }
+    pub fn new(task_ref: Option<String>, working_dir: Option<std::path::PathBuf>) -> Self {
+        Self {
+            task_ref,
+            working_dir,
+        }
     }
 }
 
@@ -602,7 +602,10 @@ mod tests {
         let h = AssertionGuardHook;
         let diff = "--- a/t.rs\n+++ b/t.rs\n-func()\n-t.Fatal(\"x\")\n+func()\n+t.Log(\"x\")\n";
         let outcome = ActionOutcome {
-            action: Action::WriteFile { path: "t.rs".into(), content_preview: "".into() },
+            action: Action::WriteFile {
+                path: "t.rs".into(),
+                content_preview: "".into(),
+            },
             ok: true,
             diff: Some(diff.into()),
             error: None,
@@ -612,7 +615,10 @@ mod tests {
     }
 
     fn write(path: &str) -> Action {
-        Action::WriteFile { path: path.into(), content_preview: "".into() }
+        Action::WriteFile {
+            path: path.into(),
+            content_preview: "".into(),
+        }
     }
 
     #[tokio::test]
@@ -621,7 +627,11 @@ mod tests {
         // "never brick" guarantee: a taskless session still writes files.
         let h = TaskGuardHook::new(None, None);
         let err = h.before(&write("/proj/x.rs")).await.unwrap_err();
-        assert_eq!(err.severity, Severity::Warn, "taskless write must warn, not block");
+        assert_eq!(
+            err.severity,
+            Severity::Warn,
+            "taskless write must warn, not block"
+        );
     }
 
     #[tokio::test]
@@ -688,10 +698,25 @@ mod tests {
         let submits = Arc::new(AtomicUsize::new(0));
         let stops = Arc::new(AtomicUsize::new(0));
         let mut mgr = HookManager::new();
-        mgr.register(Box::new(EventSpy { submits: submits.clone(), stops: stops.clone() }));
-        let _ = mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "hi".into() }).await;
-        let _ = mgr.dispatch_event(&HookEvent::UserPromptSubmit { prompt: "again".into() }).await;
-        let _ = mgr.dispatch_event(&HookEvent::Stop { summary: "done".into() }).await;
+        mgr.register(Box::new(EventSpy {
+            submits: submits.clone(),
+            stops: stops.clone(),
+        }));
+        let _ = mgr
+            .dispatch_event(&HookEvent::UserPromptSubmit {
+                prompt: "hi".into(),
+            })
+            .await;
+        let _ = mgr
+            .dispatch_event(&HookEvent::UserPromptSubmit {
+                prompt: "again".into(),
+            })
+            .await;
+        let _ = mgr
+            .dispatch_event(&HookEvent::Stop {
+                summary: "done".into(),
+            })
+            .await;
         assert_eq!(submits.load(Ordering::SeqCst), 2);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
@@ -717,17 +742,32 @@ mod tests {
             }
         }
         let mut mgr = HookManager::new();
-        mgr.register(Box::new(ContextHook { ctx: "rule-A".into() }));
-        mgr.register(Box::new(ContextHook { ctx: "rule-B".into() }));
+        mgr.register(Box::new(ContextHook {
+            ctx: "rule-A".into(),
+        }));
+        mgr.register(Box::new(ContextHook {
+            ctx: "rule-B".into(),
+        }));
         // Stop dispatch must yield nothing (neither hook returns on Stop).
-        let stop_ctxs = mgr.dispatch_event(&HookEvent::Stop { summary: "x".into() }).await.unwrap();
-        assert!(stop_ctxs.is_empty(), "Stop yields no context: {stop_ctxs:?}");
+        let stop_ctxs = mgr
+            .dispatch_event(&HookEvent::Stop {
+                summary: "x".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            stop_ctxs.is_empty(),
+            "Stop yields no context: {stop_ctxs:?}"
+        );
         // Submit dispatch must gather BOTH hooks' contexts in registration order.
         let submit_ctxs = mgr
             .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "p".into() })
             .await
             .unwrap();
-        assert_eq!(submit_ctxs, vec!["rule-A".to_string(), "rule-B".to_string()]);
+        assert_eq!(
+            submit_ctxs,
+            vec!["rule-A".to_string(), "rule-B".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -773,18 +813,30 @@ mod tests {
         mgr.register(Box::new(Counter(ran.clone())));
         // A forbidden prompt: BlockHook short-circuits BEFORE Counter runs.
         let res = mgr
-            .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "forbidden thing".into() })
+            .dispatch_event(&HookEvent::UserPromptSubmit {
+                prompt: "forbidden thing".into(),
+            })
             .await;
         let reason = res.expect_err("block must surface as Err");
         assert_eq!(reason.severity, Severity::Block);
-        assert_eq!(ran.load(Ordering::SeqCst), 0, "later hook must not run after a block");
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "later hook must not run after a block"
+        );
         // A clean prompt: no block, Counter runs.
         let res = mgr
-            .dispatch_event(&HookEvent::UserPromptSubmit { prompt: "ok".into() })
+            .dispatch_event(&HookEvent::UserPromptSubmit {
+                prompt: "ok".into(),
+            })
             .await
             .unwrap();
         assert!(res.is_empty());
-        assert_eq!(ran.load(Ordering::SeqCst), 1, "counter runs on a clean prompt");
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "counter runs on a clean prompt"
+        );
     }
 
     #[tokio::test]
@@ -801,7 +853,10 @@ mod tests {
         let mut mgr = HookManager::new();
         mgr.register(Box::new(AssertionGuardHook));
         let outcome = ActionOutcome {
-            action: Action::WriteFile { path: "t.rs".into(), content_preview: "".into() },
+            action: Action::WriteFile {
+                path: "t.rs".into(),
+                content_preview: "".into(),
+            },
             ok: true,
             diff: Some("--- a/t.rs\n+++ b/t.rs\n-x\n-t.Fatal(\"x\")\n+x\n+t.Log(\"x\")\n".into()),
             error: None,
@@ -814,9 +869,17 @@ mod tests {
 
     #[test]
     fn plan_mode_blocks_writes_and_commands_only() {
-        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
-        let run = Action::RunCommand { command: "echo hi".into() };
-        let tool = Action::CallTool { tool: "read".into(), arguments: "{}".into() };
+        let write = Action::WriteFile {
+            path: "x.rs".into(),
+            content_preview: "".into(),
+        };
+        let run = Action::RunCommand {
+            command: "echo hi".into(),
+        };
+        let tool = Action::CallTool {
+            tool: "read".into(),
+            arguments: "{}".into(),
+        };
         assert!(PermissionMode::Plan.blocks_action(&write).is_some());
         assert!(PermissionMode::Plan.blocks_action(&run).is_some());
         // Plan still allows read-style tool calls — only writes/commands stop.
@@ -830,9 +893,17 @@ mod tests {
         // DryRun must NOT gate at the hook layer — its interception lives in
         // execute_tool_call. Every action passes `blocks_action` unchanged, and
         // `is_dry_run` flags it so the tool-execution layer can simulate.
-        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
-        let run = Action::RunCommand { command: "rm -rf x".into() };
-        let tool = Action::CallTool { tool: "write".into(), arguments: "{}".into() };
+        let write = Action::WriteFile {
+            path: "x.rs".into(),
+            content_preview: "".into(),
+        };
+        let run = Action::RunCommand {
+            command: "rm -rf x".into(),
+        };
+        let tool = Action::CallTool {
+            tool: "write".into(),
+            arguments: "{}".into(),
+        };
         assert!(PermissionMode::DryRun.blocks_action(&write).is_none());
         assert!(PermissionMode::DryRun.blocks_action(&run).is_none());
         assert!(PermissionMode::DryRun.blocks_action(&tool).is_none());
@@ -846,13 +917,19 @@ mod tests {
         // The gate must pass a write action in dry-run (unlike Plan, which
         // blocks). The simulation is the tool layer's job, not the hook's.
         let mgr = HookManager::new().with_mode(PermissionMode::DryRun);
-        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let write = Action::WriteFile {
+            path: "x.rs".into(),
+            content_preview: "".into(),
+        };
         assert!(mgr.before(&write).await.is_ok());
     }
 
     #[test]
     fn non_plan_modes_do_not_block_writes() {
-        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let write = Action::WriteFile {
+            path: "x.rs".into(),
+            content_preview: "".into(),
+        };
         for m in [
             PermissionMode::Default,
             PermissionMode::AutoEdit,
@@ -860,7 +937,10 @@ mod tests {
             PermissionMode::Silent,
             PermissionMode::SkipPermissions,
         ] {
-            assert!(m.blocks_action(&write).is_none(), "{m:?} should not block writes");
+            assert!(
+                m.blocks_action(&write).is_none(),
+                "{m:?} should not block writes"
+            );
         }
     }
 
@@ -881,7 +961,10 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_manager_blocks_write_before_hooks() {
         let mgr = HookManager::new().with_mode(PermissionMode::Plan);
-        let write = Action::WriteFile { path: "x.rs".into(), content_preview: "".into() };
+        let write = Action::WriteFile {
+            path: "x.rs".into(),
+            content_preview: "".into(),
+        };
         let err = mgr.before(&write).await.unwrap_err();
         assert_eq!(err.severity, Severity::Block);
         assert_eq!(err.hook, "permission_mode");

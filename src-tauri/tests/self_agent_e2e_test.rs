@@ -24,13 +24,19 @@ struct MockChatModel {
 
 impl MockChatModel {
     fn new(script: Vec<Message>) -> Self {
-        Self { script: Arc::new(Mutex::new(script)) }
+        Self {
+            script: Arc::new(Mutex::new(script)),
+        }
     }
 }
 
 #[async_trait]
 impl ChatModel for MockChatModel {
-    async fn generate(&self, _messages: &[Message], _opts: &ModelOptions) -> Result<Message, Error> {
+    async fn generate(
+        &self,
+        _messages: &[Message],
+        _opts: &ModelOptions,
+    ) -> Result<Message, Error> {
         // run() now drives stream(); generate() is kept for trait completeness.
         let mut script = self.script.lock().unwrap();
         if script.is_empty() {
@@ -77,7 +83,9 @@ struct StreamingChatModel {
 
 impl StreamingChatModel {
     fn new(turns: Vec<Vec<Message>>) -> Self {
-        Self { turns: Arc::new(Mutex::new(turns.into())) }
+        Self {
+            turns: Arc::new(Mutex::new(turns.into())),
+        }
     }
 }
 
@@ -128,7 +136,10 @@ fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
     ToolCall {
         id: id.into(),
         call_type: "function".into(),
-        function: FunctionCall { name: name.into(), arguments: args.into() },
+        function: FunctionCall {
+            name: name.into(),
+            arguments: args.into(),
+        },
     }
 }
 
@@ -157,7 +168,9 @@ impl Tool for CountFilesTool {
 
 #[tokio::test]
 async fn react_agent_runs_skill_and_builtin_tool_then_answers() {
-    let builtin = CountFilesTool { calls: AtomicUsize::new(0) };
+    let builtin = CountFilesTool {
+        calls: AtomicUsize::new(0),
+    };
 
     let tmp = tempfile::tempdir().unwrap();
     let skill_dir = tmp.path().join("my-skill");
@@ -194,35 +207,57 @@ async fn react_agent_runs_skill_and_builtin_tool_then_answers() {
         Message::assistant("Done. Found 3 files using the counting procedure."),
     ];
 
-    let agent = ReactAgent::new(MockChatModel::new(script), registry, "You are a helpful agent.");
+    let agent = ReactAgent::new(
+        MockChatModel::new(script),
+        registry,
+        "You are a helpful agent.",
+    );
 
     let mut events = vec![];
-    let stream = agent.run(AgentInput {
-        prompt: "count and report".into(),
-        working_dir: None,
-        model: None,
-        resume_from: None,
-    }).unwrap();
+    let stream = agent
+        .run(AgentInput {
+            prompt: "count and report".into(),
+            working_dir: None,
+            model: None,
+            resume_from: None,
+        })
+        .unwrap();
     use futures::StreamExt;
     let mut s = stream;
     while let Some(ev) = s.next().await {
         events.push(ev.unwrap());
     }
 
-    let tool_events: Vec<String> = events.iter().filter_map(|e| match e {
-        AgentEvent::ToolCall(t) => Some(t.tool.clone()),
-        _ => None,
-    }).collect();
-    assert!(tool_events.iter().any(|t| t == "count_files"), "got {tool_events:?}");
-    assert!(tool_events.iter().any(|t| t == "skill__my-skill"), "got {tool_events:?}");
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done(_))), "missing Done");
+    let tool_events: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall(t) => Some(t.tool.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_events.iter().any(|t| t == "count_files"),
+        "got {tool_events:?}"
+    );
+    assert!(
+        tool_events.iter().any(|t| t == "skill__my-skill"),
+        "got {tool_events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Done(_))),
+        "missing Done"
+    );
 }
 
 #[tokio::test]
 async fn skill_tool_invoke_returns_body() {
     let tmp = tempfile::tempdir().unwrap();
     let skill_md = tmp.path().join("SKILL.md");
-    std::fs::write(&skill_md, "---\nname: x\ndescription: y\n---\n\nProcedure body here.\n").unwrap();
+    std::fs::write(
+        &skill_md,
+        "---\nname: x\ndescription: y\n---\n\nProcedure body here.\n",
+    )
+    .unwrap();
     let t = SkillTool::parse_file(&skill_md).unwrap();
     let out = t.invoke("", &ToolContext::default()).await.unwrap();
     assert!(out.contains("Procedure body here."));
@@ -233,7 +268,9 @@ async fn hook_manager_blocks_dangerous_command() {
     use app_lib::kernel_impl::hooks::{Action, CommandGuardHook, HookManager};
     let mut mgr = HookManager::new();
     mgr.register(Box::new(CommandGuardHook::default()));
-    let action = Action::RunCommand { command: "rm -rf /home".into() };
+    let action = Action::RunCommand {
+        command: "rm -rf /home".into(),
+    };
     let result = mgr.before(&action).await;
     assert!(result.is_err(), "rm -rf must be blocked");
 }
@@ -245,7 +282,10 @@ async fn hook_manager_reports_assertion_weakening() {
     mgr.register(Box::new(AssertionGuardHook));
     let diff = "--- a/t.rs\n+++ b/t.rs\n-x\n-t.Fatal(\"boom\")\n+x\n+t.Log(\"boom\")\n";
     let outcome = ActionOutcome {
-        action: Action::WriteFile { path: "t.rs".into(), content_preview: "".into() },
+        action: Action::WriteFile {
+            path: "t.rs".into(),
+            content_preview: "".into(),
+        },
         ok: true,
         diff: Some(diff.into()),
         error: None,
@@ -290,7 +330,9 @@ async fn react_agent_streams_token_deltas_then_tool_calls_and_threads_ctx() {
     }
 
     let seen = Arc::new(Mutex::new(None));
-    let registry = ToolRegistry::new().with(CtxProbe { seen: Arc::clone(&seen) });
+    let registry = ToolRegistry::new().with(CtxProbe {
+        seen: Arc::clone(&seen),
+    });
 
     let turns = vec![
         // Turn 1: text deltas + terminal tool_calls (the F2.1 stream shape).
@@ -309,10 +351,12 @@ async fn react_agent_streams_token_deltas_then_tool_calls_and_threads_ctx() {
         // Turn 2: text only → turn boundary.
         vec![Message::assistant("All done.")],
     ];
-    let agent = ReactAgent::new(StreamingChatModel::new(turns), registry, "sys").with_context(ToolContext {
-        working_dir: Some("/proj".into()),
-        conversation_id: Some("conv-9".into()),
-    });
+    let agent = ReactAgent::new(StreamingChatModel::new(turns), registry, "sys").with_context(
+        ToolContext {
+            working_dir: Some("/proj".into()),
+            conversation_id: Some("conv-9".into()),
+        },
+    );
 
     let mut events = vec![];
     let mut stream = agent
@@ -336,29 +380,62 @@ async fn react_agent_streams_token_deltas_then_tool_calls_and_threads_ctx() {
             _ => None,
         })
         .collect();
-    assert!(tokens.iter().any(|t| t == "Hel"), "first delta missing: {tokens:?}");
-    assert!(tokens.iter().any(|t| t == "lo"), "second delta missing: {tokens:?}");
-    assert!(tokens.iter().any(|t| t == "All done."), "final turn missing: {tokens:?}");
+    assert!(
+        tokens.iter().any(|t| t == "Hel"),
+        "first delta missing: {tokens:?}"
+    );
+    assert!(
+        tokens.iter().any(|t| t == "lo"),
+        "second delta missing: {tokens:?}"
+    );
+    assert!(
+        tokens.iter().any(|t| t == "All done."),
+        "final turn missing: {tokens:?}"
+    );
 
     // Tool loop entered on the terminal tool_calls: probe Started then Succeeded.
     let probe_statuses: Vec<ToolCallStatus> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::ToolCall(t) if t.tool == "probe" => Some(t.status.clone()),
+            AgentEvent::ToolCall(t) if t.tool == "probe" => Some(t.status),
             _ => None,
         })
         .collect();
-    assert!(probe_statuses.iter().any(|s| matches!(s, ToolCallStatus::Started)), "no Started: {probe_statuses:?}");
-    assert!(probe_statuses.iter().any(|s| matches!(s, ToolCallStatus::Succeeded)), "no Succeeded: {probe_statuses:?}");
+    assert!(
+        probe_statuses
+            .iter()
+            .any(|s| matches!(s, ToolCallStatus::Started)),
+        "no Started: {probe_statuses:?}"
+    );
+    assert!(
+        probe_statuses
+            .iter()
+            .any(|s| matches!(s, ToolCallStatus::Succeeded)),
+        "no Succeeded: {probe_statuses:?}"
+    );
 
     // F1.1 ctx threading: probe received the agent's working_dir + conversation_id.
     let ctx = seen.lock().unwrap().clone();
-    assert_eq!(ctx.as_ref().and_then(|c| c.working_dir.as_deref()), Some("/proj"), "working_dir not threaded: {ctx:?}");
-    assert_eq!(ctx.as_ref().and_then(|c| c.conversation_id.as_deref()), Some("conv-9"), "conversation_id not threaded: {ctx:?}");
+    assert_eq!(
+        ctx.as_ref().and_then(|c| c.working_dir.as_deref()),
+        Some("/proj"),
+        "working_dir not threaded: {ctx:?}"
+    );
+    assert_eq!(
+        ctx.as_ref().and_then(|c| c.conversation_id.as_deref()),
+        Some("conv-9"),
+        "conversation_id not threaded: {ctx:?}"
+    );
 
     // Turn boundary after the final text-only turn, then Done.
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnBoundary)), "no TurnBoundary");
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done(_))), "no Done");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::TurnBoundary)),
+        "no TurnBoundary"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Done(_))),
+        "no Done"
+    );
 }
 
 #[tokio::test]
@@ -367,7 +444,9 @@ async fn react_agent_injects_prior_history_between_system_and_current_task() {
     // the system prompt and the current task, in order, so the model sees real
     // conversation context — not just the latest prompt in isolation.
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let model = CapturingChatModel { seen: Arc::clone(&seen) };
+    let model = CapturingChatModel {
+        seen: Arc::clone(&seen),
+    };
     let registry = ToolRegistry::new();
 
     // Prior turn 1: a user question + the assistant's reply (with a tool call)
@@ -406,7 +485,15 @@ async fn react_agent_injects_prior_history_between_system_and_current_task() {
 
     let captured = seen.lock().unwrap().clone();
     // Expected order: system, prior[0..3], current task. No drops, no reordering.
-    assert_eq!(captured.len(), 5, "captured: {:?}", captured.iter().map(|m| (m.role, m.content.as_str())).collect::<Vec<_>>());
+    assert_eq!(
+        captured.len(),
+        5,
+        "captured: {:?}",
+        captured
+            .iter()
+            .map(|m| (m.role, m.content.as_str()))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(captured[0].role, Role::System);
     assert_eq!(captured[0].content, "SYS");
     assert_eq!(captured[1].role, Role::User);
@@ -424,7 +511,9 @@ async fn react_agent_without_history_keeps_system_then_task_only() {
     // Regression guard: empty history must reproduce the original single-turn
     // shape — system, then the task, nothing spliced between.
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let model = CapturingChatModel { seen: Arc::clone(&seen) };
+    let model = CapturingChatModel {
+        seen: Arc::clone(&seen),
+    };
     let registry = ToolRegistry::new();
     let agent = ReactAgent::new(model, registry, "SYS").with_history(Vec::new());
 

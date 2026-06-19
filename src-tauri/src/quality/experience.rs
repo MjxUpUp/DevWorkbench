@@ -312,10 +312,10 @@ pub fn purge_lessons_for_resolved_reviews(
         .filter(|e| e.category == "quality_failure" && e.source_type == "forge_experience");
     let mut removed = 0usize;
     for entry in candidates {
-        if markers.iter().any(|m| entry.content.contains(m)) {
-            if crate::knowledge::store::delete_entry(conn, &entry.id).is_ok() {
-                removed += 1;
-            }
+        if markers.iter().any(|m| entry.content.contains(m))
+            && crate::knowledge::store::delete_entry(conn, &entry.id).is_ok()
+        {
+            removed += 1;
         }
     }
     removed
@@ -356,9 +356,27 @@ mod tests {
     fn pending_mandatory_filters_status_and_flag() {
         let reviews = vec![
             rev("a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]),
-            rev("b", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]),
-            rev("c", 75.0, false, "pending", &[("testing", 20.0, "no tests")]),
-            rev("d", 50.0, true, "accepted", &[("testing", 20.0, "no tests")]),
+            rev(
+                "b",
+                50.0,
+                true,
+                "resolved",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "c",
+                75.0,
+                false,
+                "pending",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "d",
+                50.0,
+                true,
+                "accepted",
+                &[("testing", 20.0, "no tests")],
+            ),
         ];
         let got = pending_mandatory(&reviews);
         assert_eq!(got.len(), 1, "only pending+mandatory survives");
@@ -383,14 +401,23 @@ mod tests {
             50.0,
             true,
             "pending",
-            &[("testing", 20.0, "No test file changes"), ("tool-selection", 20.0, "12 anti-patterns")],
+            &[
+                ("testing", 20.0, "No test file changes"),
+                ("tool-selection", 20.0, "12 anti-patterns"),
+            ],
         );
         let refs = vec![&r];
         let res1 = replay_to_knowledge(&conn, "/proj", &refs, &AgentType::ClaudeCode);
-        assert_eq!(res1.replayed, 2, "two distinct dimensions → two entries: {res1:?}");
+        assert_eq!(
+            res1.replayed, 2,
+            "two distinct dimensions → two entries: {res1:?}"
+        );
         assert_eq!(res1.skipped, 0);
         // Both dimensions are first-seen → two global lessons promoted.
-        assert_eq!(res1.promoted_global, 2, "one global per new dimension: {res1:?}");
+        assert_eq!(
+            res1.promoted_global, 2,
+            "one global per new dimension: {res1:?}"
+        );
 
         // Replay again → idempotent: project-local both skipped, global both
         // already present (no re-promotion).
@@ -401,20 +428,25 @@ mod tests {
 
         let hash = activity::hash_project_path("/proj");
         let entries = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
-        let qf = entries.iter().filter(|e| e.category == "quality_failure").count();
+        let qf = entries
+            .iter()
+            .filter(|e| e.category == "quality_failure")
+            .count();
         assert_eq!(qf, 2, "no duplicates after two replays");
         assert!(entries.iter().all(|e| e.source_type == "forge_experience"));
 
         // Global layer holds exactly one lesson per dimension (2), each titled
         // `[通用] {dimension}` and source_type forge_experience_global.
-        let globals = crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH)
-            .unwrap();
+        let globals =
+            crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH).unwrap();
         let gqf: Vec<_> = globals
             .iter()
             .filter(|e| e.category == "quality_failure")
             .collect();
         assert_eq!(gqf.len(), 2, "one global per dimension: {gqf:?}");
-        assert!(gqf.iter().all(|e| e.source_type == "forge_experience_global"));
+        assert!(gqf
+            .iter()
+            .all(|e| e.source_type == "forge_experience_global"));
         assert!(globals.iter().any(|e| e.title == "[通用] testing"));
         assert!(globals.iter().any(|e| e.title == "[通用] tool-selection"));
     }
@@ -423,23 +455,65 @@ mod tests {
     fn replay_distinguishes_same_dimension_across_tasks() {
         let tmp = tempfile::TempDir::new().unwrap();
         let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
-        let r1 = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
-        let r2 = rev("feat/b", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r1 = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
+        let r2 = rev(
+            "feat/b",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         let refs = vec![&r1, &r2];
         let res = replay_to_knowledge(&conn, "/proj", &refs, &AgentType::ClaudeCode);
-        assert_eq!(res.replayed, 2, "distinct task_ref must not collide: {res:?}");
+        assert_eq!(
+            res.replayed, 2,
+            "distinct task_ref must not collide: {res:?}"
+        );
         // Same dimension twice → only ONE global lesson (deduped by title).
-        assert_eq!(res.promoted_global, 1, "same dimension → one global: {res:?}");
+        assert_eq!(
+            res.promoted_global, 1,
+            "same dimension → one global: {res:?}"
+        );
     }
 
     #[test]
     fn accepted_only_filters_status_and_flag() {
         let reviews = vec![
             rev("a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]),
-            rev("b", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]),
-            rev("c", 50.0, true, "accepted", &[("testing", 20.0, "no tests")]),
-            rev("d", 50.0, false, "accepted", &[("testing", 20.0, "no tests")]),
-            rev("e", 50.0, true, "rejected", &[("testing", 20.0, "no tests")]),
+            rev(
+                "b",
+                50.0,
+                true,
+                "resolved",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "c",
+                50.0,
+                true,
+                "accepted",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "d",
+                50.0,
+                false,
+                "accepted",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "e",
+                50.0,
+                true,
+                "rejected",
+                &[("testing", 20.0, "no tests")],
+            ),
         ];
         let got = accepted_only(&reviews);
         let refs: Vec<&str> = got.iter().map(|r| r.task_ref.as_str()).collect();
@@ -450,10 +524,34 @@ mod tests {
     fn resolved_not_accepted_filters_status_and_flag() {
         let reviews = vec![
             rev("a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]),
-            rev("b", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]),
-            rev("c", 50.0, true, "accepted", &[("testing", 20.0, "no tests")]),
-            rev("d", 50.0, false, "resolved", &[("testing", 20.0, "no tests")]),
-            rev("e", 50.0, true, "rejected", &[("testing", 20.0, "no tests")]),
+            rev(
+                "b",
+                50.0,
+                true,
+                "resolved",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "c",
+                50.0,
+                true,
+                "accepted",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "d",
+                50.0,
+                false,
+                "resolved",
+                &[("testing", 20.0, "no tests")],
+            ),
+            rev(
+                "e",
+                50.0,
+                true,
+                "rejected",
+                &[("testing", 20.0, "no tests")],
+            ),
         ];
         let got = resolved_not_accepted(&reviews);
         let refs: Vec<&str> = got.iter().map(|r| r.task_ref.as_str()).collect();
@@ -467,14 +565,26 @@ mod tests {
         let hash = activity::hash_project_path("/proj");
 
         // Replay two pending reviews → 2 lessons (one dimension each).
-        let r1 = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r1 = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         let r2 = rev("feat/b", 50.0, true, "pending", &[("tooling", 20.0, "x")]);
         let res = replay_to_knowledge(&conn, "/proj", &[&r1, &r2], &AgentType::ClaudeCode);
         assert_eq!(res.replayed, 2);
 
         // feat/a is now resolved → purge ONLY its lesson (the exit side of the
         // flywheel — previously lessons accumulated forever after a resolve).
-        let r1_resolved = rev("feat/a", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]);
+        let r1_resolved = rev(
+            "feat/a",
+            50.0,
+            true,
+            "resolved",
+            &[("testing", 20.0, "no tests")],
+        );
         let removed = purge_lessons_for_resolved_reviews(&conn, &hash, &[&r1_resolved]);
         assert_eq!(removed, 1);
 
@@ -492,7 +602,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
         let hash = activity::hash_project_path("/proj");
-        let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
         assert_eq!(purge_lessons_for_resolved_reviews(&conn, &hash, &[]), 0);
     }
@@ -504,7 +620,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
         let hash = activity::hash_project_path("/proj");
-        let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
 
         let before = crate::knowledge::store::get_entries_for_project(&conn, &hash)
@@ -514,7 +636,13 @@ mod tests {
             .unwrap();
         assert!((before.confidence - 0.85).abs() < 1e-6, "starts at 0.85");
 
-        let r_resolved = rev("feat/a", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]);
+        let r_resolved = rev(
+            "feat/a",
+            50.0,
+            true,
+            "resolved",
+            &[("testing", 20.0, "no tests")],
+        );
         let decayed = decay_confidence_for_resolved_reviews(&conn, &hash, &[&r_resolved]);
         assert_eq!(decayed, 1);
 
@@ -524,7 +652,10 @@ mod tests {
             .find(|e| e.content.contains("feat/a"))
             .unwrap();
         // 0.85 * 0.5 = 0.425 — halved but NOT removed.
-        assert!((after.confidence - 0.425).abs() < 1e-6, "decayed to 0.425: {after:?}");
+        assert!(
+            (after.confidence - 0.425).abs() < 1e-6,
+            "decayed to 0.425: {after:?}"
+        );
     }
 
     #[test]
@@ -535,12 +666,24 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
         let hash = activity::hash_project_path("/proj");
-        let r1 = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r1 = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         let r2 = rev("feat/b", 50.0, true, "pending", &[("tooling", 20.0, "x")]);
         replay_to_knowledge(&conn, "/proj", &[&r1, &r2], &AgentType::ClaudeCode);
 
         // Resolve ONLY feat/a.
-        let r1_resolved = rev("feat/a", 50.0, true, "resolved", &[("testing", 20.0, "no tests")]);
+        let r1_resolved = rev(
+            "feat/a",
+            50.0,
+            true,
+            "resolved",
+            &[("testing", 20.0, "no tests")],
+        );
         let decayed = decay_confidence_for_resolved_reviews(&conn, &hash, &[&r1_resolved]);
         assert_eq!(decayed, 1, "only feat/a's lesson decays");
 
@@ -550,14 +693,19 @@ mod tests {
             .into_iter()
             .find(|e| e.content.contains("feat/b"))
             .unwrap();
-        assert!((b.confidence - 0.85).abs() < 1e-6, "unrelated lesson keeps 0.85: {b:?}");
+        assert!(
+            (b.confidence - 0.85).abs() < 1e-6,
+            "unrelated lesson keeps 0.85: {b:?}"
+        );
 
         // Global lessons are NEVER decayed (cross-project aggregate, source_type
         // forge_experience_global is excluded by decay's filter).
-        let globals = crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH)
-            .unwrap();
-        assert!(globals.iter().all(|e| (e.confidence - 0.7).abs() < 1e-6),
-            "global confidence unchanged: {globals:?}");
+        let globals =
+            crate::knowledge::store::get_entries_for_project(&conn, GLOBAL_PROJECT_HASH).unwrap();
+        assert!(
+            globals.iter().all(|e| (e.confidence - 0.7).abs() < 1e-6),
+            "global confidence unchanged: {globals:?}"
+        );
     }
 
     #[test]
@@ -565,7 +713,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
         let hash = activity::hash_project_path("/proj");
-        let r = rev("feat/a", 50.0, true, "pending", &[("testing", 20.0, "no tests")]);
+        let r = rev(
+            "feat/a",
+            50.0,
+            true,
+            "pending",
+            &[("testing", 20.0, "no tests")],
+        );
         replay_to_knowledge(&conn, "/proj", &[&r], &AgentType::ClaudeCode);
         assert_eq!(decay_confidence_for_resolved_reviews(&conn, &hash, &[]), 0);
     }

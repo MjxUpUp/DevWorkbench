@@ -30,10 +30,8 @@ pub fn summarize(blocks: &[ChatStreamEvent], prompt: &str) -> Option<(String, St
                     tool_errors += 1;
                 }
             }
-            ChatStreamEvent::FileChanged { path } => {
-                if files_seen.insert(path.as_str()) {
-                    files.push(path.clone());
-                }
+            ChatStreamEvent::FileChanged { path } if files_seen.insert(path.as_str()) => {
+                files.push(path.clone());
             }
             _ => {}
         }
@@ -44,7 +42,13 @@ pub fn summarize(blocks: &[ChatStreamEvent], prompt: &str) -> Option<(String, St
         return None;
     }
 
-    let task_line: String = prompt.lines().next().unwrap_or(prompt).chars().take(80).collect();
+    let task_line: String = prompt
+        .lines()
+        .next()
+        .unwrap_or(prompt)
+        .chars()
+        .take(80)
+        .collect();
     let title = format!("Reflection: {}", task_line);
 
     let mut lines: Vec<String> = Vec::new();
@@ -99,7 +103,11 @@ pub fn persist_completion_memory(
     // 1. Natural-language memory — only when there is prose to store.
     if let Some(out) = summary.filter(|s| !s.is_empty()) {
         let entry = crate::knowledge::store::build_session_memory_entry(
-            project_hash, session_id, prompt, out, agent_type,
+            project_hash,
+            session_id,
+            prompt,
+            out,
+            agent_type,
         );
         if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
             written += 1;
@@ -110,7 +118,11 @@ pub fn persist_completion_memory(
     //    blocks even when prose is empty.
     if let Some((title, content)) = summarize(final_blocks, prompt) {
         let entry = crate::knowledge::store::build_session_reflection_entry(
-            project_hash, session_id, &title, &content, agent_type,
+            project_hash,
+            session_id,
+            &title,
+            &content,
+            agent_type,
         );
         if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
             written += 1;
@@ -125,10 +137,16 @@ mod tests {
     use serde_json::json;
 
     fn tu(name: &str) -> ChatStreamEvent {
-        ChatStreamEvent::ToolUse { name: name.into(), input: json!({}) }
+        ChatStreamEvent::ToolUse {
+            name: name.into(),
+            input: json!({}),
+        }
     }
     fn tr(err: bool) -> ChatStreamEvent {
-        ChatStreamEvent::ToolResult { content: "x".into(), is_error: err }
+        ChatStreamEvent::ToolResult {
+            content: "x".into(),
+            is_error: err,
+        }
     }
     fn fc(path: &str) -> ChatStreamEvent {
         ChatStreamEvent::FileChanged { path: path.into() }
@@ -136,7 +154,9 @@ mod tests {
 
     #[test]
     fn summarize_returns_none_for_pure_chat() {
-        let blocks = vec![ChatStreamEvent::Text { content: "hi".into() }];
+        let blocks = vec![ChatStreamEvent::Text {
+            content: "hi".into(),
+        }];
         assert!(summarize(&blocks, "hello").is_none());
     }
 
@@ -177,7 +197,11 @@ mod tests {
         // carries signal → Some, with no tool line.
         let blocks = vec![fc("x.txt")];
         let (_title, content) = summarize(&blocks, "t").unwrap();
-        assert!(!content.contains("工具:"), "no tool line when no tools: {}", content);
+        assert!(
+            !content.contains("工具:"),
+            "no tool line when no tools: {}",
+            content
+        );
         assert!(content.contains("改动文件(1): x.txt"));
     }
 
@@ -205,7 +229,9 @@ mod tests {
             tu("read_file"),
             tr(false),
             fc("src/a.rs"),
-            ChatStreamEvent::Text { content: "done".into() },
+            ChatStreamEvent::Text {
+                content: "done".into(),
+            },
         ];
 
         let (title, content) = summarize(&blocks, "改 a.rs 的 bug").unwrap();
@@ -263,14 +289,22 @@ mod tests {
         let blocks = vec![tu("write_file"), tr(false), fc("src/a.rs")];
 
         let n = persist_completion_memory(
-            &conn, &hash, "sid", "改 a.rs", Some("done, edited a.rs"),
-            &blocks, &crate::models::AgentType::ClaudeCode,
+            &conn,
+            &hash,
+            "sid",
+            "改 a.rs",
+            Some("done, edited a.rs"),
+            &blocks,
+            &crate::models::AgentType::ClaudeCode,
         );
 
         assert_eq!(n, 2, "prose + tools → both entries");
         let mut cats = cats(&conn, &hash);
         cats.sort();
-        assert_eq!(cats, vec!["react_reflection".to_string(), "react_session".to_string()]);
+        assert_eq!(
+            cats,
+            vec!["react_reflection".to_string(), "react_session".to_string()]
+        );
     }
 
     #[test]
@@ -282,8 +316,13 @@ mod tests {
         let blocks = vec![tu("bash"), tr(false)];
 
         let n = persist_completion_memory(
-            &conn, &hash, "sid", "task", None,
-            &blocks, &crate::models::AgentType::ClaudeCode,
+            &conn,
+            &hash,
+            "sid",
+            "task",
+            None,
+            &blocks,
+            &crate::models::AgentType::ClaudeCode,
         );
 
         assert_eq!(n, 1);
@@ -296,11 +335,18 @@ mod tests {
         // react_session memory is written, no empty reflection.
         let conn = fresh_conn();
         let hash = crate::activity::hash_project_path("/p");
-        let blocks = vec![ChatStreamEvent::Text { content: "just talking".into() }];
+        let blocks = vec![ChatStreamEvent::Text {
+            content: "just talking".into(),
+        }];
 
         let n = persist_completion_memory(
-            &conn, &hash, "sid", "hello", Some("hi there"),
-            &blocks, &crate::models::AgentType::ClaudeCode,
+            &conn,
+            &hash,
+            "sid",
+            "hello",
+            Some("hi there"),
+            &blocks,
+            &crate::models::AgentType::ClaudeCode,
         );
 
         assert_eq!(n, 1);
@@ -312,11 +358,18 @@ mod tests {
         // No prose AND a pure-chat turn → nothing at all. The DB stays empty.
         let conn = fresh_conn();
         let hash = crate::activity::hash_project_path("/p");
-        let blocks = vec![ChatStreamEvent::Text { content: "x".into() }];
+        let blocks = vec![ChatStreamEvent::Text {
+            content: "x".into(),
+        }];
 
         let n = persist_completion_memory(
-            &conn, &hash, "sid", "q", None,
-            &blocks, &crate::models::AgentType::ClaudeCode,
+            &conn,
+            &hash,
+            "sid",
+            "q",
+            None,
+            &blocks,
+            &crate::models::AgentType::ClaudeCode,
         );
 
         assert_eq!(n, 0);

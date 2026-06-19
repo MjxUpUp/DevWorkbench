@@ -6,10 +6,10 @@
 ///      already true once migrate_v7_to_v8 ran, so this function short-circuited.
 ///   2. The body opened a transaction but never committed it, so even when it
 ///      ran the imported rows were rolled back.
+///
 /// Plus a recovery concern: an earlier buggy run could have already renamed
 /// `sessions.json` → `sessions.json.v0.6.bak` while leaving the DB empty, so
 /// recovery must read the `.bak`.
-
 use app_lib::db;
 use app_lib::migrate;
 use app_lib::models::{AgentType, Session, SessionStatus};
@@ -59,15 +59,26 @@ fn imports_from_live_sessions_json_and_commits() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test.db");
     let conn = fresh_db(&db_path);
-    write_agents_file(tmp.path(), "sessions.json", &[make_session("s1"), make_session("s2")]);
+    write_agents_file(
+        tmp.path(),
+        "sessions.json",
+        &[make_session("s1"), make_session("s2")],
+    );
 
     migrate::migrate_v6_to_v7(&conn, tmp.path()).expect("migration failed");
 
     // Re-open on a FRESH connection to prove the transaction committed (the
     // original bug never called tx.commit(), so rows vanished on rollback).
     let conn2 = Connection::open(&db_path).unwrap();
-    assert_eq!(count_sessions(&conn2), 2, "imported rows must survive a new connection");
-    assert!(db::is_v6_migrated(&conn2), "version>=7 marker must be written");
+    assert_eq!(
+        count_sessions(&conn2),
+        2,
+        "imported rows must survive a new connection"
+    );
+    assert!(
+        db::is_v6_migrated(&conn2),
+        "version>=7 marker must be written"
+    );
 
     // Live file renamed to .bak after a successful commit.
     assert!(
@@ -88,7 +99,11 @@ fn falls_back_to_bak_when_live_already_renamed() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test.db");
     let conn = fresh_db(&db_path);
-    write_agents_file(tmp.path(), "sessions.json.v0.6.bak", &[make_session("recovered-1")]);
+    write_agents_file(
+        tmp.path(),
+        "sessions.json.v0.6.bak",
+        &[make_session("recovered-1")],
+    );
 
     migrate::migrate_v6_to_v7(&conn, tmp.path()).expect("migration failed");
 
@@ -113,7 +128,11 @@ fn idempotent_second_run_does_not_duplicate() {
     migrate::migrate_v6_to_v7(&conn, tmp.path()).unwrap();
 
     let conn2 = Connection::open(&db_path).unwrap();
-    assert_eq!(count_sessions(&conn2), 1, "second run must not duplicate rows");
+    assert_eq!(
+        count_sessions(&conn2),
+        1,
+        "second run must not duplicate rows"
+    );
 }
 
 #[test]
@@ -127,11 +146,19 @@ fn skips_when_already_marked_v6_migrated() {
         [chrono::Utc::now().to_rfc3339()],
     )
     .unwrap();
-    write_agents_file(tmp.path(), "sessions.json", &[make_session("should-not-import")]);
+    write_agents_file(
+        tmp.path(),
+        "sessions.json",
+        &[make_session("should-not-import")],
+    );
 
     migrate::migrate_v6_to_v7(&conn, tmp.path()).unwrap();
 
-    assert_eq!(count_sessions(&conn), 0, "must skip when version>=7 already set");
+    assert_eq!(
+        count_sessions(&conn),
+        0,
+        "must skip when version>=7 already set"
+    );
     // Live file must be untouched (the guard returned before any rename).
     assert!(
         tmp.path().join("agents/sessions.json").exists(),

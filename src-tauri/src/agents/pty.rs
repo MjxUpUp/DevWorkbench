@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::sync::LazyLock;
+use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 /// Max chars kept as output summary (truncated from tail of output)
@@ -55,6 +55,12 @@ pub struct AgentProcesses {
     processes: Mutex<HashMap<String, TrackedProcess>>,
 }
 
+impl Default for AgentProcesses {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentProcesses {
     pub fn new() -> Self {
         Self {
@@ -81,9 +87,8 @@ fn resolve_agent_exe(agent_type: &AgentType) -> Result<PathBuf, String> {
     if let Some(parent) = path.parent() {
         let nm_dir = parent.join("node_modules");
         if nm_dir.exists() {
-            let mappings: &[(&str, &str, &str)] = &[
-                ("claude", "@anthropic-ai/claude-code", "claude.exe"),
-            ];
+            let mappings: &[(&str, &str, &str)] =
+                &[("claude", "@anthropic-ai/claude-code", "claude.exe")];
             for &(name, pkg, exe_name) in mappings {
                 if name == agent_type.command_name() {
                     let candidate = nm_dir.join(pkg).join("bin").join(exe_name);
@@ -145,13 +150,17 @@ struct SpawnConfig {
 fn resolve_agent_exe_cached(agent_type: &AgentType) -> Result<PathBuf, String> {
     let key = agent_type.command_name().to_string();
     {
-        let cache = EXE_CACHE.lock().map_err(|e| format!("EXE 缓存锁失败: {}", e))?;
+        let cache = EXE_CACHE
+            .lock()
+            .map_err(|e| format!("EXE 缓存锁失败: {}", e))?;
         if let Some(path) = cache.get(&key) {
             return Ok(path.clone());
         }
     }
     let path = resolve_agent_exe(agent_type)?;
-    let mut cache = EXE_CACHE.lock().map_err(|e| format!("EXE 缓存锁失败: {}", e))?;
+    let mut cache = EXE_CACHE
+        .lock()
+        .map_err(|e| format!("EXE 缓存锁失败: {}", e))?;
     cache.insert(key, path.clone());
     Ok(path)
 }
@@ -175,7 +184,11 @@ fn build_spawn_config(
     const STDIN_PROMPT_THRESHOLD: usize = 4096;
     let use_stdin = matches!(agent_type, AgentType::ClaudeCode | AgentType::Pi)
         || prompt.len() > STDIN_PROMPT_THRESHOLD;
-    let stdin_prompt = if use_stdin { Some(prompt.to_string()) } else { None };
+    let stdin_prompt = if use_stdin {
+        Some(prompt.to_string())
+    } else {
+        None
+    };
 
     match agent_type {
         AgentType::ClaudeCode => {
@@ -361,7 +374,9 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
                     "text" => {
                         if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
                             if !t.is_empty() {
-                                blocks.push(ClaudeBlock::Text { content: t.to_string() });
+                                blocks.push(ClaudeBlock::Text {
+                                    content: t.to_string(),
+                                });
                             }
                         }
                     }
@@ -430,19 +445,17 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
 /// `message.content[]` array:
 ///   - `init`        → session/model bootstrap, no user-facing content → []
 ///   - `message`     → `content` is a FLAT STRING (not an array); `role` marks
-///                     user vs assistant turns. Both user echo and assistant
-///                     text flow through here as Text blocks.
+///     user vs assistant turns. Both user echo and assistant text flow through
+///     here as Text blocks.
 ///   - `tool_use`    → top-level event with `tool_name` / `parameters` /
-///                     `tool_id` (NOT nested in message.content, NOT named
-///                     `name`/`input` like claude).
+///     `tool_id` (NOT nested in message.content, NOT named `name`/`input` like
+///     claude).
 ///   - `tool_result` → top-level event with `tool_id` / `output` / `status`.
 ///   - `result`      → terminal event; `status: "success"|"error"` (NOT
-///                     `subtype`), NO `is_error` field (verdict = status !=
-///                     "success"), and `duration_ms` is NESTED under `stats`
-///                     (NOT top-level like claude).
+///     `subtype`), NO `is_error` field (verdict = status != "success"), and
+///     `duration_ms` is NESTED under `stats` (NOT top-level like claude).
 ///   - `error`       → pre-result API failure → [] (the following `result`
-///                     event carries the terminal verdict; emitting here would
-///                     double it).
+///     event carries the terminal verdict; emitting here would double it).
 ///
 /// Tolerant like `parse_claude_line`: a `Value` + `.get()` chain degrades
 /// gracefully — unknown/missing fields ⇒ skip, never panic — so one odd line
@@ -468,7 +481,9 @@ pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
                 return Vec::new();
             }
             match v.get("content").and_then(|c| c.as_str()) {
-                Some(t) if !t.is_empty() => vec![ClaudeBlock::Text { content: t.to_string() }],
+                Some(t) if !t.is_empty() => vec![ClaudeBlock::Text {
+                    content: t.to_string(),
+                }],
                 _ => Vec::new(),
             }
         }
@@ -572,7 +587,10 @@ pub enum ChatStreamEvent {
     #[serde(rename = "thinking")]
     Thinking { content: String },
     #[serde(rename = "tool_use")]
-    ToolUse { name: String, input: serde_json::Value },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
     #[serde(rename = "tool_result")]
     ToolResult { content: String, is_error: bool },
     #[serde(rename = "result")]
@@ -591,7 +609,9 @@ impl ClaudeBlock {
     /// Map a parsed block to its wire event form for the `agent:event` channel.
     pub fn to_event(&self) -> ChatStreamEvent {
         match self {
-            ClaudeBlock::Text { content } => ChatStreamEvent::Text { content: content.clone() },
+            ClaudeBlock::Text { content } => ChatStreamEvent::Text {
+                content: content.clone(),
+            },
             ClaudeBlock::ToolUse { name, input } => ChatStreamEvent::ToolUse {
                 name: name.clone(),
                 input: input.clone().unwrap_or(serde_json::Value::Null),
@@ -599,7 +619,9 @@ impl ClaudeBlock {
             // ToolResult: collapse the raw content value into a readable string.
             // Longer than the 120-char terminal preview — the chat card folds it,
             // so give it more room to stay useful.
-            ClaudeBlock::ToolResult { content, is_error, .. } => ChatStreamEvent::ToolResult {
+            ClaudeBlock::ToolResult {
+                content, is_error, ..
+            } => ChatStreamEvent::ToolResult {
                 content: json_preview(content.as_ref(), 500),
                 is_error: is_error.unwrap_or(false),
             },
@@ -619,7 +641,10 @@ pub(crate) fn merge_consecutive_text(events: Vec<ChatStreamEvent>) -> Vec<ChatSt
     let mut out: Vec<ChatStreamEvent> = Vec::with_capacity(events.len());
     for ev in events {
         match (&ev, out.last_mut()) {
-            (ChatStreamEvent::Text { content: incoming }, Some(ChatStreamEvent::Text { content: acc })) => {
+            (
+                ChatStreamEvent::Text { content: incoming },
+                Some(ChatStreamEvent::Text { content: acc }),
+            ) => {
                 acc.push_str(incoming);
             }
             _ => out.push(ev),
@@ -643,10 +668,14 @@ fn cap_json_string_values(value: serde_json::Value, max_chars: usize) -> serde_j
             }
         }
         serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.into_iter().map(|v| cap_json_string_values(v, max_chars)).collect(),
+            arr.into_iter()
+                .map(|v| cap_json_string_values(v, max_chars))
+                .collect(),
         ),
         serde_json::Value::Object(obj) => serde_json::Value::Object(
-            obj.into_iter().map(|(k, v)| (k, cap_json_string_values(v, max_chars))).collect(),
+            obj.into_iter()
+                .map(|(k, v)| (k, cap_json_string_values(v, max_chars)))
+                .collect(),
         ),
         other => other,
     }
@@ -657,14 +686,20 @@ fn cap_json_string_values(value: serde_json::Value, max_chars: usize) -> serde_j
 /// giant Edit `new_string` from ballooning the row. Text is the user-facing
 /// answer (left whole), Result carries no payload, and ToolResult.content was
 /// already preview-capped at emit time.
-pub(crate) fn cap_blocks_for_persist(events: Vec<ChatStreamEvent>, max_chars: usize) -> Vec<ChatStreamEvent> {
-    events.into_iter().map(|ev| match ev {
-        ChatStreamEvent::ToolUse { name, input } => ChatStreamEvent::ToolUse {
-            name,
-            input: cap_json_string_values(input, max_chars),
-        },
-        other => other,
-    }).collect()
+pub(crate) fn cap_blocks_for_persist(
+    events: Vec<ChatStreamEvent>,
+    max_chars: usize,
+) -> Vec<ChatStreamEvent> {
+    events
+        .into_iter()
+        .map(|ev| match ev {
+            ChatStreamEvent::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+                name,
+                input: cap_json_string_values(input, max_chars),
+            },
+            other => other,
+        })
+        .collect()
 }
 
 /// Test-only wrapper: parse a claude stream-json line into the wire events the
@@ -726,22 +761,36 @@ pub fn spawn_pty_agent(
     let parent_for_resume = if parent_session_id.is_some() {
         parent_session_id
     } else {
-        prior_turns.last().filter(|t| t.agent_type == agent_type).map(|t| t.id.as_str())
+        prior_turns
+            .last()
+            .filter(|t| t.agent_type == agent_type)
+            .map(|t| t.id.as_str())
     };
 
     let injected_prompt = inject_conversation_context(prompt, &prior_turns, &agent_type);
     // Inject project knowledge context into the prompt — run in background thread
     // with a 2-second timeout to avoid blocking the UI on slow DB queries.
-    let injected_prompt = inject_knowledge_with_timeout(
-        &db_conn, &agent_type, project_path, &injected_prompt,
-    );
+    let injected_prompt =
+        inject_knowledge_with_timeout(&db_conn, &agent_type, project_path, &injected_prompt);
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
     // all target CLIs support non-interactive --print/exec pipe mode.
-    spawn_pipe_fallback(&app, processes, db_conn, &config, &agent_type, project_path, linked_requirement_id, parent_for_resume, conversation_id, prompt, model)
+    spawn_pipe_fallback(
+        app,
+        processes,
+        db_conn,
+        &config,
+        &agent_type,
+        project_path,
+        linked_requirement_id,
+        parent_for_resume,
+        conversation_id,
+        prompt,
+        model,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +800,10 @@ pub fn spawn_pty_agent(
 /// Load the completed prior turns of a conversation (oldest-first), best-effort.
 /// The currently-spawning turn isn't in the DB yet, so it's naturally excluded.
 /// A DB failure degrades to "no prior history" rather than blocking the spawn.
-pub(crate) fn load_prior_turns(db_conn: &crate::db::DbState, conversation_id: &str) -> Vec<crate::models::Session> {
+pub(crate) fn load_prior_turns(
+    db_conn: &crate::db::DbState,
+    conversation_id: &str,
+) -> Vec<crate::models::Session> {
     let Ok(conn) = db_conn.get() else {
         return Vec::new();
     };
@@ -801,8 +853,10 @@ fn inject_conversation_context(
         })
         .collect();
 
-    let mut selected: Vec<String> = blocks.iter().cloned().collect();
-    while selected.iter().map(|b| b.len()).sum::<usize>() > CONTEXT_BRIDGE_TOTAL_MAX_CHARS && selected.len() > 1 {
+    let mut selected: Vec<String> = blocks.to_vec();
+    while selected.iter().map(|b| b.len()).sum::<usize>() > CONTEXT_BRIDGE_TOTAL_MAX_CHARS
+        && selected.len() > 1
+    {
         selected.remove(0);
     }
 
@@ -824,7 +878,6 @@ fn tail(s: &str, max: usize) -> String {
     }
     format!("...{}", &s[start..])
 }
-
 
 // ---------------------------------------------------------------------------
 // Pipe fallback path
@@ -919,8 +972,7 @@ pub(crate) fn register_running_session(
     agent_type: &AgentType,
 ) -> Result<(), String> {
     let conn = db_conn.get().map_err(|e| e.to_string())?;
-    crate::agents::session::insert_session_db(&conn, session)
-        .map_err(|e| e.to_string())?;
+    crate::agents::session::insert_session_db(&conn, session).map_err(|e| e.to_string())?;
 
     if conversation_id.is_some() {
         let now = chrono::Local::now().to_rfc3339();
@@ -931,15 +983,18 @@ pub(crate) fn register_running_session(
         let _ = crate::agents::session::update_conversation_db(&conn, resolved_conv_id, patch);
     }
 
-    let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
-        &session.id,
-        project_path,
-        agent_type,
-        "session_started",
-        &format!("{} session started", agent_type.display_name()),
-        None,
-        None,
-    ));
+    let _ = crate::activity::record_event(
+        &conn,
+        &crate::activity::make_activity_event(
+            &session.id,
+            project_path,
+            agent_type,
+            "session_started",
+            &format!("{} session started", agent_type.display_name()),
+            None,
+            None,
+        ),
+    );
     let _ = app.emit("agent:started", session);
     Ok(())
 }
@@ -989,27 +1044,46 @@ pub(crate) fn finalize_session(
         }
     }
 
-    log::info!("[completion] Session {} locking DB for completion update...", session_id);
+    log::info!(
+        "[completion] Session {} locking DB for completion update...",
+        session_id
+    );
     if let Ok(conn) = db_conn.get() {
-        log::info!("[completion] Session {} DB locked, writing completion...", session_id);
+        log::info!(
+            "[completion] Session {} DB locked, writing completion...",
+            session_id
+        );
         let _ = crate::agents::session::update_session_db(&conn, session_id, patch);
         let event_type = match session_status {
             SessionStatus::Completed => "session_completed",
             _ => "session_failed",
         };
-        let _ = crate::activity::record_event(&conn, &crate::activity::make_activity_event(
-            session_id,
-            project_path,
-            agent_type,
-            event_type,
-            &format!("{} session {}", agent_type.display_name(), session_status.as_str()),
-            None,
-            files_for_activity,
-        ));
+        let _ = crate::activity::record_event(
+            &conn,
+            &crate::activity::make_activity_event(
+                session_id,
+                project_path,
+                agent_type,
+                event_type,
+                &format!(
+                    "{} session {}",
+                    agent_type.display_name(),
+                    session_status.as_str()
+                ),
+                None,
+                files_for_activity,
+            ),
+        );
     } else {
-        log::error!("[finalize] Failed to lock DB for session {} completion update", session_id);
+        log::error!(
+            "[finalize] Failed to lock DB for session {} completion update",
+            session_id
+        );
     }
-    log::info!("[finalize] Emitting agent:completed for session {}", session_id);
+    log::info!(
+        "[finalize] Emitting agent:completed for session {}",
+        session_id
+    );
     let _ = app.emit(
         "agent:completed",
         serde_json::json!({
@@ -1041,14 +1115,24 @@ fn spawn_pipe_fallback(
     prompt: &str,
     model: Option<&str>,
 ) -> Result<Session, String> {
-    log::info!("[PIPE spawn] program={}, args={:?}, cwd={}, stdin_prompt={}", config.program.display(), config.args, config.cwd.display(), config.stdin_prompt.is_some());
+    log::info!(
+        "[PIPE spawn] program={}, args={:?}, cwd={}, stdin_prompt={}",
+        config.program.display(),
+        config.args,
+        config.cwd.display(),
+        config.stdin_prompt.is_some()
+    );
     let mut cmd = std::process::Command::new(&config.program);
     let use_stdin = config.stdin_prompt.is_some();
     cmd.args(&config.args)
         .current_dir(&config.cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(if use_stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+        .stdin(if use_stdin {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
 
     #[cfg(target_os = "windows")]
     {
@@ -1077,7 +1161,8 @@ fn spawn_pipe_fallback(
 
     processes
         .processes
-        .lock().unwrap_or_else(|e| e.into_inner())
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(session_id.clone(), TrackedProcess::Pipe(pid));
 
     // Capture pre-diff in background — agent won't modify files in the first
@@ -1092,21 +1177,41 @@ fn spawn_pipe_fallback(
                 if let Ok(agents_dir) = crate::agents::session::agents_dir() {
                     let dir = agents_dir.join("outputs");
                     let _ = std::fs::create_dir_all(&dir);
-                    let _ = std::fs::write(dir.join(format!("{}.pre-diff", bg_sid)), pre_diff.join("\n"));
+                    let _ = std::fs::write(
+                        dir.join(format!("{}.pre-diff", bg_sid)),
+                        pre_diff.join("\n"),
+                    );
                 }
             })
             .ok();
     }
 
     let resolved_conv_id = resolve_or_create_conversation(
-        &db_conn, conversation_id, project_path, prompt, agent_type,
+        &db_conn,
+        conversation_id,
+        project_path,
+        prompt,
+        agent_type,
     )?;
     let session = build_running_session_row(
-        &session_id, project_path, agent_type, prompt, model,
-        &resolved_conv_id, linked_requirement_id, parent_session_id, None,
+        &session_id,
+        project_path,
+        agent_type,
+        prompt,
+        model,
+        &resolved_conv_id,
+        linked_requirement_id,
+        parent_session_id,
+        None,
     );
     register_running_session(
-        &db_conn, app, &session, conversation_id, &resolved_conv_id, project_path, agent_type,
+        &db_conn,
+        app,
+        &session,
+        conversation_id,
+        &resolved_conv_id,
+        project_path,
+        agent_type,
     )?;
 
     let stdout = child.stdout.take();
@@ -1127,9 +1232,9 @@ fn spawn_pipe_fallback(
     let session_blocks = Arc::new(std::sync::Mutex::new(Vec::<ChatStreamEvent>::new()));
 
     let output_mode = config.output_mode; // Copy — drives stdout interpretation
-    // agent_type selects the StructuredJson parser (claude+qwen reuse
-    // parse_claude_line; gemini uses parse_gemini_line). Captured by value into
-    // the reader closure, the same way output_mode is above.
+                                          // agent_type selects the StructuredJson parser (claude+qwen reuse
+                                          // parse_claude_line; gemini uses parse_gemini_line). Captured by value into
+                                          // the reader closure, the same way output_mode is above.
     let agent_type_reader = agent_type.clone();
     let last_activity_reader = last_activity.clone();
     let session_blocks_reader = Arc::clone(&session_blocks);
@@ -1139,26 +1244,24 @@ fn spawn_pipe_fallback(
 
         if let Some(mut out) = stdout {
             match output_mode {
-                OutputMode::Raw => {
-                    loop {
-                        match out.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let data = &buf[..n];
-                                output_log.extend_from_slice(data);
-                                last_activity_reader.store(now_millis(), Ordering::Relaxed);
-                                let _ = app_reader.emit(
-                                    "pty:output",
-                                    serde_json::json!({
-                                        "sessionId": sid_reader,
-                                        "data": data.to_vec(),
-                                    }),
-                                );
-                            }
-                            Err(_) => break,
+                OutputMode::Raw => loop {
+                    match out.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let data = &buf[..n];
+                            output_log.extend_from_slice(data);
+                            last_activity_reader.store(now_millis(), Ordering::Relaxed);
+                            let _ = app_reader.emit(
+                                "pty:output",
+                                serde_json::json!({
+                                    "sessionId": sid_reader,
+                                    "data": data.to_vec(),
+                                }),
+                            );
                         }
+                        Err(_) => break,
                     }
-                }
+                },
                 OutputMode::StructuredJson => {
                     // Each stdout line is one structured event. Parse it ONCE
                     // into ClaudeBlocks — selecting the parser by agent_type
@@ -1264,7 +1367,11 @@ fn spawn_pipe_fallback(
     let session_blocks_wait = session_blocks.clone();
     std::thread::spawn(move || {
         let idle_secs = session_idle_timeout_secs();
-        log::info!("[PIPE wait] Waiting for session {} (idle_timeout={}s, 0=disabled)", sid_exit, idle_secs);
+        log::info!(
+            "[PIPE wait] Waiting for session {} (idle_timeout={}s, 0=disabled)",
+            sid_exit,
+            idle_secs
+        );
         let mut timed_out = false;
         let (exit_code, session_status) = loop {
             match child.try_wait() {
@@ -1279,12 +1386,14 @@ fn spawn_pipe_fallback(
                 }
                 Ok(None) => {
                     if idle_secs > 0 {
-                        let idle_ms = now_millis()
-                            .saturating_sub(last_activity_wait.load(Ordering::Relaxed));
+                        let idle_ms =
+                            now_millis().saturating_sub(last_activity_wait.load(Ordering::Relaxed));
                         if idle_ms > idle_secs * 1000 {
                             log::warn!(
                                 "[PIPE wait] Session {} idle {}ms (>{}s, no output) — killing",
-                                sid_exit, idle_ms, idle_secs,
+                                sid_exit,
+                                idle_ms,
+                                idle_secs,
                             );
                             timed_out = true;
                             // Force-kill the process tree
@@ -1300,38 +1409,58 @@ fn spawn_pipe_fallback(
             }
         };
 
-        log::info!("[PIPE wait] Session {} exited: code={:?}, status={}, timed_out={}", sid_exit, exit_code, session_status.as_str(), timed_out);
+        log::info!(
+            "[PIPE wait] Session {} exited: code={:?}, status={}, timed_out={}",
+            sid_exit,
+            exit_code,
+            session_status.as_str(),
+            timed_out
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Read output summary FIRST so key_output can be derived from it.
         let output_summary = read_output_summary(&sid_exit).or_else(|| {
             if timed_out {
-                Some(format!("(Session killed: no output for {}s — likely hung)", idle_secs))
+                Some(format!(
+                    "(Session killed: no output for {}s — likely hung)",
+                    idle_secs
+                ))
             } else if exit_code.unwrap_or(-1) == 0 {
                 Some("(Agent completed with no text output)".to_string())
             } else {
                 Some(format!("(Process exited with code {:?})", exit_code))
             }
         });
-        log::info!("[completion] Session {} capturing context snapshot...", sid_exit);
-        let snapshot = extract_context_snapshot(&project_path_exit, &sid_exit, output_summary.as_deref());
+        log::info!(
+            "[completion] Session {} capturing context snapshot...",
+            sid_exit
+        );
+        let snapshot =
+            extract_context_snapshot(&project_path_exit, &sid_exit, output_summary.as_deref());
         log::info!(
             "[completion] Session {} snapshot done ({} files changed, {} key_output chars)",
             sid_exit,
-            snapshot.as_ref().map(|s| s.files_changed.len()).unwrap_or(0),
-            snapshot.as_ref().map(|s| s.key_output.chars().count()).unwrap_or(0)
+            snapshot
+                .as_ref()
+                .map(|s| s.files_changed.len())
+                .unwrap_or(0),
+            snapshot
+                .as_ref()
+                .map(|s| s.key_output.chars().count())
+                .unwrap_or(0)
         );
         // Drain the accumulated blocks for persistence. A poisoned lock (panic
         // in the reader thread) falls back to None → terminal replay, never
         // panics the wait thread. Empty vec → None (raw agent / no agent:event).
-        let blocks_snapshot = session_blocks_wait
-            .lock()
-            .ok()
-            .and_then(|mut buf| {
-                let taken = std::mem::take(&mut *buf);
-                if taken.is_empty() { None } else { Some(taken) }
-            });
+        let blocks_snapshot = session_blocks_wait.lock().ok().and_then(|mut buf| {
+            let taken = std::mem::take(&mut *buf);
+            if taken.is_empty() {
+                None
+            } else {
+                Some(taken)
+            }
+        });
         finalize_session(
             &db_conn_exit,
             &app_exit,
@@ -1376,7 +1505,10 @@ pub fn pty_resize(
 /// Stop a running agent session.
 pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(), String> {
     let tracked = {
-        let mut map = processes.processes.lock().map_err(|e| format!("进程表锁失败: {}", e))?;
+        let mut map = processes
+            .processes
+            .lock()
+            .map_err(|e| format!("进程表锁失败: {}", e))?;
         map.remove(session_id)
     };
 
@@ -1411,7 +1543,9 @@ pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(
 /// instead of the tail-truncated `outputSummary` (which only keeps the end for list previews).
 pub(crate) fn read_full_session_output(session_id: &str) -> Option<String> {
     let agents_dir = crate::agents::session::agents_dir().ok()?;
-    let log_path = agents_dir.join("outputs").join(format!("{}.log", session_id));
+    let log_path = agents_dir
+        .join("outputs")
+        .join(format!("{}.log", session_id));
     if !log_path.exists() {
         return None;
     }
@@ -1568,7 +1702,8 @@ fn parse_numstat_line(line: &str) -> Option<FileDiff> {
 }
 
 fn read_pre_diff(session_id: &str) -> Option<Vec<String>> {
-    let path = crate::agents::session::agents_dir().ok()?
+    let path = crate::agents::session::agents_dir()
+        .ok()?
         .join("outputs")
         .join(format!("{}.pre-diff", session_id));
     let content = std::fs::read_to_string(&path).ok()?;
@@ -1613,7 +1748,10 @@ fn inject_knowledge_with_timeout(
     match rx.recv_timeout(std::time::Duration::from_secs(2)) {
         Ok(injected) => injected,
         Err(_) => {
-            log::warn!("Knowledge injection timed out for project {}, using original prompt", project_path);
+            log::warn!(
+                "Knowledge injection timed out for project {}, using original prompt",
+                project_path
+            );
             prompt.to_string()
         }
     }
@@ -1652,10 +1790,7 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
 
         // Collect candidate path chars until whitespace or end
         let mut path_end = i + 1;
-        while path_end < chars.len()
-            && !chars[path_end].is_whitespace()
-            && chars[path_end] != '@'
-        {
+        while path_end < chars.len() && !chars[path_end].is_whitespace() && chars[path_end] != '@' {
             path_end += 1;
         }
 
@@ -1723,16 +1858,25 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
         if total_injected + injected_len > FILE_INJECT_TOTAL_MAX_BYTES {
             replacements.push((
                 full_match.to_string(),
-                format!("[File {} skipped: total injection limit reached]", path.display()),
+                format!(
+                    "[File {} skipped: total injection limit reached]",
+                    path.display()
+                ),
             ));
             continue;
         }
         total_injected += injected_len;
 
-        let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let wrapped = format!(
             "--- BEGIN FILE: {} ({}) ---\n{}\n--- END FILE: {} ---",
-            file_name, path.display(), content, file_name
+            file_name,
+            path.display(),
+            content,
+            file_name
         );
         replacements.push((full_match.to_string(), wrapped));
     }
@@ -1765,18 +1909,25 @@ fn run_post_session_hooks(
             if session_status == SessionStatus::Completed {
                 if let Ok(conn) = db.get() {
                     let _ = crate::knowledge::collector::collect_from_session(
-                        &conn, &project_path, &session_id, &agent_type,
+                        &conn,
+                        &project_path,
+                        &session_id,
+                        &agent_type,
                     );
                 }
             }
             // 2. Quality gate — run subprocess
-            let forge_result = crate::quality::forge::run_forge_gate(std::path::Path::new(&project_path));
+            let forge_result =
+                crate::quality::forge::run_forge_gate(std::path::Path::new(&project_path));
             match forge_result {
                 Ok(report) => {
                     if let Ok(conn) = db.get() {
                         let _ = crate::quality::report::save_report(&conn, &report);
                         let _ = crate::quality::feedback::create_feedback(
-                            &conn, &report, &project_path, &agent_type,
+                            &conn,
+                            &report,
+                            &project_path,
+                            &agent_type,
                         );
                     }
                 }
@@ -1788,7 +1939,8 @@ fn run_post_session_hooks(
     if let Err(e) = result {
         log::error!(
             "Failed to spawn post-session-hooks thread for session {}: {}",
-            sid_for_log, e
+            sid_for_log,
+            e
         );
     }
 }
@@ -1800,29 +1952,61 @@ mod tests {
     #[test]
     fn merge_consecutive_text_folds_runs_and_leaves_others() {
         let evs = vec![
-            ChatStreamEvent::Text { content: "a".into() },
-            ChatStreamEvent::Text { content: "b".into() },
-            ChatStreamEvent::ToolUse { name: "Read".into(), input: serde_json::json!({"file_path": "/x"}) },
-            ChatStreamEvent::Text { content: "c".into() },
+            ChatStreamEvent::Text {
+                content: "a".into(),
+            },
+            ChatStreamEvent::Text {
+                content: "b".into(),
+            },
+            ChatStreamEvent::ToolUse {
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "/x"}),
+            },
+            ChatStreamEvent::Text {
+                content: "c".into(),
+            },
         ];
         let merged = merge_consecutive_text(evs);
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0], ChatStreamEvent::Text { content: "ab".into() });
-        assert_eq!(merged[2], ChatStreamEvent::Text { content: "c".into() });
+        assert_eq!(
+            merged[0],
+            ChatStreamEvent::Text {
+                content: "ab".into()
+            }
+        );
+        assert_eq!(
+            merged[2],
+            ChatStreamEvent::Text {
+                content: "c".into()
+            }
+        );
     }
 
     #[test]
     fn merge_consecutive_text_empty_and_single() {
         assert!(merge_consecutive_text(vec![]).is_empty());
-        let one = vec![ChatStreamEvent::Text { content: "solo".into() }];
-        assert_eq!(merge_consecutive_text(one), vec![ChatStreamEvent::Text { content: "solo".into() }]);
+        let one = vec![ChatStreamEvent::Text {
+            content: "solo".into(),
+        }];
+        assert_eq!(
+            merge_consecutive_text(one),
+            vec![ChatStreamEvent::Text {
+                content: "solo".into()
+            }]
+        );
     }
 
     #[test]
     fn merge_consecutive_text_all_tool_use_unchanged() {
         let evs = vec![
-            ChatStreamEvent::ToolUse { name: "A".into(), input: serde_json::Value::Null },
-            ChatStreamEvent::ToolUse { name: "B".into(), input: serde_json::Value::Null },
+            ChatStreamEvent::ToolUse {
+                name: "A".into(),
+                input: serde_json::Value::Null,
+            },
+            ChatStreamEvent::ToolUse {
+                name: "B".into(),
+                input: serde_json::Value::Null,
+            },
         ];
         let merged = merge_consecutive_text(evs.clone());
         assert_eq!(merged, evs);
@@ -1852,10 +2036,21 @@ mod tests {
     #[test]
     fn cap_blocks_for_persist_leaves_text_result_and_short_input() {
         let evs = vec![
-            ChatStreamEvent::Text { content: "answer".into() },
-            ChatStreamEvent::ToolUse { name: "Read".into(), input: serde_json::json!({"file_path": "/short"}) },
-            ChatStreamEvent::ToolResult { content: "ok".into(), is_error: false },
-            ChatStreamEvent::Result { is_error: false, secs: 1 },
+            ChatStreamEvent::Text {
+                content: "answer".into(),
+            },
+            ChatStreamEvent::ToolUse {
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "/short"}),
+            },
+            ChatStreamEvent::ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            },
+            ChatStreamEvent::Result {
+                is_error: false,
+                secs: 1,
+            },
         ];
         let capped = cap_blocks_for_persist(evs.clone(), 8000);
         assert_eq!(capped, evs);
@@ -1934,7 +2129,10 @@ mod tests {
     fn parse_numstat_line_rejects_malformed() {
         assert!(parse_numstat_line("").is_none());
         assert!(parse_numstat_line("only-one-field").is_none());
-        assert!(parse_numstat_line("1\t2\t").is_none(), "empty path rejected");
+        assert!(
+            parse_numstat_line("1\t2\t").is_none(),
+            "empty path rejected"
+        );
     }
 
     #[test]
@@ -1950,9 +2148,15 @@ mod tests {
         // UTF-8 suffix of the original text.
         let text = "一二三四五六";
         let out = truncate_tail(text, 4);
-        assert!(out.starts_with("..."), "truncated preview must be prefixed with ...; got {out:?}");
+        assert!(
+            out.starts_with("..."),
+            "truncated preview must be prefixed with ...; got {out:?}"
+        );
         let tail = out.strip_prefix("...").unwrap_or(&out);
-        assert!(text.ends_with(tail), "tail must be a suffix of the original; got {out:?}");
+        assert!(
+            text.ends_with(tail),
+            "tail must be a suffix of the original; got {out:?}"
+        );
     }
 
     #[test]
@@ -2031,10 +2235,22 @@ mod tests {
             Some("created src/Login.tsx"),
         )];
         let out = inject_conversation_context("now add validation", &prior, &AgentType::Codex);
-        assert!(out.contains("add a login page"), "prior user prompt injected: {out}");
-        assert!(out.contains("created src/Login.tsx"), "prior output injected: {out}");
-        assert!(out.contains("now add validation"), "current request appended: {out}");
-        assert!(out.contains("Claude Code"), "prior agent named in bridge: {out}");
+        assert!(
+            out.contains("add a login page"),
+            "prior user prompt injected: {out}"
+        );
+        assert!(
+            out.contains("created src/Login.tsx"),
+            "prior output injected: {out}"
+        );
+        assert!(
+            out.contains("now add validation"),
+            "current request appended: {out}"
+        );
+        assert!(
+            out.contains("Claude Code"),
+            "prior agent named in bridge: {out}"
+        );
     }
 
     #[test]
@@ -2043,7 +2259,13 @@ mod tests {
         // and the MOST RECENT turn's content must survive the trim.
         let big = "x".repeat(CONTEXT_BRIDGE_OUTPUT_MAX_CHARS);
         let prior: Vec<_> = (0..20)
-            .map(|i| mk_turn(AgentType::ClaudeCode, &format!("turn-{i}"), Some(&format!("{big} marker-{i}"))))
+            .map(|i| {
+                mk_turn(
+                    AgentType::ClaudeCode,
+                    &format!("turn-{i}"),
+                    Some(&format!("{big} marker-{i}")),
+                )
+            })
             .collect();
         let out = inject_conversation_context("current", &prior, &AgentType::ClaudeCode);
         assert!(
@@ -2115,8 +2337,7 @@ mod tests {
         let cfg = build_spawn_config(&AgentType::GeminiCli, "/p", "hello", None)
             .expect("build_spawn_config for GeminiCli");
         assert!(
-            cfg.args.contains(&"-o".to_string())
-                && cfg.args.contains(&"stream-json".to_string()),
+            cfg.args.contains(&"-o".to_string()) && cfg.args.contains(&"stream-json".to_string()),
             "GeminiCli must emit -o stream-json for structured output: {:?}",
             cfg.args,
         );
@@ -2140,8 +2361,7 @@ mod tests {
         let cfg = build_spawn_config(&AgentType::QwenCode, "/p", "hello", None)
             .expect("build_spawn_config for QwenCode");
         assert!(
-            cfg.args.contains(&"-o".to_string())
-                && cfg.args.contains(&"stream-json".to_string()),
+            cfg.args.contains(&"-o".to_string()) && cfg.args.contains(&"stream-json".to_string()),
             "QwenCode must emit -o stream-json for structured output: {:?}",
             cfg.args,
         );
@@ -2159,10 +2379,13 @@ mod tests {
 
     #[test]
     fn parse_claude_line_assistant_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
         assert_eq!(
             parse_claude_line(line),
-            vec![ClaudeBlock::Text { content: "hello world".to_string() }],
+            vec![ClaudeBlock::Text {
+                content: "hello world".to_string()
+            }],
         );
     }
 
@@ -2174,7 +2397,9 @@ mod tests {
         assert_eq!(
             parse_claude_line(line),
             vec![
-                ClaudeBlock::Text { content: "reading".to_string() },
+                ClaudeBlock::Text {
+                    content: "reading".to_string()
+                },
                 ClaudeBlock::ToolUse {
                     name: "Read".to_string(),
                     input: Some(serde_json::json!({"file_path":"src/main.rs"})),
@@ -2212,7 +2437,11 @@ mod tests {
         let blocks = parse_claude_line(line);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ClaudeBlock::ToolResult { tool_use_id, is_error, .. } => {
+            ClaudeBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
                 assert_eq!(tool_use_id.as_deref(), Some("t1"));
                 assert_eq!(*is_error, Some(false));
             }
@@ -2225,25 +2454,37 @@ mod tests {
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":45000}"#;
         assert_eq!(
             parse_claude_line(ok),
-            vec![ClaudeBlock::Result { is_error: false, secs: 45 }],
+            vec![ClaudeBlock::Result {
+                is_error: false,
+                secs: 45
+            }],
         );
-        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
+        let err =
+            r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
         assert_eq!(
             parse_claude_line(err),
-            vec![ClaudeBlock::Result { is_error: true, secs: 1 }],
+            vec![ClaudeBlock::Result {
+                is_error: true,
+                secs: 1
+            }],
         );
         // subtype != success also counts as failure even without is_error.
         let bad = r#"{"type":"result","subtype":"error_during_execution","is_error":false,"duration_ms":500}"#;
         assert_eq!(
             parse_claude_line(bad),
-            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+            vec![ClaudeBlock::Result {
+                is_error: true,
+                secs: 0
+            }],
         );
     }
 
     #[test]
     fn parse_claude_line_system_and_malformed_are_empty() {
         // system (init / api_retry) carries no user-facing content.
-        assert!(parse_claude_line(r#"{"type":"system","subtype":"init","session_id":"x"}"#).is_empty());
+        assert!(
+            parse_claude_line(r#"{"type":"system","subtype":"init","session_id":"x"}"#).is_empty()
+        );
         // Malformed / non-JSON / empty → empty (must not panic, never break stream).
         assert!(parse_claude_line("not json at all").is_empty());
         assert!(parse_claude_line("").is_empty());
@@ -2277,7 +2518,9 @@ mod tests {
     #[test]
     fn parse_gemini_line_message_empty_content_is_empty() {
         // Empty or missing content → no block (mirrors claude's empty-text skip).
-        assert!(parse_gemini_line(r#"{"type":"message","role":"assistant","content":""}"#).is_empty());
+        assert!(
+            parse_gemini_line(r#"{"type":"message","role":"assistant","content":""}"#).is_empty()
+        );
         assert!(parse_gemini_line(r#"{"type":"message","role":"assistant"}"#).is_empty());
     }
 
@@ -2317,17 +2560,24 @@ mod tests {
         let blocks = parse_gemini_line(ok);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ClaudeBlock::ToolResult { tool_use_id, is_error, content } => {
+            ClaudeBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                content,
+            } => {
                 assert_eq!(tool_use_id.as_deref(), Some("t1"));
                 assert_eq!(*is_error, Some(false));
                 assert_eq!(content.as_ref().and_then(|c| c.as_str()), Some("42 lines"));
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
-        let err = r#"{"type":"tool_result","tool_id":"t1","output":{"error":"denied"},"status":"error"}"#;
+        let err =
+            r#"{"type":"tool_result","tool_id":"t1","output":{"error":"denied"},"status":"error"}"#;
         let blocks = parse_gemini_line(err);
         match &blocks[0] {
-            ClaudeBlock::ToolResult { is_error, content, .. } => {
+            ClaudeBlock::ToolResult {
+                is_error, content, ..
+            } => {
                 assert_eq!(*is_error, Some(true));
                 assert!(content.as_ref().map(|c| c.is_object()).unwrap_or(false));
             }
@@ -2343,18 +2593,27 @@ mod tests {
         let err = r#"{"type":"result","timestamp":"2026-06-16T10:26:53.368Z","status":"error","error":{"type":"Error","message":"auth"},"stats":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"duration_ms":0,"tool_calls":0}}"#;
         assert_eq!(
             parse_gemini_line(err),
-            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+            vec![ClaudeBlock::Result {
+                is_error: true,
+                secs: 0
+            }],
         );
         let ok = r#"{"type":"result","status":"success","stats":{"duration_ms":45000,"total_tokens":100}}"#;
         assert_eq!(
             parse_gemini_line(ok),
-            vec![ClaudeBlock::Result { is_error: false, secs: 45 }],
+            vec![ClaudeBlock::Result {
+                is_error: false,
+                secs: 45
+            }],
         );
         // status missing → treated as failure (never silently "success").
         let no_status = r#"{"type":"result","stats":{"duration_ms":1000}}"#;
         assert_eq!(
             parse_gemini_line(no_status),
-            vec![ClaudeBlock::Result { is_error: true, secs: 1 }],
+            vec![ClaudeBlock::Result {
+                is_error: true,
+                secs: 1
+            }],
         );
     }
 
@@ -2385,7 +2644,10 @@ mod tests {
             Some("\x1b[32m✓ 完成 (45s)\x1b[0m\n".to_string()),
         );
         // Zero blocks (init/malformed) → None.
-        assert_eq!(render_blocks(&parse_gemini_line(r#"{"type":"init"}"#)), None);
+        assert_eq!(
+            render_blocks(&parse_gemini_line(r#"{"type":"init"}"#)),
+            None
+        );
     }
 
     #[test]
@@ -2397,7 +2659,9 @@ mod tests {
         let line = r#"{"type":"assistant","uuid":"u1","message":{"content":[{"type":"thinking","thinking":"reasoning here"},{"type":"text","text":"the answer"}]}}"#;
         assert_eq!(
             parse_claude_line(line),
-            vec![ClaudeBlock::Text { content: "the answer".to_string() }],
+            vec![ClaudeBlock::Text {
+                content: "the answer".to_string()
+            }],
         );
     }
 
@@ -2411,7 +2675,10 @@ mod tests {
         let line = r#"{"type":"result","subtype":"error_during_execution","uuid":"7cec5b38","session_id":"8421a91e","is_error":true,"duration_ms":0,"duration_api_ms":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0},"permission_denials":[],"error":{"message":"No auth type is selected."}}"#;
         assert_eq!(
             parse_claude_line(line),
-            vec![ClaudeBlock::Result { is_error: true, secs: 0 }],
+            vec![ClaudeBlock::Result {
+                is_error: true,
+                secs: 0
+            }],
         );
     }
 
@@ -2420,26 +2687,34 @@ mod tests {
         // Golden snapshots: render_blocks(parse(line)) must equal the exact
         // ANSI text the old single-pass renderer produced. Locks the render
         // contract so the terminal replay and {sid}.log stay byte-identical.
-        let assistant = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        let assistant =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
         assert_eq!(
             render_blocks(&parse_claude_line(assistant)),
             Some("hello world\n".to_string()),
         );
         let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
         let rendered = render_blocks(&parse_claude_line(tool)).expect("tool_use renders");
-        assert_eq!(rendered, "\x1b[36m🔧 Read \x1b[90m{\"file_path\":\"src/main.rs\"}\x1b[0m\n");
+        assert_eq!(
+            rendered,
+            "\x1b[36m🔧 Read \x1b[90m{\"file_path\":\"src/main.rs\"}\x1b[0m\n"
+        );
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":45000}"#;
         assert_eq!(
             render_blocks(&parse_claude_line(ok)),
             Some("\x1b[32m✓ 完成 (45s)\x1b[0m\n".to_string()),
         );
-        let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
+        let err =
+            r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":1000}"#;
         assert_eq!(
             render_blocks(&parse_claude_line(err)),
             Some("\x1b[31m✗ 失败 (1s)\x1b[0m\n".to_string()),
         );
         // Zero blocks (system / malformed) → None, not an empty string.
-        assert_eq!(render_blocks(&parse_claude_line(r#"{"type":"system","subtype":"init"}"#)), None);
+        assert_eq!(
+            render_blocks(&parse_claude_line(r#"{"type":"system","subtype":"init"}"#)),
+            None
+        );
         assert_eq!(render_blocks(&parse_claude_line("not json")), None);
     }
 
@@ -2447,7 +2722,9 @@ mod tests {
     fn chat_stream_event_serializes_with_kind_tag() {
         // The wire schema must carry `kind` as the discriminator tag so the TS
         // union narrows on it. Verify each variant's serialized shape.
-        let text = ChatStreamEvent::Text { content: "hi".to_string() };
+        let text = ChatStreamEvent::Text {
+            content: "hi".to_string(),
+        };
         let v = serde_json::to_value(&text).unwrap();
         assert_eq!(v["kind"], "text");
         assert_eq!(v["content"], "hi");
@@ -2461,7 +2738,10 @@ mod tests {
         assert_eq!(v["name"], "Read");
         assert_eq!(v["input"]["file_path"], "a.rs");
 
-        let res_ok = ChatStreamEvent::Result { is_error: false, secs: 12 };
+        let res_ok = ChatStreamEvent::Result {
+            is_error: false,
+            secs: 12,
+        };
         let v = serde_json::to_value(&res_ok).unwrap();
         assert_eq!(v["kind"], "result");
         assert_eq!(v["is_error"], false);
@@ -2474,7 +2754,12 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
         let evs = claude_line_to_events(line);
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0], ChatStreamEvent::Text { content: "hello".to_string() });
+        assert_eq!(
+            evs[0],
+            ChatStreamEvent::Text {
+                content: "hello".to_string()
+            }
+        );
 
         // text + tool_use → [Text, ToolUse], order preserved
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
@@ -2492,7 +2777,13 @@ mod tests {
         // result → [Result]
         let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":3000}"#;
         let evs = claude_line_to_events(line);
-        assert_eq!(evs, vec![ChatStreamEvent::Result { is_error: false, secs: 3 }]);
+        assert_eq!(
+            evs,
+            vec![ChatStreamEvent::Result {
+                is_error: false,
+                secs: 3
+            }]
+        );
 
         // system → []
         assert!(claude_line_to_events(r#"{"type":"system","subtype":"init"}"#).is_empty());
@@ -2510,7 +2801,10 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"found it"}]}}"#,
             r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":5000}"#,
         ];
-        let seq: Vec<ChatStreamEvent> = lines.iter().flat_map(|l| claude_line_to_events(l)).collect();
+        let seq: Vec<ChatStreamEvent> = lines
+            .iter()
+            .flat_map(|l| claude_line_to_events(l))
+            .collect();
         let kinds: Vec<&str> = seq
             .iter()
             .map(|e| match e {
@@ -2522,7 +2816,10 @@ mod tests {
                 ChatStreamEvent::FileChanged { .. } => "file_changed",
             })
             .collect();
-        assert_eq!(kinds, vec!["text", "tool_use", "tool_result", "text", "result"]);
+        assert_eq!(
+            kinds,
+            vec!["text", "tool_use", "tool_result", "text", "result"]
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub fn estimate_tokens(s: &str) -> usize {
     if chars == 0 {
         0
     } else {
-        (chars + 2) / 3
+        chars.div_ceil(3)
     }
 }
 
@@ -76,7 +76,11 @@ mod tests {
     fn select_picks_front_to_back_until_budget_exhausted() {
         // Each rendered line is 5 chars → 2 tokens. Budget 5 → first two fit
         // (2+2=4 ≤ 5); the third would push it to 6 > 5 → skipped.
-        let items = vec!["aaaaa".to_string(), "bbbbb".to_string(), "ccccc".to_string()];
+        let items = vec![
+            "aaaaa".to_string(),
+            "bbbbb".to_string(),
+            "ccccc".to_string(),
+        ];
         let picked = select_within_budget(&items, 5, |s: &String| s.clone());
         assert_eq!(picked.len(), 2);
         assert_eq!(*picked[0], "aaaaa");
