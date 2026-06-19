@@ -311,11 +311,18 @@ pub(crate) fn build_react_agent(
     for dir in subagents_search_dirs(&home, working_dir, &data_dir) {
         subagents.extend(crate::kernel_impl::subagent_spec::load_subagents(&dir));
     }
-    registry.push(crate::kernel_impl::react_agent::SubAgentTool::new(
+    // C2/D3 subagent concurrency limiter: a parent that fans out N
+    // dispatch_subagent calls in ONE turn runs them concurrently (see
+    // ReactAgent::execute_call_set), bounded to 4 in-flight children. Wide
+    // enough to parallelize a real fan-out, narrow enough not to blow the
+    // model rate budget or starve the parent's own turns.
+    let subagent_concurrency = Arc::new(tokio::sync::Semaphore::new(4));
+    registry.push(crate::kernel_impl::react_agent::SubAgentTool::new_with_concurrency(
         Arc::clone(&chat),
         registry.read_only_subset(),
         8,
         subagents.clone(),
+        Arc::clone(&subagent_concurrency),
     ));
 
     // Surface installed skills + MCP tools BY NAME in the system prompt, not just

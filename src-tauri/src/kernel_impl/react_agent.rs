@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -952,23 +953,57 @@ pub struct SubAgentTool {
     /// [default_worker_prompt], so the agent can delegate to a specialist by
     /// name. Empty = anonymous-worker-only (the v2.0 T2 behavior).
     named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
+    /// C2/D3 subagent concurrency limiter. A parent that fans out multiple
+    /// `dispatch_subagent` calls in ONE turn runs them concurrently (see
+    /// [`ReactAgent`]'s `execute_call_set`); this Semaphore bounds how many
+    /// child ReactAgents run at once, so a 10-way fan-out can't exhaust the
+    /// model rate budget. `new` defaults to a wide permit count (tests stay
+    /// unaffected); production injects a bounded handle via
+    /// [`SubAgentTool::new_with_concurrency`].
+    concurrency: Arc<Semaphore>,
 }
 
 impl SubAgentTool {
     /// `read_only_tools` should be the parent registry's read-only subset —
     /// pass `registry.read_only_subset()` so the child can't mutate or recurse.
     /// `named` are the loaded named sub-agent specs (empty = anonymous-only).
+    ///
+    /// Concurrency defaults to effectively unlimited — fine for unit tests,
+    /// which don't fan out. Production wires a bounded Semaphore via
+    /// [`SubAgentTool::new_with_concurrency`] from `build_react_agent`.
     pub fn new(
         model: Arc<dyn ChatModel>,
         read_only_tools: ToolRegistry,
         max_steps: usize,
         named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
     ) -> Self {
+        Self::new_with_concurrency(
+            model,
+            read_only_tools,
+            max_steps,
+            named,
+            Arc::new(Semaphore::new(64)),
+        )
+    }
+
+    /// Same as [`new`] but with an explicit subagent concurrency limiter. The
+    /// Semaphore is `Arc`-shared, so multiple concurrent `dispatch_subagent`
+    /// invocations in one turn contend on the SAME handle — that's the whole
+    /// point of C2/D3: a parent fanning out N sub-tasks is capped at `permits`
+    /// in-flight children, the rest queue on the permit.
+    pub fn new_with_concurrency(
+        model: Arc<dyn ChatModel>,
+        read_only_tools: ToolRegistry,
+        max_steps: usize,
+        named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
+        concurrency: Arc<Semaphore>,
+    ) -> Self {
         Self {
             model,
             read_only_tools,
             max_steps,
             named,
+            concurrency,
         }
     }
 
@@ -1060,6 +1095,16 @@ impl Tool for SubAgentTool {
             ReactAgent::new_shared(Arc::clone(&self.model), child_tools, worker_prompt.as_str())
                 .with_context(ctx.clone())
                 .with_max_steps(self.max_steps);
+        // C2/D3: hold a concurrency permit for the whole child run so a parent
+        // that fans out multiple dispatch_subagent calls in one turn is bounded.
+        // The Semaphore is Arc-shared across concurrent invocations, so the Nth
+        // in-flight child blocks here until an earlier one finishes — acquired
+        // before run_loop and dropped (`_permit` scope) exactly when it returns.
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .expect("subagent concurrency semaphore should never be closed");
         match child.run_loop(&task, ModelOptions::default()).await {
             Ok(out) => Ok(format!("[子 agent 结论] {out}")),
             Err(e) => {
@@ -1075,6 +1120,207 @@ impl Tool for SubAgentTool {
     fn is_read_only(&self) -> bool {
         false
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution for run/stream turns (C2/D3 subagent concurrency)
+// ---------------------------------------------------------------------------
+
+/// One tool call's outcome within a run/stream turn. Extracted from the
+/// stream's per-call block so the C2/D3 concurrency path can collect outcomes
+/// without driving the model, and so the result/event shape is unit-testable
+/// in isolation. `events` holds the Succeeded/Failed ToolCallEvent(s) the
+/// stream yields AFTER the call's Started event (Started is the caller's job,
+/// emitted before any execution).
+#[derive(Debug, Clone)]
+struct CallOutcome {
+    call_id: String,
+    result: String,
+    events: Vec<kernel_core::ToolCallEvent>,
+    file_changed: Option<std::path::PathBuf>,
+}
+
+/// Execute a single tool call (before-hook → invoke → outcome events). The
+/// extracted body of the run/stream per-call loop so it can run concurrently
+/// for dispatch_subagent without re-driving the model. Pure of yield: RETURNS
+/// events (Started is the caller's job); the stream re-yields them in order.
+async fn execute_one_call(
+    tools: &ToolRegistry,
+    call: &kernel_core::ToolCall,
+    ctx: &ToolContext,
+    hooks: &Option<Arc<HookManager>>,
+) -> CallOutcome {
+    let mut events: Vec<kernel_core::ToolCallEvent> = Vec::new();
+    // Classify once: the before-hook uses it for the veto, and — on a
+    // successful write — we re-match it below to emit a per-write FileChanged.
+    let action = crate::kernel_impl::hooks::classify_action(
+        &call.function.name,
+        &call.function.arguments,
+    );
+    let blocked = if let Some(h) = hooks.as_ref() {
+        match h.before(&action).await {
+            Err(reason) => {
+                let blocked_msg = format!("[blocked by {}: {}]", reason.hook, reason.message);
+                events.push(kernel_core::ToolCallEvent {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                    status: kernel_core::ToolCallStatus::Failed,
+                    result: Some(blocked_msg.clone()),
+                });
+                Some(blocked_msg)
+            }
+            Ok(()) => None,
+        }
+    } else {
+        None
+    };
+    let (result, file_changed) = match blocked {
+        Some(b) => (b, None),
+        None => match tools.find(&call.function.name) {
+            Some(t) => match t.invoke(&call.function.arguments, ctx).await {
+                Ok(out) => {
+                    events.push(kernel_core::ToolCallEvent {
+                        tool: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                        status: kernel_core::ToolCallStatus::Succeeded,
+                        result: Some(out.clone()),
+                    });
+                    let fc = match &action {
+                        crate::kernel_impl::hooks::Action::WriteFile { path, .. } => {
+                            Some(std::path::PathBuf::from(path))
+                        }
+                        _ => None,
+                    };
+                    (out, fc)
+                }
+                Err(e) => {
+                    let err = format!("[tool error: {e}]");
+                    events.push(kernel_core::ToolCallEvent {
+                        tool: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                        status: kernel_core::ToolCallStatus::Failed,
+                        result: Some(err.clone()),
+                    });
+                    (err, None)
+                }
+            },
+            None => (format!("[unknown tool: {}]", call.function.name), None),
+        },
+    };
+    CallOutcome {
+        call_id: call.id.clone(),
+        result,
+        events,
+        file_changed,
+    }
+}
+
+/// Execute every tool call in a turn, returning outcomes in ORIGINAL call
+/// order (tool_result blocks must pair with tool_use by id — Anthropic). The
+/// C2/D3 concurrency path: when ≥2 calls are dispatch_subagent, those fan out
+/// concurrently (bounded by SubAgentTool's Arc-shared Semaphore, acquired
+/// inside each invoke); every other call stays serial so AssertionGuard's
+/// git-diff capture around writes stays sound. With ≤1 dispatch_subagent this
+/// is plain serial — zero behavioural change vs the old inline loop.
+async fn execute_call_set(
+    tools: &ToolRegistry,
+    calls: &[kernel_core::ToolCall],
+    ctx: &ToolContext,
+    hooks: &Option<Arc<HookManager>>,
+) -> Vec<CallOutcome> {
+    let dispatch_positions: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.function.name == "dispatch_subagent")
+        .map(|(i, _)| i)
+        .collect();
+    let mut outcomes: Vec<Option<CallOutcome>> = (0..calls.len()).map(|_| None).collect();
+    if dispatch_positions.len() > 1 {
+        // Fan out the dispatch_subagent calls concurrently. Each holds a permit
+        // from SubAgentTool's Semaphore for the whole child run, so the parent
+        // is capped at `permits` in-flight children regardless of fan-out width.
+        let dispatch_calls: Vec<(usize, kernel_core::ToolCall)> = dispatch_positions
+            .iter()
+            .map(|&i| (i, calls[i].clone()))
+            .collect();
+        let futs = dispatch_calls.iter().map(|(i, c)| async move {
+            let o = execute_one_call(tools, c, ctx, hooks).await;
+            (*i, o)
+        });
+        for (i, o) in futures::future::join_all(futs).await {
+            outcomes[i] = Some(o);
+        }
+        // Run the remaining (non-dispatch) calls serially — writes included, so
+        // AssertionGuard sees a clean pre/post git-diff window per write.
+        for (i, call) in calls.iter().enumerate() {
+            if outcomes[i].is_none() {
+                outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks).await);
+            }
+        }
+    } else {
+        for (i, call) in calls.iter().enumerate() {
+            outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks).await);
+        }
+    }
+    outcomes
+        .into_iter()
+        .map(|o| o.expect("every call position is filled in both branches"))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Subagent status contract (C2/D3) — deer-flow subagent_status_contract.json
+// ---------------------------------------------------------------------------
+
+/// Terminal status of a dispatched sub-agent's tool result. Mirrors deer-flow's
+/// cross-language `subagent_status` contract (completed / failed / cancelled /
+/// timed_out / polling_timed_out) so the frontend board can color a dispatch by
+/// outcome regardless of which agent family produced the text. Parsed from the
+/// tool-result prefix by [`parse_subagent_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    PollingTimedOut,
+}
+
+/// Parse a dispatch_subagent tool result into its terminal status. Recognizes
+/// BOTH this project's own prefixes (`[子 agent 结论]` / `[子 agent 失败 …]`,
+/// produced by [`SubAgentTool::invoke`]) AND deer-flow's `Task Succeeded` /
+/// `Task failed` / `Task cancelled` / `Task timed out` / `Task polling timed
+/// out` prefixes (so a future claude `task` tool output maps to the same enum).
+/// Returns `None` for non-terminal streaming fragments ("Investigating …") —
+/// the deer-flow contract marks those `expected_status: null`.
+pub fn parse_subagent_status(content: &str) -> Option<SubagentStatus> {
+    let trimmed = content.trim();
+    // This project's dispatch_subagent prefixes (SubAgentTool::invoke).
+    if trimmed.starts_with("[子 agent 结论]") {
+        return Some(SubagentStatus::Completed);
+    }
+    if trimmed.starts_with("[子 agent 失败") {
+        return Some(SubagentStatus::Failed);
+    }
+    // deer-flow Task-tool prefixes (subagent_status_contract.json cases).
+    // `polling timed out` MUST be checked before `timed out` (more specific).
+    if trimmed.starts_with("Task Succeeded") {
+        return Some(SubagentStatus::Completed);
+    }
+    if trimmed.starts_with("Task polling timed out") {
+        return Some(SubagentStatus::PollingTimedOut);
+    }
+    if trimmed.starts_with("Task timed out") {
+        return Some(SubagentStatus::TimedOut);
+    }
+    if trimmed.starts_with("Task cancelled") {
+        return Some(SubagentStatus::Cancelled);
+    }
+    if trimmed.starts_with("Task failed") {
+        return Some(SubagentStatus::Failed);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1828,84 +2074,72 @@ impl kernel_core::Agent for ReactAgent {
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
-                for call in &turn_tool_calls {
-                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
-                        tool: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        status: kernel_core::ToolCallStatus::Started,
-                        result: None,
-                    });
-                    // Classify once: the before-hook uses it for the veto, and —
-                    // on a successful write — we re-match it below to emit a
-                    // per-write FileChanged event so the chat UI shows mutations
-                    // live (D3).
-                    let action = crate::kernel_impl::hooks::classify_action(
-                        &call.function.name,
-                        &call.function.arguments,
-                    );
-                    let blocked = if let Some(h) = &hooks {
-                        match h.before(&action).await {
-                            Err(reason) => {
-                                let blocked_msg =
-                                    format!("[blocked by {}: {}]", reason.hook, reason.message);
-                                yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
-                                    tool: call.function.name.clone(),
-                                    arguments: call.function.arguments.clone(),
-                                    status: kernel_core::ToolCallStatus::Failed,
-                                    result: Some(blocked_msg.clone()),
-                                });
-                                Some(blocked_msg)
-                            }
-                            Ok(()) => None,
+                // C2/D3 subagent concurrency: when ≥2 calls this turn are
+                // dispatch_subagent, fan them out concurrently (bounded by
+                // SubAgentTool's Semaphore); the rest stay serial. Outcomes are
+                // emitted + appended to history in ORIGINAL call order so
+                // tool_result blocks pair with tool_use by id (Anthropic).
+                let dispatch_count = turn_tool_calls
+                    .iter()
+                    .filter(|c| c.function.name == "dispatch_subagent")
+                    .count();
+                if dispatch_count > 1 {
+                    // Concurrent path: emit Started for all calls up front, then
+                    // run dispatch_subagent calls concurrently + the rest serially
+                    // (see execute_call_set). Result events arrive after the whole
+                    // set settles, in call order — the subagent board thus sees
+                    // all dispatches start together and finish as permits release.
+                    for call in &turn_tool_calls {
+                        yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            status: kernel_core::ToolCallStatus::Started,
+                            result: None,
+                        });
+                    }
+                    let outcomes = execute_call_set(&tools, &turn_tool_calls, &ctx, &hooks).await;
+                    for o in &outcomes {
+                        for ev in &o.events {
+                            yield AgentEvent::ToolCall(ev.clone());
                         }
-                    } else {
-                        None
-                    };
-                    let result = match blocked {
-                        Some(b) => b,
-                        None => match tools.find(&call.function.name) {
-                            Some(t) => match t.invoke(&call.function.arguments, &ctx).await {
-                                Ok(out) => {
-                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
-                                        tool: call.function.name.clone(),
-                                        arguments: call.function.arguments.clone(),
-                                        status: kernel_core::ToolCallStatus::Succeeded,
-                                        result: Some(out.clone()),
-                                    });
-                                    // D3: a write tool landed — surface the touched
-                                    // path as a FileChanged event so the chat UI
-                                    // renders per-write mutations in real time,
-                                    // distinct from the end-of-run git-diff
-                                    // aggregate carried by Done.files_changed.
-                                    if let crate::kernel_impl::hooks::Action::WriteFile { path, .. } =
-                                        &action
-                                    {
-                                        yield AgentEvent::FileChanged(std::path::PathBuf::from(path));
-                                    }
-                                    out
-                                }
-                                Err(e) => {
-                                    let err = format!("[tool error: {e}]");
-                                    yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
-                                        tool: call.function.name.clone(),
-                                        arguments: call.function.arguments.clone(),
-                                        status: kernel_core::ToolCallStatus::Failed,
-                                        result: Some(err.clone()),
-                                    });
-                                    err
-                                }
-                            },
-                            None => format!("[unknown tool: {}]", call.function.name),
-                        },
-                    };
-                    history.push(Message {
-                        role: Role::Tool,
-                        content: result,
-                        tool_calls: Vec::new(),
-                        tool_call_id: Some(call.id.clone()),
-                        reasoning: None,
-                        reasoning_signature: None,
-                    });
+                        if let Some(p) = &o.file_changed {
+                            yield AgentEvent::FileChanged(p.clone());
+                        }
+                        history.push(Message {
+                            role: Role::Tool,
+                            content: o.result.clone(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(o.call_id.clone()),
+                            reasoning: None,
+                            reasoning_signature: None,
+                        });
+                    }
+                } else {
+                    // Serial path (≤1 dispatch_subagent): Started→result per call,
+                    // preserving the legacy interleaved event order — zero regression.
+                    for call in &turn_tool_calls {
+                        yield AgentEvent::ToolCall(kernel_core::ToolCallEvent {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            status: kernel_core::ToolCallStatus::Started,
+                            result: None,
+                        });
+                        let o = execute_one_call(&tools, call, &ctx, &hooks).await;
+                        for ev in &o.events {
+                            yield AgentEvent::ToolCall(ev.clone());
+                        }
+                        if let Some(p) = &o.file_changed {
+                            yield AgentEvent::FileChanged(p.clone());
+                        }
+                        history.push(Message {
+                            role: Role::Tool,
+                            content: o.result.clone(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(o.call_id.clone()),
+                            reasoning: None,
+                            reasoning_signature: None,
+                        });
+                    }
                 }
             }
             // D2 lifecycle: dispatch Stop ONCE at run termination, regardless of
@@ -1970,6 +2204,216 @@ impl kernel_core::Agent for ReactAgent {
 mod tests {
     use super::*;
     use kernel_core::ToolInfo;
+
+    #[test]
+    fn subagent_status_parses_project_prefixes() {
+        // SubAgentTool::invoke stamps these prefixes on its tool result.
+        assert_eq!(
+            parse_subagent_status("[子 agent 结论] 调研完成,产出 3 页报告"),
+            Some(SubagentStatus::Completed)
+        );
+        assert_eq!(
+            parse_subagent_status("[子 agent 失败: model returned 400]"),
+            Some(SubagentStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn subagent_status_parses_deerflow_contract_cases() {
+        // deer-flow contracts/subagent_status_contract.json — both sides must
+        // agree on every case. These literals come straight from that fixture.
+        assert_eq!(
+            parse_subagent_status(
+                "Task Succeeded. Result: investigated and produced a 3-page report"
+            ),
+            Some(SubagentStatus::Completed)
+        );
+        assert_eq!(
+            parse_subagent_status("Task failed. Error: underlying tool raised RuntimeError"),
+            Some(SubagentStatus::Failed)
+        );
+        assert_eq!(
+            parse_subagent_status("Task cancelled by user."),
+            Some(SubagentStatus::Cancelled)
+        );
+        assert_eq!(
+            parse_subagent_status("Task timed out. Error: 900 seconds"),
+            Some(SubagentStatus::TimedOut)
+        );
+        assert_eq!(
+            parse_subagent_status(
+                "Task polling timed out after 15 minutes. This may indicate the background task is stuck. Status: RUNNING"
+            ),
+            Some(SubagentStatus::PollingTimedOut)
+        );
+        assert_eq!(
+            parse_subagent_status("Task polling timed out after 1 minutes. Status: RUNNING"),
+            Some(SubagentStatus::PollingTimedOut)
+        );
+        // Non-terminal streaming fragment → None (contract: expected_status null).
+        assert_eq!(parse_subagent_status("Investigating ..."), None);
+        // Whitespace tolerance (streaming prepends/appends newlines).
+        assert_eq!(
+            parse_subagent_status("  Task Succeeded. Result: ok  "),
+            Some(SubagentStatus::Completed)
+        );
+        assert_eq!(
+            parse_subagent_status("  Task cancelled by user.\n"),
+            Some(SubagentStatus::Cancelled)
+        );
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test ChatModel that records how many generate() calls overlap in time.
+    /// Each call sleeps 40ms while holding an in-flight counter; `max_seen` is
+    /// the high-water mark. run_loop calls generate once per child, so max_seen
+    /// == number of children that ran simultaneously. Used to PROVE the C2/D3
+    /// Semaphore actually caps concurrency — not just that the code compiles.
+    struct ConcurrentModel {
+        in_flight: Arc<AtomicUsize>,
+        max_seen: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl ChatModel for ConcurrentModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_seen.fetch_max(cur, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(Message {
+                role: Role::Assistant,
+                content: "done".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_signature: None,
+            })
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            // run_loop uses generate, not stream; this model is generate-only.
+            Err(Error::Unsupported("ConcurrentModel is generate-only".into()))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(ConcurrentModel {
+                in_flight: Arc::clone(&self.in_flight),
+                max_seen: Arc::clone(&self.max_seen),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_call_set_fans_out_dispatch_subagents() {
+        // Semaphore(4) is wide enough that all 3 fan-out children run at once.
+        // max in-flight generate must reach 3 — proving execute_call_set ran
+        // them concurrently (the old serial loop would peak at 1).
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let model: Arc<dyn ChatModel> = Arc::new(ConcurrentModel {
+            in_flight: Arc::clone(&in_flight),
+            max_seen: Arc::clone(&max_seen),
+        });
+        let tool = SubAgentTool::new_with_concurrency(
+            Arc::clone(&model),
+            ToolRegistry::new(),
+            4,
+            Vec::new(),
+            Arc::new(Semaphore::new(4)),
+        );
+        let mut reg = ToolRegistry::new();
+        reg.push(tool);
+        let calls = vec![
+            probe_call("dispatch_subagent", r#"{"task":"a"}"#),
+            probe_call("dispatch_subagent", r#"{"task":"b"}"#),
+            probe_call("dispatch_subagent", r#"{"task":"c"}"#),
+        ];
+        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            3,
+            "3 fan-out children ran concurrently under Semaphore(4)"
+        );
+        // Outcomes preserve ORIGINAL call order — tool_result must pair with
+        // tool_use by id (Anthropic), regardless of completion order.
+        assert_eq!(outcomes[0].call_id, calls[0].id);
+        assert_eq!(outcomes[1].call_id, calls[1].id);
+        assert_eq!(outcomes[2].call_id, calls[2].id);
+        // Each dispatched child converged → Completed status on its result.
+        for o in &outcomes {
+            assert_eq!(parse_subagent_status(&o.result), Some(SubagentStatus::Completed));
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_call_set_semaphore_caps_concurrency() {
+        // Semaphore(1) serializes the children even though execute_call_set
+        // fans them out concurrently — the acquire inside SubAgentTool::invoke
+        // is the gate. max in-flight generate must be 1, not 3.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let model: Arc<dyn ChatModel> = Arc::new(ConcurrentModel {
+            in_flight: Arc::clone(&in_flight),
+            max_seen: Arc::clone(&max_seen),
+        });
+        let tool = SubAgentTool::new_with_concurrency(
+            Arc::clone(&model),
+            ToolRegistry::new(),
+            4,
+            Vec::new(),
+            Arc::new(Semaphore::new(1)),
+        );
+        let mut reg = ToolRegistry::new();
+        reg.push(tool);
+        let calls = vec![
+            probe_call("dispatch_subagent", r#"{"task":"a"}"#),
+            probe_call("dispatch_subagent", r#"{"task":"b"}"#),
+            probe_call("dispatch_subagent", r#"{"task":"c"}"#),
+        ];
+        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            1,
+            "Semaphore(1) serialized the fan-out children"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_call_set_serial_when_at_most_one_dispatch() {
+        // ≤1 dispatch_subagent → serial branch (zero behavioural change). A
+        // read-only echo tool returns its arguments; outcomes stay in call order.
+        struct EchoTool;
+        #[async_trait]
+        impl Tool for EchoTool {
+            fn info(&self) -> ToolInfo {
+                ToolInfo {
+                    name: "echo".into(),
+                    description: "echo args".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn invoke(&self, args: &str, _: &ToolContext) -> Result<String, Error> {
+                Ok(args.to_string())
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+        }
+        let mut reg = ToolRegistry::new();
+        reg.push(EchoTool);
+        let calls = vec![
+            probe_call("echo", r#"{"v":"1"}"#),
+            probe_call("echo", r#"{"v":"2"}"#),
+        ];
+        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].call_id, calls[0].id);
+        assert_eq!(outcomes[1].call_id, calls[1].id);
+        // Each succeeded with one Succeeded event carrying the echoed args.
+        assert_eq!(outcomes[0].events.len(), 1);
+        assert_eq!(outcomes[0].events[0].status, kernel_core::ToolCallStatus::Succeeded);
+    }
 
     #[test]
     fn decode_anthropic_text_block() {

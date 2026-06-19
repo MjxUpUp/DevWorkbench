@@ -527,3 +527,22 @@ export interface TraceSettings {
   retention_days: number | null;
   last_vacuum_at: string | null;
 }
+
+// ---- Subagent board types (C2/D3) ----
+
+/** Terminal status of a dispatched sub-agent. Mirrors the Rust `SubagentStatus`
+ *  serde schema (snake_case) — both sides agree on the same 5 values + the
+ *  shared parse rules (deer-flow subagent_status_contract.json). */
+export type SubagentStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'polling_timed_out';
+
+/** One dispatch_subagent call tracked by the subagent board. `status` is
+ *  'running' until the matching tool_result resolves it. */
+export interface SubagentDispatch {
+  task: string;
+  status: 'running' | SubagentStatus;
+}

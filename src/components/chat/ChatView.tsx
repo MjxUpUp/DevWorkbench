@@ -4,6 +4,7 @@ import { useAgentStore } from '../../stores/agentStore';
 import type { AgentType, BranchNode, Session } from '../../types';
 import type { AgentMode } from '../ModeSelector';
 import { ChatHeader } from './ChatHeader';
+import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
@@ -423,6 +424,13 @@ export function ChatView() {
         onModelChange={setSelectedModel}
         modelOptions={modelOptions}
         onClear={handleClear}
+      />
+      <SubagentBoard
+        events={
+          visibleTurns.length
+            ? visibleTurns[visibleTurns.length - 1].blocks ?? null
+            : null
+        }
       />
       <div className="message-list" ref={messageListRef}>
         {visibleTurns.map((session, i) => {
