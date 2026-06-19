@@ -4,7 +4,7 @@ import { ProvidersSection } from '../src/components/settings/ProvidersSection';
 import { MemorySection } from '../src/components/settings/MemorySection';
 import { SkillsSection } from '../src/components/settings/SkillsSection';
 import { HooksSection } from '../src/components/settings/HooksSection';
-import { PluginsSection } from '../src/components/settings/PluginsSection';
+import { CapabilitySection } from '../src/components/settings/CapabilitySection';
 import { ToastProvider } from '../src/components/Toast';
 import { useNavigationStore } from '../src/stores/navigationStore';
 
@@ -40,7 +40,7 @@ function Harness() {
       </section>
       <h2>capability</h2>
       <section data-e2e="capability">
-        <PluginsSection />
+        <CapabilitySection />
       </section>
     </ToastProvider>
   );

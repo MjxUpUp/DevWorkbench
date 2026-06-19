@@ -5,7 +5,7 @@ import { useSkillsStore } from '../../stores/skillsStore';
 import type { McpToolListing } from '../../types';
 
 /**
- * 能力总览 (D1 — the "plugins" settings page).
+ * 能力总览 (Capability overview — the agent's "what can I do right now" page).
  *
  * A READ-ONLY aggregate of everything a kernel agent can currently do, in one
  * place:
@@ -20,6 +20,10 @@ import type { McpToolListing } from '../../types';
  * Distinct from the Skills / MCP CONFIG pages (their own sidebar entries):
  * those EDIT the registries; this one answers "what can my agent use right
  * now?" without making the user click through three pages.
+ *
+ * Renamed from PluginsSection (the old "plugins" id) to CapabilitySection /
+ * "capability" — the section was never about plugins, only the legacy id
+ * lingered. UI label "能力总览" is unchanged.
  */
 
 // Core built-in tools every kernel agent gets. Mirrors kernel_impl::builtin_tools
@@ -39,7 +43,7 @@ interface ToolRow {
   desc: string;
 }
 
-export function PluginsSection() {
+export function CapabilitySection() {
   const activeProject = useNavigationStore((s) => s.activeProject);
   const installed = useSkillsStore((s) => s.installed);
   const loadInstalled = useSkillsStore((s) => s.loadInstalled);

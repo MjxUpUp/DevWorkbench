@@ -54,9 +54,28 @@ pub struct RollbackResult {
 /// Run a git command in `project`, returning trimmed stdout. Windows uses
 /// CREATE_NO_WINDOW to avoid console popups (same pattern as honesty.rs /
 /// git.rs). Errors carry stderr so callers can log a meaningful reason.
+///
+/// Every invocation forces a deterministic, platform-safe git config via `-c`
+/// (opencode snapshot/index.ts:33-35 — these are the flags that keep
+/// checkpoints/diffs correct on Windows):
+///   - `core.autocrlf=false`  — never LF↔CRLF convert, else blob/patch hashes
+///     drift between platforms and rollback restores CRLF-corrupted content.
+///   - `core.longpaths=true`  — allow >260-char paths on Windows, else they're
+///     silently dropped from `ls-files` and a checkpoint misses them.
+///   - `core.symlinks=true`   — honor symlinks instead of materializing them.
+///   - `core.quotepath=false` — keep non-ASCII paths literal in `ls-files`
+///     output, else 中文路径 gets octal-escaped and the untracked set we diff
+///     against never matches (rollback would miscompare / miss them).
 fn git_run(project: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(args).current_dir(project);
+    cmd.args([
+        "-c", "core.autocrlf=false",
+        "-c", "core.longpaths=true",
+        "-c", "core.symlinks=true",
+        "-c", "core.quotepath=false",
+    ])
+    .args(args)
+    .current_dir(project);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -342,5 +361,50 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let err = create_at_session_start(tmp.path().to_str().unwrap(), "s5", "test").unwrap_err();
         assert!(err.contains("git"), "got: {err}");
+    }
+
+    /// A2 — core.quotepath=false: a non-ASCII path must appear LITERALLY in the
+    /// untracked snapshot, not git's default octal-escaped form. Without the
+    /// flag `git ls-files` would emit `"\346\265\213\350\257\225.md"` and the
+    /// rollback diff would never match the real on-disk filename, so an
+    /// agent-created 中文 file would survive rollback. This test pins the flag.
+    #[test]
+    fn create_captures_non_ascii_untracked_unescaped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git_repo(tmp.path());
+        let name = "测试笔记.md";
+        std::fs::write(tmp.path().join(name), "中文内容\n").unwrap();
+
+        let cp = create_at_session_start(tmp.path().to_str().unwrap(), "s6", "test").unwrap();
+        assert!(
+            cp.untracked_at_checkpoint.iter().any(|f| f == name),
+            "中文 path must be literal (quotepath=false), got: {:?}",
+            cp.untracked_at_checkpoint
+        );
+        assert!(
+            !cp.untracked_at_checkpoint.iter().any(|f| f.contains('\\')),
+            "no octal-escaped (backslash) paths expected, got: {:?}",
+            cp.untracked_at_checkpoint
+        );
+    }
+
+    /// A2 — core.autocrlf=false + quotepath=false end-to-end: an agent-created
+    /// 中文 untracked file is correctly removed on rollback. This is the real
+    /// Windows-correctness scenario the flags exist for (previously the escaped
+    /// name would never match, leaving the file behind after "rollback").
+    #[test]
+    fn rollback_removes_non_ascii_agent_untracked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git_repo(tmp.path());
+        create_at_session_start(tmp.path().to_str().unwrap(), "s7", "test").unwrap();
+        let name = "代理产物.md";
+        std::fs::write(tmp.path().join(name), "agent wrote\n").unwrap();
+
+        let res = apply_rollback(tmp.path().to_str().unwrap(), "s7", false).unwrap();
+        assert!(
+            res.removed_untracked.iter().any(|f| f == name),
+            "中文 agent file removed, got: {res:?}"
+        );
+        assert!(!tmp.path().join(name).exists());
     }
 }

@@ -7,7 +7,7 @@ import { MemorySection } from './MemorySection';
 import { SkillsSection } from './SkillsSection';
 import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
-import { PluginsSection } from './PluginsSection';
+import { CapabilitySection } from './CapabilitySection';
 import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
@@ -32,7 +32,7 @@ type SettingsIcon = React.FC<{ size?: number; className?: string }>;
  * aesthetic.
  */
 export type SettingsSection =
-  | 'agent-tools' | 'providers' | 'plugins'
+  | 'agent-tools' | 'providers' | 'capability'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
   | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';
 
@@ -47,7 +47,7 @@ interface SectionDef {
 const SECTIONS: SectionDef[] = [
   { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection },
   { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection },
-  { id: 'plugins', label: '能力总览', Icon: IconInbox, Component: PluginsSection },
+  { id: 'capability', label: '能力总览', Icon: IconInbox, Component: CapabilitySection },
   { id: 'skills', label: '技能', Icon: IconSparkles, Component: SkillsSection },
   { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection },
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, Component: SubAgentsSection },
