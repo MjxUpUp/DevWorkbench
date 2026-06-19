@@ -235,6 +235,12 @@ pub(crate) fn build_react_agent(
     let session_id_owned = session_id.map(|s| s.to_string());
     let trace_sink =
         crate::trace::sink::optional_shared(db.clone(), conversation_id_owned.clone());
+    // Whether the resolved model is GLM-family — gates the per-step router below
+    // (only GLM same-provider routing is valid; non-GLM providers must NOT get the
+    // router, else run_loop's base_model fallback hardcodes glm-4.6 and overwrites
+    // opts.model with a GLM id → 400 on a non-GLM endpoint). Captured BEFORE
+    // resolved_model is moved into GlmChatModel::new.
+    let is_glm_family = resolved_model.starts_with("glm-");
     let chat: Arc<dyn kernel_core::ChatModel> = Arc::new(
         GlmChatModel::new(endpoint, api_key, resolved_model)
             // P0 model orchestration: a process-wide breaker so a down GLM
@@ -373,18 +379,29 @@ pub(crate) fn build_react_agent(
             }
         }
     }
-    Ok(ReactAgent::new_shared(chat, registry, sys_prompt)
+    let agent = ReactAgent::new_shared(chat, registry, sys_prompt)
         .with_context(ctx)
         .with_history(history)
         .with_thinking(2048)
-        .with_max_verify(1)
-        // T9 per-step routing: rule-based glm-4-flash for low-stakes turns
-        // (tool-result echoes, confirmations), glm-4.6 for planning/reasoning.
-        // Same Z.AI provider → endpoint/key constant; route_step is a no-op for
-        // non-GLM base models.
-        .with_model_router(Arc::new(
+        .with_max_verify(1);
+    // T9 per-step routing: rule-based glm-4-flash for low-stakes turns
+    // (tool-result echoes, confirmations), glm-4.6 for planning/reasoning.
+    // Z.AI GLM 同族 only —— route_step 在 glm-4.6 ↔ glm-4-flash 间切,要求 endpoint
+    // 不变(Z.AI)。对非 GLM provider(DeepSeek/claude/…)挂 router 会爆:run_loop 的
+    // base_model 在 model_opt 为 None 时 fallback 到 hardcode STRONG_MODEL(glm-4.6),
+    // route_step 据此返回 glm-4.6 覆盖 opts.model,把 GLM 模型名灌进非 GLM 端点 →
+    // 400 invalid model(session 1ef23cbc:DeepSeek 端点收到 glm-4.6)。wire 时按
+    // resolved_model 守门:非 GLM 不挂 router,opts.model 保持 None → stream 回退到
+    // GlmChatModel.model(resolved_model),正确。route_step 内部 base_model guard
+    // (model_router.rs: non_glm_base_is_returned_unchanged)是第二道防线。
+    let agent = if is_glm_family {
+        agent.with_model_router(Arc::new(
             crate::kernel_impl::model_router::route_step,
         ))
+    } else {
+        agent
+    };
+    Ok(agent
         .with_budget_check(budget_check)
         // v1.3 C1 + v2.0 fix: summarize the conversation middle once it exceeds a
         // threshold sized to the MODEL's declared context window (75%), keeping

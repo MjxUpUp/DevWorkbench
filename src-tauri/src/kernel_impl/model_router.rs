@@ -142,6 +142,15 @@ mod tests {
         let h = [user("ok")];
         assert_eq!(route_step(&h, "claude-opus-4"), "claude-opus-4");
         assert_eq!(route_step(&h, "gpt-5"), "gpt-5");
+        // Regression (session 1ef23cbc, 2026-06-19): a DeepSeek base model must
+        // NEVER be swapped to glm-4.6 — that sends a GLM model id to the DeepSeek
+        // endpoint → 400 invalid_request_error. The guard here is the runtime
+        // backstop; executor.rs additionally gates the router off at wire-time for
+        // non-GLM providers (only resolved_model.starts_with("glm-") wires it).
+        // Both must hold — a power-hint turn on a DeepSeek base must still return
+        // the DeepSeek id, not STRONG_MODEL.
+        assert_eq!(route_step(&[user("plan the refactor")], "deepseek-v4-flash"), "deepseek-v4-flash");
+        assert_eq!(route_step(&h, "deepseek-v4-flash"), "deepseek-v4-flash");
     }
 
     #[test]
