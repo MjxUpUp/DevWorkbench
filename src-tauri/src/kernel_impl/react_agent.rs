@@ -1247,11 +1247,17 @@ impl ReactAgent {
         let Some(dir) = working_dir.as_deref() else {
             return Vec::new();
         };
-        let Ok(out) = std::process::Command::new("git")
-            .args(["diff", "--name-only"])
-            .current_dir(dir)
-            .output()
-        else {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["diff", "--name-only"]).current_dir(dir);
+        // CREATE_NO_WINDOW — 本函数在 AgentEvent::Done(Completed) 时调用（即
+        // 对话完成的瞬间），缺这个标志 Windows 会为 git.exe 分配一个新控制台
+        // 窗口，闪一下黑框。与 git.rs/honesty.rs/pty.rs 保持一致。
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let Ok(out) = cmd.output() else {
             return Vec::new();
         };
         if !out.status.success() {
@@ -1269,11 +1275,16 @@ impl ReactAgent {
     /// repo or spawn failure returns None (no diff → no weakening scan).
     fn capture_git_diff(working_dir: &Option<String>) -> Option<String> {
         let dir = working_dir.as_deref()?;
-        let out = std::process::Command::new("git")
-            .args(["diff", "--no-color"])
-            .current_dir(dir)
-            .output()
-            .ok()?;
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["diff", "--no-color"]).current_dir(dir);
+        // CREATE_NO_WINDOW — 本函数在每次 WriteFile 工具调用前后触发，缺标志
+        // 会闪 git 黑框。与 git.rs/honesty.rs/pty.rs 保持一致。
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().ok()?;
         if out.status.success() {
             Some(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
@@ -1827,6 +1838,42 @@ mod tests {
         assert_eq!(m.tool_calls[0].function.name, "grep");
         assert_eq!(m.tool_calls[0].id, "call_1");
         assert!(m.tool_calls[0].function.arguments.contains("foo"));
+    }
+
+    #[test]
+    fn git_changed_files_and_capture_diff_reflect_working_tree() {
+        // 回归 guard:git_changed_files / capture_git_diff 是 assertion-weakening
+        // 检测链(PostToolUse hooks 读 diff 判弱化)与 Done(Completed) 的
+        // files_changed 的关键依赖,此前零覆盖。CREATE_NO_WINDOW 重构(Windows
+        // 加 creation_flags)只改窗口行为、不改契约——此测试覆盖契约本身,确保
+        // 重构没破坏函数:在真实 git repo 里制造一个未暂存修改,两个函数必须各自
+        // 看到它。(窗口抑制行为本身属 OS 层,不可单测。)
+        use std::process::Command;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let g = |args: &[&str]| {
+            let r = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(r.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&r.stderr));
+        };
+        g(&["init"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-m", "init"]);
+        // 制造未暂存修改 → git diff --name-only / --no-color 都应看到 a.txt
+        std::fs::write(dir.join("a.txt"), "two").unwrap();
+        let wd: Option<String> = Some(dir.to_string_lossy().into_owned());
+        let changed = ReactAgent::git_changed_files(&wd);
+        assert!(
+            changed.iter().any(|f| f.ends_with("a.txt")),
+            "git_changed_files 应含 a.txt: {:?}", changed
+        );
+        let diff = ReactAgent::capture_git_diff(&wd).expect("有 diff 时 capture_git_diff 返回 Some");
+        assert!(diff.contains("a.txt"), "diff 应含 a.txt: {}", diff);
+        // working_dir=None 早退,不调 git、不 panic
+        assert!(ReactAgent::git_changed_files(&None).is_empty());
+        assert!(ReactAgent::capture_git_diff(&None).is_none());
     }
 
     #[test]
