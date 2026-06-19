@@ -1,7 +1,25 @@
 use crate::error::AppError;
 use crate::models::{AgentType, ContextSnapshot, Conversation, Session, SessionStatus};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// A flat branch-tree node: one turn + its parent pointer. The frontend groups
+/// these by `parent_session_id` to render the branch switcher (a turn that was
+/// edited-and-regenerated forks a sibling under the SAME parent; the switcher
+/// walks between siblings). Kept as a query DTO here so `models.rs` stays free
+/// of presentation-shaped types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchNode {
+    pub id: String,
+    pub parent_session_id: Option<String>,
+    pub prompt: String,
+    pub status: String,
+    pub started_at: String,
+    pub agent_type: String,
+}
 
 // Thread-local override for database path (test isolation).
 #[cfg(test)]
@@ -466,6 +484,159 @@ pub fn load_turns_for_conversation_db(
     Ok(out)
 }
 
+/// Load a single session by id (None when absent). Used by edit_and_regenerate
+/// to read the edited turn's lineage (parent_session_id + conversation_id)
+/// before forking its regenerated sibling.
+pub fn get_session_by_id_db(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<Session>, AppError> {
+    let row = conn
+        .query_row(
+            "SELECT id, project_path, agent_type, status, prompt, model,
+                    started_at, finished_at, exit_code, output_summary,
+                    context_snapshot, linked_requirement_id, parent_session_id,
+                    conversation_id, blocks, task_ref
+             FROM sessions WHERE id = ?1",
+            params![id],
+            |row| {
+                let agent_type_str: String = row.get(2)?;
+                let agent_type: AgentType =
+                    serde_json::from_value(serde_json::Value::String(agent_type_str))
+                        .unwrap_or(AgentType::ClaudeCode);
+                let status_str: String = row.get(3)?;
+                let status = match status_str.as_str() {
+                    "running" => SessionStatus::Running,
+                    "completed" => SessionStatus::Completed,
+                    "failed" => SessionStatus::Failed,
+                    _ => SessionStatus::Failed,
+                };
+                let snapshot_str: Option<String> = row.get(10)?;
+                let context_snapshot: Option<ContextSnapshot> = snapshot_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok());
+                let blocks_str: Option<String> = row.get(14)?;
+                let blocks: Option<serde_json::Value> =
+                    blocks_str.as_deref().and_then(|s| serde_json::from_str(s).ok());
+                let task_ref: Option<String> = row.get(15)?;
+                Ok(Session {
+                    id: row.get(0)?,
+                    project_path: row.get(1)?,
+                    agent_type,
+                    status,
+                    prompt: row.get(4)?,
+                    model: row.get(5)?,
+                    started_at: row.get(6)?,
+                    finished_at: row.get(7)?,
+                    exit_code: row.get(8)?,
+                    output_summary: row.get(9)?,
+                    context_snapshot,
+                    linked_requirement_id: row.get(11)?,
+                    parent_session_id: row.get(12)?,
+                    conversation_id: row.get(13)?,
+                    blocks,
+                    task_ref,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Walk the parent_session_id chain from `descendant_id` back to the root,
+/// returning the ancestor turns oldest-first (NOT including the descendant
+/// itself).
+///
+/// This is the branch-pure history injector for edit-and-regenerate: a fork
+/// re-runs with `parent_session_id` = the edited turn's own parent, so its
+/// prior context must be exactly that parent's ancestor chain — never the
+/// edited turn's siblings (the other branches), which would otherwise leak
+/// into the regenerated turn's history via the conversation-wide loader.
+///
+/// Linear conversations (no forks): equivalent to "all turns before this one".
+/// Returns empty when `descendant_id` is the root (no parent) or doesn't exist.
+pub fn load_turn_chain_db(
+    conn: &rusqlite::Connection,
+    descendant_id: &str,
+) -> Result<Vec<Session>, AppError> {
+    // Locate the descendant's conversation + its immediate parent. Missing row
+    // or no parent ⇒ root ⇒ no ancestors to inject.
+    let start: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT conversation_id, parent_session_id FROM sessions WHERE id = ?1",
+            params![descendant_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((Some(conv), first_parent)) = start else {
+        return Ok(Vec::new());
+    };
+    let Some(first_parent) = first_parent else {
+        return Ok(Vec::new()); // root turn
+    };
+
+    // Load the whole conversation once, then walk the chain in memory. Cheaper
+    // than N round-trips and reuses the validated row mapping of
+    // load_turns_for_conversation_db (consistent Session decoding).
+    let all = load_turns_for_conversation_db(conn, &conv)?;
+    let by_id: HashMap<&str, &Session> = all.iter().map(|s| (s.id.as_str(), s)).collect();
+
+    let mut chain = Vec::new();
+    let mut cursor = Some(first_parent);
+    let mut visited: HashSet<String> = HashSet::new();
+    while let Some(pid) = cursor {
+        if !visited.insert(pid.clone()) {
+            break; // cycle guard (malformed chain)
+        }
+        match by_id.get(pid.as_str()) {
+            Some(s) => {
+                let session: &Session = *s;
+                chain.push(session.clone());
+                cursor = session.parent_session_id.clone();
+            }
+            None => break, // dangling parent ref
+        }
+    }
+    chain.reverse(); // collected child→parent; flip to oldest-first
+    Ok(chain)
+}
+
+/// Return every turn of a conversation as flat [`BranchNode`]s (oldest-first),
+/// each carrying its `parent_session_id`. The frontend groups by parent to
+/// render the branch switcher. We deliberately do NOT assemble the tree server-
+/// side — the parent pointers are enough for the client, and keeping it flat
+/// avoids coupling branch UI shape to the backend.
+pub fn load_conversation_branches_db(
+    conn: &rusqlite::Connection,
+    conversation_id: &str,
+) -> Result<Vec<BranchNode>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_session_id, prompt, status, started_at, agent_type
+         FROM sessions WHERE conversation_id = ?1 ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map(params![conversation_id], |row| {
+        let agent_type_str: String = row.get(5)?;
+        Ok(BranchNode {
+            id: row.get(0)?,
+            parent_session_id: row.get(1)?,
+            prompt: row.get(2)?,
+            status: row.get(3)?,
+            started_at: row.get(4)?,
+            agent_type: agent_type_str,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 // ---- Legacy helpers (still used by pty output logging) ----
 
 pub(crate) fn agents_dir() -> Result<PathBuf, String> {
@@ -703,6 +874,81 @@ mod tests {
         let turns = load_turns_for_conversation_db(&conn, "c1").unwrap();
         let ids: Vec<&str> = turns.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["first", "mid", "last"], "oldest-first within c1 only");
+    }
+
+    // --- A4 edit-and-regenerate: branch-pure turn chain ---
+
+    /// Helper: a turn with explicit conversation + parent + ordered start time,
+    /// so branch trees can be built deterministically in tests.
+    fn make_turn(id: &str, conv: &str, parent: Option<&str>, started: &str) -> Session {
+        let mut s = make_session(id, "/p", SessionStatus::Completed);
+        s.conversation_id = Some(conv.to_string());
+        s.parent_session_id = parent.map(|p| p.to_string());
+        s.started_at = started.to_string();
+        s
+    }
+
+    /// The core A4 guarantee: a forked/regenerated turn's history chain is its
+    /// parent's ancestors ONLY — never the sibling branch being replaced. Without
+    /// this, the conversation-wide loader would leak the edited-out branch into
+    /// the new turn's context.
+    #[test]
+    fn turn_chain_walks_ancestors_excluding_sibling_branches() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        // root → b1 → c1   (original branch)
+        //  └──→ b2         (fork: b1 edited → regenerated as sibling under root)
+        let nodes = [
+            make_turn("root", "c1", None, "2026-01-01T00:00:00Z"),
+            make_turn("b1", "c1", Some("root"), "2026-01-02T00:00:00Z"),
+            make_turn("c1", "c1", Some("b1"), "2026-01-03T00:00:00Z"),
+            make_turn("b2", "c1", Some("root"), "2026-01-04T00:00:00Z"),
+        ];
+        for s in &nodes {
+            insert_session_db(&conn, s).unwrap();
+        }
+
+        // b2 (the fork) sees ONLY [root] — not b1/c1.
+        let chain = load_turn_chain_db(&conn, "b2").unwrap();
+        let ids: Vec<&str> = chain.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["root"], "forked turn chain = parent's ancestors only");
+
+        // c1 (deep in the original branch) sees its full ancestor chain.
+        let chain_c1 = load_turn_chain_db(&conn, "c1").unwrap();
+        let ids_c1: Vec<&str> = chain_c1.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids_c1, vec!["root", "b1"]);
+
+        // Root (no parent) and a missing id both yield empty.
+        assert!(load_turn_chain_db(&conn, "root").unwrap().is_empty());
+        assert!(load_turn_chain_db(&conn, "missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn conversation_branches_returns_flat_turns_with_parent_pointers() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        for s in [
+            make_turn("root", "c1", None, "2026-01-01T00:00:00Z"),
+            make_turn("b1", "c1", Some("root"), "2026-01-02T00:00:00Z"),
+            make_turn("b2", "c1", Some("root"), "2026-01-04T00:00:00Z"),
+            // A different conversation's turn must not leak in.
+            make_turn("other", "c2", None, "2026-01-05T00:00:00Z"),
+        ] {
+            insert_session_db(&conn, &s).unwrap();
+        }
+
+        let branches = load_conversation_branches_db(&conn, "c1").unwrap();
+        let ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["root", "b1", "b2"], "all c1 turns oldest-first; c2 excluded");
+
+        // b1 + b2 share parent=root → siblings → the branch switcher's group.
+        let b1 = branches.iter().find(|b| b.id == "b1").unwrap();
+        let b2 = branches.iter().find(|b| b.id == "b2").unwrap();
+        assert_eq!(b1.parent_session_id.as_deref(), Some("root"));
+        assert_eq!(b2.parent_session_id.as_deref(), Some("root"));
+        assert_eq!(branches[0].parent_session_id, None, "root has no parent");
     }
 
     /// blocks round-trip: update_session_db writes the persisted blocks JSON,

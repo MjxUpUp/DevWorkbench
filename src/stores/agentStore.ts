@@ -3,7 +3,7 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent } from '../types';
+import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
 import type { AgentMode } from '../components/ModeSelector';
 
 interface AgentState {
@@ -59,7 +59,15 @@ interface AgentState {
     kernel?: boolean,
     mode?: AgentMode,
     model?: string,
+    parentSessionId?: string,
   ) => Promise<Session>;
+  /** 编辑某条 turn 的 prompt 并重新生成:后端从该 turn 的父节点 fork 一个
+   *  新兄弟 turn(同 conversation,parent = 被编辑 turn 的 parent)并重跑 agent。
+   *  新 turn 与旧 turn 成兄弟 = 可切换分支。返回 forked session。 */
+  editAndRegenerate: (sessionId: string, newPrompt: string, kernel?: boolean) => Promise<Session>;
+  /** 拉取一个 conversation 的扁平分支节点(turn + parent 指针),供前端渲染
+   *  分支切换器。 */
+  getConversationBranches: (conversationId: string) => Promise<BranchNode[]>;
   getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
   clearPtyOutput: (sessionId: string) => void;
@@ -238,13 +246,47 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, undefined, kernel, mode);
   },
 
-  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode, model) => {
+  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode, model, parentSessionId) => {
     if (!agentType) {
       throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
     }
     // conversation_id present → backend attaches this as a follow-up turn of
     // the existing container and touches its last_agent / last_activity_at.
-    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, conversationId, kernel, mode);
+    // parentSessionId links this turn into the conversation's turn chain — the
+    // backbone of branch-aware history (visibleTurns walks it; a fork via
+    // edit_and_regenerate branches off it). Undefined → backend treats as no
+    // parent (backwards compatible with the first turn of a container).
+    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, parentSessionId, conversationId, kernel, mode);
+  },
+
+  editAndRegenerate: async (sessionId, newPrompt, kernel) => {
+    const session = await invoke<Session>('edit_and_regenerate', {
+      sessionId,
+      newPrompt,
+      kernel: kernel ?? false,
+    });
+    // Upsert + refresh — same dedup rationale as spawnAgent: the backend
+    // (spawn_agent_session → react_chat_driver → register_running_session) emits
+    // agent:started synchronously BEFORE this returns, so refreshSessions has
+    // usually already loaded the forked session by the time we upsert here.
+    set((s) => {
+      const exists = s.sessions.some((x) => x.id === session.id);
+      return {
+        sessions: exists
+          ? s.sessions.map((x) => (x.id === session.id ? { ...x, ...session } : x))
+          : [...s.sessions, session],
+      };
+    });
+    void get().refreshConversations(session.projectPath);
+    void get().refreshSessions();
+    return session;
+  },
+
+  getConversationBranches: async (conversationId) => {
+    const result = await invoke<BranchNode[]>('get_conversation_branches', { conversationId });
+    // Defensive: invoke may resolve null (test mocks, or a transient backend
+    // hiccup) — coerce to [] so the branch UI never throws on a non-array.
+    return Array.isArray(result) ? result : [];
   },
 
   getDefaultAgent: () => {

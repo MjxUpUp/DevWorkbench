@@ -402,6 +402,111 @@
   white-space: pre-wrap;
 }
 
+/* --- A4: turn edit/regenerate + branch switcher --- */
+
+/* Wrap the user bubble + the hover-revealed turn actions so the actions sit
+ * under the bubble, right-aligned to match the bubble's flex-end. */
+.user-message-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.turn-actions {
+  display: flex;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--duration-fast) ease;
+}
+.user-message-wrap:hover .turn-actions {
+  opacity: 1;
+}
+
+.turn-edit-btn,
+.branch-switch-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  padding: 2px var(--space-1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.turn-edit-btn:hover,
+.branch-switch-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+.turn-edit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.branch-switch-btn {
+  color: var(--accent);
+}
+
+/* Inline editor replacing the user bubble while editing a turn's prompt. */
+.user-message-edit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+  width: 100%;
+}
+.user-message-edit-textarea {
+  width: 100%;
+  max-width: 70%;
+  align-self: flex-end;
+  resize: vertical;
+  min-height: 60px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  line-height:1.5;
+  font-family: inherit;
+}
+.user-message-edit-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.user-message-edit-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+.user-message-edit-submit,
+.user-message-edit-cancel {
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 4px var(--space-2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, filter var(--duration-fast) ease;
+}
+.user-message-edit-submit {
+  background: var(--accent);
+  color: var(--surface-0);
+}
+.user-message-edit-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.user-message-edit-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.user-message-edit-cancel {
+  background: transparent;
+  color: var(--text-tertiary);
+}
+.user-message-edit-cancel:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
 /* --- Agent Message --- */
 
 .agent-message {

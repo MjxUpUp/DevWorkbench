@@ -864,7 +864,7 @@ pub fn spawn_pty_agent(
     // is unrelated to this conversation; see build_spawn_config). Same-agent and
     // cross-agent turns are therefore continuous the same way.
     let prior_turns = match conversation_id {
-        Some(cid) => load_prior_turns(&db_conn, cid),
+        Some(cid) => load_prior_turns(&db_conn, cid, parent_session_id),
         None => Vec::new(),
     };
 
@@ -918,12 +918,24 @@ pub fn spawn_pty_agent(
 pub(crate) fn load_prior_turns(
     db_conn: &crate::db::DbState,
     conversation_id: &str,
+    parent_session_id: Option<&str>,
 ) -> Vec<crate::models::Session> {
     let Ok(conn) = db_conn.get() else {
         return Vec::new();
     };
-    crate::agents::session::load_turns_for_conversation_db(&conn, conversation_id)
-        .unwrap_or_default()
+    match parent_session_id {
+        // Branch-pure: walk ONLY the ancestor chain of this turn's parent. This
+        // is what makes edit-and-regenerate fork safely — a forked turn's parent
+        // is the edited turn's own parent, so its history is exactly that
+        // parent's ancestors, never the sibling branches being replaced. Without
+        // this, the conversation-wide loader would leak the edited-out branch.
+        Some(pid) => crate::agents::session::load_turn_chain_db(&conn, pid).unwrap_or_default(),
+        // Flat: first turn, or a linear continue with no explicit parent (the
+        // pipe path derives a parent afterwards). A linear conversation is its
+        // own single branch, so conversation-wide loading == the ancestor chain.
+        None => crate::agents::session::load_turns_for_conversation_db(&conn, conversation_id)
+            .unwrap_or_default(),
+    }
 }
 
 /// Max chars of prior-turn output to include per turn in the injected summary.

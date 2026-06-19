@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
-import type { AgentType } from '../../types';
+import type { AgentType, BranchNode, Session } from '../../types';
 import type { AgentMode } from '../ModeSelector';
 import { ChatHeader } from './ChatHeader';
 import { UserMessage } from './UserMessage';
@@ -64,6 +64,69 @@ export function ChatView() {
     () => (activeConversationId ? getTurnsForConversation(activeConversationId) : []),
     [activeConversationId, getTurnsForConversation, allSessions]
   );
+
+  // A4 edit-and-regenerate: branch-aware view. A forked (regenerated) turn is a
+  // SIBLING under the edited turn's parent, so the flat turn list would show two
+  // branches at once. We render ONE branch chain at a time (root → activeLeaf)
+  // and switch between siblings via the branch switcher. Linear conversations
+  // have a single child per parent, so the chain == the flat list (no change).
+  const getConversationBranches = useAgentStore((s) => s.getConversationBranches);
+  const editAndRegenerate = useAgentStore((s) => s.editAndRegenerate);
+  const [branches, setBranches] = useState<BranchNode[]>([]);
+  useEffect(() => {
+    if (!activeConversationId) { setBranches([]); return; }
+    let cancelled = false;
+    // Re-fetch whenever the session set changes (a new fork/turn lands) so the
+    // switcher reflects the latest siblings.
+    getConversationBranches(activeConversationId)
+      .then((bs) => { if (!cancelled) setBranches(bs); })
+      .catch(() => { if (!cancelled) setBranches([]); });
+    return () => { cancelled = true; };
+  }, [activeConversationId, getConversationBranches, allSessions]);
+
+  // parent_id → children (siblings grouped). null key = root-level turns.
+  const childrenByParent = useMemo(() => {
+    const m = new Map<string | null, BranchNode[]>();
+    for (const b of branches) {
+      const arr = m.get(b.parentId) ?? [];
+      arr.push(b);
+      m.set(b.parentId, arr);
+    }
+    return m;
+  }, [branches]);
+
+  // activeLeaf = the bottom of the branch currently shown. Defaults to the
+  // newest turn; a fork or follow-up lands a newer turn, so we follow it.
+  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
+  const latestTurnId = turns.length > 0 ? turns[turns.length - 1].id : null;
+  useEffect(() => {
+    if (latestTurnId && (!activeLeafId || !turns.some((t) => t.id === activeLeafId))) {
+      setActiveLeafId(latestTurnId);
+    }
+  }, [latestTurnId, activeLeafId, turns]);
+
+  // Walk from activeLeaf up the parent chain to the root → the visible branch.
+  const sessionById = useMemo(() => {
+    const m = new Map<string, Session>();
+    for (const t of turns) m.set(t.id, t);
+    return m;
+  }, [turns]);
+  const visibleTurns = useMemo(() => {
+    if (!activeLeafId) return turns;
+    const chain: Session[] = [];
+    let cursor: string | null = activeLeafId;
+    const visited = new Set<string>();
+    while (cursor) {
+      if (visited.has(cursor)) break;
+      visited.add(cursor);
+      const s = sessionById.get(cursor);
+      if (!s) break;
+      chain.push(s);
+      cursor = s.parentSessionId;
+    }
+    chain.reverse();
+    return chain;
+  }, [activeLeafId, turns, sessionById]);
 
   // The running turn is whichever turn of the active conversation is still running.
   const runningSession = useMemo(
@@ -151,6 +214,59 @@ export function ChatView() {
     return () => clearInterval(id);
   }, [runningSession]);
 
+  // A4 edit-and-regenerate handlers. Editing a turn's prompt forks a new
+  // sibling turn (same conversation, parent = the edited turn's parent) and
+  // re-runs the agent — the old turn stays, switchable via the branch switcher.
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editPrompt, setEditPrompt] = useState('');
+
+  const startEdit = useCallback((sessionId: string, currentPrompt: string) => {
+    setEditingSessionId(sessionId);
+    setEditPrompt(currentPrompt);
+  }, []);
+
+  const handleEditSubmit = useCallback(async (sessionId: string) => {
+    if (!project || !editPrompt.trim() || runningSession) return;
+    try {
+      // kernel flag mirrors the edited turn's agent family — react_kernel runs
+      // the self-hosted ReactAgent; others fork through their CLI spawn path.
+      const edited = sessionById.get(sessionId);
+      const kernel = edited?.agentType === 'react_kernel';
+      await editAndRegenerate(sessionId, editPrompt.trim(), kernel);
+      setEditingSessionId(null);
+      setEditPrompt('');
+    } catch (e) {
+      console.error('Failed to regenerate:', e);
+    }
+  }, [project, editPrompt, runningSession, editAndRegenerate, sessionById]);
+
+  // Branch switching: jump to the next sibling's deepest leaf. Bounded walk
+  // with a visited guard so a malformed cycle can't hang the render.
+  const deepestLeaf = useCallback((id: string): string => {
+    let cur = id;
+    const seen = new Set<string>();
+    for (let i = 0; i < 1000; i++) {
+      if (seen.has(cur)) break;
+      seen.add(cur);
+      const children = childrenByParent.get(cur);
+      if (!children || children.length === 0) break;
+      const newest = [...children].sort(
+        (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+      )[0];
+      cur = newest.id;
+    }
+    return cur;
+  }, [childrenByParent]);
+
+  const switchToSibling = useCallback((turnId: string, parentId: string | null) => {
+    const siblings = childrenByParent.get(parentId) ?? [];
+    if (siblings.length <= 1) return;
+    const idx = siblings.findIndex((s) => s.id === turnId);
+    if (idx < 0) return;
+    const next = siblings[(idx + 1) % siblings.length];
+    setActiveLeafId(deepestLeaf(next.id));
+  }, [childrenByParent, deepestLeaf]);
+
   const isContinuing = turns.length > 0 && !runningSession;
   const canSend = !!project && !!selectedAgent && !!prompt.trim() && !runningSession;
 
@@ -179,7 +295,11 @@ export function ChatView() {
       if (activeConversationId && !runningSession) {
         // Follow-up turn on the existing conversation. The agent may differ
         // from the previous turn — that's the conversation-container model.
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode, model);
+        // parentSessionId links this follow-up to the prior turn — the backbone
+        // of branch-aware history (visibleTurns walks the chain; edit_and_regenerate
+        // forks off it). Undefined for the very first turn of the container.
+        const parentSessionId = turns.length > 0 ? turns[turns.length - 1].id : undefined;
+        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode, model, parentSessionId);
         // continueConversation attaches to the already-selected conversation;
         // selection is already correct, no need to re-select.
         void session;
@@ -198,7 +318,7 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to send:', e);
     }
-  }, [selectedAgent, prompt, runningSession, project, activeConversationId, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel]);
+  }, [selectedAgent, prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
@@ -227,7 +347,7 @@ export function ChatView() {
     if (messageListRef.current) {
       messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
     }
-  }, [turns, runningSession]);
+  }, [visibleTurns, runningSession]);
 
   // Landing state — no project selected
   if (!project) {
@@ -305,14 +425,20 @@ export function ChatView() {
         onClear={handleClear}
       />
       <div className="message-list" ref={messageListRef}>
-        {turns.map((session, i) => {
+        {visibleTurns.map((session, i) => {
           // Insert a divider before a turn whose agent differs from the previous
           // turn — this is the visible cue that the conversation switched agents
           // (e.g. claude → codex). The first turn never gets one.
-          const prev = i > 0 ? turns[i - 1] : null;
+          const prev = i > 0 ? visibleTurns[i - 1] : null;
           const switchedFrom = prev && prev.agentType !== session.agentType
             ? prev.agentType
             : null;
+          // A4: siblings of THIS turn (same parent). >1 ⇒ a branch point — the
+          // switcher lets the user walk between regenerated forks.
+          const siblings = childrenByParent.get(session.parentSessionId) ?? [];
+          const branchCount = siblings.length;
+          const branchIndex = siblings.findIndex((s) => s.id === session.id);
+          const isEditing = editingSessionId === session.id;
           return (
             <div key={session.id}>
               {switchedFrom && (
@@ -324,7 +450,61 @@ export function ChatView() {
                   <span className="agent-switch-divider-line" />
                 </div>
               )}
-              <UserMessage content={session.prompt} />
+              {isEditing ? (
+                <div className="user-message-edit">
+                  <textarea
+                    className="user-message-edit-textarea"
+                    value={editPrompt}
+                    onChange={(e) => setEditPrompt(e.target.value)}
+                    rows={3}
+                    aria-label="编辑消息"
+                  />
+                  <div className="user-message-edit-actions">
+                    <button
+                      type="button"
+                      className="user-message-edit-submit"
+                      onClick={() => handleEditSubmit(session.id)}
+                      disabled={!editPrompt.trim() || !!runningSession}
+                    >
+                      重新生成
+                    </button>
+                    <button
+                      type="button"
+                      className="user-message-edit-cancel"
+                      onClick={() => { setEditingSessionId(null); setEditPrompt(''); }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="user-message-wrap">
+                  <UserMessage content={session.prompt} />
+                  <div className="turn-actions">
+                    <button
+                      type="button"
+                      className="turn-edit-btn"
+                      onClick={() => startEdit(session.id, session.prompt)}
+                      disabled={!!runningSession}
+                      title="编辑并重新生成"
+                      aria-label="编辑并重新生成"
+                    >
+                      ✎ 编辑
+                    </button>
+                    {branchCount > 1 && (
+                      <button
+                        type="button"
+                        className="branch-switch-btn"
+                        onClick={() => switchToSibling(session.id, session.parentSessionId)}
+                        title={`切换分支(共 ${branchCount} 个)`}
+                        aria-label={`切换分支 ${branchIndex + 1} / ${branchCount}`}
+                      >
+                        ↥ 分支 {branchIndex + 1}/{branchCount}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               <AgentMessage
                 session={session}
                 running={runningSession?.id === session.id}

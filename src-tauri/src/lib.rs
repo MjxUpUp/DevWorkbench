@@ -201,6 +201,8 @@ pub fn run() {
             commands::agents::archive_conversation,
             commands::agents::delete_conversation,
             commands::agents::restore_conversation,
+            commands::agents::edit_and_regenerate,
+            commands::agents::get_conversation_branches,
             commands::agents::pty_write_cmd,
             commands::agents::pty_resize_cmd,
             commands::agents::get_project_activity,

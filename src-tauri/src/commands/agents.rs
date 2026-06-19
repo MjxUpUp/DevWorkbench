@@ -252,7 +252,7 @@ fn react_chat_driver(
     // output_summary string. Computed before spawn so it can be moved into the
     // task. load_prior_turns returns ASC; the current turn (just registered as
     // Running) is excluded by turns_to_history's Running filter.
-    let prior_turns = pty::load_prior_turns(&db_conn, &resolved_conv_id);
+    let prior_turns = pty::load_prior_turns(&db_conn, &resolved_conv_id, parent_session_id);
     let history_drv = react_chat::turns_to_history(
         &prior_turns,
         react_chat::REACT_HISTORY_TURN_TEXT_CAP,
@@ -508,6 +508,66 @@ pub fn delete_conversation(db: State<'_, DbState>, id: String) -> Result<(), App
 pub fn restore_conversation(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
     let conn = db.get()?;
     session::set_conversation_status_db(&conn, &id, "active")
+}
+
+/// 编辑某条 turn 的 prompt 并重新生成。语义 = 从该 turn 的**父节点** fork
+/// 一个新兄弟 turn(parent = 被编辑 turn 的 parent_session_id,prompt = 新内容,
+/// 同 conversation),然后重跑 agent。新 turn 与被编辑 turn 成兄弟(共享
+/// parent),构成可切换分支;旧 turn 保留,前端分支切换器在兄弟间切换。
+///
+/// Claude Code 的 "edit a message and regenerate" 等价物——但模型化在 turn 级别
+/// (一次 agent 运行)而非单条 chat message,贴合本项目 conversation→turn
+/// (parent_session_id 链)的持久化结构,无需引入独立 messages 表。
+#[tauri::command]
+pub async fn edit_and_regenerate(
+    app: tauri::AppHandle,
+    state: State<'_, AgentState>,
+    db: State<'_, DbState>,
+    kernel_tasks: State<'_, KernelTasks>,
+    session_id: String,
+    new_prompt: String,
+    kernel: bool,
+) -> Result<Session, AppError> {
+    let edited = {
+        let conn = db.get()?;
+        session::get_session_by_id_db(&conn, &session_id)?
+            .ok_or_else(|| AppError::NotFound(format!("Session {session_id} 不存在")))?
+    };
+    let conversation_id = edited.conversation_id.clone().ok_or_else(|| {
+        AppError::Internal(format!("Session {session_id} 无 conversation_id,无法 fork"))
+    })?;
+    // Fork 点 = 被编辑 turn 的 parent(不是被编辑 turn 本身),所以重生成的
+    // turn 是从同一分叉点长出的兄弟。新 turn 的 prior-turn history 随之只走该
+    // parent 的祖先链(load_turn_chain_db),绝不混入被编辑 turn 那条已被替换
+    // 的分支——这是避免分支污染的关键。
+    spawn_agent_session(
+        app,
+        state,
+        db,
+        kernel_tasks,
+        edited.project_path,
+        edited.agent_type,
+        new_prompt,
+        edited.model,
+        None, // linked_requirement_id 不继承
+        edited.parent_session_id, // ← fork 点
+        Some(conversation_id),    // ← 同 conversation
+        kernel,
+        None,              // mode: 默认权限态
+        edited.task_ref,   // 复用原任务上下文
+    )
+    .await
+}
+
+/// 返回一个 conversation 的扁平分支节点(turn + parent 指针,oldest-first)。
+/// 前端按 parent_session_id 分组渲染分支切换器。
+#[tauri::command]
+pub fn get_conversation_branches(
+    db: State<'_, DbState>,
+    conversation_id: String,
+) -> Result<Vec<session::BranchNode>, AppError> {
+    let conn = db.get()?;
+    session::load_conversation_branches_db(&conn, &conversation_id)
 }
 
 #[tauri::command]

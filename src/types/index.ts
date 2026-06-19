@@ -110,6 +110,18 @@ export interface RollbackResult {
   skipped: string[];
 }
 
+/** 一个 conversation 内单个 turn 的分支树节点(扁平,带 parent 指针)。
+ *  前端按 parentId 分组渲染分支切换器:同一 parent 下的多个节点互为兄弟分支,
+ *  edit_and_regenerate fork 出的新 turn 就是某条 turn 的兄弟。 */
+export interface BranchNode {
+  id: string;
+  parentId: string | null;
+  prompt: string;
+  status: string;
+  startedAt: string;
+  agentType: string;
+}
+
 export interface Session {
   id: string;
   projectPath: string;
