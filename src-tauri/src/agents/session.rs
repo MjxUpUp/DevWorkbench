@@ -595,7 +595,7 @@ pub fn load_turn_chain_db(
         }
         match by_id.get(pid.as_str()) {
             Some(s) => {
-                let session: &Session = *s;
+                let session: &Session = s;
                 chain.push(session.clone());
                 cursor = session.parent_session_id.clone();
             }

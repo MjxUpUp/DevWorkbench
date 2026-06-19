@@ -124,6 +124,14 @@ pub enum PermissionMode {
     /// Read-only planning — block writes and command execution until the user
     /// confirms the plan.
     Plan,
+    /// Mission Phase 2 — controller-only execution (D4). The agent delegates
+    /// ALL coding to sub-agents; its ToolRegistry is the read-only +
+    /// `dispatch_subagent` subset (see `build_react_agent`), so unlike `Plan`
+    /// this mode does NOT block writes at the gate — the restriction is
+    /// structural (the tool set), not a permission veto. The master still
+    /// needs to write `prd.json` (flip `passes`) and dispatch workers, mirroring
+    /// QwenPaw's Phase 2 keeping `write_file`/`execute_shell_command` available.
+    Executing,
     /// Dry-run / preview (v2.0 C6) — let the agent reason over a COMPLETE plan
     /// with zero side effects. Read-only tools (search/read) run for real so the
     /// agent plans against actual file contents; every side-effecting tool is
@@ -169,6 +177,14 @@ impl PermissionMode {
     /// still run for real and the loop keeps producing a plan.
     pub fn is_dry_run(self) -> bool {
         matches!(self, PermissionMode::DryRun)
+    }
+
+    /// Is this Mission Phase 2 controller-execution mode (D4)? The tool set
+    /// is already restricted to read-only + `dispatch_subagent`, so the gate
+    /// does not veto writes here — this flag lets the run loop + UI mark the
+    /// current phase distinctly from `Default`.
+    pub fn is_executing(self) -> bool {
+        matches!(self, PermissionMode::Executing)
     }
 }
 
@@ -924,6 +940,24 @@ mod tests {
         assert!(mgr.before(&write).await.is_ok());
     }
 
+    #[tokio::test]
+    async fn executing_mode_lets_writes_through_and_is_detectable() {
+        // Executing (Mission Phase 2) does NOT gate writes at the hook layer —
+        // the restriction is structural (read-only + dispatch_subagent tool
+        // subset), not a permission veto. The master needs write_file to flip
+        // prd.json `passes`, mirroring QwenPaw keeping write_file available in
+        // Phase 2. is_executing flags the phase distinctly from Default/Plan.
+        let mgr = HookManager::new().with_mode(PermissionMode::Executing);
+        let write = Action::WriteFile {
+            path: "prd.json".into(),
+            content_preview: "".into(),
+        };
+        assert!(mgr.before(&write).await.is_ok());
+        assert!(PermissionMode::Executing.is_executing());
+        assert!(!PermissionMode::Plan.is_executing());
+        assert!(!PermissionMode::Default.is_executing());
+    }
+
     #[test]
     fn non_plan_modes_do_not_block_writes() {
         let write = Action::WriteFile {
@@ -933,6 +967,7 @@ mod tests {
         for m in [
             PermissionMode::Default,
             PermissionMode::AutoEdit,
+            PermissionMode::Executing,
             PermissionMode::DryRun,
             PermissionMode::Silent,
             PermissionMode::SkipPermissions,
@@ -951,6 +986,7 @@ mod tests {
             PermissionMode::Default,
             PermissionMode::AutoEdit,
             PermissionMode::Plan,
+            PermissionMode::Executing,
             PermissionMode::DryRun,
             PermissionMode::Silent,
         ] {
@@ -994,6 +1030,7 @@ mod tests {
             ("default", PermissionMode::Default),
             ("auto-edit", PermissionMode::AutoEdit),
             ("plan", PermissionMode::Plan),
+            ("executing", PermissionMode::Executing),
             ("dry-run", PermissionMode::DryRun),
             ("silent", PermissionMode::Silent),
             ("skip-permissions", PermissionMode::SkipPermissions),

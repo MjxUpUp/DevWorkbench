@@ -8,6 +8,7 @@ pub mod git;
 pub mod agents;
 pub mod checkpoint;
 pub mod files;
+pub mod mission;
 pub mod workflows;
 pub mod mcp_cmds;
 pub mod skills_cmds;

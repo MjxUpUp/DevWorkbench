@@ -9,6 +9,7 @@ pub mod executor;
 pub mod hooks;
 pub mod honesty;
 pub mod llm_recovery;
+pub mod mission;
 pub mod mcp_tool;
 pub mod model_router;
 pub mod opaque_agent;

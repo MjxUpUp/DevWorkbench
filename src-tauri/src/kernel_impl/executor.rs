@@ -275,7 +275,14 @@ pub(crate) fn build_react_agent(
     registry.push(crate::kernel_impl::builtin_tools::ReadFileTool);
     registry.push(crate::kernel_impl::builtin_tools::GlobTool);
     registry.push(crate::kernel_impl::builtin_tools::GrepTool);
-    registry.push(crate::kernel_impl::builtin_tools::BashTool);
+    // Mission Phase 2 (Executing): the controller must NOT run shell commands
+    // itself — it delegates all work to sub-agents. BashTool is the strongest
+    // implementation tool, so we withhold it; read/glob/grep/write (the latter
+    // to update prd.json `passes`) stay available. Mirrors QwenPaw's "deactivate
+    // implementation tools" in Phase 2 (write_file kept; edit_file/browser not).
+    if mode != crate::kernel_impl::hooks::PermissionMode::Executing {
+        registry.push(crate::kernel_impl::builtin_tools::BashTool);
+    }
     registry.push(crate::kernel_impl::builtin_tools::WriteFileTool);
     let home = crate::commands::projects::dirs_home();
     for dir in skills_search_dirs(&home, working_dir, &data_dir) {

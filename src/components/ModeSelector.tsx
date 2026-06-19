@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 
-export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'dry-run' | 'silent' | 'skip-permissions';
+// 'executing' is Mission Phase 2 (D4) — set internally by the `mission_apply`
+// command, not surfaced in MODE_OPTIONS for manual selection. It round-trips
+// the backend PermissionMode::Executing wire value.
+export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'executing' | 'dry-run' | 'silent' | 'skip-permissions';
 
 interface ModeOption {
   id: AgentMode;
