@@ -118,8 +118,7 @@ pub fn update_hook(
 ) -> Result<(), AppError> {
     // Existence check first so an absent id errors with a clear message rather
     // than silently updating zero rows.
-    find_by_id(conn, id)?
-        .ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
+    find_by_id(conn, id)?.ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
     let matcher_norm = matcher.map(str::trim).filter(|m| !m.is_empty());
     conn.execute(
         "UPDATE user_hooks SET name=?1, event=?2, command=?3, shell=?4, timeout_secs=?5, enabled=?6, \
@@ -141,8 +140,7 @@ pub fn update_hook(
 /// Flip just the `enabled` flag (the list-card toggle calls this without
 /// re-POSTing the whole row).
 pub fn set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<(), AppError> {
-    find_by_id(conn, id)?
-        .ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
+    find_by_id(conn, id)?.ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
     conn.execute(
         "UPDATE user_hooks SET enabled=?1 WHERE id=?2",
         rusqlite::params![enabled as i64, id],
@@ -152,8 +150,7 @@ pub fn set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<(), App
 
 /// Delete a hook by id.
 pub fn delete_hook(conn: &Connection, id: &str) -> Result<(), AppError> {
-    find_by_id(conn, id)?
-        .ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
+    find_by_id(conn, id)?.ok_or_else(|| AppError::Config(format!("hook {id} 不存在")))?;
     conn.execute("DELETE FROM user_hooks WHERE id=?1", [id])?;
     Ok(())
 }
@@ -190,7 +187,10 @@ mod tests {
     #[test]
     fn list_empty_init_returns_none() {
         let conn = fresh();
-        assert!(list_user_hooks(&conn).unwrap().is_empty(), "no hooks seeded");
+        assert!(
+            list_user_hooks(&conn).unwrap().is_empty(),
+            "no hooks seeded"
+        );
     }
 
     #[test]
@@ -223,7 +223,17 @@ mod tests {
     #[test]
     fn create_duplicate_name_errors() {
         let conn = fresh();
-        create_hook(&conn, "dup", UserHookEvent::Stop, "echo done", true, 10, true, None).unwrap();
+        create_hook(
+            &conn,
+            "dup",
+            UserHookEvent::Stop,
+            "echo done",
+            true,
+            10,
+            true,
+            None,
+        )
+        .unwrap();
         let err = create_hook(&conn, "dup", UserHookEvent::Stop, "x", true, 10, true, None);
         assert!(err.is_err(), "duplicate name must error");
     }
@@ -231,12 +241,40 @@ mod tests {
     #[test]
     fn load_enabled_by_event_filters_event_and_disabled() {
         let conn = fresh();
-        let a = create_hook(&conn, "a", UserHookEvent::UserPromptSubmit, "echo a", true, 10, true, None)
-            .unwrap();
-        create_hook(&conn, "b", UserHookEvent::Stop, "echo b", true, 10, true, None).unwrap();
+        let a = create_hook(
+            &conn,
+            "a",
+            UserHookEvent::UserPromptSubmit,
+            "echo a",
+            true,
+            10,
+            true,
+            None,
+        )
+        .unwrap();
+        create_hook(
+            &conn,
+            "b",
+            UserHookEvent::Stop,
+            "echo b",
+            true,
+            10,
+            true,
+            None,
+        )
+        .unwrap();
         // Disabled submit hook must NOT appear in the enabled load.
-        create_hook(&conn, "c", UserHookEvent::UserPromptSubmit, "echo c", true, 10, false, None)
-            .unwrap();
+        create_hook(
+            &conn,
+            "c",
+            UserHookEvent::UserPromptSubmit,
+            "echo c",
+            true,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
 
         let submits = load_enabled_by_event(&conn, UserHookEvent::UserPromptSubmit).unwrap();
         assert_eq!(submits.len(), 1, "only enabled submit hooks: {submits:?}");
@@ -331,7 +369,7 @@ mod tests {
             &conn,
             "no-write",
             UserHookEvent::PreToolUse,
-            "cmd /C exit 2",
+            "exit 2",
             true,
             10,
             true,
@@ -365,8 +403,17 @@ mod tests {
         // create and update, so the DB never stores a "filter" that's actually a
         // no-op — single canonical representation.
         let conn = fresh();
-        let h = create_hook(&conn, "h", UserHookEvent::PreToolUse, "c", true, 10, true, Some("   "))
-            .unwrap();
+        let h = create_hook(
+            &conn,
+            "h",
+            UserHookEvent::PreToolUse,
+            "c",
+            true,
+            10,
+            true,
+            Some("   "),
+        )
+        .unwrap();
         assert!(h.matcher.is_none(), "whitespace matcher normalizes to None");
         assert!(
             find_by_id(&conn, &h.id).unwrap().unwrap().matcher.is_none(),

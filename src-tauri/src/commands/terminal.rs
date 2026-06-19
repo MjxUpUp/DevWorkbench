@@ -1,6 +1,6 @@
 use crate::db::DbState;
-use std::process::Command;
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use tauri::State;
 
 /// 校验命令字符串只包含安全字符（字母、数字、横杠、下划线、点、空格、路径分隔符）
@@ -10,7 +10,15 @@ fn validate_command(cmd: &str) -> Result<(), String> {
         return Ok(());
     }
     for ch in cmd.chars() {
-        if !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '.' && ch != ' ' && ch != '/' && ch != '\\' && ch != ':' {
+        if !ch.is_alphanumeric()
+            && ch != '-'
+            && ch != '_'
+            && ch != '.'
+            && ch != ' '
+            && ch != '/'
+            && ch != '\\'
+            && ch != ':'
+        {
             return Err(format!("命令包含非法字符: '{}'", ch));
         }
     }
@@ -137,7 +145,11 @@ pub fn detect_terminals() -> Result<Vec<TerminalInfo>, String> {
 }
 
 #[tauri::command]
-pub fn open_terminal(working_dir: String, command: Option<String>, db: State<'_, DbState>) -> Result<(), String> {
+pub fn open_terminal(
+    working_dir: String,
+    command: Option<String>,
+    db: State<'_, DbState>,
+) -> Result<(), String> {
     let dir = std::path::Path::new(&working_dir);
     if !dir.exists() {
         return Err(format!("目录不存在: {}", working_dir));
@@ -157,7 +169,8 @@ pub fn open_terminal(working_dir: String, command: Option<String>, db: State<'_,
     // 如果没有设置偏好终端，自动选第一个可用的并持久化
     let terminal_id = if preferred.is_empty() {
         let terminals = detect_terminals()?;
-        let first_available = terminals.iter()
+        let first_available = terminals
+            .iter()
             .find(|t| t.available)
             .map(|t| t.id.clone())
             .unwrap_or_else(|| "cmd".to_string());
@@ -218,7 +231,15 @@ fn launch_windows_wt(working_dir: &str, cmd: &str) -> Result<(), String> {
         // 优先 pwsh → powershell → cmd，匹配用户实际使用的 shell
         if which_exists("pwsh.exe") {
             Command::new("wt.exe")
-                .args(["-d", working_dir, "--", "pwsh.exe", "-NoExit", "-Command", cmd])
+                .args([
+                    "-d",
+                    working_dir,
+                    "--",
+                    "pwsh.exe",
+                    "-NoExit",
+                    "-Command",
+                    cmd,
+                ])
                 .spawn()
         } else {
             Command::new("wt.exe")
@@ -226,9 +247,7 @@ fn launch_windows_wt(working_dir: &str, cmd: &str) -> Result<(), String> {
                 .spawn()
         }
     } else {
-        Command::new("wt.exe")
-            .args(["-d", working_dir])
-            .spawn()
+        Command::new("wt.exe").args(["-d", working_dir]).spawn()
     };
 
     if result.is_ok() {
@@ -243,7 +262,15 @@ fn launch_windows_pwsh(working_dir: &str, cmd: &str) -> Result<(), String> {
     if which_exists("wt.exe") {
         let result = if !cmd.is_empty() {
             Command::new("wt.exe")
-                .args(["-d", working_dir, "--", "pwsh.exe", "-NoExit", "-Command", cmd])
+                .args([
+                    "-d",
+                    working_dir,
+                    "--",
+                    "pwsh.exe",
+                    "-NoExit",
+                    "-Command",
+                    cmd,
+                ])
                 .spawn()
         } else {
             Command::new("wt.exe")
@@ -274,13 +301,19 @@ fn launch_windows_pwsh(working_dir: &str, cmd: &str) -> Result<(), String> {
 fn launch_windows_powershell(working_dir: &str, cmd: &str) -> Result<(), String> {
     if which_exists("wt.exe") {
         let args = if !cmd.is_empty() {
-            vec!["-d", working_dir, "--", "powershell.exe", "-NoExit", "-Command", cmd]
+            vec![
+                "-d",
+                working_dir,
+                "--",
+                "powershell.exe",
+                "-NoExit",
+                "-Command",
+                cmd,
+            ]
         } else {
             vec!["-d", working_dir, "--", "powershell.exe"]
         };
-        let result = Command::new("wt.exe")
-            .args(&args)
-            .spawn();
+        let result = Command::new("wt.exe").args(&args).spawn();
         if result.is_ok() {
             return Ok(());
         }
@@ -295,15 +328,16 @@ fn launch_windows_powershell(working_dir: &str, cmd: &str) -> Result<(), String>
 
 #[cfg(target_os = "windows")]
 fn launch_windows_git_bash(working_dir: &str, cmd: &str) -> Result<(), String> {
-    // 查找 git bash 路径
-    let bash_path = if std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
-        r"C:\Program Files\Git\bin\bash.exe".to_string()
-    } else if std::path::Path::new(r"C:\Program Files (x86)\Git\bin\bash.exe").exists() {
-        r"C:\Program Files (x86)\Git\bin\bash.exe".to_string()
-    } else if let Ok(p) = which::which("bash.exe") {
-        p.to_string_lossy().to_string()
-    } else {
-        return Err("Git Bash 未找到".to_string());
+    // 查找 git bash 路径——复用 resolve_git_bash（与 BashTool / UserCommandHook
+    // 同一套探测：env DEVWORKBENCH_BASH_PATH → ProgramFiles → (x86) → which）。
+    // 之前这里硬编码 C:\Program Files\...，Git 装在非默认盘（如 D:\Git）时 miss。
+    let bash_path = match crate::commands::tools::resolve_git_bash(None) {
+        Some(p) => p.to_string_lossy().to_string(),
+        None => {
+            return Err(
+                "Git Bash 未找到（设 DEVWORKBENCH_BASH_PATH 或安装 Git for Windows）".to_string(),
+            )
+        }
     };
 
     if which_exists("wt.exe") {
@@ -312,9 +346,7 @@ fn launch_windows_git_bash(working_dir: &str, cmd: &str) -> Result<(), String> {
         } else {
             vec!["-d", working_dir, "--", &bash_path]
         };
-        let result = Command::new("wt.exe")
-            .args(&args)
-            .spawn();
+        let result = Command::new("wt.exe").args(&args).spawn();
         if result.is_ok() {
             return Ok(());
         }
@@ -441,7 +473,14 @@ fn launch_macos_kitty(working_dir: &str, cmd: &str) -> Result<(), String> {
 fn launch_linux_gnome(working_dir: &str, cmd: &str) -> Result<(), String> {
     if !cmd.is_empty() {
         Command::new("gnome-terminal")
-            .args(["--working-directory", working_dir, "--", "bash", "-c", &format!("{}; exec $SHELL", cmd)])
+            .args([
+                "--working-directory",
+                working_dir,
+                "--",
+                "bash",
+                "-c",
+                &format!("{}; exec $SHELL", cmd),
+            ])
             .spawn()
     } else {
         Command::new("gnome-terminal")
@@ -456,7 +495,14 @@ fn launch_linux_gnome(working_dir: &str, cmd: &str) -> Result<(), String> {
 fn launch_linux_konsole(working_dir: &str, cmd: &str) -> Result<(), String> {
     if !cmd.is_empty() {
         Command::new("konsole")
-            .args(["--workdir", working_dir, "-e", "bash", "-c", &format!("{}; exec $SHELL", cmd)])
+            .args([
+                "--workdir",
+                working_dir,
+                "-e",
+                "bash",
+                "-c",
+                &format!("{}; exec $SHELL", cmd),
+            ])
             .spawn()
     } else {
         Command::new("konsole")

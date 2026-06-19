@@ -48,7 +48,15 @@ impl UserCommandHook {
         timeout_secs: u64,
         working_dir: Option<PathBuf>,
     ) -> Self {
-        Self { name, event, command, shell, timeout_secs, working_dir, matcher: None }
+        Self {
+            name,
+            event,
+            command,
+            shell,
+            timeout_secs,
+            working_dir,
+            matcher: None,
+        }
     }
 
     pub fn with_matcher(mut self, matcher: Option<String>) -> Self {
@@ -111,7 +119,9 @@ impl UserCommandHook {
             return true;
         }
         // Simple string or pipe-separated list (no regex special chars except |).
-        let is_simple = m.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|');
+        let is_simple = m
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|');
         if is_simple {
             if let Some(_) = m.find('|') {
                 return m.split('|').any(|seg| seg.trim() == match_query);
@@ -210,7 +220,7 @@ enum RunOutcome {
 impl UserCommandHook {
     /// Run the configured command with `payload` on stdin, bounded by
     /// `timeout_secs`. Cross-platform: `shell=true` (default) routes through the
-    /// system shell (`cmd /C` on Windows, `sh -c` elsewhere, identical to the
+    /// system shell (`git-bash bash.exe -c` on Windows, `sh -c` elsewhere, identical to the
     /// kernel BashTool); `shell=false` splits the command on whitespace into
     /// program + args (naive — no quoting; documented). `CREATE_NO_WINDOW` on
     /// Windows so hook commands don't flash a console, matching every other
@@ -220,9 +230,23 @@ impl UserCommandHook {
 
         let mut cmd = if self.shell {
             if cfg!(target_os = "windows") {
-                let mut c = tokio::process::Command::new("cmd");
-                c.arg("/C").arg(&self.command);
-                c
+                // 与 kernel BashTool 同语义：锁 git-bash（之前 cmd /C 导致 Unix
+                // 命令失败 + agent 死循环，见 BashTool 注释）。hook 找不到 git-bash
+                // 降级为 Warn（不阻塞 turn），与下方 cmd.spawn() 的 Err 也返回
+                // Warn 的失败语义一致。
+                match crate::commands::tools::resolve_git_bash(None) {
+                    Some(bash) => {
+                        let mut c = tokio::process::Command::new(bash);
+                        c.arg("-c").arg(&self.command);
+                        c
+                    }
+                    None => {
+                        return RunOutcome::Warn(format!(
+                            "hook {}: git-bash 未找到（设 DEVWORKBENCH_BASH_PATH 或安装 Git for Windows）",
+                            self.name
+                        ))
+                    }
+                }
             } else {
                 let mut c = tokio::process::Command::new("sh");
                 c.arg("-c").arg(&self.command);
@@ -268,12 +292,32 @@ impl UserCommandHook {
             let _ = stdin.shutdown().await;
         }
 
+        // 取出 stdout/stderr 管道句柄（owned），child 仅剩 wait/kill。借用模式
+        // 同 BashTool：timeout().await 结果先 let 再 match，超时分支才能 kill。
+        let stdout_h = child.stdout.take();
+        let stderr_h = child.stderr.take();
+
         let timeout = Duration::from_secs(self.timeout_secs.max(1));
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(out)) => {
-                let code = out.status.code().unwrap_or(-1);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
+        use tokio::io::AsyncReadExt;
+        let outcome = tokio::time::timeout(timeout, async {
+            let mut so = Vec::new();
+            let mut se = Vec::new();
+            if let Some(mut s) = stdout_h {
+                let _ = s.read_to_end(&mut so).await;
+            }
+            if let Some(mut s) = stderr_h {
+                let _ = s.read_to_end(&mut se).await;
+            }
+            let status = child.wait().await;
+            (so, se, status)
+        })
+        .await;
+
+        match outcome {
+            Ok((so, se, Ok(status))) => {
+                let code = status.code().unwrap_or(-1);
+                let stdout = String::from_utf8_lossy(&so);
+                let stderr = String::from_utf8_lossy(&se);
                 match code {
                     0 => RunOutcome::Context(stdout.trim_end().to_string()),
                     2 => {
@@ -290,11 +334,16 @@ impl UserCommandHook {
                     )),
                 }
             }
-            Ok(Err(e)) => RunOutcome::Warn(format!("hook {} wait failed: {e}", self.name)),
-            Err(_) => RunOutcome::Warn(format!(
-                "hook {} timed out ({}s)",
-                self.name, self.timeout_secs
-            )),
+            Ok((_, _, Err(e))) => RunOutcome::Warn(format!("hook {} wait failed: {e}", self.name)),
+            Err(_) => {
+                // 超时：杀子进程 + 收尸（同 BashTool 修复，避免孤儿进程泄漏）。
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                RunOutcome::Warn(format!(
+                    "hook {} timed out ({}s, killed)",
+                    self.name, self.timeout_secs
+                ))
+            }
         }
     }
 }
@@ -378,16 +427,14 @@ mod tests {
         let h = UserCommandHook::new(
             "echo-test".into(),
             UserHookEvent::UserPromptSubmit,
-            if cfg!(target_os = "windows") {
-                "echo CONTEXT-FROM-HOOK".into()
-            } else {
-                "echo CONTEXT-FROM-HOOK".into()
-            },
+            "echo CONTEXT-FROM-HOOK".into(),
             true,
             10,
             working_dir(),
         );
-        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let ev = HookEvent::UserPromptSubmit {
+            prompt: "hi".into(),
+        };
         let ctxs = h.on_event(&ev).await.unwrap();
         assert_eq!(ctxs, vec!["CONTEXT-FROM-HOOK".to_string()]);
     }
@@ -399,16 +446,14 @@ mod tests {
         let h = UserCommandHook::new(
             "gate".into(),
             UserHookEvent::UserPromptSubmit,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 2".into()
-            } else {
-                "exit 2".into()
-            },
+            "exit 2".into(),
             true,
             10,
             working_dir(),
         );
-        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let ev = HookEvent::UserPromptSubmit {
+            prompt: "hi".into(),
+        };
         let err = h.on_event(&ev).await.expect_err("exit 2 must block Submit");
         assert_eq!(err.severity, Severity::Block);
         assert_eq!(err.hook, "user-hook:gate");
@@ -421,11 +466,7 @@ mod tests {
         let blocking = UserCommandHook::new(
             "no-bash".into(),
             UserHookEvent::PreToolUse,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 2".into()
-            } else {
-                "exit 2".into()
-            },
+            "exit 2".into(),
             true,
             10,
             working_dir(),
@@ -434,23 +475,25 @@ mod tests {
             tool: "bash".into(),
             arguments: "{\"command\":\"rm -rf x\"}".into(),
         };
-        let err = blocking.on_event(&ev_block).await.expect_err("exit 2 blocks tool");
+        let err = blocking
+            .on_event(&ev_block)
+            .await
+            .expect_err("exit 2 blocks tool");
         assert_eq!(err.severity, Severity::Block);
 
         let allowing = UserCommandHook::new(
             "allow".into(),
             UserHookEvent::PreToolUse,
-            if cfg!(target_os = "windows") {
-                "echo would-log".into()
-            } else {
-                "echo would-log".into()
-            },
+            "echo would-log".into(),
             true,
             10,
             working_dir(),
         );
         let ctxs = allowing.on_event(&ev_block).await.unwrap();
-        assert!(ctxs.is_empty(), "PreToolUse exit-0 stdout is NOT injected: {ctxs:?}");
+        assert!(
+            ctxs.is_empty(),
+            "PreToolUse exit-0 stdout is NOT injected: {ctxs:?}"
+        );
     }
 
     #[tokio::test]
@@ -460,11 +503,7 @@ mod tests {
         let h = UserCommandHook::new(
             "late-gate".into(),
             UserHookEvent::PostToolUse,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 2".into()
-            } else {
-                "exit 2".into()
-            },
+            "exit 2".into(),
             true,
             10,
             working_dir(),
@@ -475,7 +514,10 @@ mod tests {
             result: "ok".into(),
         };
         let ctxs = h.on_event(&ev).await.unwrap();
-        assert!(ctxs.is_empty(), "PostToolUse block must be ignored, not propagated");
+        assert!(
+            ctxs.is_empty(),
+            "PostToolUse block must be ignored, not propagated"
+        );
     }
 
     #[tokio::test]
@@ -489,9 +531,14 @@ mod tests {
             10,
             working_dir(),
         );
-        let ev = HookEvent::Stop { summary: "done".into() };
+        let ev = HookEvent::Stop {
+            summary: "done".into(),
+        };
         let ctxs = h.on_event(&ev).await.unwrap();
-        assert!(ctxs.is_empty(), "Stop hooks must not inject context: {ctxs:?}");
+        assert!(
+            ctxs.is_empty(),
+            "Stop hooks must not inject context: {ctxs:?}"
+        );
     }
 
     #[tokio::test]
@@ -505,7 +552,9 @@ mod tests {
             10,
             working_dir(),
         );
-        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let ev = HookEvent::UserPromptSubmit {
+            prompt: "hi".into(),
+        };
         assert!(h.on_event(&ev).await.unwrap().is_empty());
     }
 
@@ -515,16 +564,14 @@ mod tests {
         let h = UserCommandHook::new(
             "fails".into(),
             UserHookEvent::UserPromptSubmit,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 1".into()
-            } else {
-                "false".into()
-            },
+            "false".into(),
             true,
             10,
             working_dir(),
         );
-        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let ev = HookEvent::UserPromptSubmit {
+            prompt: "hi".into(),
+        };
         let ctxs = h.on_event(&ev).await.unwrap();
         assert!(ctxs.is_empty());
     }
@@ -536,30 +583,32 @@ mod tests {
         let h = UserCommandHook::new(
             "slow".into(),
             UserHookEvent::UserPromptSubmit,
-            if cfg!(target_os = "windows") {
-                "ping -n 10 127.0.0.1 > nul".into()
-            } else {
-                "sleep 10".into()
-            },
+            "sleep 10".into(),
             true,
             1,
             working_dir(),
         );
-        let ev = HookEvent::UserPromptSubmit { prompt: "hi".into() };
+        let ev = HookEvent::UserPromptSubmit {
+            prompt: "hi".into(),
+        };
         let res = h.on_event(&ev).await.unwrap();
         assert!(res.is_empty(), "timed-out hook yields no context: {res:?}");
     }
 
     #[test]
     fn payload_serializes_event_fields() {
-        let submit = HookEvent::UserPromptSubmit { prompt: "do X".into() };
+        let submit = HookEvent::UserPromptSubmit {
+            prompt: "do X".into(),
+        };
         let p = HookPayload::from_event(&submit).to_stdin();
         assert!(p.contains("\"hook_event_name\":\"UserPromptSubmit\""));
         assert!(p.contains("\"prompt\":\"do X\""));
         assert!(!p.contains("summary"), "submit payload has no summary");
         assert!(p.ends_with('\n'), "trailing newline");
 
-        let stop = HookEvent::Stop { summary: "done".into() };
+        let stop = HookEvent::Stop {
+            summary: "done".into(),
+        };
         let p2 = HookPayload::from_event(&stop).to_stdin();
         assert!(p2.contains("\"hook_event_name\":\"Stop\""));
         assert!(p2.contains("\"summary\":\"done\""));
@@ -574,7 +623,10 @@ mod tests {
         assert!(p3.contains("\"hook_event_name\":\"PreToolUse\""));
         assert!(p3.contains("\"tool_name\":\"bash\""));
         assert!(p3.contains("\"tool_input\":\"{\\\"command\\\":\\\"ls\\\"}\""));
-        assert!(!p3.contains("tool_response"), "PreToolUse has no tool_response");
+        assert!(
+            !p3.contains("tool_response"),
+            "PreToolUse has no tool_response"
+        );
 
         // PostToolUse carries tool + tool_input + tool_response.
         let post = HookEvent::PostToolUse {
@@ -598,7 +650,9 @@ mod tests {
             None,
         );
         assert!(submit_hook.matches(&HookEvent::UserPromptSubmit { prompt: "p".into() }));
-        assert!(!submit_hook.matches(&HookEvent::Stop { summary: "s".into() }));
+        assert!(!submit_hook.matches(&HookEvent::Stop {
+            summary: "s".into()
+        }));
 
         let pre_hook = UserCommandHook::new(
             "pre".into(),
@@ -632,30 +686,57 @@ mod tests {
     #[test]
     fn matches_pattern_literal_exact() {
         // Plain alphanumeric matcher → exact equality (no substring, no regex).
-        assert!(UserCommandHook::matches_pattern("write_file", Some("write_file")));
-        assert!(!UserCommandHook::matches_pattern("write_file", Some("write")));
-        assert!(!UserCommandHook::matches_pattern("Write_File", Some("write_file")));
+        assert!(UserCommandHook::matches_pattern(
+            "write_file",
+            Some("write_file")
+        ));
+        assert!(!UserCommandHook::matches_pattern(
+            "write_file",
+            Some("write")
+        ));
+        assert!(!UserCommandHook::matches_pattern(
+            "Write_File",
+            Some("write_file")
+        ));
     }
 
     #[test]
     fn matches_pattern_pipe_alternation() {
         // `|` among simple chars → split, match if query equals ANY segment.
-        assert!(UserCommandHook::matches_pattern("edit", Some("write_file|edit")));
-        assert!(UserCommandHook::matches_pattern("write_file", Some("write_file|edit")));
-        assert!(!UserCommandHook::matches_pattern("bash", Some("write_file|edit")));
+        assert!(UserCommandHook::matches_pattern(
+            "edit",
+            Some("write_file|edit")
+        ));
+        assert!(UserCommandHook::matches_pattern(
+            "write_file",
+            Some("write_file|edit")
+        ));
+        assert!(!UserCommandHook::matches_pattern(
+            "bash",
+            Some("write_file|edit")
+        ));
         // A SPACE breaks the is_simple gate (`[A-Za-z0-9_|]` only) → the matcher
         // falls through to regex mode (faithful to claude-code, whose gate is
         // `/^[a-zA-Z0-9_|]+$/`). So "write_file | edit" is regex, not pipe, and
         // must NOT match "edit" (the regex's alternatives carry the spaces).
-        assert!(!UserCommandHook::matches_pattern("edit", Some("write_file | edit")));
+        assert!(!UserCommandHook::matches_pattern(
+            "edit",
+            Some("write_file | edit")
+        ));
     }
 
     #[test]
     fn matches_pattern_regex_mode() {
         // Any regex metacharacter (here `^`) drops us out of literal mode into
         // regex; `is_match` is a partial match like claude-code's regex.test.
-        assert!(UserCommandHook::matches_pattern("write_file", Some("^write_")));
-        assert!(UserCommandHook::matches_pattern("read_file", Some("^(read|write)_")));
+        assert!(UserCommandHook::matches_pattern(
+            "write_file",
+            Some("^write_")
+        ));
+        assert!(UserCommandHook::matches_pattern(
+            "read_file",
+            Some("^(read|write)_")
+        ));
         assert!(!UserCommandHook::matches_pattern("bash", Some("^write_")));
         // Invalid regex must NOT panic — it logs and matches nothing.
         assert!(!UserCommandHook::matches_pattern("x", Some("(")));
@@ -696,7 +777,9 @@ mod tests {
             None,
         )
         .with_matcher(Some("write_file|edit".into()));
-        let ev_stop = HookEvent::Stop { summary: "done".into() };
+        let ev_stop = HookEvent::Stop {
+            summary: "done".into(),
+        };
         // Stop ignores the matcher — hook fires, returns no context.
         assert!(stop_hook.on_event(&ev_stop).await.unwrap().is_empty());
     }

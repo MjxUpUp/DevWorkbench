@@ -19,19 +19,19 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
-    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus,
-    ChatModel, Error, Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
+    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus, ChatModel, Error,
+    Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
 };
 use serde_json::{json, Value};
 
 use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
 use crate::cost::sink::CostSink;
-use crate::trace::{truncate, LlmTrace, TraceSink};
+use crate::kernel_impl::hooks::HookManager;
 use crate::kernel_impl::llm_recovery::{
     classify_llm_error, fatal_user_message, retry_delay, should_retry, FatalReason, LlmErrorKind,
     MAX_ATTEMPTS,
 };
-use crate::kernel_impl::hooks::HookManager;
+use crate::trace::{truncate, LlmTrace, TraceSink};
 
 // ---------------------------------------------------------------------------
 // GlmChatModel
@@ -74,7 +74,10 @@ impl GlmChatModel {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap_or_else(|_| reqwest::Client::new()),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             bound_tools: Vec::new(),
             circuit: None,
             cost_sink: None,
@@ -148,7 +151,13 @@ impl GlmChatModel {
         }
     }
 
-    fn build_body(&self, model: &str, messages: &[Message], opts: &ModelOptions, stream: bool) -> Value {
+    fn build_body(
+        &self,
+        model: &str,
+        messages: &[Message],
+        opts: &ModelOptions,
+        stream: bool,
+    ) -> Value {
         // M5 + parallel-tool-use fix: Anthropic requires ALL tool_results for one
         // assistant turn to live in a SINGLE user message (an array of
         // tool_result blocks), and messages must strictly alternate user/
@@ -174,7 +183,9 @@ impl GlmChatModel {
             // A non-Tool message: flush any accumulated tool_results as one
             // user message before serializing the next turn.
             if !pending_tool_results.is_empty() {
-                msgs.push(json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }));
+                msgs.push(
+                    json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }),
+                );
             }
             let entry = match m.role {
                 Role::User => json!({ "role": "user", "content": m.content }),
@@ -190,7 +201,8 @@ impl GlmChatModel {
                     ) {
                         (None, true) => json!({ "role": "assistant", "content": m.content }),
                         (None, false) => {
-                            let mut content: Vec<Value> = vec![json!({"type":"text","text":m.content})];
+                            let mut content: Vec<Value> =
+                                vec![json!({"type":"text","text":m.content})];
                             for tc in &m.tool_calls {
                                 let input: Value = serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(json!({}));
@@ -235,7 +247,9 @@ impl GlmChatModel {
         // Flush trailing tool_results: history can legitimately end on Tool
         // messages (the run loop appends them and re-invokes the model).
         if !pending_tool_results.is_empty() {
-            msgs.push(json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }));
+            msgs.push(
+                json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }),
+            );
         }
         let system: String = messages
             .iter()
@@ -268,13 +282,17 @@ impl GlmChatModel {
             body["temperature"] = json!(t);
         }
         if !self.bound_tools.is_empty() {
-            let tools: Vec<Value> = self.bound_tools.iter().map(|t| {
-                json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters_schema,
+            let tools: Vec<Value> = self
+                .bound_tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters_schema,
+                    })
                 })
-            }).collect();
+                .collect();
             body["tools"] = Value::Array(tools);
         }
         body
@@ -288,7 +306,10 @@ impl ChatModel for GlmChatModel {
         // Circuit breaker: gate the call and record the outcome.
         if let Some(cb) = &self.circuit {
             if !cb.allow_request(&self.base_url) {
-                return Err(Error::Model(format!("upstream circuit open: {}", self.base_url)));
+                return Err(Error::Model(format!(
+                    "upstream circuit open: {}",
+                    self.base_url
+                )));
             }
             cb.on_attempt(&self.base_url);
         }
@@ -306,7 +327,16 @@ impl ChatModel for GlmChatModel {
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
-                self.record_trace(&model, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
+                self.record_trace(
+                    &model,
+                    None,
+                    Some("network"),
+                    &req_body,
+                    None,
+                    t0.elapsed().as_millis() as u64,
+                    None,
+                    None,
+                );
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
                 }
@@ -326,7 +356,10 @@ impl ChatModel for GlmChatModel {
             let err_body = resp.text().await.unwrap_or_default();
             log::warn!(
                 "[llm] {} {} -> {}: {}",
-                model, self.base_url, status, truncate(&err_body, 500)
+                model,
+                self.base_url,
+                status,
+                truncate(&err_body, 500)
             );
             self.record_trace(
                 &model,
@@ -343,7 +376,16 @@ impl ChatModel for GlmChatModel {
         let v: Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                self.record_trace(&model, Some(status.as_u16()), Some("decode"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
+                self.record_trace(
+                    &model,
+                    Some(status.as_u16()),
+                    Some("decode"),
+                    &req_body,
+                    None,
+                    t0.elapsed().as_millis() as u64,
+                    None,
+                    None,
+                );
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
                 }
@@ -363,7 +405,16 @@ impl ChatModel for GlmChatModel {
         // success and failure symmetrically (see 2026-06-19 trace observability
         // research); the decoded message below is a separate concern.
         let resp_body = serde_json::to_string(&v).unwrap_or_default();
-        self.record_trace(&model, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body, 32_000)), t0.elapsed().as_millis() as u64, Some(input_tokens), Some(output_tokens));
+        self.record_trace(
+            &model,
+            Some(status.as_u16()),
+            None,
+            &req_body,
+            Some(&truncate(&resp_body, 32_000)),
+            t0.elapsed().as_millis() as u64,
+            Some(input_tokens),
+            Some(output_tokens),
+        );
         decode_anthropic_message(&v)
     }
 
@@ -579,13 +630,27 @@ fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
                     }
                 }
                 Some("tool_use") => {
-                    let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    let args = block.get("input").map(|i| i.to_string()).unwrap_or_else(|| "{}".to_string());
+                    let id = block
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let args = block
+                        .get("input")
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "{}".to_string());
                     tool_calls.push(kernel_core::ToolCall {
                         id,
                         call_type: "function".into(),
-                        function: kernel_core::FunctionCall { name, arguments: args },
+                        function: kernel_core::FunctionCall {
+                            name,
+                            arguments: args,
+                        },
                     });
                 }
                 Some("thinking") => {
@@ -639,15 +704,26 @@ fn handle_sse_line(
             if let Some(block) = ev.get("content_block") {
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                     let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     tool_bufs.insert(idx, (id, name, String::new()));
                 }
             }
             None
         }
         "content_block_delta" => {
-            let dt = ev.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str());
+            let dt = ev
+                .get("delta")
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.as_str());
             if dt == Some("text_delta") {
                 ev.get("delta")
                     .and_then(|d| d.get("text"))
@@ -723,7 +799,11 @@ fn handle_sse_line(
                     call_type: "function".into(),
                     function: kernel_core::FunctionCall {
                         name,
-                        arguments: if args.is_empty() { "{}".to_string() } else { args },
+                        arguments: if args.is_empty() {
+                            "{}".to_string()
+                        } else {
+                            args
+                        },
                     },
                 })
                 .collect();
@@ -789,7 +869,12 @@ impl ToolRegistry {
     /// recursion at depth 1: a child cannot dispatch a grandchild).
     pub fn read_only_subset(&self) -> ToolRegistry {
         ToolRegistry {
-            tools: self.tools.iter().filter(|t| t.is_read_only()).cloned().collect(),
+            tools: self
+                .tools
+                .iter()
+                .filter(|t| t.is_read_only())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -807,7 +892,11 @@ impl ToolRegistry {
     /// `tools_allow: ["skill__web_search"]` gets only that tool even if the
     /// read-only set is larger.
     pub fn restrict_to_prefixes(&self, allowed: &[String]) -> ToolRegistry {
-        let prefixes: Vec<&str> = allowed.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let prefixes: Vec<&str> = allowed
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
         if prefixes.is_empty() {
             return self.clone();
         }
@@ -868,7 +957,12 @@ impl SubAgentTool {
         max_steps: usize,
         named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
     ) -> Self {
-        Self { model, read_only_tools, max_steps, named }
+        Self {
+            model,
+            read_only_tools,
+            max_steps,
+            named,
+        }
     }
 
     /// Build the child's tool registry for a dispatch. A non-empty `tools_allow`
@@ -933,9 +1027,11 @@ impl Tool for SubAgentTool {
         if task.trim().is_empty() {
             return Err(Error::Agent("dispatch_subagent 的 task 不能为空".into()));
         }
-        let requested = parsed
-            .as_ref()
-            .and_then(|v| v.get("subagent").and_then(|s| s.as_str()).map(str::to_owned));
+        let requested = parsed.as_ref().and_then(|v| {
+            v.get("subagent")
+                .and_then(|s| s.as_str())
+                .map(str::to_owned)
+        });
         // Resolve the matched named spec (system_prompt + tools_allow). A
         // matching name whose system_prompt is blank — or an unknown name —
         // degrades to the anonymous worker, so a typo never stalls the dispatch.
@@ -1378,7 +1474,11 @@ impl ReactAgent {
                 action,
                 ok: !result.starts_with("[tool error"),
                 diff: post_diff,
-                error: if result.starts_with('[') { Some(result.clone()) } else { None },
+                error: if result.starts_with('[') {
+                    Some(result.clone())
+                } else {
+                    None
+                },
             };
             let findings = hooks.after(&outcome).await;
             for f in findings {
@@ -1403,7 +1503,11 @@ impl kernel_core::Agent for ReactAgent {
         }
     }
 
-    fn run(&self, input: AgentInput) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error> {
+    fn run(
+        &self,
+        input: AgentInput,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, kernel_core::Error>>, kernel_core::Error>
+    {
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let hooks = self.hooks.clone();
@@ -1852,8 +1956,17 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path();
         let g = |args: &[&str]| {
-            let r = Command::new("git").args(args).current_dir(dir).output().unwrap();
-            assert!(r.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&r.stderr));
+            let r = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                r.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&r.stderr)
+            );
         };
         g(&["init"]);
         g(&["config", "user.email", "t@t"]);
@@ -1867,9 +1980,11 @@ mod tests {
         let changed = ReactAgent::git_changed_files(&wd);
         assert!(
             changed.iter().any(|f| f.ends_with("a.txt")),
-            "git_changed_files 应含 a.txt: {:?}", changed
+            "git_changed_files 应含 a.txt: {:?}",
+            changed
         );
-        let diff = ReactAgent::capture_git_diff(&wd).expect("有 diff 时 capture_git_diff 返回 Some");
+        let diff =
+            ReactAgent::capture_git_diff(&wd).expect("有 diff 时 capture_git_diff 返回 Some");
         assert!(diff.contains("a.txt"), "diff 应含 a.txt: {}", diff);
         // working_dir=None 早退,不调 git、不 panic
         assert!(ReactAgent::git_changed_files(&None).is_empty());
@@ -1884,26 +1999,39 @@ mod tests {
             description: "search".into(),
             parameters_schema: json!({"type": "object"}),
         }];
-        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        let body = model.build_body(
+            "glm-4.6",
+            &[Message::user("hi")],
+            &ModelOptions::default(),
+            false,
+        );
         assert_eq!(body["tools"][0]["name"], "grep");
     }
 
     #[test]
     fn build_body_omits_tools_when_empty() {
         let model = GlmChatModel::bigmodel("k", "glm-4.6");
-        let body = model.build_body("glm-4.6", &[Message::user("hi")], &ModelOptions::default(), false);
+        let body = model.build_body(
+            "glm-4.6",
+            &[Message::user("hi")],
+            &ModelOptions::default(),
+            false,
+        );
         assert!(body.get("tools").is_none());
     }
 
     #[test]
     fn with_tools_returns_bound_clone() {
         let model = GlmChatModel::bigmodel("k", "glm-4.6");
-        let _bound = model.with_tools(&[ToolInfo {
-            name: "x".into(),
-            description: "y".into(),
-            parameters_schema: json!({}),
-        }]).unwrap();
-        let body_orig = model.build_body("m", &[Message::user("a")], &ModelOptions::default(), false);
+        let _bound = model
+            .with_tools(&[ToolInfo {
+                name: "x".into(),
+                description: "y".into(),
+                parameters_schema: json!({}),
+            }])
+            .unwrap();
+        let body_orig =
+            model.build_body("m", &[Message::user("a")], &ModelOptions::default(), false);
         assert!(body_orig.get("tools").is_none(), "original stays unbound");
     }
 
@@ -1975,7 +2103,11 @@ mod tests {
     /// A read-only ProbeTool with the given name and a throwaway call log — for
     /// registry-narrowing tests that only care about WHICH tools survive.
     fn read_only_probe(name: &'static str) -> ProbeTool {
-        ProbeTool { name, read_only: true, calls: Arc::new(Mutex::new(Vec::new())) }
+        ProbeTool {
+            name,
+            read_only: true,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     #[tokio::test]
@@ -1983,8 +2115,16 @@ mod tests {
         let write_calls = Arc::new(Mutex::new(Vec::new()));
         let read_calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
-        reg.push(ProbeTool { name: "read_file", read_only: true, calls: read_calls.clone() });
+        reg.push(ProbeTool {
+            name: "write_file",
+            read_only: false,
+            calls: write_calls.clone(),
+        });
+        reg.push(ProbeTool {
+            name: "read_file",
+            read_only: true,
+            calls: read_calls.clone(),
+        });
 
         let hooks = Arc::new(
             crate::kernel_impl::hooks::HookManager::new()
@@ -1997,19 +2137,37 @@ mod tests {
         let r1 = agent
             .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
             .await;
-        assert!(r1.contains("[dry-run]"), "side-effect tool simulated, got: {r1}");
-        assert!(write_calls.lock().unwrap().is_empty(), "write must NOT land in dry-run");
+        assert!(
+            r1.contains("[dry-run]"),
+            "side-effect tool simulated, got: {r1}"
+        );
+        assert!(
+            write_calls.lock().unwrap().is_empty(),
+            "write must NOT land in dry-run"
+        );
 
         let r2 = agent
             .execute_tool_call(&probe_call("read_file", r#"{"path":"a.rs"}"#), &ctx)
             .await;
-        assert!(!r2.contains("[dry-run]"), "read-only tool runs for real, got: {r2}");
-        assert_eq!(read_calls.lock().unwrap().len(), 1, "read-only tool invoked once");
+        assert!(
+            !r2.contains("[dry-run]"),
+            "read-only tool runs for real, got: {r2}"
+        );
+        assert_eq!(
+            read_calls.lock().unwrap().len(),
+            1,
+            "read-only tool invoked once"
+        );
 
         // Unknown tool in dry-run: find() is None so it falls through to the
         // stable "[unknown tool]" path — dry-run never invents execution.
-        let r3 = agent.execute_tool_call(&probe_call("nope", "{}"), &ctx).await;
-        assert!(r3.contains("[unknown tool: nope]"), "unknown tool path unchanged: {r3}");
+        let r3 = agent
+            .execute_tool_call(&probe_call("nope", "{}"), &ctx)
+            .await;
+        assert!(
+            r3.contains("[unknown tool: nope]"),
+            "unknown tool path unchanged: {r3}"
+        );
     }
 
     #[tokio::test]
@@ -2017,7 +2175,11 @@ mod tests {
         // Regression guard: the dry-run branch must NOT fire outside DryRun.
         let write_calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
+        reg.push(ProbeTool {
+            name: "write_file",
+            read_only: false,
+            calls: write_calls.clone(),
+        });
 
         let hooks = Arc::new(
             crate::kernel_impl::hooks::HookManager::new()
@@ -2030,7 +2192,11 @@ mod tests {
             .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
             .await;
         assert!(!r.contains("[dry-run]"), "real mode must NOT simulate: {r}");
-        assert_eq!(write_calls.lock().unwrap().len(), 1, "write landed once in real mode");
+        assert_eq!(
+            write_calls.lock().unwrap().len(),
+            1,
+            "write landed once in real mode"
+        );
     }
 
     // --- v2.0 T2: subagent dispatch ---
@@ -2045,7 +2211,9 @@ mod tests {
 
     impl GenModel {
         fn new(reply: &str) -> Self {
-            Self { reply: reply.to_string() }
+            Self {
+                reply: reply.to_string(),
+            }
         }
     }
 
@@ -2070,8 +2238,16 @@ mod tests {
     async fn subagent_dispatches_child_and_returns_conclusion() {
         // Child has no tools → run_loop calls generate directly and returns the
         // reply as the final answer, which SubAgentTool wraps for the parent.
-        let tool = SubAgentTool::new(shared_gen_model("子任务结论：找到 3 处"), ToolRegistry::new(), 6, Vec::new());
-        let out = tool.invoke(r#"{"task":"分析依赖"}"#, &ToolContext::default()).await.unwrap();
+        let tool = SubAgentTool::new(
+            shared_gen_model("子任务结论：找到 3 处"),
+            ToolRegistry::new(),
+            6,
+            Vec::new(),
+        );
+        let out = tool
+            .invoke(r#"{"task":"分析依赖"}"#, &ToolContext::default())
+            .await
+            .unwrap();
         assert!(out.contains("[子 agent 结论]"), "conclusion wrapped: {out}");
         assert!(out.contains("子任务结论"), "child answer surfaced: {out}");
     }
@@ -2080,10 +2256,22 @@ mod tests {
     async fn subagent_rejects_malformed_or_empty_task() {
         let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 6, Vec::new());
         let ctx = ToolContext::default();
-        assert!(tool.invoke("not json", &ctx).await.is_err(), "non-JSON rejected");
-        assert!(tool.invoke(r#"{}"#, &ctx).await.is_err(), "missing task rejected");
-        assert!(tool.invoke(r#"{"task":""}"#, &ctx).await.is_err(), "empty task rejected");
-        assert!(tool.invoke(r#"{"task":"   "}"#, &ctx).await.is_err(), "blank task rejected");
+        assert!(
+            tool.invoke("not json", &ctx).await.is_err(),
+            "non-JSON rejected"
+        );
+        assert!(
+            tool.invoke(r#"{}"#, &ctx).await.is_err(),
+            "missing task rejected"
+        );
+        assert!(
+            tool.invoke(r#"{"task":""}"#, &ctx).await.is_err(),
+            "empty task rejected"
+        );
+        assert!(
+            tool.invoke(r#"{"task":"   "}"#, &ctx).await.is_err(),
+            "blank task rejected"
+        );
     }
 
     #[test]
@@ -2092,15 +2280,31 @@ mod tests {
         // dispatcher itself are excluded, so it can't mutate or recurse.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "read_file", read_only: true, calls: calls.clone() });
-        reg.push(ProbeTool { name: "write_file", read_only: false, calls });
-        reg.push(SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4, Vec::new()));
+        reg.push(ProbeTool {
+            name: "read_file",
+            read_only: true,
+            calls: calls.clone(),
+        });
+        reg.push(ProbeTool {
+            name: "write_file",
+            read_only: false,
+            calls,
+        });
+        reg.push(SubAgentTool::new(
+            shared_gen_model("x"),
+            ToolRegistry::new(),
+            4,
+            Vec::new(),
+        ));
 
         let ro = reg.read_only_subset();
         assert_eq!(ro.len(), 1, "only the read-only tool survives");
         assert!(ro.find("read_file").is_some());
         assert!(ro.find("write_file").is_none(), "mutator dropped");
-        assert!(ro.find("dispatch_subagent").is_none(), "dispatcher dropped → recursion bounded");
+        assert!(
+            ro.find("dispatch_subagent").is_none(),
+            "dispatcher dropped → recursion bounded"
+        );
     }
 
     #[tokio::test]
@@ -2121,10 +2325,16 @@ mod tests {
             }
         }
         let tool = SubAgentTool::new(Arc::new(FailModel), ToolRegistry::new(), 4, Vec::new());
-        let out = tool.invoke(r#"{"task":"x"}"#, &ToolContext::default()).await.unwrap();
+        let out = tool
+            .invoke(r#"{"task":"x"}"#, &ToolContext::default())
+            .await
+            .unwrap();
         // Failure branch returns "[子 agent 失败: {e}]" — note ':' (it carries
         // the cause), NOT ']' like the success prefix.
-        assert!(out.contains("[子 agent 失败:"), "failure surfaced, not propagated: {out}");
+        assert!(
+            out.contains("[子 agent 失败:"),
+            "failure surfaced, not propagated: {out}"
+        );
     }
 
     #[test]
@@ -2142,10 +2352,24 @@ mod tests {
         };
         let tool = SubAgentTool::new(shared_gen_model("x"), ToolRegistry::new(), 4, vec![spec]);
         let info = tool.info();
-        assert!(info.description.contains("researcher"), "named agent listed: {}", info.description);
-        assert!(info.description.contains("deep research"), "description carried: {}", info.description);
-        let props = info.parameters_schema.get("properties").expect("schema has properties");
-        assert!(props.get("subagent").is_some(), "{{subagent}} parameter present");
+        assert!(
+            info.description.contains("researcher"),
+            "named agent listed: {}",
+            info.description
+        );
+        assert!(
+            info.description.contains("deep research"),
+            "description carried: {}",
+            info.description
+        );
+        let props = info
+            .parameters_schema
+            .get("properties")
+            .expect("schema has properties");
+        assert!(
+            props.get("subagent").is_some(),
+            "{{subagent}} parameter present"
+        );
     }
 
     #[tokio::test]
@@ -2163,13 +2387,27 @@ mod tests {
             system_prompt: "你是资深调研员,只给结论与依据".into(),
             tools_allow: vec![],
         };
-        let tool = SubAgentTool::new(shared_gen_model("结论：ok"), ToolRegistry::new(), 4, vec![spec]);
+        let tool = SubAgentTool::new(
+            shared_gen_model("结论：ok"),
+            ToolRegistry::new(),
+            4,
+            vec![spec],
+        );
         let out = tool
-            .invoke(r#"{"task":"调研X","subagent":"researcher"}"#, &ToolContext::default())
+            .invoke(
+                r#"{"task":"调研X","subagent":"researcher"}"#,
+                &ToolContext::default(),
+            )
             .await
             .unwrap();
-        assert!(out.contains("[子 agent 结论]"), "named dispatch wraps conclusion: {out}");
-        assert!(out.contains("结论：ok"), "named child answer surfaced: {out}");
+        assert!(
+            out.contains("[子 agent 结论]"),
+            "named dispatch wraps conclusion: {out}"
+        );
+        assert!(
+            out.contains("结论：ok"),
+            "named child answer surfaced: {out}"
+        );
     }
 
     #[tokio::test]
@@ -2177,12 +2415,23 @@ mod tests {
         // An unknown {subagent} name is NOT an error — it degrades to the
         // anonymous worker so the dispatch still succeeds (the agent never gets
         // stuck on a typo'd subagent name). named=[] here, so any name misses.
-        let tool = SubAgentTool::new(shared_gen_model("结论：anon"), ToolRegistry::new(), 4, Vec::new());
+        let tool = SubAgentTool::new(
+            shared_gen_model("结论：anon"),
+            ToolRegistry::new(),
+            4,
+            Vec::new(),
+        );
         let out = tool
-            .invoke(r#"{"task":"x","subagent":"ghost"}"#, &ToolContext::default())
+            .invoke(
+                r#"{"task":"x","subagent":"ghost"}"#,
+                &ToolContext::default(),
+            )
             .await
             .unwrap();
-        assert!(out.contains("[子 agent 结论]"), "unknown name → anonymous worker: {out}");
+        assert!(
+            out.contains("[子 agent 结论]"),
+            "unknown name → anonymous worker: {out}"
+        );
     }
 
     // --- D1: tools_allow name-prefix narrowing ---
@@ -2202,7 +2451,10 @@ mod tests {
             .map(|t| t.name)
             .collect();
         names.sort();
-        assert_eq!(names, vec!["read_file".to_string(), "skill__web_search".to_string()]);
+        assert_eq!(
+            names,
+            vec!["read_file".to_string(), "skill__web_search".to_string()]
+        );
     }
 
     #[test]
@@ -2269,7 +2521,10 @@ mod tests {
         let m = handle_sse_line(line, &mut bufs, &mut sig).unwrap();
         assert_eq!(m.content, "hi");
         assert!(m.tool_calls.is_empty());
-        assert!(bufs.is_empty(), "text delta must not touch the tool accumulator");
+        assert!(
+            bufs.is_empty(),
+            "text delta must not touch the tool accumulator"
+        );
     }
 
     #[test]
@@ -2278,12 +2533,21 @@ mod tests {
         let mut sig = String::new();
         // content_block_start opens a tool_use block at index 1.
         let start = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_9","name":"read_file"}}"#;
-        assert!(handle_sse_line(start, &mut bufs, &mut sig).is_none(), "start yields nothing");
+        assert!(
+            handle_sse_line(start, &mut bufs, &mut sig).is_none(),
+            "start yields nothing"
+        );
         // input_json_delta arrives in two fragments — Anthropic streams partial JSON.
         let d1 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/a"}}"#;
         let d2 = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":".txt\"}"}}"#;
-        assert!(handle_sse_line(d1, &mut bufs, &mut sig).is_none(), "json delta yields nothing");
-        assert!(handle_sse_line(d2, &mut bufs, &mut sig).is_none(), "json delta yields nothing");
+        assert!(
+            handle_sse_line(d1, &mut bufs, &mut sig).is_none(),
+            "json delta yields nothing"
+        );
+        assert!(
+            handle_sse_line(d2, &mut bufs, &mut sig).is_none(),
+            "json delta yields nothing"
+        );
         // message_stop reassembles the terminal tool_calls Message.
         let m = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
         assert_eq!(m.content, "");
@@ -2352,7 +2616,9 @@ mod tests {
     #[async_trait]
     impl ChatModel for ScriptedModel {
         async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
-            Err(Error::Unsupported("ScriptedModel: drive via stream()".into()))
+            Err(Error::Unsupported(
+                "ScriptedModel: drive via stream()".into(),
+            ))
         }
         fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
             let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2392,7 +2658,9 @@ mod tests {
     #[async_trait]
     impl ChatModel for RecordingModel {
         async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
-            Err(Error::Unsupported("RecordingModel: drive via stream()".into()))
+            Err(Error::Unsupported(
+                "RecordingModel: drive via stream()".into(),
+            ))
         }
         fn stream(&self, _: &[Message], opts: &ModelOptions) -> Result<MessageStream, Error> {
             self.seen.lock().unwrap().push(opts.model.clone());
@@ -2419,7 +2687,11 @@ mod tests {
         let outcome = collect_outcome(s).await.expect("must emit Done");
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "one stream call on a converging turn: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            1,
+            "one stream call on a converging turn: {seen:?}"
+        );
         assert_eq!(
             seen[0].as_deref(),
             Some("routed-sentinel"),
@@ -2440,7 +2712,10 @@ mod tests {
         let outcome = collect_outcome(s).await.expect("must emit Done");
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
         let summary = outcome.output_summary.expect("budget message");
-        assert!(summary.contains("budget"), "budget reason in summary: {summary}");
+        assert!(
+            summary.contains("budget"),
+            "budget reason in summary: {summary}"
+        );
         // No LLM call was made — the limit fired before the first turn.
         assert!(
             seen.lock().unwrap().is_empty(),
@@ -2502,12 +2777,17 @@ mod tests {
             std::env::current_dir().ok(),
         )));
 
-        let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys")
-            .with_hooks(Arc::new(hooks));
-        let out = agent.run_loop("do the thing", ModelOptions::default()).await;
+        let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys").with_hooks(Arc::new(hooks));
+        let out = agent
+            .run_loop("do the thing", ModelOptions::default())
+            .await;
         assert!(out.is_ok(), "run_loop should converge: {out:?}");
 
-        let captured = last_user.lock().unwrap().clone().expect("model saw a user message");
+        let captured = last_user
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("model saw a user message");
         assert!(
             captured.contains("do the thing"),
             "original task preserved: {captured}"
@@ -2533,9 +2813,19 @@ mod tests {
         let last_user = spy.last_user.clone();
         // No with_hooks → self.hooks is None → dispatch skipped.
         let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys");
-        agent.run_loop("plain prompt", ModelOptions::default()).await.ok();
-        let captured = last_user.lock().unwrap().clone().expect("user message seen");
-        assert_eq!(captured, "plain prompt", "no fence when no hooks: {captured}");
+        agent
+            .run_loop("plain prompt", ModelOptions::default())
+            .await
+            .ok();
+        let captured = last_user
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("user message seen");
+        assert_eq!(
+            captured, "plain prompt",
+            "no fence when no hooks: {captured}"
+        );
     }
 
     // --- v2: exit-2 blocking (UserPromptSubmit + PreToolUse) ---
@@ -2560,18 +2850,16 @@ mod tests {
         hooks.register(Box::new(UserCommandHook::new(
             "gate".into(),
             UserHookEvent::UserPromptSubmit,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 2".into()
-            } else {
-                "exit 2".into()
-            },
+            "exit 2".into(),
             true,
             10,
             std::env::current_dir().ok(),
         )));
 
         let agent = ReactAgent::new(spy, ToolRegistry::new(), "sys").with_hooks(Arc::new(hooks));
-        let out = agent.run_loop("do the thing", ModelOptions::default()).await;
+        let out = agent
+            .run_loop("do the thing", ModelOptions::default())
+            .await;
         let answer = out.expect("block returns Ok with the reason, not Err");
         assert!(
             answer.contains("用户钩子阻止本轮提交"),
@@ -2591,23 +2879,23 @@ mod tests {
         // PreToolUse semantics via the dispatch seam in execute_tool_call).
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "write_file", read_only: false, calls: calls.clone() });
+        reg.push(ProbeTool {
+            name: "write_file",
+            read_only: false,
+            calls: calls.clone(),
+        });
 
         let mut hooks = crate::kernel_impl::hooks::HookManager::new();
         hooks.register(Box::new(crate::user_hooks::UserCommandHook::new(
             "no-writes".into(),
             crate::models::UserHookEvent::PreToolUse,
-            if cfg!(target_os = "windows") {
-                "cmd /C exit 2".into()
-            } else {
-                "exit 2".into()
-            },
+            "exit 2".into(),
             true,
             10,
             std::env::current_dir().ok(),
         )));
-        let agent = ReactAgent::new(ScriptedModel::new(vec![]), reg, "sys")
-            .with_hooks(Arc::new(hooks));
+        let agent =
+            ReactAgent::new(ScriptedModel::new(vec![]), reg, "sys").with_hooks(Arc::new(hooks));
         let ctx = ToolContext::default();
 
         let r = agent
@@ -2648,7 +2936,11 @@ mod tests {
 
     #[async_trait]
     impl ChatModel for CompactingModel {
-        async fn generate(&self, _msgs: &[Message], _opts: &ModelOptions) -> Result<Message, Error> {
+        async fn generate(
+            &self,
+            _msgs: &[Message],
+            _opts: &ModelOptions,
+        ) -> Result<Message, Error> {
             self.generate_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Message::assistant(self.summary.clone()))
@@ -2797,7 +3089,9 @@ mod tests {
     #[async_trait]
     impl ChatModel for RetryingModel {
         async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
-            Err(Error::Unsupported("RetryingModel: drive via stream()".into()))
+            Err(Error::Unsupported(
+                "RetryingModel: drive via stream()".into(),
+            ))
         }
         fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
             let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2992,14 +3286,21 @@ mod tests {
         use kernel_core::Agent;
         let write_calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "write_file", read_only: false, calls: write_calls.clone() });
+        reg.push(ProbeTool {
+            name: "write_file",
+            read_only: false,
+            calls: write_calls.clone(),
+        });
         // turn 0: a write_file tool call → agent executes ProbeTool + emits
         // FileChanged(src/a.rs); turn 1: bare text → convergence → Done(Completed).
         let model = ScriptedModel::new(vec![
             Message {
                 role: Role::Assistant,
                 content: String::new(),
-                tool_calls: vec![probe_call("write_file", r#"{"path":"src/a.rs","content":"x"}"#)],
+                tool_calls: vec![probe_call(
+                    "write_file",
+                    r#"{"path":"src/a.rs","content":"x"}"#,
+                )],
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
@@ -3035,11 +3336,22 @@ mod tests {
         let conn = crate::db::init_db(&tmp.path().join("e.db")).unwrap();
         let hash = crate::activity::hash_project_path("/proj");
         let n = crate::kernel_impl::session_reflection::persist_completion_memory(
-            &conn, &hash, "sid", "write src/a.rs",
-            if summary.is_empty() { None } else { Some(&summary) },
-            &final_blocks, &crate::models::AgentType::ClaudeCode,
+            &conn,
+            &hash,
+            "sid",
+            "write src/a.rs",
+            if summary.is_empty() {
+                None
+            } else {
+                Some(&summary)
+            },
+            &final_blocks,
+            &crate::models::AgentType::ClaudeCode,
         );
-        assert_eq!(n, 2, "prose summary + write tool → react_session + react_reflection");
+        assert_eq!(
+            n, 2,
+            "prose summary + write tool → react_session + react_reflection"
+        );
         let got = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
         let refl = got
             .iter()
@@ -3047,8 +3359,16 @@ mod tests {
             .expect("react_reflection written from a real agent stream");
         // The agent REALLY emitted FileChanged("src/a.rs"); it survived
         // map_agent_event into the structured reflection content verbatim.
-        assert!(refl.content.contains("src/a.rs"), "real file path landed: {}", refl.content);
-        assert!(refl.content.contains("write_file"), "tool counted: {}", refl.content);
+        assert!(
+            refl.content.contains("src/a.rs"),
+            "real file path landed: {}",
+            refl.content
+        );
+        assert!(
+            refl.content.contains("write_file"),
+            "tool counted: {}",
+            refl.content
+        );
     }
 
     /// ScriptedModel that ALSO records every history snapshot passed into
@@ -3075,7 +3395,9 @@ mod tests {
     #[async_trait]
     impl ChatModel for CapturingModel {
         async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
-            Err(Error::Unsupported("CapturingModel: drive via stream()".into()))
+            Err(Error::Unsupported(
+                "CapturingModel: drive via stream()".into(),
+            ))
         }
         fn stream(&self, msgs: &[Message], _opts: &ModelOptions) -> Result<MessageStream, Error> {
             self.seen.lock().unwrap().push(msgs.to_vec());
@@ -3105,8 +3427,16 @@ mod tests {
         let read_calls = Arc::new(Mutex::new(Vec::new()));
         let glob_calls = Arc::new(Mutex::new(Vec::new()));
         let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool { name: "read_file", read_only: true, calls: read_calls.clone() });
-        reg.push(ProbeTool { name: "glob", read_only: true, calls: glob_calls.clone() });
+        reg.push(ProbeTool {
+            name: "read_file",
+            read_only: true,
+            calls: read_calls.clone(),
+        });
+        reg.push(ProbeTool {
+            name: "glob",
+            read_only: true,
+            calls: glob_calls.clone(),
+        });
 
         // Turn 0: assistant requests read_file AND glob in ONE message (the
         // parallel-tool-use shape). Turn 1: bare text → convergence.
@@ -3166,12 +3496,20 @@ mod tests {
         let wire = body["messages"].as_array().unwrap();
         let roles: Vec<&str> = wire.iter().map(|m| m["role"].as_str().unwrap()).collect();
         for w in wire.windows(2) {
-            assert_ne!(w[0]["role"], w[1]["role"], "back-to-back roles: {:?}", roles);
+            assert_ne!(
+                w[0]["role"], w[1]["role"],
+                "back-to-back roles: {:?}",
+                roles
+            );
         }
         let merged = wire.last().unwrap();
         assert_eq!(merged["role"], "user");
         let results = merged["content"].as_array().unwrap();
-        assert_eq!(results.len(), 2, "both tool_results merged into one user message");
+        assert_eq!(
+            results.len(),
+            2,
+            "both tool_results merged into one user message"
+        );
         assert_eq!(results[0]["tool_use_id"], "call_00");
         assert_eq!(results[1]["tool_use_id"], "call_01");
     }
@@ -3198,7 +3536,8 @@ mod tests {
         assert_eq!(sig, "sig-123");
         // message_stop carries the accumulated signature even with no tools — so
         // a pure reasoning+answer turn still preserves its signature next turn.
-        let stop = handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
+        let stop =
+            handle_sse_line(r#"data: {"type":"message_stop"}"#, &mut bufs, &mut sig).unwrap();
         assert!(stop.tool_calls.is_empty());
         assert_eq!(stop.reasoning_signature.as_deref(), Some("sig-123"));
     }
@@ -3235,7 +3574,8 @@ mod tests {
         // is a 0 placeholder). parse_usage reads both → the caller's
         // saturating_add recovers the real input. Without this the streaming
         // path undercounted input tokens to 0.
-        let glm_delta = r#"data: {"type":"message_delta","usage":{"input_tokens":16,"output_tokens":10}}"#;
+        let glm_delta =
+            r#"data: {"type":"message_delta","usage":{"input_tokens":16,"output_tokens":10}}"#;
         assert_eq!(parse_usage(glm_delta), Some((16, 10)));
         // Non-usage event types → None.
         assert_eq!(parse_usage(r#"data: {"type":"content_block_delta"}"#), None);
@@ -3259,11 +3599,13 @@ mod tests {
         use crate::cost::sink::NullCostSink;
         use std::time::Duration;
         let m = GlmChatModel::bigmodel("k", "glm-4.6")
-            .with_circuit(std::sync::Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-                failure_threshold: 1,
-                cooldown: Duration::from_secs(60),
-                half_open_max: 1,
-            })))
+            .with_circuit(std::sync::Arc::new(CircuitBreaker::new(
+                CircuitBreakerConfig {
+                    failure_threshold: 1,
+                    cooldown: Duration::from_secs(60),
+                    half_open_max: 1,
+                },
+            )))
             .with_cost_sink(std::sync::Arc::new(NullCostSink));
         assert!(m.circuit.is_some());
         assert!(m.cost_sink.is_some());
@@ -3285,7 +3627,9 @@ mod tests {
         // thinking on: body carries the thinking param, and max_tokens is raised
         // above budget (caller's 1024 < budget 2000 → 2000 + 4096).
         let opts = ModelOptions {
-            thinking: Some(ThinkingConfig { budget_tokens: 2000 }),
+            thinking: Some(ThinkingConfig {
+                budget_tokens: 2000,
+            }),
             max_tokens: Some(1024),
             ..Default::default()
         };
@@ -3539,12 +3883,17 @@ mod tests {
         // reassembles it into a terminal tool_calls Message (id/name/args).
         let sse = include_str!("../../tests/fixtures/glm/stream_tool_use.sse");
         let (msgs, _in, _out) = replay_sse(sse);
-        let terminal = msgs.last().expect("message_stop yields terminal tool_calls");
+        let terminal = msgs
+            .last()
+            .expect("message_stop yields terminal tool_calls");
         assert!(!terminal.tool_calls.is_empty(), "tool_use reassembled");
         let tc = &terminal.tool_calls[0];
         assert_eq!(tc.function.name, "get_weather");
         assert_eq!(tc.function.arguments, "{\"city\":\"Beijing\"}");
-        assert!(!tc.id.is_empty(), "tool_use id carried from content_block_start");
+        assert!(
+            !tc.id.is_empty(),
+            "tool_use id carried from content_block_start"
+        );
         // The text block before the tool_use still streamed inline.
         let text: String = msgs
             .iter()
@@ -3607,9 +3956,10 @@ mod tests {
         };
         use futures::StreamExt;
         let sink = std::sync::Arc::new(CapturingSink::new());
-        let model = GlmChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
-            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
-        );
+        let model = GlmChatModel::bigmodel(key, "glm-4.6")
+            .with_cost_sink(
+                std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>
+            );
         let stream = model
             .stream(
                 &[Message::user("Reply with exactly one word: HELLO")],
@@ -3656,14 +4006,11 @@ mod tests {
         use futures::StreamExt;
         use kernel_core::{Agent, AgentEvent, AgentInput};
         let sink = std::sync::Arc::new(CapturingSink::new());
-        let model = GlmChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
-            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
-        );
-        let agent = ReactAgent::new(
-            model,
-            ToolRegistry::new(),
-            "You are a concise assistant.",
-        );
+        let model = GlmChatModel::bigmodel(key, "glm-4.6")
+            .with_cost_sink(
+                std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>
+            );
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "You are a concise assistant.");
         let mut stream = agent
             .run(AgentInput {
                 prompt: "Reply with exactly one word: PONG".into(),
@@ -3722,9 +4069,7 @@ mod tests {
             .map(|r| !r.api_key.is_empty())
             .unwrap_or(false);
         if !has_key {
-            eprintln!(
-                "no keyed GUI provider in {data_dir:?} — skipping live assembly smoke"
-            );
+            eprintln!("no keyed GUI provider in {data_dir:?} — skipping live assembly smoke");
             return;
         }
         let agent = crate::kernel_impl::executor::build_react_agent(
@@ -3757,7 +4102,10 @@ mod tests {
             }
             wire.extend(crate::agents::react_chat::map_agent_event(ev, 0));
         }
-        assert!(done, "agent never reached Done through the real assembly path");
+        assert!(
+            done,
+            "agent never reached Done through the real assembly path"
+        );
         assert!(
             !wire.is_empty(),
             "map_agent_event produced no wire events from the live run"
@@ -3766,8 +4114,7 @@ mod tests {
         // types/index.ts deserializes; they must serialize to {kind: ...} JSON
         // (the TS union discriminator), proving map_agent_event output is valid
         // wire — not just valid Rust enums.
-        let json = serde_json::to_string(&wire)
-            .expect("wire events serialize to agent:event JSON");
+        let json = serde_json::to_string(&wire).expect("wire events serialize to agent:event JSON");
         assert!(
             json.contains("\"kind\""),
             "wire payload carries the kind discriminator the TS union narrows on: {json}"
@@ -3846,7 +4193,10 @@ mod tests {
             "live parallel-tool-use smoke: status={:?} tool_uses_seen={} summary={:?} err={:?}",
             done_status, tool_uses_seen, summary, stream_err
         );
-        assert!(stream_err.is_empty(), "stream error (possible 400): {stream_err}");
+        assert!(
+            stream_err.is_empty(),
+            "stream error (possible 400): {stream_err}"
+        );
         let status = done_status.expect("agent never reached Done");
         // 环境问题(GLM key失效)≠ 代码问题(400)。has_key 只查 key 非空,
         // 运行时才发现 key 失效——此时优雅跳过,不假装通过;只有真400/
@@ -3947,7 +4297,10 @@ mod tests {
         // 本地wire合规(合并+严格交替)——复刻的history经修复后必须满足。
         let wire = body["messages"].as_array().unwrap();
         for w in wire.windows(2) {
-            assert_ne!(w[0]["role"], w[1]["role"], "local wire has back-to-back roles");
+            assert_ne!(
+                w[0]["role"], w[1]["role"],
+                "local wire has back-to-back roles"
+            );
         }
         // 真POST到GLM。修复前这个body会400;修复后应被接受。
         let client = reqwest::Client::new();
@@ -3961,7 +4314,10 @@ mod tests {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         let head = &text[..text.len().min(300)];
-        eprintln!("live merged-body POST: status={} resp_head={}", status, head);
+        eprintln!(
+            "live merged-body POST: status={} resp_head={}",
+            status, head
+        );
         // 环境问题(key失效)→ 优雅skip,不假装通过。
         if status.as_u16() == 401 || text.contains("authentication") {
             eprintln!("SKIP: key failed authentication: {}", head);
@@ -3979,7 +4335,8 @@ mod tests {
         assert!(
             status.is_success(),
             "provider rejected merged body (non-auth): {} {}",
-            status, head
+            status,
+            head
         );
     }
 
@@ -4059,18 +4416,15 @@ mod tests {
     #[ignore = "diagnostic; needs keyed DeepSeek GUI provider; spends tokens"]
     #[tokio::test]
     async fn diag_deepseek_glm_stream_raw() {
-        use kernel_core::{ChatModel, Message, ModelOptions, ThinkingConfig};
         use futures::StreamExt;
+        use kernel_core::{ChatModel, Message, ModelOptions, ThinkingConfig};
         let home = crate::commands::projects::dirs_home();
         let data_dir = home.join(".dev-workbench");
         let r = crate::config::providers::load_providers_config(&data_dir)
             .ok()
             .and_then(|c| crate::config::providers::resolve_provider(&c, "deepseek-v4-flash"))
             .expect("keyed DeepSeek provider");
-        eprintln!(
-            "endpoint={} model_in_config={}",
-            r.endpoint, r.model
-        );
+        eprintln!("endpoint={} model_in_config={}", r.endpoint, r.model);
         let model = GlmChatModel::new(&r.endpoint, &r.api_key, &r.model);
         let msgs = vec![
             Message::system("You are a helpful assistant."),
@@ -4079,7 +4433,9 @@ mod tests {
         // Mirror executor.rs with_thinking(2048) + build_body's max_tokens floor.
         let opts = ModelOptions {
             model: Some(r.model.clone()),
-            thinking: Some(ThinkingConfig { budget_tokens: 2048 }),
+            thinking: Some(ThinkingConfig {
+                budget_tokens: 2048,
+            }),
             max_tokens: Some(6144),
             ..Default::default()
         };
@@ -4118,8 +4474,8 @@ mod tests {
     #[ignore = "diagnostic; needs keyed DeepSeek GUI provider; spends tokens"]
     #[tokio::test]
     async fn diag_deepseek_agent_run() {
-        use kernel_core::{Agent, AgentInput};
         use futures::StreamExt;
+        use kernel_core::{Agent, AgentInput};
         let working_dir = env!("CARGO_MANIFEST_DIR").to_string();
         let agent = crate::kernel_impl::executor::build_react_agent(
             Some("deepseek-v4-flash"),

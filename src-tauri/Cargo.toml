@@ -59,3 +59,6 @@ serde_yaml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+# BashTool shell-path 测试需串行：resolve_git_bash 读/写进程级 env
+# （DEVWORKBENCH_BASH_PATH / ProgramFiles），并行测试会互相覆盖。
+serial_test = "3"
