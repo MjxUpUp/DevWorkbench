@@ -44,6 +44,99 @@ pub fn estimate_tokens(history: &[Message]) -> usize {
     chars / 4
 }
 
+/// Placeholder substituted for cleared tool results (CCB
+/// `TIME_BASED_MC_CLEARED_MESSAGE` = `"[Old tool result content cleared]"`).
+/// Keeps the message slot — `tool_call_id` correlation stays intact — but
+/// drops the bulky raw output.
+const CLEARED_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+/// Tools whose results are bulky raw output worth clearing under pressure.
+/// Sub-agent / skill / MCP results carry conclusions, not raw dumps, so they
+/// stay — parity with CCB's `COMPACTABLE_TOOLS` allowlist (Read/Grep/Glob/
+/// Shell/WebSearch/WebFetch/Edit/Write). Matched by stem, case-insensitively,
+/// so both `"Read"` and `"read_file"` style names match.
+fn is_compactable_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "read", "grep", "glob", "bash", "shell", "write", "edit",
+        "web_search", "web_fetch",
+    ]
+    .iter()
+    .any(|stem| lower.starts_with(stem))
+}
+
+/// D1(c) micro-compact — lightweight, **LLM-free** compression. Clears the
+/// `content` of stale bulky tool-result messages (keeping the most recent
+/// `keep_recent` compactable ones), replacing each with [`CLEARED_PLACEHOLDER`].
+/// Returns `Some(new_history)` iff anything was cleared; `None` otherwise.
+///
+/// CCB `microCompact.ts` parity: the `COMPACTABLE_TOOLS` allowlist, a
+/// keep-recent-N window, and the cleared-message placeholder. Unlike
+/// [`summarize_middle`] this is a pure local truncation — it trades exact tool
+/// output for tokens WITHOUT blending the middle into a (lossy) LLM summary, so
+/// it's the cheaper first pass when the pressure is just stale tool output, not
+/// a genuinely long thread.
+pub fn micro_compact(history: &[Message], keep_recent: usize) -> Option<Vec<Message>> {
+    // Index tool_call_id → tool name from assistant tool_calls so we can tell
+    // which tool a Role::Tool result came from.
+    let mut name_index: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for m in history {
+        if m.role == Role::Assistant {
+            for tc in &m.tool_calls {
+                name_index.insert(tc.id.as_str(), tc.function.name.as_str());
+            }
+        }
+    }
+
+    // Collect indices of compactable tool-result messages, in encounter order.
+    let compactable_idxs: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.role == Role::Tool
+                && m.tool_call_id
+                    .as_deref()
+                    .and_then(|id| name_index.get(id))
+                    .map(|name| is_compactable_tool(name))
+                    .unwrap_or(false)
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Keep the last `keep_recent` (floor 1 — clearing ALL leaves zero working
+    // context; CCB floors the same way). Nothing to clear → no-op.
+    let keep = keep_recent.max(1);
+    if compactable_idxs.len() <= keep {
+        return None;
+    }
+    let clear_set: std::collections::HashSet<usize> = compactable_idxs[..compactable_idxs.len() - keep]
+        .iter()
+        .copied()
+        .collect();
+
+    let mut changed = false;
+    let result: Vec<Message> = history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if clear_set.contains(&i) && m.content != CLEARED_PLACEHOLDER {
+                changed = true;
+                let mut c = m.clone();
+                c.content = CLEARED_PLACEHOLDER.to_string();
+                c
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+
+    if changed {
+        Some(result)
+    } else {
+        None
+    }
+}
+
 /// Compress the middle of `history` into a single summary message.
 ///
 /// Result layout: `[system] [summary(user)] ...last keep_recent messages...`.
@@ -152,6 +245,17 @@ pub async fn maybe_compact(
     if estimate_tokens(history) <= max_tokens {
         return Ok(false);
     }
+    // D1(c) micro-compact FIRST (LLM-free): clear stale bulky tool results,
+    // keeping the most recent. If that alone brings us back under the threshold,
+    // we're done — no summarize_middle round (no LLM call, no lossy blending).
+    // CCB runs micro-compact before autocompact for the same reason. Falls
+    // through to summarize_middle on the already-trimmed history if still over.
+    if let Some(micro) = micro_compact(history, keep_recent) {
+        *history = micro;
+        if estimate_tokens(history) <= max_tokens {
+            return Ok(true);
+        }
+    }
     // D1(b) breaker: stop re-attempting once the summarizer has failed several
     // rounds running. Without this, a persistent LLM error makes compaction a
     // per-turn infinite retry (history grows → over threshold → retry → fail).
@@ -235,6 +339,120 @@ mod tests {
             reasoning: None,
             reasoning_signature: None,
         }
+    }
+
+    fn assistant_with_tool(content: &str, tool_id: &str, tool_name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: content.to_string(),
+            tool_calls: vec![kernel_core::ToolCall {
+                id: tool_id.into(),
+                call_type: "function".into(),
+                function: kernel_core::FunctionCall {
+                    name: tool_name.into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        }
+    }
+
+    fn tool_msg(tool_id: &str, content: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: content.to_string(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_id.into()),
+            reasoning: None,
+            reasoning_signature: None,
+        }
+    }
+
+    #[test]
+    fn micro_compact_clears_old_results_keeps_recent_n() {
+        // 4 read tool results; keep_recent=1 → only the last keeps its content.
+        let hist = vec![
+            msg(Role::System, "sys"),
+            assistant_with_tool("a1", "t1", "read_file"),
+            tool_msg("t1", &"x".repeat(200)),
+            assistant_with_tool("a2", "t2", "read_file"),
+            tool_msg("t2", &"y".repeat(200)),
+            assistant_with_tool("a3", "t3", "read_file"),
+            tool_msg("t3", &"z".repeat(200)),
+            assistant_with_tool("a4", "t4", "read_file"),
+            tool_msg("t4", "latest"),
+        ];
+        let out = micro_compact(&hist, 1).expect("should clear old results");
+        assert_eq!(out[2].content, CLEARED_PLACEHOLDER); // t1
+        assert_eq!(out[4].content, CLEARED_PLACEHOLDER); // t2
+        assert_eq!(out[6].content, CLEARED_PLACEHOLDER); // t3
+        assert_eq!(out[8].content, "latest"); // t4 kept verbatim
+        // tool_call_id correlation preserved (slot intact, only content dropped).
+        assert_eq!(out[2].tool_call_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn micro_compact_leaves_non_compactable_results_intact() {
+        // dispatch_subagent results carry conclusions, not raw dumps → never cleared.
+        let hist = vec![
+            msg(Role::System, "sys"),
+            assistant_with_tool("a1", "d1", "dispatch_subagent"),
+            tool_msg("d1", "conclusion-1"),
+            assistant_with_tool("a2", "d2", "dispatch_subagent"),
+            tool_msg("d2", "conclusion-2"),
+            assistant_with_tool("a3", "d3", "dispatch_subagent"),
+            tool_msg("d3", "conclusion-3"),
+        ];
+        // 3 dispatch results, NONE compactable → nothing to clear → None.
+        assert!(micro_compact(&hist, 1).is_none());
+    }
+
+    #[test]
+    fn micro_compact_returns_none_when_at_most_keep_recent() {
+        let hist = vec![
+            msg(Role::System, "sys"),
+            assistant_with_tool("a1", "t1", "grep"),
+            tool_msg("t1", "r1"),
+        ];
+        // 1 compactable, keep_recent=1 → floor(keep)=1, len<=keep → None.
+        assert!(micro_compact(&hist, 1).is_none());
+    }
+
+    #[test]
+    fn micro_compact_is_idempotent_on_already_cleared() {
+        // Both already cleared → changed stays false → None (no re-write).
+        let hist = vec![
+            msg(Role::System, "sys"),
+            assistant_with_tool("a1", "t1", "read_file"),
+            tool_msg("t1", CLEARED_PLACEHOLDER),
+            assistant_with_tool("a2", "t2", "read_file"),
+            tool_msg("t2", CLEARED_PLACEHOLDER),
+        ];
+        assert!(micro_compact(&hist, 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_micro_compact_short_circuits_llm_call() {
+        // History over threshold BUT micro-compact alone brings it back under →
+        // summarize_middle must NOT be called (no LLM round, no lossy summary).
+        let model = SummaryChatModel::new("summary");
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 1..=5 {
+            hist.push(assistant_with_tool(&format!("a{i}"), &format!("t{i}"), "read_file"));
+            hist.push(tool_msg(&format!("t{i}"), &"x".repeat(400)));
+        }
+        let mut fails = 0u32;
+        let compacted = maybe_compact(&mut hist, &model, &ModelOptions::default(), 300, 1, &mut fails)
+            .await
+            .unwrap();
+        assert!(compacted, "compaction should have happened");
+        assert!(
+            model.calls().is_empty(),
+            "micro-compact alone suffices — no summarize_middle LLM call"
+        );
+        assert!(hist.iter().any(|m| m.content == CLEARED_PLACEHOLDER));
     }
 
     #[test]
