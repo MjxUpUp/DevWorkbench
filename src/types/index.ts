@@ -493,12 +493,25 @@ export interface LlmTrace {
   /** The request body (build_body JSON), truncated to ~32KB on the Rust side.
    *  Safe to persist — api_key travels in a header, never the body. */
   req_body: string;
-  /** The response body on a non-2xx (the provider's error JSON — the actual
-   *  reason). null on 2xx: success bodies reconstruct from the persisted
-   *  blocks, and storing them would bloat the table. */
+  /** The raw wire response body, truncated to ~32KB on the Rust side. On a clean
+   *  2xx this is the full response (JSON for generate, the SSE stream for
+   *  stream) so the request↔response pair is one query away — symmetric with the
+   *  error path, which stores the provider's error JSON. null only when the call
+   *  never produced a body (network error / decode failure before a response). */
   resp_body: string | null;
   latency_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
   created_at: string;
+}
+
+/** Trace retention settings — mirrors the Rust `trace::db::TraceSettings` row
+ *  (verbatim snake_case, no serde rename). `retention_days` null = infinite
+ *  (the default, per the 2026-06-19 trace observability research — Phoenix's
+ *  infinite-by-default semantics); a positive N prunes traces older than N days
+ *  on startup. `last_vacuum_at` throttles VACUUM to weekly and is shown in the
+ *  settings UI. */
+export interface TraceSettings {
+  retention_days: number | null;
+  last_vacuum_at: string | null;
 }

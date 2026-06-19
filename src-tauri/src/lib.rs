@@ -119,6 +119,8 @@ pub fn run() {
                     .expect("Failed to run v12 to v13 user_hooks.matcher column migration");
                 migrate::migrate_v13_to_v14(&conn)
                     .expect("Failed to run v13 to v14 llm_traces table migration");
+                migrate::migrate_v14_to_v15(&conn)
+                    .expect("Failed to run v14 to v15 trace_settings + index migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -129,6 +131,24 @@ pub fn run() {
                     Err(e) => {
                         log::warn!("Knowledge prune failed (non-fatal): {}", e);
                     }
+                }
+                // Lazy trace retention (2026-06-19 observability research): local
+                // apps aren't long-running, so TTL runs on startup, not a cron.
+                // Prune traces past their retention window, then VACUUM (throttled
+                // weekly) to reclaim disk — SQLite doesn't reclaim after DELETE.
+                // Both best-effort: a failure here must never block app startup.
+                match trace::db::get_trace_settings(&conn) {
+                    Ok(settings) => {
+                        match trace::db::prune_old_traces(&conn, settings.retention_days) {
+                            Ok(n) if n > 0 => log::info!("Pruned {} old llm_traces", n),
+                            Ok(_) => {}
+                            Err(e) => log::warn!("llm_traces prune failed (non-fatal): {e}"),
+                        }
+                        if let Err(e) = trace::db::maybe_vacuum(&conn, &settings) {
+                            log::warn!("llm_traces vacuum failed (non-fatal): {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("trace_settings read failed (non-fatal): {e}"),
                 }
             }
 
@@ -239,6 +259,9 @@ pub fn run() {
             commands::cost_cmds::load_budget,
             commands::cost_cmds::save_budget,
             commands::trace::list_llm_traces,
+            commands::trace::get_trace_settings_cmd,
+            commands::trace::set_trace_retention_cmd,
+            commands::trace::prune_llm_traces_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

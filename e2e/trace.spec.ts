@@ -32,4 +32,12 @@ test('TraceView renders a failed turn and reveals its error response body', asyn
   await page.getByText('400').click();
   await expect(page.getByText(/invalid_request_error/)).toBeVisible();
   await expect(page.getByText(/request rejected by provider/)).toBeVisible();
+
+  // A clean 2xx now persists its full response body too — symmetric with the
+  // error path. The 2026-06-19 trace observability research found "2xx stores
+  // NULL" to be an industry outlier; the successful turn's output ("hello
+  // there") is now one click away, rendered as a normal (non-error) response.
+  await expect(page.getByText(/hello there/)).toHaveCount(0);
+  await page.getByText('200').click();
+  await expect(page.getByText(/hello there/)).toBeVisible();
 });

@@ -6,8 +6,10 @@ import type { LlmTrace } from '../../types';
 /**
  * LLM HTTP call timeline for one session (turn). Each row is one
  * GlmChatModel stream/generate call: # | model | status | latency | tokens |
- * error_kind. Click a row to expand the truncated request body and (on error)
- * the provider's real response body — the actual reason a turn failed.
+ * error_kind. Click a row to expand the truncated request body and the
+ * provider's real response body — for errors the diagnostic reason a turn
+ * failed, for a clean 2xx the full assistant output (persisted symmetric with
+ * errors per the 2026-06-19 trace observability research).
  *
  * This is the observability payoff: a 0.8s "GLM stream failed: 400" turn is
  * now diagnosable end-to-end without guessing. Reuses the agent-block card +
@@ -96,6 +98,10 @@ export function TraceView() {
             {traces.map((t, i) => {
               const badge = statusBadge(t);
               const isOpen = expanded === t.id;
+              // 2xx success rows now also persist resp_body (the full assistant
+              // output); only those render the body section as a normal (non-error)
+              // response. Anything else carrying a body is an error diagnostic.
+              const is2xx = t.status_code != null && t.status_code >= 200 && t.status_code < 300;
               return (
                 <div key={t.id} style={{ borderBottom: '1px solid var(--border, rgba(128,128,128,0.2))' }}>
                   <div
@@ -122,11 +128,15 @@ export function TraceView() {
                     <div style={{ padding: '8px 12px 12px', background: 'var(--bg-secondary, rgba(128,128,128,0.06))' }}>
                       <DetailSection title="Request body" body={t.req_body} />
                       {t.resp_body ? (
-                        <DetailSection title="Response body (error)" body={t.resp_body} isError />
+                        <DetailSection
+                          title={is2xx ? 'Response body' : 'Response body (error)'}
+                          body={t.resp_body}
+                          isError={!is2xx}
+                        />
                       ) : (
                         t.error_kind && (
                           <div style={{ marginTop: 8, color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
-                            无 response body（{t.error_kind}：调用未到达 HTTP，或 2xx 成功路径不落盘响应体）。
+                            无 response body（{t.error_kind}：调用未到达 HTTP，没有响应体可记录）。
                           </div>
                         )
                       )}

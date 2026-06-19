@@ -340,9 +340,12 @@ impl ChatModel for GlmChatModel {
         if let Some(sink) = &self.cost_sink {
             sink.record(&model, input_tokens, output_tokens, 0.0);
         }
-        // Trace: clean 2xx (no resp_body — the message's own content is the
-        // source of truth, reconstructable from the persisted blocks).
-        self.record_trace(&model, Some(status.as_u16()), None, &req_body, None, t0.elapsed().as_millis() as u64, Some(input_tokens), Some(output_tokens));
+        // Trace: clean 2xx — store the raw response body (truncated) so the full
+        // request↔response evidence is one query away. Industry norm is to record
+        // success and failure symmetrically (see 2026-06-19 trace observability
+        // research); the decoded message below is a separate concern.
+        let resp_body = serde_json::to_string(&v).unwrap_or_default();
+        self.record_trace(&model, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body, 32_000)), t0.elapsed().as_millis() as u64, Some(input_tokens), Some(output_tokens));
         decode_anthropic_message(&v)
     }
 
@@ -411,6 +414,13 @@ impl ChatModel for GlmChatModel {
                 }
             };
             let mut buf = String::new();
+            // Parallel accumulator for the raw SSE stream — unlike `buf` this is
+            // never drained, so it holds the full wire response body for the
+            // trace. Industry norm: record success responses verbatim, symmetric
+            // with the error path (see 2026-06-19 trace observability research).
+            // Capped at ~40 KB while accumulating so a long stream can't balloon
+            // memory; the tail is already past the 32 KB trace cap anyway.
+            let mut resp_body_buf = String::new();
             // Accumulate tool_use blocks by Anthropic content_block index, then
             // reassemble into a terminal tool_calls Message on message_stop. Text
             // deltas are yielded inline for real token-by-token streaming. The
@@ -434,6 +444,9 @@ impl ChatModel for GlmChatModel {
                     }
                 };
                 buf.push_str(&String::from_utf8_lossy(&bytes));
+                if resp_body_buf.len() < 40_000 {
+                    resp_body_buf.push_str(&String::from_utf8_lossy(&bytes));
+                }
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
@@ -451,9 +464,10 @@ impl ChatModel for GlmChatModel {
             if let Some(sink) = &model_clone.cost_sink {
                 sink.record(&model_name, usage_in, usage_out, 0.0);
             }
-            // Trace: clean 2xx; resp_body stays null (the streamed deltas are
-            // reconstructable from the persisted blocks, and would dwarf the row).
-            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, None, t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
+            // Trace: clean 2xx — store the raw SSE stream (truncated) for full
+            // request↔response evidence; symmetric with the error path (which
+            // stores the error body). See 2026-06-19 trace observability research.
+            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
         };
         Ok(Box::pin(s))
     }

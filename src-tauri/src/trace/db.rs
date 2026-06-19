@@ -90,6 +90,83 @@ pub fn list_traces_for_session(
     Ok(out)
 }
 
+/// Trace retention settings — the single `trace_settings` row, surfaced to the
+/// frontend. `retention_days` NULL/<=0 = infinite (the default, per the
+/// 2026-06-19 trace observability research — Phoenix's infinite-by-default
+/// semantics); a positive N prunes traces older than N days. `last_vacuum_at`
+/// throttles VACUUM to weekly and is shown in the settings UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceSettings {
+    pub retention_days: Option<i64>,
+    pub last_vacuum_at: Option<String>,
+}
+
+/// Read the single trace_settings row (always present — seeded by SCHEMA and the
+/// v15 migration). retention_days NULL = infinite.
+pub fn get_trace_settings(conn: &Connection) -> Result<TraceSettings, AppError> {
+    conn.query_row(
+        "SELECT retention_days, last_vacuum_at FROM trace_settings WHERE id = 1",
+        [],
+        |r| Ok(TraceSettings {
+            retention_days: r.get(0)?,
+            last_vacuum_at: r.get(1)?,
+        }),
+    )
+    .map_err(|e| AppError::Internal(format!("trace_settings read failed: {e}")))
+}
+
+/// Set retention_days (NULL = infinite) and stamp updated_at. Does NOT prune;
+/// the caller prunes immediately after so the new policy takes effect now.
+pub fn set_trace_retention(conn: &Connection, days: Option<i64>) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE trace_settings SET retention_days = ?1, updated_at = ?2 WHERE id = 1",
+        rusqlite::params![days, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Delete traces older than `retention_days` days. None/<=0 = infinite (no-op,
+/// returns 0). Uses a UTC cutoff so the string comparison against the UTC
+/// `created_at` (written by `DbTraceSink`) is a true time ordering — mixing
+/// timezones here would mis-delete. Backed by `idx_llm_traces_created`. Returns
+/// the row count deleted.
+pub fn prune_old_traces(
+    conn: &Connection,
+    retention_days: Option<i64>,
+) -> Result<usize, AppError> {
+    let Some(days) = retention_days.filter(|d| *d > 0) else {
+        return Ok(0);
+    };
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+    let cutoff_str = cutoff.to_rfc3339();
+    let deleted = conn.execute("DELETE FROM llm_traces WHERE created_at < ?1", [&cutoff_str])?;
+    Ok(deleted)
+}
+
+/// Run VACUUM when `last_vacuum_at` is missing or older than 7 days, then stamp
+/// it. Skips otherwise. SQLite does not reclaim disk after DELETE without
+/// VACUUM; throttling to weekly avoids the rewrite cost on every startup.
+/// Returns true iff a VACUUM ran.
+pub fn maybe_vacuum(conn: &Connection, settings: &TraceSettings) -> Result<bool, AppError> {
+    let due = match settings.last_vacuum_at.as_deref() {
+        None => true,
+        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+            Ok(prev) => chrono::Utc::now().signed_duration_since(prev) > chrono::Duration::days(7),
+            Err(_) => true, // unparseable stamp → treat as due (safe, just vacuums)
+        },
+    };
+    if !due {
+        return Ok(false);
+    }
+    conn.execute_batch("VACUUM")?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE trace_settings SET last_vacuum_at = ?1, updated_at = ?1 WHERE id = 1",
+        [&now],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +191,16 @@ mod tests {
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 created_at TEXT NOT NULL
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
+            CREATE TABLE IF NOT EXISTS trace_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                retention_days INTEGER,
+                last_vacuum_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO trace_settings (id, retention_days, last_vacuum_at, updated_at)
+            VALUES (1, NULL, '2026-06-19T00:00:00Z', '2026-06-19T00:00:00Z');",
         )
         .unwrap();
         conn
@@ -165,12 +251,102 @@ mod tests {
 
     #[test]
     fn insert_success_shape_with_nulls_succeeds() {
-        // A clean 2xx call: status present, but error_kind/resp_body NULL.
+        // The INSERT path must tolerate NULL optional fields (a network error
+        // row, for instance, has no resp_body). Independent of the 2xx policy.
         let conn = test_conn();
         let mut row = sample("ok", "s1", "2026-06-19T00:00:00Z");
         row.status_code = Some(200);
         row.error_kind = None;
         row.resp_body = None;
         insert_llm_trace(&conn, &row).unwrap();
+    }
+
+    #[test]
+    fn insert_2xx_persists_full_resp_body() {
+        // A clean 2xx now stores the FULL wire response body (truncated on the
+        // Rust side), symmetric with the error path — the 2026-06-19 trace
+        // observability research found "2xx stores NULL" to be an industry
+        // outlier. The INSERT + round-trip must carry it, not just the NULL case.
+        let conn = test_conn();
+        let mut row = sample("ok2xx", "s1", "2026-06-19T00:00:00Z");
+        row.status_code = Some(200);
+        row.error_kind = None;
+        row.resp_body = Some(r#"{"content":[{"type":"text","text":"hi"}]}"#.to_string());
+        insert_llm_trace(&conn, &row).unwrap();
+        let rows = list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status_code, Some(200));
+        assert!(rows[0].error_kind.is_none());
+        assert!(
+            rows[0].resp_body.as_deref().unwrap_or("").contains("hi"),
+            "2xx resp_body must round-trip, got: {:?}",
+            rows[0].resp_body
+        );
+    }
+
+    #[test]
+    fn prune_old_traces_deletes_past_retention_keeps_recent() {
+        let conn = test_conn();
+        let two_days_ago = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_llm_trace(&conn, &sample("old", "s1", &two_days_ago)).unwrap();
+        insert_llm_trace(&conn, &sample("fresh", "s1", &now)).unwrap();
+
+        let deleted = prune_old_traces(&conn, Some(1)).unwrap();
+        assert_eq!(deleted, 1, "the 2-day-old trace is past the 1-day retention");
+
+        let rows = list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 1, "the recent trace is kept");
+        assert_eq!(rows[0].id, "fresh");
+    }
+
+    #[test]
+    fn prune_old_traces_infinite_when_null_or_nonpositive() {
+        let conn = test_conn();
+        let ancient = (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339();
+        insert_llm_trace(&conn, &sample("ancient", "s1", &ancient)).unwrap();
+        // NULL / 0 / negative retention = infinite → nothing deleted.
+        assert_eq!(prune_old_traces(&conn, None).unwrap(), 0);
+        assert_eq!(prune_old_traces(&conn, Some(0)).unwrap(), 0);
+        assert_eq!(prune_old_traces(&conn, Some(-5)).unwrap(), 0);
+        assert_eq!(
+            list_traces_for_session(&conn, "s1").unwrap().len(),
+            1,
+            "infinite retention keeps even a year-old trace"
+        );
+    }
+
+    #[test]
+    fn trace_settings_get_set_round_trip() {
+        let conn = test_conn();
+        // test_conn seeds the default row: NULL retention = infinite.
+        let s = get_trace_settings(&conn).unwrap();
+        assert_eq!(s.retention_days, None, "default retention is infinite");
+        assert_eq!(s.last_vacuum_at.as_deref(), Some("2026-06-19T00:00:00Z"));
+
+        set_trace_retention(&conn, Some(30)).unwrap();
+        let s = get_trace_settings(&conn).unwrap();
+        assert_eq!(s.retention_days, Some(30), "retention persisted");
+
+        set_trace_retention(&conn, None).unwrap();
+        let s = get_trace_settings(&conn).unwrap();
+        assert_eq!(s.retention_days, None, "NULL resets to infinite");
+    }
+
+    #[test]
+    fn maybe_vacuum_runs_when_due_then_throttled_within_window() {
+        let conn = test_conn();
+        // Force a due state: clear last_vacuum_at (NULL = never vacuumed).
+        conn.execute("UPDATE trace_settings SET last_vacuum_at = NULL WHERE id = 1", [])
+            .unwrap();
+        let due = get_trace_settings(&conn).unwrap();
+        assert!(maybe_vacuum(&conn, &due).unwrap(), "NULL last_vacuum_at → VACUUM runs");
+
+        let after = get_trace_settings(&conn).unwrap();
+        assert!(after.last_vacuum_at.is_some(), "last_vacuum_at stamped after VACUUM");
+
+        // Immediately again → throttled (just stamped, well within 7 days).
+        let not_due = get_trace_settings(&conn).unwrap();
+        assert!(!maybe_vacuum(&conn, &not_due).unwrap(), "throttled within the 7-day window");
     }
 }

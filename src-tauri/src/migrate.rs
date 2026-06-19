@@ -543,6 +543,44 @@ pub fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v14→v15: add `trace_settings` (single-row retention config, mirrors
+/// `budget_settings`) and the `idx_llm_traces_created` index that speeds the
+/// retention prune. Like v13→v14 this is plain `CREATE TABLE IF NOT EXISTS` /
+/// `CREATE INDEX IF NOT EXISTS` (idempotent); a fresh DB already has both from
+/// the static SCHEMA, so this is a no-op there and only materializes them on a
+/// pre-v15 DB. Then bump the version.
+pub fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 15 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS trace_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            retention_days INTEGER,
+            last_vacuum_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO trace_settings (id, retention_days, last_vacuum_at, updated_at)
+        VALUES (1, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+        CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);",
+    )?;
+    log::info!("Migrated schema v14→v15: created trace_settings + idx_llm_traces_created");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (15, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,5 +1073,96 @@ mod tests {
             },
         )
         .expect("insert must work on migrated table");
+    }
+
+    /// v14→v15 creates the trace_settings table + idx_llm_traces_created. On a
+    /// fresh DB both already exist (static SCHEMA) — the migration's CREATE is a
+    /// no-op but it must still record version 15 and leave a usable default row.
+    #[test]
+    fn migrate_v14_to_v15_on_fresh_db_creates_table_and_bumps_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh15.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v14_to_v15(&conn).expect("fresh DB v15 migration must succeed");
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trace_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "trace_settings table must exist");
+
+        // The default single row is present: id=1, NULL retention = infinite.
+        let retention: Option<i64> = conn
+            .query_row(
+                "SELECT retention_days FROM trace_settings WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retention, None, "default retention_days is NULL = infinite");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 15, "version must be 15 on fresh DB");
+    }
+
+    /// Idempotent: running twice short-circuits on version>=15 (no error).
+    #[test]
+    fn migrate_v14_to_v15_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("idem15.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v14_to_v15(&conn).expect("first run must succeed");
+        migrate_v14_to_v15(&conn).expect("second run (idempotent) must succeed");
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+    }
+
+    /// A pre-v15 DB (no trace_settings table, no idx_llm_traces_created, version
+    /// pinned to 14) must get both materialized by the migration. Simulated by
+    /// dropping the table+index the static SCHEMA created and seeding version=14.
+    #[test]
+    fn migrate_v14_to_v15_creates_table_and_index_on_pre_v15_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("legacy15.db");
+        let conn = db::init_db(&path).unwrap();
+        conn.execute("DROP TABLE trace_settings", []).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_llm_traces_created", []).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (14, ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        migrate_v14_to_v15(&conn).expect("pre-v15 migration must materialize table+index");
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trace_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "trace_settings must be created on pre-v15 DB");
+
+        let index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_llm_traces_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_exists, 1, "idx_llm_traces_created must be created on pre-v15 DB");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 15, "version bumped to 15");
     }
 }

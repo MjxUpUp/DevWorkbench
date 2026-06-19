@@ -395,6 +395,24 @@ CREATE TABLE IF NOT EXISTS llm_traces (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, created_at);
+-- created_at single-column index speeds the retention prune (DELETE WHERE
+-- created_at < cutoff); without it the prune full-scans llm_traces.
+CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
+
+-- Trace retention settings (single-row table, mirrors budget_settings). NULL or
+-- 0 retention_days = infinite (the default — Phoenix's
+-- PHOENIX_DEFAULT_RETENTION_POLICY_DAYS=0 semantics, per the 2026-06-19 trace
+-- observability research); a positive N prunes traces older than N days on
+-- startup. last_vacuum_at throttles VACUUM to at most weekly (SQLite does not
+-- reclaim disk after DELETE without it).
+CREATE TABLE IF NOT EXISTS trace_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    retention_days INTEGER,
+    last_vacuum_at TEXT,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO trace_settings (id, retention_days, last_vacuum_at, updated_at)
+VALUES (1, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 ";
 
 /// Open (or create) the SQLite database at `db_path`, create all tables.

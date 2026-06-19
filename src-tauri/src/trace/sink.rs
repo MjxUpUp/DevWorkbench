@@ -37,9 +37,12 @@ pub struct LlmTrace {
     /// diagnosis without bloating the table. api_key travels in a header,
     /// never the body, so this is safe to persist.
     pub req_body: String,
-    /// The response body on a non-2xx (the error JSON — the actual reason).
-    /// None on 2xx to save space; success bodies are already reconstructed
-    /// from the stream's own persisted blocks.
+    /// The raw wire response body, truncated. On a clean 2xx this is the full
+    /// response (JSON for generate(), the SSE stream for stream()) so the
+    /// request↔response pair is one query away — symmetric with the error path,
+    /// which stores the error JSON. None only when the call never produced a
+    /// body (network error / circuit open / decode failure before any response).
+    /// See the 2026-06-19 trace observability research.
     pub resp_body: Option<String>,
     pub latency_ms: Option<u64>,
     pub input_tokens: Option<u32>,
