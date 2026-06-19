@@ -3,6 +3,7 @@ import { StatCards } from '../dashboard/StatCards';
 import { CostTrendChart } from '../dashboard/CostTrendChart';
 import { BudgetBar } from '../dashboard/BudgetBar';
 import { QualityHistory } from '../dashboard/QualityHistory';
+import { EvalPanel } from '../dashboard/EvalPanel';
 import { useDashboardStore } from '../../stores/dashboardStore';
 
 /**
@@ -35,6 +36,8 @@ export function UsageStatsSection() {
       </div>
 
       <QualityHistory />
+
+      <EvalPanel />
     </div>
   );
 }
