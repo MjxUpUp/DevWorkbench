@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import type { CostSummary, CostTrendPoint, BudgetSettings, QualityReport, DashboardStats, BudgetInfo, QualityEntry } from '../types';
+import { useAgentStore } from './agentStore';
 
 interface DashboardState {
   stats: DashboardStats;
@@ -28,6 +29,12 @@ const EMPTY_BUDGET: BudgetInfo = {
   percentage: 0,
 };
 
+/** Day-over-day percent change. 0→N is +100%, N→0 is -100%, 0→0 is 0. */
+function pctChange(prev: number, curr: number): number {
+  if (prev === 0) return curr === 0 ? 0 : 100;
+  return Math.round(((curr - prev) / prev) * 100);
+}
+
 export const useDashboardStore = create<DashboardState>((set) => ({
   stats: EMPTY_STATS,
   costTrend: [],
@@ -45,15 +52,24 @@ export const useDashboardStore = create<DashboardState>((set) => ({
         invoke<QualityReport[]>('get_quality_reports'),
       ]);
 
-      // Map CostSummary → DashboardStats
+      // Map CostSummary + cost_trend → DashboardStats. cost_trend is
+      // `ORDER BY date` ASC, so the last point is today / most-recent day.
       const totalTokens = summary.totalInputTokens + summary.totalOutputTokens;
+      const last = trend[trend.length - 1];
+      const prev = trend[trend.length - 2];
+      const todayCost = last?.cost ?? summary.totalCost;
+      const costTrendPct = last && prev ? pctChange(prev.cost, last.cost) : 0;
+      const tokenTrendPct = last && prev ? pctChange(prev.tokens, last.tokens) : 0;
+      const runningSessions = useAgentStore
+        .getState()
+        .sessions.filter((s) => s.status === 'running').length;
       const stats: DashboardStats = {
-        todayCost: summary.totalCost,
-        costTrend: 0,       // trend requires period comparison; default to 0
+        todayCost,
+        costTrend: costTrendPct,
         totalTokens,
-        tokenTrend: 0,
-        activeSessions: 0,  // derived from agentStore, not available here
-        qualityRate: 0,     // computed below
+        tokenTrend: tokenTrendPct,
+        activeSessions: runningSessions,
+        qualityRate: 0, // computed below
       };
 
       // Map QualityReport[] → QualityEntry[]
