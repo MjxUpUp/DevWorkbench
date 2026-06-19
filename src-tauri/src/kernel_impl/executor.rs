@@ -162,6 +162,7 @@ impl Executor for KernelExecutor {
 /// model: the agent still CONSTRUCTS (so the graph run doesn't crash), but GLM
 /// calls fail at request time with 401 — the honest signal that Settings →
 /// Providers needs a key.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_react_agent(
     model: Option<&str>,
     mcp: Option<&McpRegistry>,

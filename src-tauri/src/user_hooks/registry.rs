@@ -59,6 +59,7 @@ pub fn load_enabled_by_event(
 /// Create a user hook. `name` must be unique. Returns the created row (re-read so
 /// the caller gets the generated id + created_at). `matcher` is stored verbatim;
 /// None/empty become NULL (match-all). Meaningful only for tool events.
+#[allow(clippy::too_many_arguments)]
 pub fn create_hook(
     conn: &Connection,
     name: &str,
@@ -105,6 +106,7 @@ pub fn create_hook(
 }
 
 /// Update a hook's editable fields by id.
+#[allow(clippy::too_many_arguments)]
 pub fn update_hook(
     conn: &Connection,
     id: &str,

@@ -69,6 +69,7 @@ fn expand_slash_command(db: &crate::db::DbState, prompt: String) -> Result<Strin
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn spawn_agent_session(
     app: tauri::AppHandle,
@@ -142,6 +143,7 @@ pub async fn spawn_agent_session(
 /// MVP constraints (explicitly deferred, see plan §"阶段 E 后续"):
 /// empty ToolRegistry (no real tools yet), non-streaming `generate()` (Token is
 /// the whole message, not chunked), single-turn (resume_from ignored).
+#[allow(clippy::too_many_arguments)]
 fn react_chat_driver(
     app: &tauri::AppHandle,
     db_conn: crate::db::DbState,

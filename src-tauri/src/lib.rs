@@ -1,8 +1,3 @@
-// Tauri #[command] fns and internal spawn/build/CRUD helpers legitimately take
-// many params (framework convention + inherent complexity); refactoring them to
-// param structs is low-value and out of scope. Suppressed project-wide.
-#![allow(clippy::too_many_arguments)]
-
 pub mod activity;
 pub mod agents;
 pub mod commands;

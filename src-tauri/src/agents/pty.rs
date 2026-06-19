@@ -730,6 +730,7 @@ fn json_preview(value: Option<&serde_json::Value>, max: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// Spawn an agent process. Tries real PTY first, falls back to pipe I/O.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty_agent(
     app: &tauri::AppHandle,
     processes: Arc<AgentProcesses>,
@@ -927,6 +928,7 @@ pub(crate) fn resolve_or_create_conversation(
 }
 
 /// Build a `Running` Session row ready for `insert_session_db`. Does not write.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_running_session_row(
     session_id: &str,
     project_path: &str,
@@ -1006,6 +1008,7 @@ pub(crate) fn register_running_session(
 /// prepares `output_summary` + `context_snapshot`; this fn only persists the
 /// terminal state — so the ReactAgent driver can call it with the same shape the
 /// pipe wait-thread does.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_session(
     db_conn: &crate::db::DbState,
     app: &tauri::AppHandle,
@@ -1102,6 +1105,7 @@ pub(crate) fn finalize_session(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pipe_fallback(
     app: &tauri::AppHandle,
     processes: Arc<AgentProcesses>,

@@ -128,6 +128,7 @@ impl GlmChatModel {
     /// Record one LLM call to the trace sink (if attached). Centralizes
     /// `LlmTrace` construction so generate/stream stay readable; no-op when no
     /// sink is attached (tests / ad-hoc agents).
+    #[allow(clippy::too_many_arguments)]
     fn record_trace(
         &self,
         model: &str,

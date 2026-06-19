@@ -19,6 +19,7 @@ pub async fn list_user_hooks(db: State<'_, DbState>) -> Result<Vec<UserHook>, Ap
 
 /// Create a user hook. `name` must be unique. `matcher` scopes a tool-event hook
 /// to specific tools (claude-code `matcher`); None/empty = match all.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_user_hook(
     db: State<'_, DbState>,
@@ -46,6 +47,7 @@ pub async fn create_user_hook(
 }
 
 /// Update a user hook's editable fields by id.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn update_user_hook(
     db: State<'_, DbState>,
