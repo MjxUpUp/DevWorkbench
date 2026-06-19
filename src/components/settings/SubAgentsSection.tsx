@@ -251,34 +251,48 @@ export function SubAgentsSection() {
         </div>
       )}
       <div className="memory-list">
-        {agents.map((s) => (
-          <div key={`${s.scope}:${s.name}`} className="memory-card skills-card">
-            <div className="memory-card-header">
-              <span className="memory-card-title">{s.name}</span>
-              <span className="memory-card-category">{SCOPE_LABEL[s.scope] ?? s.scope}</span>
-            </div>
-            {s.description && <p className="memory-card-content">{s.description}</p>}
-            <p className="memory-card-content" style={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-              {s.systemPrompt}
-            </p>
-            {s.toolsAllow.length > 0 && (
-              <p className="settings-section-desc" style={{ fontSize: 12, margin: '4px 0' }}>
-                tools: {s.toolsAllow.join(', ')}
+        {agents.map((s) => {
+          // app-private is the legacy read-only tier (~/.dev-workbench/subagents):
+          // the kernel loads it for dispatch, but the UI must NOT offer edit/delete —
+          // save/delete only resolve scope to global/project, so acting on an
+          // app-private row would either fail ("子智能体 X 不存在") or silently shadow
+          // it with a project copy. Treat it as read-only, matching scope_dir's contract.
+          const isReadOnly = s.scope === 'app-private';
+          return (
+            <div key={`${s.scope}:${s.name}`} className="memory-card skills-card">
+              <div className="memory-card-header">
+                <span className="memory-card-title">{s.name}</span>
+                <span className="memory-card-category">{SCOPE_LABEL[s.scope] ?? s.scope}</span>
+              </div>
+              {s.description && <p className="memory-card-content">{s.description}</p>}
+              <p className="memory-card-content" style={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                {s.systemPrompt}
               </p>
-            )}
-            <p className="settings-section-desc" style={{ fontSize: 11, margin: '4px 0' }} title={s.sourcePath}>
-              {s.sourcePath}
-            </p>
-            <div className="memory-card-meta">
-              <button className="memory-card-delete" onClick={() => openEdit(s)} aria-label={`编辑子智能体 ${s.name}`}>
-                编辑
-              </button>
-              <button className="memory-card-delete" onClick={() => onDelete(s)} aria-label={`删除子智能体 ${s.name}`}>
-                删除
-              </button>
+              {s.toolsAllow.length > 0 && (
+                <p className="settings-section-desc" style={{ fontSize: 12, margin: '4px 0' }}>
+                  tools: {s.toolsAllow.join(', ')}
+                </p>
+              )}
+              <p className="settings-section-desc" style={{ fontSize: 11, margin: '4px 0' }} title={s.sourcePath}>
+                {s.sourcePath}
+              </p>
+              <div className="memory-card-meta">
+                {isReadOnly ? (
+                  <span className="settings-section-desc" style={{ fontSize: 12 }}>内置/只读（不可编辑）</span>
+                ) : (
+                  <>
+                    <button className="memory-card-delete" onClick={() => openEdit(s)} aria-label={`编辑子智能体 ${s.name}`}>
+                      编辑
+                    </button>
+                    <button className="memory-card-delete" onClick={() => onDelete(s)} aria-label={`删除子智能体 ${s.name}`}>
+                      删除
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

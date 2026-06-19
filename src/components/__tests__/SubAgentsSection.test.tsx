@@ -19,6 +19,15 @@ const PROJECT_AGENT: SubAgentInfo = {
   sourcePath: '/proj/.agents/subagents/researcher/AGENT.md',
 };
 
+const APP_PRIVATE_AGENT: SubAgentInfo = {
+  name: 'builtin-helper',
+  description: 'shipped with the app',
+  systemPrompt: 'internal',
+  toolsAllow: [],
+  scope: 'app-private',
+  sourcePath: '/home/.dev-workbench/subagents/builtin-helper/AGENT.md',
+};
+
 function renderSection() {
   return render(
     <ToastProvider>
@@ -117,6 +126,25 @@ describe('SubAgentsSection', () => {
         scope: 'project',
       });
     });
+  });
+
+  it('treats legacy app-private sub-agents as read-only (no edit/delete)', async () => {
+    // app-private (~/.dev-workbench/subagents) is a legacy read-only tier: the
+    // kernel loads it for dispatch, but save/delete only resolve global/project.
+    // Acting on an app-private row would either fail ("子智能体 X 不存在") or
+    // silently shadow it with a project copy — so the card must hide both actions
+    // and show a read-only note instead.
+    vi.mocked(invoke).mockImplementation((cmd) => {
+      if (String(cmd) === 'list_subagents') return Promise.resolve([APP_PRIVATE_AGENT]);
+      return Promise.resolve(null);
+    });
+    renderSection();
+    expect(await screen.findByText('builtin-helper')).toBeInTheDocument();
+    expect(screen.queryByLabelText('编辑子智能体 builtin-helper')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('删除子智能体 builtin-helper')).not.toBeInTheDocument();
+    // The read-only hint is specific (the section desc also contains "只读" in
+    // "继承完整只读工具集"), so match the hint's distinct prefix, not bare 只读.
+    expect(screen.getByText(/内置\/只读/)).toBeInTheDocument();
   });
 
   it('loads an existing sub-agent into the form with name disabled', async () => {
