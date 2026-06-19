@@ -1298,7 +1298,28 @@ impl ReactAgent {
         history.push(Message::user(&full_task));
         let result: Result<String, Error> = async {
             for _step in 0..self.max_steps {
-                let resp = model.generate(&history, &opts).await?;
+                let mut resp = model.generate(&history, &opts).await?;
+                // B6 tool-call-repair (generate path) — same plain-text
+                // promotion as the streaming run() path. run_loop is the entry
+                // used by sub-agents (dispatch_subagent), so weak-model
+                // plain-text tool calls must be repaired here too, not only in
+                // the streaming chat path.
+                if resp.tool_calls.is_empty() && !resp.content.is_empty() {
+                    let allowlist: Vec<String> =
+                        self.tools.infos().iter().map(|t| t.name.clone()).collect();
+                    if let Some(repaired) =
+                        crate::kernel_impl::tool_call_repair::repair_plain_text_tool_calls(
+                            &resp.content,
+                            Some(&allowlist),
+                        )
+                    {
+                        log::info!(
+                            "[ReactAgent/run_loop] repaired {} leaked plain-text tool call(s)",
+                            repaired.len()
+                        );
+                        resp.tool_calls = repaired;
+                    }
+                }
                 history.push(resp.clone());
                 if resp.tool_calls.is_empty() {
                     return Ok(resp.content);
@@ -1711,6 +1732,32 @@ impl kernel_core::Agent for ReactAgent {
                 if degraded.is_some() {
                     break;
                 }
+                // B6 tool-call-repair: weak models (GLM / DeepSeek) sometimes
+                // leak a tool call as plain text (`[name]{...}`, `<function=...>`,
+                // Harmony `commentary to=... code {...}`) instead of a structured
+                // tool_use block. When the turn produced no structured tool_calls,
+                // scan the assembled text and promote any leaked calls so the loop
+                // executes them instead of terminating on a half-finished action.
+                // The allowlist restricts promotion to advertised tool names so a
+                // prompt-injected plain-text call cannot invoke an unknown tool.
+                if turn_tool_calls.is_empty() && !turn_text.is_empty() {
+                    // `infos` is the owned ToolInfo vec cloned at the top of the
+                    // stream (this block must be 'static — it cannot borrow self).
+                    let allowlist: Vec<String> =
+                        infos.iter().map(|t| t.name.clone()).collect();
+                    if let Some(repaired) =
+                        crate::kernel_impl::tool_call_repair::repair_plain_text_tool_calls(
+                            &turn_text,
+                            Some(&allowlist),
+                        )
+                    {
+                        log::info!(
+                            "[ReactAgent] repaired {} leaked plain-text tool call(s) into structured tool_use",
+                            repaired.len()
+                        );
+                        turn_tool_calls = repaired;
+                    }
+                }
                 history.push(Message {
                     role: Role::Assistant,
                     content: turn_text.clone(),
@@ -2113,6 +2160,71 @@ mod tests {
             read_only: true,
             calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Two-phase model for the B6 repair test: turn 1 emits an assistant message
+    /// carrying `first` as plain text with NO structured tool_calls (mirroring a
+    /// weak model leaking a tool call as prose); turn 2 returns "done" to let the
+    /// loop converge after the repaired call executes.
+    #[derive(Clone)]
+    struct TwoPhaseModel {
+        first: String,
+        turns: Arc<std::sync::Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl ChatModel for TwoPhaseModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            let mut n = self.turns.lock().unwrap();
+            *n += 1;
+            let content = if *n == 1 {
+                self.first.clone()
+            } else {
+                "done".to_string()
+            };
+            Ok(Message::assistant(content))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            Err(Error::Unsupported("TwoPhaseModel: drive via generate".into()))
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_repairs_leaked_plain_text_tool_call() {
+        // B6: a weak model (GLM/DeepSeek) leaks the tool call as plain text
+        // (content = `[probe]{...}`, tool_calls empty). The run_loop generate
+        // path must repair it into a structured tool_call so `probe` is invoked
+        // — not treat the leaked prose as the final answer and terminate early.
+        let leaked = "[probe]\n{\"k\":\"v\"}\n[END_TOOL_REQUEST]";
+        let model = TwoPhaseModel {
+            first: leaked.into(),
+            turns: Arc::new(std::sync::Mutex::new(0)),
+        };
+        let probe_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let probe = ProbeTool {
+            name: "probe",
+            read_only: true,
+            calls: probe_calls.clone(),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new().with(probe), "sys");
+        let out = agent
+            .run_loop("do the thing", ModelOptions::default())
+            .await;
+        assert!(out.is_ok(), "run_loop should converge after repair: {out:?}");
+        let calls = probe_calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "probe invoked exactly once after plain-text repair: {calls:?}"
+        );
+        assert!(
+            calls[0].contains("\"k\":\"v\""),
+            "repair preserved the JSON arguments verbatim: {}",
+            calls[0]
+        );
     }
 
     #[tokio::test]

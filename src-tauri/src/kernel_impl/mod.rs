@@ -16,3 +16,4 @@ pub mod react_agent;
 pub mod skill_tool;
 pub mod subagent_spec;
 pub mod session_reflection;
+pub mod tool_call_repair;
