@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -25,6 +26,7 @@ use serde_json::{json, Value};
 
 use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
 use crate::cost::sink::CostSink;
+use crate::trace::{truncate, LlmTrace, TraceSink};
 use crate::kernel_impl::llm_recovery::{
     classify_llm_error, fatal_user_message, retry_delay, should_retry, FatalReason, LlmErrorKind,
     MAX_ATTEMPTS,
@@ -50,6 +52,16 @@ pub struct GlmChatModel {
     /// Optional cost sink — records token usage + cost per completed request.
     /// None = untracked (tests / ad-hoc agents without a session).
     cost_sink: Option<Arc<dyn CostSink>>,
+    /// Optional trace sink — records the request/response of every LLM HTTP
+    /// call to `llm_traces`. None = untraced (tests / ad-hoc agents). The
+    /// observability layer: keeps the real build_body + error body on disk so a
+    /// failed session's root cause is queryable, instead of being lost to a
+    /// bare status string.
+    trace_sink: Option<Arc<dyn TraceSink>>,
+    /// The session id this model is serving (for trace attribution). Set by
+    /// build_react_agent from the driver's session id; None for ad-hoc/test
+    /// agents. Passed to trace_sink.record_llm_call so traces join the session.
+    session_id: Option<String>,
 }
 
 impl GlmChatModel {
@@ -66,6 +78,8 @@ impl GlmChatModel {
             bound_tools: Vec::new(),
             circuit: None,
             cost_sink: None,
+            trace_sink: None,
+            session_id: None,
         }
     }
 
@@ -85,6 +99,53 @@ impl GlmChatModel {
     pub fn with_cost_sink(mut self, sink: Arc<dyn CostSink>) -> Self {
         self.cost_sink = Some(sink);
         self
+    }
+
+    /// Attach a trace sink that records every LLM HTTP call (request body,
+    /// HTTP status, error body on non-2xx, latency, tokens) to `llm_traces`.
+    pub fn with_trace_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
+        self.trace_sink = Some(sink);
+        self
+    }
+
+    /// Set the session id this model serves, so traces attribute to the right
+    /// session row. None for ad-hoc/test agents (traces still record, with a
+    /// null session_id).
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Record one LLM call to the trace sink (if attached). Centralizes
+    /// `LlmTrace` construction so generate/stream stay readable; no-op when no
+    /// sink is attached (tests / ad-hoc agents).
+    fn record_trace(
+        &self,
+        model: &str,
+        status_code: Option<u16>,
+        error_kind: Option<&str>,
+        req_body: &str,
+        resp_body: Option<&str>,
+        latency_ms: u64,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+    ) {
+        if let Some(sink) = &self.trace_sink {
+            sink.record_llm_call(
+                self.session_id.as_deref(),
+                LlmTrace {
+                    model: model.to_string(),
+                    base_url: self.base_url.clone(),
+                    status_code,
+                    error_kind: error_kind.map(str::to_string),
+                    req_body: req_body.to_string(),
+                    resp_body: resp_body.map(str::to_string),
+                    latency_ms: Some(latency_ms),
+                    input_tokens,
+                    output_tokens,
+                },
+            );
+        }
     }
 
     fn build_body(&self, model: &str, messages: &[Message], opts: &ModelOptions, stream: bool) -> Value {
@@ -214,6 +275,8 @@ impl ChatModel for GlmChatModel {
             cb.on_attempt(&self.base_url);
         }
         let body = self.build_body(&model, messages, opts, false);
+        let req_body = truncate(&body.to_string(), 32_000);
+        let t0 = Instant::now();
         let resp = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
@@ -225,6 +288,7 @@ impl ChatModel for GlmChatModel {
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
+                self.record_trace(&model, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
                 }
@@ -238,11 +302,30 @@ impl ChatModel for GlmChatModel {
                     cb.record_failure(&self.base_url);
                 }
             }
+            // Read the error body BEFORE it's dropped — this is the actual
+            // reason (quota, schema, model-not-found) that was previously lost
+            // to `format!("GLM stream failed: {status}")`.
+            let err_body = resp.text().await.unwrap_or_default();
+            log::warn!(
+                "[llm] {} {} -> {}: {}",
+                model, self.base_url, status, truncate(&err_body, 500)
+            );
+            self.record_trace(
+                &model,
+                Some(status.as_u16()),
+                Some("non_2xx"),
+                &req_body,
+                Some(&truncate(&err_body, 8_192)),
+                t0.elapsed().as_millis() as u64,
+                None,
+                None,
+            );
             return Err(Error::Model(format!("GLM stream failed: {status}")));
         }
         let v: Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
+                self.record_trace(&model, Some(status.as_u16()), Some("decode"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
                 }
@@ -252,11 +335,14 @@ impl ChatModel for GlmChatModel {
         if let Some(cb) = &self.circuit {
             cb.record_success(&self.base_url);
         }
-        // Cost: record token usage; cost is derived in the sink when 0.
+        // Cost + trace: record token usage; cost is derived in the sink when 0.
+        let (input_tokens, output_tokens) = usage_from_response(&v);
         if let Some(sink) = &self.cost_sink {
-            let (input, output) = usage_from_response(&v);
-            sink.record(&model, input, output, 0.0);
+            sink.record(&model, input_tokens, output_tokens, 0.0);
         }
+        // Trace: clean 2xx (no resp_body — the message's own content is the
+        // source of truth, reconstructable from the persisted blocks).
+        self.record_trace(&model, Some(status.as_u16()), None, &req_body, None, t0.elapsed().as_millis() as u64, Some(input_tokens), Some(output_tokens));
         decode_anthropic_message(&v)
     }
 
@@ -274,6 +360,8 @@ impl ChatModel for GlmChatModel {
                 cb.on_attempt(&model_clone.base_url);
             }
             let body = model_clone.build_body(&model_name, &messages, &opts, true);
+            let req_body = truncate(&body.to_string(), 32_000);
+            let t0 = Instant::now();
             let resp = model_clone.client
                 .post(format!("{}/v1/messages", model_clone.base_url))
                 .header("x-api-key", &model_clone.api_key)
@@ -284,19 +372,44 @@ impl ChatModel for GlmChatModel {
             let resp = match resp {
                 Ok(r) => r,
                 Err(e) => {
+                    model_clone.record_trace(&model_name, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
                     if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                     Err(Error::Network(e.to_string()))?
                 }
             };
             let status = resp.status();
-            if !status.is_success() {
-                if should_failover(Some(status.as_u16()), false) {
-                    if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
-                }
-                Err(Error::Model(format!("GLM stream failed: {status}")))?;
-            }
+            // 消费 resp:非 2xx 读 error body 再终止流;2xx 取字节流。两 arm 各自
+            // move resp(互斥),用 match 而非 if + 块外 use——try_stream! 宏的 ? 让
+            // 编译器无法证明 if 块必 return,块外 resp.bytes_stream() 会报
+            // use-after-move(resp.text() 已 move resp)。match 把 resp 的消费收敛
+            // 到一处,编译器一眼看到它被消费一次。
             use futures::StreamExt;
-            let mut byte_stream = resp.bytes_stream();
+            let mut byte_stream = match status.is_success() {
+                true => resp.bytes_stream(),
+                false => {
+                    if should_failover(Some(status.as_u16()), false) {
+                        if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
+                    }
+                    // Read the error body BEFORE it's dropped — same fix as generate().
+                    let err_body = resp.text().await.unwrap_or_default();
+                    log::warn!(
+                        "[llm] {} {} -> {}: {}",
+                        model_name, model_clone.base_url, status, truncate(&err_body, 500)
+                    );
+                    model_clone.record_trace(
+                        &model_name,
+                        Some(status.as_u16()),
+                        Some("non_2xx"),
+                        &req_body,
+                        Some(&truncate(&err_body, 8_192)),
+                        t0.elapsed().as_millis() as u64,
+                        None,
+                        None,
+                    );
+                    Err(Error::Model(format!("GLM stream failed: {status}")))?;
+                    unreachable!("non_2xx arm always returns via ? above")
+                }
+            };
             let mut buf = String::new();
             // Accumulate tool_use blocks by Anthropic content_block index, then
             // reassemble into a terminal tool_calls Message on message_stop. Text
@@ -315,6 +428,7 @@ impl ChatModel for GlmChatModel {
                 let bytes = match chunk_res {
                     Ok(b) => b,
                     Err(e) => {
+                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
                         if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                         Err(Error::Network(e.to_string()))?
                     }
@@ -337,6 +451,9 @@ impl ChatModel for GlmChatModel {
             if let Some(sink) = &model_clone.cost_sink {
                 sink.record(&model_name, usage_in, usage_out, 0.0);
             }
+            // Trace: clean 2xx; resp_body stays null (the streamed deltas are
+            // reconstructable from the persisted blocks, and would dwarf the row).
+            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, None, t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
         };
         Ok(Box::pin(s))
     }
@@ -3297,6 +3414,7 @@ mod tests {
             None,
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
+            None, // session_id: test agents — traces record with a null session_id
         )
         .expect("build_react_agent assembles from GUI provider config");
         let mut stream = agent
@@ -3369,6 +3487,7 @@ mod tests {
             None,
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
+            None, // session_id: test agents — traces record with a null session_id
         )
         .expect("build_react_agent");
         let mut stream = agent
@@ -3395,5 +3514,122 @@ mod tests {
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         std::fs::write(&out, &json).unwrap();
         eprintln!("recorded {} wire events to {}", wire.len(), out.display());
+    }
+
+    /// DIAG-ONLY (delete after root-causing): DeepSeek deepseek-v4-flash
+    /// sessions fail 100% of the time (status=Failed blocks=1 in the app log),
+    /// yet an external curl/urllib probe of the same request shape returns 200.
+    /// This bypasses the run_loop (which swallows the real error into a generic
+    /// "could not be recovered" message) and calls GlmChatModel.stream() with
+    /// the real reqwest client, so the raw Error::Model("GLM stream failed: N")
+    /// / Error::Network surfaces. The suspect: reqwest's default HTTP/2 ALPN
+    /// (vs the probe's HTTP/1.1) breaking DeepSeek's streaming response.
+    ///   cargo test --lib -- --ignored diag_deepseek --nocapture
+    #[ignore = "diagnostic; needs keyed DeepSeek GUI provider; spends tokens"]
+    #[tokio::test]
+    async fn diag_deepseek_glm_stream_raw() {
+        use kernel_core::{ChatModel, Message, ModelOptions, ThinkingConfig};
+        use futures::StreamExt;
+        let home = crate::commands::projects::dirs_home();
+        let data_dir = home.join(".dev-workbench");
+        let r = crate::config::providers::load_providers_config(&data_dir)
+            .ok()
+            .and_then(|c| crate::config::providers::resolve_provider(&c, "deepseek-v4-flash"))
+            .expect("keyed DeepSeek provider");
+        eprintln!(
+            "endpoint={} model_in_config={}",
+            r.endpoint, r.model
+        );
+        let model = GlmChatModel::new(&r.endpoint, &r.api_key, &r.model);
+        let msgs = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("为什么信息直接失败"),
+        ];
+        // Mirror executor.rs with_thinking(2048) + build_body's max_tokens floor.
+        let opts = ModelOptions {
+            model: Some(r.model.clone()),
+            thinking: Some(ThinkingConfig { budget_tokens: 2048 }),
+            max_tokens: Some(6144),
+            ..Default::default()
+        };
+        let mut s = match model.stream(&msgs, &opts) {
+            Err(e) => {
+                eprintln!("!!! stream() returned Err before first poll: {e}");
+                return;
+            }
+            Ok(s) => s,
+        };
+        let mut i = 0usize;
+        while let Some(item) = s.next().await {
+            match item {
+                Ok(m) => eprintln!(
+                    "[{i}] Ok role={:?} content({}) reasoning({}) tools({}) sig={}",
+                    m.role,
+                    m.content.len(),
+                    m.reasoning.as_deref().unwrap_or("").len(),
+                    m.tool_calls.len(),
+                    m.reasoning_signature.as_deref().unwrap_or("")
+                ),
+                Err(e) => {
+                    eprintln!("!!! [{i}] Err FROM STREAM: {e}");
+                    break;
+                }
+            }
+            i += 1;
+        }
+        eprintln!("=== deepseek stream consumed after {i} items ===");
+    }
+
+    /// DIAG-ONLY: same model via the full build_react_agent → agent.run path.
+    /// If diag_deepseek_glm_stream_raw succeeds but this fails, the regression
+    /// is in the run_loop layer (thinking replay / opts wiring), not the HTTP
+    /// layer.
+    #[ignore = "diagnostic; needs keyed DeepSeek GUI provider; spends tokens"]
+    #[tokio::test]
+    async fn diag_deepseek_agent_run() {
+        use kernel_core::{Agent, AgentInput};
+        use futures::StreamExt;
+        let working_dir = env!("CARGO_MANIFEST_DIR").to_string();
+        let agent = crate::kernel_impl::executor::build_react_agent(
+            Some("deepseek-v4-flash"),
+            None,
+            &working_dir,
+            None,
+            Vec::new(),
+            None,
+            crate::kernel_impl::hooks::PermissionMode::default(),
+            None,
+            None, // session_id: test agents — traces record with a null session_id
+        )
+        .expect("build_react_agent");
+        let mut stream = agent
+            .run(AgentInput {
+                prompt: "为什么信息直接失败".into(),
+                working_dir: Some(working_dir.clone()),
+                model: Some("deepseek-v4-flash".into()),
+                resume_from: None,
+            })
+            .expect("agent run starts");
+        let mut i = 0usize;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.unwrap();
+            match &ev {
+                kernel_core::AgentEvent::Done(o) => {
+                    eprintln!(
+                        "[{i}] Done status={:?} summary={:?}",
+                        o.status, o.output_summary
+                    );
+                }
+                kernel_core::AgentEvent::Token(t) => {
+                    eprintln!("[{i}] Token({} chars)", t.len());
+                }
+                kernel_core::AgentEvent::Reasoning(t) => {
+                    eprintln!("[{i}] Reasoning({} chars)", t.len());
+                }
+                other => eprintln!("[{i}] {other:?}"),
+            }
+            i += 1;
+        }
+        eprintln!("=== agent.run stream consumed after {i} events ===");
     }
 }

@@ -372,6 +372,29 @@ CREATE TABLE IF NOT EXISTS budget_settings (
     alert_threshold REAL DEFAULT 0.8,
     updated_at TEXT NOT NULL
 );
+
+-- LLM call traces — one row per GlmChatModel HTTP request. The observability
+-- layer: persists the request body, HTTP status, and (on error) the response
+-- body so a failed session's root cause is always queryable. Before this,
+-- a non-2xx was compressed to a bare status string and the error body
+-- was discarded. session_id is the per-turn key (driver passes it through
+-- build_react_agent); conversation_id is redundant for cross-turn aggregation.
+CREATE TABLE IF NOT EXISTS llm_traces (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    conversation_id TEXT,
+    model TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    status_code INTEGER,
+    error_kind TEXT,
+    req_body TEXT,
+    resp_body TEXT,
+    latency_ms INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, created_at);
 ";
 
 /// Open (or create) the SQLite database at `db_path`, create all tables.

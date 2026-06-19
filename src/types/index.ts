@@ -470,3 +470,35 @@ export type ChatStreamEvent =
   | { kind: 'tool_result'; content: string; is_error: boolean }
   | { kind: 'result'; is_error: boolean; secs: number }
   | { kind: 'file_changed'; path: string };
+
+// ---- LLM trace observability types ----
+
+/** One persisted LLM HTTP call (Rust `trace::db::LlmTraceRow`). Mirrors the
+ *  Rust serde schema EXACTLY — verbatim snake_case (NO camelCase), because
+ *  LlmTraceRow has no #[serde(rename_all)]. One row per GlmChatModel
+ *  stream/generate request. This is the observability layer that finally makes
+ *  a 0.8s "GLM stream failed: 400" session diagnosable: the real request body
+ *  and the provider's error response body are both persisted here. */
+export interface LlmTrace {
+  id: string;
+  session_id: string | null;
+  conversation_id: string | null;
+  model: string;
+  base_url: string;
+  /** HTTP status code. null when the call never reached HTTP (network error,
+   *  decode failure before a response). */
+  status_code: number | null;
+  /** non_2xx | network | decode | stream | circuit. null on a clean 2xx. */
+  error_kind: string | null;
+  /** The request body (build_body JSON), truncated to ~32KB on the Rust side.
+   *  Safe to persist — api_key travels in a header, never the body. */
+  req_body: string;
+  /** The response body on a non-2xx (the provider's error JSON — the actual
+   *  reason). null on 2xx: success bodies reconstruct from the persisted
+   *  blocks, and storing them would bloat the table. */
+  resp_body: string | null;
+  latency_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  created_at: string;
+}

@@ -498,6 +498,51 @@ pub fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v13→v14: add the `llm_traces` table (one row per LLM HTTP call — request
+/// body, status, error body, latency, tokens). Unlike v10→v13 which ALTER
+/// existing tables, this creates a brand-new table, so it's a plain
+/// `CREATE TABLE IF NOT EXISTS` (idempotent on its own). A fresh DB already has
+/// the table from the static SCHEMA — the CREATE is a no-op there; on a pre-v14
+/// DB it materializes the table. Then bump the version.
+pub fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 14 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_traces (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            conversation_id TEXT,
+            model TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            status_code INTEGER,
+            error_kind TEXT,
+            req_body TEXT,
+            resp_body TEXT,
+            latency_ms INTEGER,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, created_at);",
+    )?;
+    log::info!("Migrated schema v13→v14: created llm_traces table");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (14, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,5 +948,92 @@ mod tests {
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 12, "version must be 12 on fresh DB");
+    }
+
+    /// v13→v14 creates the llm_traces table. On a fresh DB the table already
+    /// exists (static SCHEMA) — the migration's CREATE is a no-op but it must
+    /// still record version 14.
+    #[test]
+    fn migrate_v13_to_v14_on_fresh_db_creates_table_and_bumps_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh14.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v13_to_v14(&conn).expect("fresh DB v14 migration must succeed");
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='llm_traces'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "llm_traces table must exist");
+
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 14, "version must be 14 on fresh DB");
+    }
+
+    /// Idempotent: running twice short-circuits on version>=14 (no error).
+    #[test]
+    fn migrate_v13_to_v14_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("idem14.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v13_to_v14(&conn).expect("first run must succeed");
+        migrate_v13_to_v14(&conn).expect("second run (idempotent) must succeed");
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+    }
+
+    /// A pre-v14 DB (no llm_traces table, version pinned to 13) must get the
+    /// table materialized by the migration. Simulated by dropping the table the
+    /// static SCHEMA created and seeding version=13.
+    #[test]
+    fn migrate_v13_to_v14_creates_table_on_pre_v14_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("legacy14.db");
+        let conn = db::init_db(&path).unwrap();
+        conn.execute("DROP TABLE llm_traces", []).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (13, ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+
+        migrate_v13_to_v14(&conn).expect("pre-v14 migration must materialize the table");
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='llm_traces'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "llm_traces must be created on pre-v14 DB");
+
+        // The insert path works end-to-end against the freshly migrated table.
+        crate::trace::db::insert_llm_trace(
+            &conn,
+            &crate::trace::db::LlmTraceRow {
+                id: "t1".into(),
+                session_id: Some("s1".into()),
+                conversation_id: None,
+                model: "glm-4.6".into(),
+                base_url: "https://x".into(),
+                status_code: Some(400),
+                error_kind: Some("non_2xx".into()),
+                req_body: "{}".into(),
+                resp_body: Some("boom".into()),
+                latency_ms: Some(12),
+                input_tokens: None,
+                output_tokens: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .expect("insert must work on migrated table");
     }
 }

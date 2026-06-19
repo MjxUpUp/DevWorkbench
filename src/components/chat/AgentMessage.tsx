@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Session, QualityReport, ChatStreamEvent } from '../../types';
 import { useAgentStore } from '../../stores/agentStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
 import { BlocksView } from './BlocksView';
@@ -29,6 +30,10 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   // 唯一键——用户报问题时复制 id 给排查方，比复述原始 prompt 精确省时得多
   // （否则只能靠 prompt 文本盲查会话）。
   const [idCopied, setIdCopied] = useState(false);
+
+  // 「🔍 Trace」: jump to the LLM trace view scoped to THIS turn. The only side
+  // effect is the navigation-store swap; TraceView fetches the rows itself.
+  const setTrace = useNavigationStore((s) => s.setTrace);
 
   const copySessionId = async () => {
     try {
@@ -180,6 +185,14 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
           onClick={copySessionId}
         >
           {idCopied ? '已复制' : '复制ID'}
+        </button>
+        <button
+          type="button"
+          className="agent-message-copy-id"
+          title="查看本 turn 的每一次 LLM HTTP 调用（请求体 / 响应体 / 状态 / 延迟）"
+          onClick={() => setTrace(session.id)}
+        >
+          🔍 Trace
         </button>
       </div>
 

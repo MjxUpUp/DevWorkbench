@@ -259,6 +259,9 @@ fn react_chat_driver(
             Some(db_drv.clone()),
             mode,
             task_ref_drv.as_deref(),
+            // Trace attribution: this turn's LLM calls land under sid_drv so a
+            // failed session's real req/resp body is one query away.
+            Some(sid_drv.as_str()),
         ) {
             Ok(a) => a,
             Err(e) => {

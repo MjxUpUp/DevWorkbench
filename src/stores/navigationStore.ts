@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
 
-export type ViewId = 'task' | 'search' | 'skills' | 'orchestrate' | 'settings';
+export type ViewId = 'task' | 'search' | 'skills' | 'orchestrate' | 'settings' | 'trace';
 
 interface NavigationState {
   /** Currently active view in the main stage */
@@ -22,6 +22,10 @@ interface NavigationState {
   sidebarWidth: number;
   /** Left column visible — zcode-style single-column toggle (replaces per-view auto-hide) */
   sidebarOpen: boolean;
+  /** The session whose LLM traces the 'trace' view shows. Set by AgentMessage's
+   *  「🔍 Trace」 button; cleared when leaving the trace view. null = no session
+   *  selected → TraceView shows its empty state. */
+  traceSessionId: string | null;
 
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
@@ -32,6 +36,9 @@ interface NavigationState {
   setAddProjectOpen: (open: boolean) => void;
   setSidebarWidth: (width: number) => void;
   toggleSidebar: () => void;
+  /** Jump to the trace view scoped to one session (a turn). The trace view then
+   *  fetches that session's LLM HTTP calls via traceStore. */
+  setTrace: (sessionId: string) => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -43,6 +50,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   addProjectOpen: false,
   sidebarWidth: 240,
   sidebarOpen: true,
+  traceSessionId: null,
 
   setActiveView: (view) => set({ activeView: view }),
   // Switching project resets the active conversation — a conversation belongs to
@@ -61,4 +69,5 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  setTrace: (sessionId) => set({ traceSessionId: sessionId, activeView: 'trace' }),
 }));

@@ -89,6 +89,9 @@ impl Executor for KernelExecutor {
                     // binding here yet. None = taskless → TaskGuard warns but
                     // never blocks (the "never brick" guarantee).
                     None,
+                    // No session_id on the subagent dispatch path; traces still
+                    // record with a null session_id (queryable by conversation).
+                    None,
                 )?)
             }
         };
@@ -168,6 +171,7 @@ pub(crate) fn build_react_agent(
     db: Option<DbState>,
     mode: crate::kernel_impl::hooks::PermissionMode,
     task_ref: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -223,6 +227,14 @@ pub(crate) fn build_react_agent(
     let hooks_db = db.clone();
     // Shared as `Arc<dyn ChatModel>` so the subagent dispatcher (v2.0 T2) can
     // hand the SAME model handle to child agents instead of re-wrapping it.
+    // Trace + cost sinks both need `db`; cost moves it, so build the trace sink
+    // from a clone first. conversation_id is cost's attribution key; session_id
+    // is trace's per-turn row key — a failing session is ONE turn, so traces
+    // must key on session_id or the failed turn's req/resp is unfindable.
+    let conversation_id_owned = conversation_id.map(|s| s.to_string());
+    let session_id_owned = session_id.map(|s| s.to_string());
+    let trace_sink =
+        crate::trace::sink::optional_shared(db.clone(), conversation_id_owned.clone());
     let chat: Arc<dyn kernel_core::ChatModel> = Arc::new(
         GlmChatModel::new(endpoint, api_key, resolved_model)
             // P0 model orchestration: a process-wide breaker so a down GLM
@@ -233,8 +245,10 @@ pub(crate) fn build_react_agent(
             .with_cost_sink(crate::cost::sink::optional_shared(
                 db,
                 "react_kernel",
-                conversation_id.map(|s| s.to_string()),
-            )),
+                conversation_id_owned,
+            ))
+            .with_session_id(session_id_owned)
+            .with_trace_sink(trace_sink),
     );
 
     // Build the tool registry: skills + MCP tools + the subagent dispatcher.

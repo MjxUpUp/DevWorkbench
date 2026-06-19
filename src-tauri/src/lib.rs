@@ -11,6 +11,7 @@ pub mod quality;
 pub mod mcp;
 pub mod skills;
 pub mod cost;
+pub mod trace;
 pub mod slash_commands;
 pub mod user_hooks;
 pub mod kernel_impl;
@@ -116,6 +117,8 @@ pub fn run() {
                     .expect("Failed to run v11 to v12 task_ref column migration");
                 migrate::migrate_v12_to_v13(&conn)
                     .expect("Failed to run v12 to v13 user_hooks.matcher column migration");
+                migrate::migrate_v13_to_v14(&conn)
+                    .expect("Failed to run v13 to v14 llm_traces table migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -235,6 +238,7 @@ pub fn run() {
             commands::cost_cmds::get_cost_trend,
             commands::cost_cmds::load_budget,
             commands::cost_cmds::save_budget,
+            commands::trace::list_llm_traces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,14 +2,15 @@ import { useNavigationStore } from '../stores/navigationStore';
 import { ChatView } from './chat/ChatView';
 import { SkillsSection } from './settings/SkillsSection';
 import { OrchestrateView } from './orchestrate/OrchestrateView';
+import { TraceView } from './trace/TraceView';
 import { GitPanel } from './git/GitPanel';
 
 /**
  * Main stage view router.
  *
- * Views: task (chat) / skills / orchestrate. (Settings renders as a full-screen
- * overlay above the grid — see App.tsx. Search is a CommandPalette modal, not a
- * routed view — see Sidebar's 搜索 item.)
+ * Views: task (chat) / skills / orchestrate / trace. (Settings renders as a
+ * full-screen overlay above the grid — see App.tsx. Search is a CommandPalette
+ * modal, not a routed view — see Sidebar's 搜索 item.)
  *
  * The task view is the only one that shows the right-side Git tool panel — the
  * stage becomes a 2-column grid (chat | git) in that mode. Other views are
@@ -31,6 +32,7 @@ export function MainStage() {
           </div>
         )}
         {activeView === 'orchestrate' && <OrchestrateView />}
+        {activeView === 'trace' && <TraceView />}
       </div>
       {isTask && <GitPanel projectPath={activeProject?.path ?? null} />}
     </main>
