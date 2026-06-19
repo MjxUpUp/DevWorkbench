@@ -1594,6 +1594,9 @@ impl kernel_core::Agent for ReactAgent {
             let mut degraded: Option<FatalReason> = None;
             // T7 self-verify: how many audit-and-feed-back cycles have run.
             let mut verify_count = 0u32;
+            // D1(b): consecutive summarizer failures this run. Feed to maybe_compact
+            // so compaction suspends (not infinite-retries) after repeated errors.
+            let mut compact_consecutive_failures = 0u32;
 
             for _step in 0..max_steps {
                 // T10 hard budget limit: halt before spending another turn if the
@@ -1623,6 +1626,7 @@ impl kernel_core::Agent for ReactAgent {
                         &opts,
                         max_tok,
                         compact_keep_recent,
+                        &mut compact_consecutive_failures,
                     )
                     .await;
                 }
