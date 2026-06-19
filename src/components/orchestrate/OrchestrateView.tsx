@@ -8,6 +8,7 @@ import {
   type NodeState,
 } from '../../stores/orchestrateStore';
 import { BlocksView } from '../chat/BlocksView';
+import { WorkflowBuilder } from './WorkflowBuilder';
 import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
 
 /** Color per node status — drives the canvas node fill. */
@@ -46,6 +47,7 @@ export function OrchestrateView() {
   const [running, setRunning] = useState(false);
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+  const [editorMode, setEditorMode] = useState<'visual' | 'yaml'>('visual');
 
   // Built-in workflow templates (D5): one-click starters that fill the YAML
   // editor so the user doesn't face a blank DAG. Empty list (backend missing or
@@ -127,7 +129,25 @@ export function OrchestrateView() {
       <div className="orchestrate-body">
         {/* YAML editor */}
         <section className="orchestrate-yaml">
-          <h3>Workflow 定义 (YAML)</h3>
+          <div className="yaml-editor-header">
+            <h3>Workflow 定义</h3>
+            <div className="yaml-mode-toggle">
+              <button
+                type="button"
+                className={`btn yaml-mode-btn ${editorMode === 'visual' ? 'btn-primary' : ''}`}
+                onClick={() => setEditorMode('visual')}
+              >
+                可视化
+              </button>
+              <button
+                type="button"
+                className={`btn yaml-mode-btn ${editorMode === 'yaml' ? 'btn-primary' : ''}`}
+                onClick={() => setEditorMode('yaml')}
+              >
+                YAML
+              </button>
+            </div>
+          </div>
           {templates.length > 0 && (
             <div className="yaml-templates">
               <span className="yaml-templates-label">从模板开始：</span>
@@ -143,12 +163,16 @@ export function OrchestrateView() {
               ))}
             </div>
           )}
-          <textarea
-            value={yaml}
-            onChange={(e) => setYaml(e.target.value)}
-            spellCheck={false}
-            className="yaml-editor"
-          />
+          {editorMode === 'visual' ? (
+            <WorkflowBuilder yaml={yaml} onYamlChange={setYaml} />
+          ) : (
+            <textarea
+              value={yaml}
+              onChange={(e) => setYaml(e.target.value)}
+              spellCheck={false}
+              className="yaml-editor"
+            />
+          )}
         </section>
 
         {/* Canvas — nodes light up by status */}
