@@ -191,6 +191,8 @@ pub fn run() {
             commands::projects::update_project_open,
             commands::projects::record_tool_open,
             commands::git::get_git_status,
+            commands::git::list_changed_files,
+            commands::git::get_file_diff,
             commands::checkpoint::get_checkpoint,
             commands::checkpoint::rollback_to_checkpoint,
             commands::agents::discover_agents_cmd,

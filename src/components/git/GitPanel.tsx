@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../Toast';
 import { IconBranch } from '../Icons';
 import { isTauri } from '../../utils/env';
-import type { GitStatus } from '../../types';
+import type { GitStatus, ChangedFile, GitFileDiff } from '../../types';
 
 /**
  * Right-side Git tool panel (rendered only inside the task view).
@@ -39,6 +39,7 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode
 
 function GitPanelInner({ projectPath }: { projectPath: string | null }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
+  const [files, setFiles] = useState<ChangedFile[]>([]);
   const [loading, setLoading] = useState(false);
   const { info, error } = useToast();
   // Guards so a stale async result can't overwrite a newer one, and so the
@@ -48,17 +49,20 @@ function GitPanelInner({ projectPath }: { projectPath: string | null }) {
   const inFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    if (!projectPath || !isTauri()) { setStatus(null); return; }
+    if (!projectPath || !isTauri()) { setStatus(null); setFiles([]); return; }
     if (inFlightRef.current) return; // don't pile up concurrent fetches
     inFlightRef.current = true;
     const myId = ++reqIdRef.current;
     setLoading(true);
     try {
-      const s = await invoke<GitStatus>('get_git_status', { projectPath });
+      const [s, f] = await Promise.all([
+        invoke<GitStatus>('get_git_status', { projectPath }),
+        invoke<ChangedFile[]>('list_changed_files', { projectPath }),
+      ]);
       // Only apply if this is still the latest request.
-      if (myId === reqIdRef.current) setStatus(s);
+      if (myId === reqIdRef.current) { setStatus(s); setFiles(f); }
     } catch {
-      if (myId === reqIdRef.current) setStatus(null);
+      if (myId === reqIdRef.current) { setStatus(null); setFiles([]); }
     } finally {
       if (myId === reqIdRef.current) setLoading(false);
       inFlightRef.current = false;
@@ -157,7 +161,91 @@ function GitPanelInner({ projectPath }: { projectPath: string | null }) {
         >
           提交 ...
         </button>
+
+        {/* A2 — per-file change list with expandable diffs. Only renders when
+            there are changes; clicking a row lazily fetches its hunks. */}
+        {files.length > 0 && (
+          <ChangedFilesList projectPath={projectPath} files={files} />
+        )}
       </div>
     </aside>
+  );
+}
+
+/** The per-file change list + lazy expandable diff (A2). Each row shows the
+ *  status badge, path, and +/− counts; expanding fetches `get_file_diff` and
+ *  renders colored hunks. Diffs are cached per path so re-collapse/re-expand
+ *  doesn't refetch, and a stale diff is dropped when the file leaves the set. */
+function ChangedFilesList({ projectPath, files }: { projectPath: string; files: ChangedFile[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // path -> diff. Re-validated against `files` so a committed/deleted file's
+  // cached diff doesn't linger and render stale hunks.
+  const [diffs, setDiffs] = useState<Record<string, GitFileDiff>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const toggle = useCallback(async (path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    // Fetch on first expand only (cache hit skips the IPC).
+    if (expanded.has(path) || diffs[path] || errors[path]) return;
+    try {
+      const d = await invoke<GitFileDiff>('get_file_diff', { projectPath, filePath: path });
+      setDiffs((prev) => ({ ...prev, [path]: d }));
+    } catch (e) {
+      setErrors((prev) => ({ ...prev, [path]: String(e) }));
+    }
+  }, [projectPath, expanded, diffs, errors]);
+
+  return (
+    <div className="git-files">
+      <div className="git-files-header">改动文件 ({files.length})</div>
+      {files.map((f) => {
+        const isOpen = expanded.has(f.path);
+        const diff = diffs[f.path];
+        const err = errors[f.path];
+        return (
+          <div key={f.path} className="git-file">
+            <button
+              type="button"
+              className={`git-file-row${isOpen ? ' open' : ''}`}
+              onClick={() => toggle(f.path)}
+              title={isOpen ? '收起' : '展开查看改动'}
+            >
+              <span className="git-file-chevron">{isOpen ? '▾' : '▸'}</span>
+              <span className={`git-file-badge git-file-badge--${f.status}`}>{f.status}</span>
+              <span className="git-file-path">{f.path}</span>
+              <span className="git-file-counts">
+                {f.added > 0 && <span className="git-count ins">+{f.added}</span>}
+                {f.removed > 0 && <span className="git-count del">-{f.removed}</span>}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="git-file-diff">
+                {err && <div className="git-diff-error">读取失败：{err}</div>}
+                {!err && !diff && <div className="git-diff-loading">读取中…</div>}
+                {diff?.isBinary && <div className="git-diff-binary">二进制文件，无法显示文本差异</div>}
+                {diff && !diff.isBinary && diff.hunks.length === 0 && (
+                  <div className="git-diff-empty">无文本差异</div>
+                )}
+                {diff && !diff.isBinary && diff.hunks.map((line, i) => (
+                  <div key={i} className={`git-diff-line git-diff-line--${line.kind}`}>
+                    <span className="git-diff-gutter old">{line.oldNo ?? ''}</span>
+                    <span className="git-diff-gutter new">{line.newNo ?? ''}</span>
+                    <span className="git-diff-sign">
+                      {line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : line.kind === 'meta' ? '@' : ' '}
+                    </span>
+                    <span className="git-diff-text">{line.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
