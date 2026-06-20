@@ -569,12 +569,23 @@ impl Hook for TaskGuardHook {
     }
 }
 
-/// Is `path` inside `dir`? Relative check via `strip_prefix` — no `canonicalize`
-/// (that requires the path to exist, but the agent often writes a NEW file
-/// whose path doesn't yet). An absolute `path` is checked directly; a relative
-/// one is joined onto `dir` first. Falls back to canonicalizing both when the
-/// lexical check fails (resolves `..` / symlinks); if canonicalize can't
-/// resolve either side, the lexical result stands.
+/// Is `path` inside `dir`? Two strategies, authoritative first:
+///
+/// 1. If the target EXISTS on disk, `canonicalize` both sides and compare the
+///    canonical forms. This resolves `.`, `..`, AND symlinks — the only way to
+///    defeat `/proj/./../../etc/passwd` escapes and symlink redirects whose
+///    target leaves the project.
+/// 2. If the target does NOT exist (the common case: the agent is writing a NEW
+///    file whose path isn't on disk yet), canonicalize can't help, so we
+///    LEXICALLY normalize both paths — collapse `.` and `..` components WITHOUT
+///    touching the filesystem — then prefix-check. This closes the old hole
+///    where a raw `strip_prefix` saw `/proj/../../etc` as "starting with /proj"
+///    and returned `true`, letting the agent write outside the project by
+///    embedding `..`. Parent-dir symlinks are NOT resolved in this branch (an
+///    accepted limitation: a symlink inside the project whose target escapes is
+///    caught once the file exists and path 1 runs on a later call).
+///
+/// An absolute `path` is checked directly; a relative one is joined onto `dir`.
 fn is_within(path: &str, dir: &std::path::Path) -> bool {
     let p = std::path::Path::new(path);
     let target = if p.is_absolute() {
@@ -582,13 +593,35 @@ fn is_within(path: &str, dir: &std::path::Path) -> bool {
     } else {
         dir.join(p)
     };
-    if target.strip_prefix(dir).is_ok() || target == *dir {
-        return true;
+    // 1. Authoritative: both sides exist → canonicalize resolves .. and symlinks.
+    if let (Ok(t), Ok(d)) = (std::fs::canonicalize(&target), std::fs::canonicalize(dir)) {
+        return t.strip_prefix(&d).is_ok() || t == d;
     }
-    match (std::fs::canonicalize(&target), std::fs::canonicalize(dir)) {
-        (Ok(t), Ok(d)) => t.strip_prefix(&d).is_ok() || t == d,
-        _ => false,
+    // 2. Fallback: target doesn't exist yet → lexical normalize, then prefix-check.
+    let norm_target = lexical_normalize(&target);
+    let norm_dir = lexical_normalize(dir);
+    norm_target.strip_prefix(&norm_dir).is_ok() || norm_target == norm_dir
+}
+
+/// Lexically normalize a path: resolve `.` (drop) and `..` (pop the last
+/// component) WITHOUT touching the filesystem, so `/proj/../../etc` collapses
+/// to `/etc`. Used by [`is_within`] when the target doesn't exist yet
+/// (canonicalize fails). A `..` that would escape above the root is a no-op
+/// (`pop` on the root stays at the root) — correct for confinement: `/../etc`
+/// normalizes to `/etc`, never above.
+fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -682,6 +715,64 @@ mod tests {
     async fn task_guard_ignores_non_write_actions() {
         let h = TaskGuardHook::new(None, None);
         assert!(h.before(&cmd("cargo build")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn task_guard_blocks_dotdot_path_escape() {
+        // Regression: `/proj/../../etc/passwd` lexically STARTS WITH `/proj`, so
+        // the OLD is_within (raw strip_prefix short-circuit) returned true → the
+        // agent could write anywhere by embedding `..`. lexical_normalize must
+        // collapse it to `/etc/passwd` → outside /proj → blocked.
+        let h = TaskGuardHook::new(
+            Some("feat/x".into()),
+            Some(std::path::PathBuf::from("/proj")),
+        );
+        let err = h.before(&write("/proj/../../etc/passwd")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block, "dotdot escape must be blocked: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn task_guard_allows_legitimate_dotdot_within_scope() {
+        // A `..` that STAYS inside the project (`/proj/sub/../file.rs` collapses
+        // to `/proj/file.rs`) must remain allowed — the fix must not over-block
+        // ordinary relative navigation within the working dir.
+        let h = TaskGuardHook::new(
+            Some("feat/x".into()),
+            Some(std::path::PathBuf::from("/proj")),
+        );
+        assert!(
+            h.before(&write("/proj/sub/../file.rs")).await.is_ok(),
+            "in-scope dotdot must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_guard_blocks_dotdot_with_dot_segments() {
+        // `/proj/./../../etc` mixes `.` and `..` — both must collapse so the
+        // escape is caught (the old code's lexical `strip_prefix` saw the `/proj`
+        // prefix and returned true before canonicalize ever ran).
+        let h = TaskGuardHook::new(
+            Some("feat/x".into()),
+            Some(std::path::PathBuf::from("/proj")),
+        );
+        let err = h.before(&write("/proj/./../../etc/shadow")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block, "mixed ./.. escape must be blocked: {err:?}");
+    }
+
+    #[test]
+    fn lexical_normalize_collapses_dot_and_dotdot() {
+        // `/proj/../../etc/passwd` must collapse BELOW /proj (escaped).
+        let escaped = lexical_normalize(std::path::Path::new("/proj/../../etc/passwd"));
+        assert!(
+            !escaped.starts_with("/proj"),
+            "escaped path {escaped:?} must not remain under /proj"
+        );
+        // `/proj/./sub/../file.rs` must collapse to inside /proj.
+        let inside = lexical_normalize(std::path::Path::new("/proj/./sub/../file.rs"));
+        assert!(
+            inside.starts_with("/proj"),
+            "in-scope path {inside:?} must remain under /proj"
+        );
     }
 
     #[tokio::test]
