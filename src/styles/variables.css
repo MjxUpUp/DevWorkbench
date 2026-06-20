@@ -37,6 +37,11 @@
   --cost-safe: #22c55e;
   --cost-warning: #f97316;
   --cost-danger: #ef4444;
+  /* B5 transparent cost per-tier colors */
+  --cost-input: #3b82f6;
+  --cost-output: #8b5cf6;
+  --cost-cache-read: #22c55e;
+  --cost-cache-write: #f97316;
 
   /* Quality Gate */
   --gate-pass: #22c55e;

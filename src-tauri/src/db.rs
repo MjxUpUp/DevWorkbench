@@ -360,6 +360,13 @@ CREATE TABLE IF NOT EXISTS cost_records (
     model TEXT NOT NULL,
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    -- B5 transparent cost: prompt-cache token tiers (Anthropic
+    -- cache_read_input_tokens / cache_creation_input_tokens). Default 0 so the
+    -- column exists for pre-v17 rows and for providers (GLM) that don't report
+    -- cache usage. Added by migrate_v16_to_v17 on existing DBs; present in
+    -- CREATE here for fresh DBs.
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
     recorded_at TEXT NOT NULL
 );

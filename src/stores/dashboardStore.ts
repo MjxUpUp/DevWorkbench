@@ -8,6 +8,10 @@ interface DashboardState {
   costTrend: CostTrendPoint[];
   budget: BudgetInfo;
   qualityHistory: QualityEntry[];
+  /** B5: raw CostSummary kept so the transparent-cost card can show the
+   *  per-tier (input/output/cache) USD + token split, which DashboardStats
+   *  collapses away. null until the first successful fetch. */
+  costSummary: CostSummary | null;
   loading: boolean;
 
   fetchDashboard: () => Promise<void>;
@@ -40,6 +44,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   costTrend: [],
   budget: EMPTY_BUDGET,
   qualityHistory: [],
+  costSummary: null,
   loading: false,
 
   fetchDashboard: async () => {
@@ -113,6 +118,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
         costTrend: trend,
         budget,
         qualityHistory,
+        costSummary: summary,
         loading: false,
       });
     } catch (e) {

@@ -2,6 +2,7 @@
 
 use rusqlite::Connection;
 
+use crate::cost::pricing::{self, CostBreakdown, TokenUsage};
 use crate::error::AppError;
 use crate::models::{BudgetSettings, CostRecord, CostSummary, CostTrendPoint};
 
@@ -9,11 +10,11 @@ use crate::models::{BudgetSettings, CostRecord, CostSummary, CostTrendPoint};
 /// side (aggregate_costs / cost_trend) and the table both already existed, but
 /// nothing was ever inserting rows, so cost tracking stayed at zero. Called from
 /// `DbCostSink::record` (fire-and-forget on a blocking thread) per completed
-/// model request.
+/// model request. B5: now persists the cache-read/write token tiers too.
 pub fn insert_cost_record(conn: &Connection, record: &CostRecord) -> Result<(), AppError> {
     conn.execute(
-        "INSERT INTO cost_records (id, session_id, agent_type, model, input_tokens, output_tokens, cost_usd, recorded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO cost_records (id, session_id, agent_type, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             record.id,
             record.session_id,
@@ -21,6 +22,8 @@ pub fn insert_cost_record(conn: &Connection, record: &CostRecord) -> Result<(), 
             record.model,
             record.input_tokens,
             record.output_tokens,
+            record.cache_read_tokens,
+            record.cache_write_tokens,
             record.cost_usd,
             record.recorded_at,
         ],
@@ -28,21 +31,85 @@ pub fn insert_cost_record(conn: &Connection, record: &CostRecord) -> Result<(), 
     Ok(())
 }
 
-/// Aggregate cost data into a summary.
+/// Aggregate cost data into a summary. B5: the summary now carries the
+/// transparent per-tier breakdown (input/output/cache token totals + their USD
+/// split). The total cost is still `SUM(cost_usd)` (what was actually charged at
+/// insert time); the per-tier split is RE-DERIVED here by grouping rows by model
+/// and multiplying each model's token sums by `pricing_for(model)`. Recomputing
+/// from tokens — rather than storing a split per row — keeps one source of truth
+/// (token counts) and means the dashboard split is always internally consistent
+/// with the pricing table even if a model id was reclassified later.
 pub fn aggregate_costs(conn: &Connection) -> Result<CostSummary, AppError> {
     let row = conn.query_row(
-        "SELECT COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COUNT(DISTINCT COALESCE(session_id, id)) FROM cost_records",
+        "SELECT
+            COALESCE(SUM(cost_usd), 0.0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_write_tokens), 0),
+            COUNT(DISTINCT COALESCE(session_id, id))
+         FROM cost_records",
         [],
         |row| {
-            Ok(CostSummary {
-                total_cost: row.get(0)?,
-                total_input_tokens: row.get(1)?,
-                total_output_tokens: row.get(2)?,
-                session_count: row.get(3)?,
-            })
+            Ok((
+                row.get::<_, f64>(0)?, // total_cost
+                row.get::<_, i64>(1)?, // total_input_tokens
+                row.get::<_, i64>(2)?, // total_output_tokens
+                row.get::<_, i64>(3)?, // total_cache_read_tokens
+                row.get::<_, i64>(4)?, // total_cache_write_tokens
+                row.get::<_, i64>(5)?, // session_count
+            ))
         },
     )?;
-    Ok(row)
+    let (total_cost, total_in, total_out, total_cache_read, total_cache_write, session_count) = row;
+
+    // Per-tier USD split: group by model so each family's tokens hit its own
+    // pricing tier, then fold the per-model CostBreakdowns into one total.
+    let mut stmt = conn.prepare(
+        "SELECT model,
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_write_tokens), 0)
+         FROM cost_records GROUP BY model",
+    )?;
+    let groups = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut split = CostBreakdown::default();
+    for group in groups {
+        let (model, input, output, cache_read, cache_write) = group?;
+        let usage = TokenUsage {
+            input: input.max(0) as u32,
+            output: output.max(0) as u32,
+            cache_read: cache_read.max(0) as u32,
+            cache_write: cache_write.max(0) as u32,
+        };
+        let b = pricing::cost_breakdown(usage, pricing::pricing_for(&model));
+        split.input_cost += b.input_cost;
+        split.output_cost += b.output_cost;
+        split.cache_read_cost += b.cache_read_cost;
+        split.cache_write_cost += b.cache_write_cost;
+    }
+
+    Ok(CostSummary {
+        total_cost,
+        total_input_tokens: total_in,
+        total_output_tokens: total_out,
+        session_count,
+        total_cache_read_tokens: total_cache_read,
+        total_cache_write_tokens: total_cache_write,
+        input_cost: split.input_cost,
+        output_cost: split.output_cost,
+        cache_read_cost: split.cache_read_cost,
+        cache_write_cost: split.cache_write_cost,
+    })
 }
 
 /// Get daily cost trend.
@@ -165,6 +232,8 @@ mod tests {
                 model TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
                 cost_usd REAL NOT NULL DEFAULT 0,
                 recorded_at TEXT NOT NULL
             );
@@ -187,9 +256,30 @@ mod tests {
             model: "glm-4.6".into(),
             input_tokens: 1000,
             output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             cost_usd: 0.0026,
             // Use "now" so the row always falls inside cost_trend's window,
             // whatever calendar day the test runs on.
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// A Sonnet row with prompt-cache tokens, so the B5 breakdown path has
+    /// something to split. Sonnet pricing: input $3, output $15, cache-read $0.30,
+    /// cache-write $3.75 per 1M. For 1M/1M/500k/500k:
+    ///   input 3.0 + output 15.0 + cache_read 0.15 + cache_write 1.875 = 20.025.
+    fn sonnet_cache_record(id: &str) -> CostRecord {
+        CostRecord {
+            id: id.into(),
+            session_id: Some("sess-sonnet".into()),
+            agent_type: "react_kernel".into(),
+            model: "claude-sonnet-4-5".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 500_000,
+            cache_write_tokens: 500_000,
+            cost_usd: 20.025,
             recorded_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -202,6 +292,8 @@ mod tests {
         let summary = aggregate_costs(&conn).unwrap();
         assert_eq!(summary.total_input_tokens, 2000);
         assert_eq!(summary.total_output_tokens, 1000);
+        assert_eq!(summary.total_cache_read_tokens, 0);
+        assert_eq!(summary.total_cache_write_tokens, 0);
         assert!(
             (summary.total_cost - 0.0052).abs() < 1e-9,
             "total_cost {}",
@@ -209,6 +301,46 @@ mod tests {
         );
         // session_count counts DISTINCT session_id — both rows share sess-1.
         assert_eq!(summary.session_count, 1);
+    }
+
+    #[test]
+    fn aggregate_breakdown_splits_input_output_and_cache_by_model() {
+        let conn = test_conn();
+        insert_cost_record(&conn, &sonnet_cache_record("c1")).unwrap();
+        let summary = aggregate_costs(&conn).unwrap();
+        // Token tiers flow through.
+        assert_eq!(summary.total_input_tokens, 1_000_000);
+        assert_eq!(summary.total_output_tokens, 1_000_000);
+        assert_eq!(summary.total_cache_read_tokens, 500_000);
+        assert_eq!(summary.total_cache_write_tokens, 500_000);
+        // USD split is derived from Sonnet pricing.
+        assert!((summary.input_cost - 3.0).abs() < 1e-9, "input: {}", summary.input_cost);
+        assert!((summary.output_cost - 15.0).abs() < 1e-9, "output: {}", summary.output_cost);
+        assert!((summary.cache_read_cost - 0.15).abs() < 1e-9, "cache_read: {}", summary.cache_read_cost);
+        assert!((summary.cache_write_cost - 1.875).abs() < 1e-9, "cache_write: {}", summary.cache_write_cost);
+    }
+
+    #[test]
+    fn aggregate_breakdown_folds_multiple_models_into_one_split() {
+        let conn = test_conn();
+        // Two GLM rows (no cache pricing → cache contributes $0) + one Sonnet row.
+        insert_cost_record(&conn, &sample_record("g1")).unwrap();
+        insert_cost_record(&conn, &sonnet_cache_record("s1")).unwrap();
+        let summary = aggregate_costs(&conn).unwrap();
+        // GLM 1000 input @ $1/M = $0.001; 500 output @ $3.2/M = $0.0016 → $0.0026.
+        // Sonnet split total = 3.0 + 15.0 + 0.15 + 1.875 = 20.025.
+        let glm_split = 0.0026;
+        let expected_input = 0.001 + 3.0;
+        let expected_output = 0.0016 + 15.0;
+        assert!((summary.input_cost - expected_input).abs() < 1e-9, "input: {}", summary.input_cost);
+        assert!((summary.output_cost - expected_output).abs() < 1e-9, "output: {}", summary.output_cost);
+        // GLM cache pricing is $0, so only Sonnet contributes.
+        assert!((summary.cache_read_cost - 0.15).abs() < 1e-9);
+        assert!((summary.cache_write_cost - 1.875).abs() < 1e-9);
+        // The split components summed ≈ total of both per-model totals.
+        let split_total =
+            summary.input_cost + summary.output_cost + summary.cache_read_cost + summary.cache_write_cost;
+        assert!((split_total - (glm_split + 20.025)).abs() < 1e-9, "split_total: {split_total}");
     }
 
     #[test]

@@ -634,6 +634,13 @@ fn record_pty_usage(
         model: model.to_string(),
         input_tokens: usage.input_tokens as i64,
         output_tokens: usage.output_tokens as i64,
+        // PTY/raw-agent usage (claude-code stream-json) records Anthropic
+        // input_tokens verbatim, which ALREADY includes prompt-cache tokens (per
+        // cline claude-code.ts:177 — never re-add). The cache tiers aren't
+        // surfaced separately by the CLI stream, so they stay 0 here; the
+        // ReactAgent path is the one that reports distinct cache tiers (B5).
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
         cost_usd: cost,
         recorded_at: chrono::Utc::now().to_rfc3339(),
     };

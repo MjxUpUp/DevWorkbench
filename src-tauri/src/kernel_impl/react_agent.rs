@@ -26,6 +26,7 @@ use kernel_core::{
 use serde_json::{json, Value};
 
 use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
+use crate::cost::pricing;
 use crate::cost::sink::CostSink;
 use crate::kernel_impl::hooks::HookManager;
 use crate::kernel_impl::llm_recovery::{
@@ -404,9 +405,9 @@ impl ChatModel for GlmChatModel {
             cb.record_success(&self.base_url);
         }
         // Cost + trace: record token usage; cost is derived in the sink when 0.
-        let (input_tokens, output_tokens) = usage_from_response(&v);
+        let usage = usage_from_response(&v);
         if let Some(sink) = &self.cost_sink {
-            sink.record(&model, input_tokens, output_tokens, 0.0);
+            sink.record(&model, usage, 0.0);
         }
         // Trace: clean 2xx — store the raw response body (truncated) so the full
         // request↔response evidence is one query away. Industry norm is to record
@@ -420,8 +421,8 @@ impl ChatModel for GlmChatModel {
             &req_body,
             Some(&truncate(&resp_body, 32_000)),
             t0.elapsed().as_millis() as u64,
-            Some(input_tokens),
-            Some(output_tokens),
+            Some(usage.input),
+            Some(usage.output),
         );
         decode_anthropic_message(&v)
     }
@@ -509,13 +510,12 @@ impl ChatModel for GlmChatModel {
             let mut sig_buf = String::new();
             // Accumulate token usage from message_start/message_delta so the
             // turn's cost is recorded when the stream completes.
-            let mut usage_in: u32 = 0;
-            let mut usage_out: u32 = 0;
+            let mut usage = pricing::TokenUsage::default();
             while let Some(chunk_res) = byte_stream.next().await {
                 let bytes = match chunk_res {
                     Ok(b) => b,
                     Err(e) => {
-                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
+                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output));
                         if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                         Err(Error::Network(e.to_string()))?
                     }
@@ -527,9 +527,8 @@ impl ChatModel for GlmChatModel {
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
-                    if let Some((i, o)) = parse_usage(&line) {
-                        usage_in = usage_in.saturating_add(i);
-                        usage_out = usage_out.saturating_add(o);
+                    if let Some(delta) = parse_usage(&line) {
+                        usage = usage.saturating_add(delta);
                     }
                     if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
                         yield msg;
@@ -539,12 +538,12 @@ impl ChatModel for GlmChatModel {
             // Stream consumed cleanly → upstream healthy + record the turn's cost.
             if let Some(cb) = &model_clone.circuit { cb.record_success(&model_clone.base_url); }
             if let Some(sink) = &model_clone.cost_sink {
-                sink.record(&model_name, usage_in, usage_out, 0.0);
+                sink.record(&model_name, usage, 0.0);
             }
             // Trace: clean 2xx — store the raw SSE stream (truncated) for full
             // request↔response evidence; symmetric with the error path (which
             // stores the error body). See 2026-06-19 trace observability research.
-            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage_in), Some(usage_out));
+            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output));
         };
         Ok(Box::pin(s))
     }
@@ -574,54 +573,73 @@ pub fn shared_glm_circuit() -> Arc<CircuitBreaker> {
 }
 
 /// Extract token usage from an Anthropic SSE line. `message_start` carries
-/// `usage.input_tokens`; `message_delta` carries the cumulative
-/// `usage.output_tokens` AND — on GLM — the real `usage.input_tokens`.
-/// Standard Anthropic reports authoritative input on message_start; GLM puts
-/// a 0 placeholder there and reports input on message_delta. Reading BOTH
-/// fields on message_delta + the caller's `saturating_add` yields the correct
-/// input for either provider (standard = start_input + 0, GLM = 0 +
-/// delta_input) without double-counting. Non-usage / non-`data:` lines → None.
-/// Used to meter cost on the streaming path.
-fn parse_usage(line: &str) -> Option<(u32, u32)> {
+/// `usage.input_tokens` (+ the prompt-cache tiers on real Anthropic);
+/// `message_delta` carries the cumulative `usage.output_tokens` AND — on GLM —
+/// the real `usage.input_tokens`. Standard Anthropic reports authoritative
+/// input on message_start; GLM puts a 0 placeholder there and reports input on
+/// message_delta. Reading BOTH fields on message_delta + the caller's
+/// `saturating_add` yields the correct input for either provider (standard =
+/// start_input + 0, GLM = 0 + delta_input) without double-counting.
+///
+/// B5: also reads `cache_read_input_tokens` / `cache_creation_input_tokens`
+/// from message_start (these only appear there). GLM doesn't emit them → 0.
+/// Non-usage / non-`data:` lines → None. Used to meter cost on the streaming
+/// path.
+fn parse_usage(line: &str) -> Option<pricing::TokenUsage> {
     let data = line.trim().strip_prefix("data: ")?;
     let ev: Value = serde_json::from_str(data).ok()?;
     match ev.get("type").and_then(|t| t.as_str())? {
         "message_start" => {
-            let input = ev
-                .get("message")
-                .and_then(|m| m.get("usage"))
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            Some((input, 0))
+            let usage = ev.get("message").and_then(|m| m.get("usage"));
+            let input = read_u32(usage, "input_tokens");
+            // Cache tiers are reported once, on message_start (Anthropic).
+            let cache_read = read_u32(usage, "cache_read_input_tokens");
+            let cache_write = read_u32(usage, "cache_creation_input_tokens");
+            Some(pricing::TokenUsage {
+                input,
+                output: 0,
+                cache_read,
+                cache_write,
+            })
         }
         "message_delta" => {
             let usage = ev.get("usage");
-            let input = usage
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let output = usage
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            Some((input, output))
+            let input = read_u32(usage, "input_tokens");
+            let output = read_u32(usage, "output_tokens");
+            Some(pricing::TokenUsage {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+            })
         }
         _ => None,
     }
 }
 
+/// Read an optional u64→u32 usage field from a JSON object (which may be null
+/// or absent). Centralized so the two branches above stay readable.
+fn read_u32(obj: Option<&Value>, key: &str) -> u32 {
+    obj.and_then(|u| u.get(key))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
+}
+
 /// Extract usage from a non-streaming Anthropic response
-/// (`usage.input_tokens` / `usage.output_tokens`). Returns (0, 0) if absent —
-/// the sink still records the call with a derived/zero cost.
-fn usage_from_response(v: &Value) -> (u32, u32) {
+/// (`usage.input_tokens` / `usage.output_tokens` + cache tiers). Returns an
+/// all-zero TokenUsage if no usage object is present — the sink still records
+/// the call with a derived/zero cost.
+fn usage_from_response(v: &Value) -> pricing::TokenUsage {
     let u = match v.get("usage") {
         Some(u) => u,
-        None => return (0, 0),
+        None => return pricing::TokenUsage::default(),
     };
-    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    (input, output)
+    pricing::TokenUsage {
+        input: read_u32(Some(u), "input_tokens"),
+        output: read_u32(Some(u), "output_tokens"),
+        cache_read: read_u32(Some(u), "cache_read_input_tokens"),
+        cache_write: read_u32(Some(u), "cache_creation_input_tokens"),
+    }
 }
 
 fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
@@ -4124,17 +4142,26 @@ mod tests {
     #[test]
     fn parse_usage_extracts_message_start_input_and_delta_output() {
         let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}"#;
-        assert_eq!(parse_usage(start), Some((42, 0)));
+        assert_eq!(
+            parse_usage(start),
+            Some(pricing::TokenUsage { input: 42, output: 0, cache_read: 0, cache_write: 0 })
+        );
         // Standard Anthropic: message_delta carries only output_tokens.
         let delta = r#"data: {"type":"message_delta","usage":{"output_tokens":128}}"#;
-        assert_eq!(parse_usage(delta), Some((0, 128)));
+        assert_eq!(
+            parse_usage(delta),
+            Some(pricing::TokenUsage { input: 0, output: 128, cache_read: 0, cache_write: 0 })
+        );
         // GLM: message_delta ALSO carries the real input_tokens (message_start's
         // is a 0 placeholder). parse_usage reads both → the caller's
         // saturating_add recovers the real input. Without this the streaming
         // path undercounted input tokens to 0.
         let glm_delta =
             r#"data: {"type":"message_delta","usage":{"input_tokens":16,"output_tokens":10}}"#;
-        assert_eq!(parse_usage(glm_delta), Some((16, 10)));
+        assert_eq!(
+            parse_usage(glm_delta),
+            Some(pricing::TokenUsage { input: 16, output: 10, cache_read: 0, cache_write: 0 })
+        );
         // Non-usage event types → None.
         assert_eq!(parse_usage(r#"data: {"type":"content_block_delta"}"#), None);
         // Non-data lines → None.
@@ -4143,12 +4170,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_usage_reads_prompt_cache_tiers_from_message_start() {
+        // B5: real Anthropic reports cache_read_input_tokens +
+        // cache_creation_input_tokens on message_start. parse_usage must surface
+        // them so the transparent cost breakdown can price the cache tiers.
+        let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":5000,"cache_creation_input_tokens":2000}}}"#;
+        let usage = parse_usage(start).expect("message_start yields usage");
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.cache_read, 5000);
+        assert_eq!(usage.cache_write, 2000);
+        // message_delta never carries cache tiers → both stay 0.
+        let delta = r#"data: {"type":"message_delta","usage":{"output_tokens":1}}"#;
+        let d = parse_usage(delta).expect("message_delta yields usage");
+        assert_eq!(d.cache_read, 0);
+        assert_eq!(d.cache_write, 0);
+    }
+
+    #[test]
     fn usage_from_response_reads_usage_object() {
         let v = json!({"usage":{"input_tokens":10,"output_tokens":20}});
-        assert_eq!(usage_from_response(&v), (10, 20));
-        // Missing usage → (0, 0), not an error.
+        assert_eq!(
+            usage_from_response(&v),
+            pricing::TokenUsage { input: 10, output: 20, cache_read: 0, cache_write: 0 }
+        );
+        // Missing usage → all-zero TokenUsage, not an error.
         let v2 = json!({"content":[]});
-        assert_eq!(usage_from_response(&v2), (0, 0));
+        assert_eq!(usage_from_response(&v2), pricing::TokenUsage::default());
+    }
+
+    #[test]
+    fn usage_from_response_reads_cache_tiers() {
+        // B5: the non-streaming path must also surface the cache tiers.
+        let v = json!({"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}});
+        let usage = usage_from_response(&v);
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.output, 20);
+        assert_eq!(usage.cache_read, 7);
+        assert_eq!(usage.cache_write, 3);
     }
 
     #[test]
@@ -4359,25 +4417,23 @@ mod tests {
 
     /// Replay an SSE byte stream through the same per-line loop `stream()` runs
     /// (split on '\n', trim, `parse_usage` + `handle_sse_line`). Returns the
-    /// yielded Messages and accumulated (input, output) usage. No HTTP — the
-    /// unit-test harness for the streaming parse path.
-    fn replay_sse(sse: &str) -> (Vec<Message>, u32, u32) {
+    /// yielded Messages and accumulated usage. No HTTP — the unit-test harness
+    /// for the streaming parse path.
+    fn replay_sse(sse: &str) -> (Vec<Message>, pricing::TokenUsage) {
         let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
         let mut sig_buf = String::new();
         let mut msgs = Vec::new();
-        let mut usage_in = 0u32;
-        let mut usage_out = 0u32;
+        let mut usage = pricing::TokenUsage::default();
         for raw in sse.split('\n') {
             let line = raw.trim();
-            if let Some((i, o)) = parse_usage(line) {
-                usage_in = usage_in.saturating_add(i);
-                usage_out = usage_out.saturating_add(o);
+            if let Some(delta) = parse_usage(line) {
+                usage = usage.saturating_add(delta);
             }
             if let Some(msg) = handle_sse_line(line, &mut tool_bufs, &mut sig_buf) {
                 msgs.push(msg);
             }
         }
-        (msgs, usage_in, usage_out)
+        (msgs, usage)
     }
 
     #[test]
@@ -4397,10 +4453,15 @@ mod tests {
     #[test]
     fn usage_from_response_reads_real_glm_usage() {
         // GLM usage object has standard input/output_tokens plus extras;
-        // usage_from_response reads only input/output.
+        // usage_from_response reads input/output (and cache tiers if present,
+        // which GLM doesn't emit → 0).
         let raw = include_str!("../../tests/fixtures/glm/nonstream_text.json");
         let v: Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(usage_from_response(&v), (15, 3));
+        let usage = usage_from_response(&v);
+        assert_eq!(usage.input, 15);
+        assert_eq!(usage.output, 3);
+        assert_eq!(usage.cache_read, 0, "GLM emits no cache_read_input_tokens");
+        assert_eq!(usage.cache_write, 0);
     }
 
     #[test]
@@ -4409,14 +4470,14 @@ mod tests {
         // the per-token fragmentation GLM uses. Deltas must concatenate to
         // "1\n2\n3\n4\n5". (GLM fragmentation is the historically flaky path.)
         let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
-        let (msgs, _in, output) = replay_sse(sse);
+        let (msgs, usage) = replay_sse(sse);
         let text: String = msgs
             .iter()
             .filter(|m| !m.content.is_empty())
             .map(|m| m.content.clone())
             .collect();
         assert_eq!(text, "1\n2\n3\n4\n5");
-        assert_eq!(output, 10, "output_tokens from message_delta");
+        assert_eq!(usage.output, 10, "output_tokens from message_delta");
         assert!(msgs.iter().all(|m| m.tool_calls.is_empty()));
     }
 
@@ -4429,9 +4490,9 @@ mod tests {
         // 0-undercount bug before parse_usage's message_delta branch learned to
         // read input_tokens.
         let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
-        let (_msgs, input, output) = replay_sse(sse);
-        assert_eq!(input, 16, "input_tokens accumulated from message_delta");
-        assert_eq!(output, 10);
+        let (_msgs, usage) = replay_sse(sse);
+        assert_eq!(usage.input, 16, "input_tokens accumulated from message_delta");
+        assert_eq!(usage.output, 10);
     }
 
     #[test]
@@ -4440,7 +4501,7 @@ mod tests {
         // GLM sent the whole partial_json in one input_json_delta; message_stop
         // reassembles it into a terminal tool_calls Message (id/name/args).
         let sse = include_str!("../../tests/fixtures/glm/stream_tool_use.sse");
-        let (msgs, _in, _out) = replay_sse(sse);
+        let (msgs, _usage) = replay_sse(sse);
         let terminal = msgs
             .last()
             .expect("message_stop yields terminal tool_calls");
@@ -4469,7 +4530,7 @@ mod tests {
         // ("{\"ci" / "ty\":\"Be" / "ijing\"}"). GLM fragments long tool args in
         // practice, so the slot.2.push_str accumulation is a must-test path.
         let sse = include_str!("../../tests/fixtures/glm/stream_tool_use_fragmented.sse");
-        let (msgs, _in, _out) = replay_sse(sse);
+        let (msgs, _usage) = replay_sse(sse);
         let terminal = msgs.last().expect("terminal tool_calls");
         assert_eq!(terminal.tool_calls.len(), 1);
         let tc = &terminal.tool_calls[0];
@@ -4482,17 +4543,17 @@ mod tests {
 
     /// Cost sink that captures the last usage GlmChatModel reported, so the live
     /// smoke test can assert input_tokens > 0 after the parse_usage fix.
-    struct CapturingSink(std::sync::Mutex<(u32, u32)>);
+    struct CapturingSink(std::sync::Mutex<crate::cost::pricing::TokenUsage>);
 
     impl CapturingSink {
         fn new() -> Self {
-            Self(std::sync::Mutex::new((0, 0)))
+            Self(std::sync::Mutex::new(crate::cost::pricing::TokenUsage::default()))
         }
     }
 
     impl crate::cost::sink::CostSink for CapturingSink {
-        fn record(&self, _: &str, input: u32, output: u32, _: f64) {
-            *self.0.lock().unwrap() = (input, output);
+        fn record(&self, _: &str, usage: crate::cost::pricing::TokenUsage, _: f64) {
+            *self.0.lock().unwrap() = usage;
         }
     }
 
@@ -4531,11 +4592,12 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         let text: String = collected.iter().map(|m| m.content.clone()).collect();
-        let (input, _output) = *sink.0.lock().unwrap();
+        let usage = *sink.0.lock().unwrap();
         assert!(!text.is_empty(), "live GLM returned text: {text:?}");
         assert!(
-            input > 0,
-            "input_tokens metered from message_delta after fix, got {input}"
+            usage.input > 0,
+            "input_tokens metered from message_delta after fix, got {}",
+            usage.input
         );
     }
 
@@ -4586,19 +4648,21 @@ mod tests {
                 _ => {}
             }
         }
-        let (input, output) = *sink.0.lock().unwrap();
+        let usage = *sink.0.lock().unwrap();
         assert!(done, "agent never reached Done; text so far: {text:?}");
         assert!(
             !text.is_empty(),
             "agent produced no assistant text: {text:?}"
         );
         assert!(
-            input > 0,
-            "cost sink saw input_tokens>0 from the full live loop, got {input}"
+            usage.input > 0,
+            "cost sink saw input_tokens>0 from the full live loop, got {}",
+            usage.input
         );
         assert!(
-            output > 0,
-            "cost sink saw output_tokens>0 from the full live loop, got {output}"
+            usage.output > 0,
+            "cost sink saw output_tokens>0 from the full live loop, got {}",
+            usage.output
         );
     }
 
