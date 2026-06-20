@@ -81,15 +81,28 @@ impl McpRegistry {
 
     /// List all tools from all connected servers.
     pub fn get_tools(&self) -> Result<Vec<(String, serde_json::Value)>, AppError> {
-        let clients = self
-            .clients
-            .lock()
-            .map_err(|e| AppError::Mcp(format!("Lock error: {}", e)))?;
+        // Snapshot the clients under the registry lock, then release the lock
+        // BEFORE calling list_tools — mirroring call_tool. Holding the registry
+        // lock across list_tools (potentially blocking stdio I/O to each MCP
+        // server) would block every other registry operation (connect /
+        // disconnect / get_client / call_tool, which all need the registry lock
+        // even briefly to look up a server) for the whole list while one slow
+        // server stalls. The clone is cheap (Arc bump); the release is the fix.
+        let clients: Vec<(String, SharedMcpClient)> = {
+            let guard = self
+                .clients
+                .lock()
+                .map_err(|e| AppError::Mcp(format!("Lock error: {}", e)))?;
+            guard
+                .iter()
+                .map(|(name, shared)| (name.clone(), Arc::clone(shared)))
+                .collect()
+        };
         let mut results = Vec::new();
-        for (name, shared) in clients.iter() {
+        for (name, shared) in clients {
             match shared.lock() {
                 Ok(mut client) => match client.list_tools() {
-                    Ok(tools) => results.push((name.clone(), tools)),
+                    Ok(tools) => results.push((name, tools)),
                     Err(e) => log::warn!("MCP server '{}' list_tools failed: {}", name, e),
                 },
                 Err(e) => log::warn!("MCP server '{}' lock failed: {}", name, e),
@@ -193,5 +206,19 @@ mod tests {
         let n = reg.connect_from_config(&config).unwrap();
         assert_eq!(n, 0, "failing server skipped, not counted");
         assert!(reg.server_names().is_empty(), "failed connect left nothing registered");
+    }
+
+    #[test]
+    fn get_tools_on_empty_registry_releases_lock_and_returns_empty() {
+        // Smoke test for the lock-release refactor: get_tools snapshots the
+        // clients under the registry lock, drops it, then iterates. On an empty
+        // registry this exercises the snapshot-collect path and must return an
+        // empty list, and the registry lock must be releasable again right
+        // after (i.e. not held across the — here empty — list_tools loop).
+        let reg = McpRegistry::new();
+        let tools = reg.get_tools().expect("empty registry lists no tools");
+        assert!(tools.is_empty());
+        // Lock is free immediately after: a follow-up registry op does not block.
+        assert!(reg.clients.lock().is_ok(), "registry lock must not be leaked by get_tools");
     }
 }

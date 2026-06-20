@@ -416,14 +416,27 @@ fn extract_array(input: &Value, path: &str) -> Vec<Value> {
 /// Drive a sub-graph (a Loop body) to completion, returning its `GraphDone`
 /// output. A `GraphFailed` / `GraphInterrupted` from the body propagates as
 /// `Err`. Only the Loop node uses this; the top-level run streams events via
-/// `build_run_stream` instead. A Loop body containing a Human node will hang
-/// here (no approval channel) — that is a documented limitation.
+/// `build_run_stream` instead. A Loop body containing a Human node is rejected
+/// up front — this helper uses `run_graph()`, which has no approval channel
+/// (the sender belongs to the top-level run only), so a Human in the body
+/// would otherwise fail downstream with the misleading "approval channel
+/// closed". Threading the outer approval channel into the loop body would
+/// require resume-token namespacing per iteration; left as a future feature.
 async fn run_graph_to_completion(
     compiled: CompiledGraph,
     input: Value,
     working_dir: Option<String>,
     executor: Arc<dyn Executor>,
 ) -> Result<Value, String> {
+    // Reject a Human node in the loop body up front, with a clear message —
+    // before driving the body at all (see the doc comment above for why).
+    if compiled.graph.nodes.values().any(|n| matches!(n, Node::Human(_))) {
+        return Err(
+            "a Loop body cannot contain a Human node — human approval is not \
+             supported inside loops"
+                .into(),
+        );
+    }
     use futures::StreamExt;
     let mut s = run_graph(compiled, input, working_dir, executor);
     while let Some(ev) = s.next().await {
@@ -575,6 +588,29 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e,
             GraphEvent::NodeEnd { node, status: NodeStatus::Done, .. } if node == "go_path")),
             "go_path should be done");
+    }
+
+    #[tokio::test]
+    async fn loop_body_with_human_node_is_rejected_up_front() {
+        // A Loop body runs via run_graph_to_completion, which has no approval
+        // channel. A Human node in the body must be rejected up front with a
+        // clear message — NOT fail downstream with the misleading
+        // "approval channel closed" (the old behavior the doc comment wrongly
+        // described as a "hang").
+        use crate::graph::{GraphBuilder, HumanNode, MergeNode, Node};
+        let g = GraphBuilder::new()
+            .node("h", Node::Human(HumanNode { prompt: "ok?".into() }))
+            .node("e", Node::Merge(MergeNode::default()))
+            .edge("h", "e")
+            .start("h").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let err = run_graph_to_completion(compiled, json!("in"), None, Arc::new(MockExec))
+            .await
+            .expect_err("Human-in-loop body must be rejected");
+        assert!(
+            err.contains("Human") && err.contains("Loop"),
+            "error should name the limitation clearly, got: {err}"
+        );
     }
 
     #[tokio::test]

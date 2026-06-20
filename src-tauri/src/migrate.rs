@@ -45,10 +45,36 @@ pub fn migrate_v6_to_v7(conn: &Connection, data_dir: &Path) -> Result<(), AppErr
     if sessions_file.exists() {
         let content = fs::read_to_string(&sessions_file)?;
         if !content.trim().is_empty() {
-            let sessions: Vec<Session> = serde_json::from_str(&content)?;
-            for s in &sessions {
-                insert_session(&tx, s)?;
-                imported += 1;
+            match serde_json::from_str::<Vec<Session>>(&content) {
+                Ok(sessions) => {
+                    for s in &sessions {
+                        insert_session(&tx, s)?;
+                        imported += 1;
+                    }
+                }
+                Err(e) => {
+                    // A corrupt/truncated sessions.json would otherwise propagate
+                    // up through lib.rs's `.expect("Failed to run data migration")`
+                    // and crash the app on EVERY startup — bricking the install
+                    // until the file is hand-edited. Quarantine the file aside
+                    // (.corrupt) and proceed with zero imported sessions so the
+                    // app can still start; the v0.6 history in that one file is
+                    // lost, but the app remains usable.
+                    let mut corrupt_path = sessions_file.clone();
+                    let mut name = corrupt_path
+                        .file_name()
+                        .map(|n| n.to_os_string())
+                        .unwrap_or_default();
+                    name.push(".corrupt");
+                    corrupt_path.set_file_name(name);
+                    log::error!(
+                        "v0.6 sessions.json is corrupt ({}); moving it to {} and \
+                         skipping import so startup can proceed",
+                        e,
+                        corrupt_path.display()
+                    );
+                    let _ = fs::rename(&sessions_file, &corrupt_path);
+                }
             }
         }
     }
@@ -772,6 +798,32 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn corrupt_v6_sessions_json_is_quarantined_not_fatal() {
+        // A corrupt/truncated sessions.json must NOT bubble up from
+        // migrate_v6_to_v7 — lib.rs calls it via .expect, so an error bricks
+        // the app on every startup. The file is moved aside and the migration
+        // completes with zero imports so the app can still start.
+        let g = TempDb::new();
+        let data_dir = g._tmp.path();
+        let agents_dir = data_dir.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let sessions = agents_dir.join("sessions.json");
+        std::fs::write(&sessions, "{ this is not valid json").unwrap();
+
+        // Must NOT return Err (which .expect would turn into a startup panic).
+        migrate_v6_to_v7(&g.conn, data_dir).unwrap();
+
+        // Corrupt file quarantined, not left in place to crash the next launch.
+        assert!(!sessions.exists(), "corrupt sessions.json must be moved aside");
+        assert!(
+            agents_dir.join("sessions.json.corrupt").exists(),
+            "corrupt file should be quarantined as .corrupt"
+        );
+        // Migration still marked done so it doesn't re-run / re-fail next start.
+        assert!(db::is_v6_migrated(&g.conn));
     }
 
     #[test]
