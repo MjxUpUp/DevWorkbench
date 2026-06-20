@@ -171,11 +171,30 @@ impl CircuitBreaker {
         }
     }
 
+    /// Record a probe outcome that is neither a success nor an upstream
+    /// failure — a non-failover 4xx (caller error: bad request shape, a 401 on
+    /// one call, etc.). The probe slot it occupied in HalfOpen must be released
+    /// (`on_attempt` incremented `half_open_inflight`), but the outcome carries
+    /// no signal about upstream health, so the state is left in HalfOpen rather
+    /// than collapsing to Closed (a 400 doesn't prove recovery) or tripping to
+    /// Open (a 400 isn't an upstream failure). Without this, a single 400 during
+    /// the HalfOpen probe leaks the slot and — under the default
+    /// `half_open_max = 1` — wedges the circuit in HalfOpen permanently (no probe
+    /// re-admitted, no path back to Open).
+    pub fn record_probe_inconclusive(&self, host: &str) {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = hosts.get_mut(host) {
+            if c.state == CircuitState::HalfOpen {
+                c.half_open_inflight = c.half_open_inflight.saturating_sub(1);
+            }
+        }
+    }
+
     /// Current state for `host` (Closed if never seen).
     pub fn state(&self, host: &str) -> CircuitState {
         self.hosts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(host)
             .map(|c| c.state)
             .unwrap_or(CircuitState::Closed)
@@ -270,6 +289,32 @@ mod tests {
         cb.on_attempt("h");
         cb.record_success("h");
         assert_eq!(cb.state("h"), CircuitState::Closed);
+    }
+
+    #[test]
+    fn non_failover_4xx_in_half_open_releases_probe_slot() {
+        // Regression: a non-failover 4xx (e.g. 400) during a HalfOpen probe used
+        // to leak the probe slot — on_attempt incremented half_open_inflight but
+        // neither record_success nor record_failure ran, so under half_open_max=1
+        // the circuit wedged in HalfOpen forever (no probe re-admitted, no path
+        // back to Open). record_probe_inconclusive releases the slot.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            cooldown: Duration::from_millis(10),
+            half_open_max: 1,
+        });
+        cb.record_failure("h");
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(cb.allow_request("h")); // Open → HalfOpen, probe admitted
+        cb.on_attempt("h"); // half_open_inflight = 1
+        assert_eq!(cb.state("h"), CircuitState::HalfOpen);
+        assert!(!cb.allow_request("h"), "slot occupied: second probe blocked");
+        // 400 is a caller error, not an upstream failure:
+        assert!(!should_failover(Some(400), false));
+        cb.record_probe_inconclusive("h");
+        // Slot freed, still HalfOpen → a follow-up probe is admitted (not wedged).
+        assert!(cb.allow_request("h"), "probe slot must be released, not leaked");
+        assert_eq!(cb.state("h"), CircuitState::HalfOpen);
     }
 
     #[test]

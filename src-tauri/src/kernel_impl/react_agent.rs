@@ -402,6 +402,13 @@ impl ChatModel for GlmChatModel {
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
                 }
+            } else if let Some(cb) = &self.circuit {
+                // Non-failover 4xx (caller error) is neither success nor an
+                // upstream failure: release the HalfOpen probe slot on_attempt
+                // took. Without this, under half_open_max=1 a single 400 during
+                // the probe wedges the circuit in HalfOpen (record_success is
+                // skipped by the early return below, so half_open_inflight leaks).
+                cb.record_probe_inconclusive(&self.base_url);
             }
             // Read the error body BEFORE it's dropped — this is the actual
             // reason (quota, schema, model-not-found) that was previously lost
@@ -524,6 +531,11 @@ impl ChatModel for GlmChatModel {
                 false => {
                     if should_failover(Some(status.as_u16()), false) {
                         if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
+                    } else if let Some(cb) = &model_clone.circuit {
+                        // Non-failover 4xx: release the HalfOpen probe slot (see
+                        // generate()'s matching branch) so a caller-error response
+                        // doesn't wedge the breaker in HalfOpen under half_open_max=1.
+                        cb.record_probe_inconclusive(&model_clone.base_url);
                     }
                     // Read the error body BEFORE it's dropped — same fix as generate().
                     let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
