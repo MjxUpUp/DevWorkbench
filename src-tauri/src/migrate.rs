@@ -679,6 +679,45 @@ pub fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v17→v18: add `ttfb_ms` + `stream_ms` columns to `llm_traces` so the B3
+/// per-call timing breakdown (eino five-timing-points → derived intervals) can
+/// be persisted and surfaced in TraceView. Same idempotent probe-then-ALTER
+/// shape as v16→v17 / v10→v11: a fresh DB already has both columns from the
+/// static SCHEMA and skips the ALTERs; a pre-v18 DB gets them added (NULL
+/// default — legacy rows have no per-phase timing, which is honest).
+pub fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 18 {
+        return Ok(());
+    }
+
+    let ttfb_exists = conn.prepare("SELECT ttfb_ms FROM llm_traces LIMIT 0").is_ok();
+    if !ttfb_exists {
+        conn.execute("ALTER TABLE llm_traces ADD COLUMN ttfb_ms INTEGER", [])?;
+    }
+    let stream_exists = conn.prepare("SELECT stream_ms FROM llm_traces LIMIT 0").is_ok();
+    if !stream_exists {
+        conn.execute("ALTER TABLE llm_traces ADD COLUMN stream_ms INTEGER", [])?;
+    }
+    if !ttfb_exists || !stream_exists {
+        log::info!(
+            "Migrated schema v17→v18: added llm_traces timing columns (B3 ttfb/stream)"
+        );
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (18, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,7 +1247,17 @@ mod tests {
             .unwrap();
         assert_eq!(table_exists, 1, "llm_traces must be created on pre-v14 DB");
 
-        // The insert path works end-to-end against the freshly migrated table.
+        // Bring the table to the CURRENT shape before inserting: production
+        // always runs the full v14→v18 chain, and v17→v18 is what ALTERs in the
+        // timing columns insert_llm_trace now writes. v13→v14 alone stops at the
+        // pre-timing shape, so the insert path is only meaningful against the
+        // fully-migrated table that real DBs reach.
+        migrate_v14_to_v15(&conn).unwrap();
+        migrate_v15_to_v16(&conn).unwrap();
+        migrate_v16_to_v17(&conn).unwrap();
+        migrate_v17_to_v18(&conn).unwrap();
+
+        // The insert path works end-to-end against the fully-migrated table.
         crate::trace::db::insert_llm_trace(
             &conn,
             &crate::trace::db::LlmTraceRow {
@@ -1224,6 +1273,8 @@ mod tests {
                 latency_ms: Some(12),
                 input_tokens: None,
                 output_tokens: None,
+                ttfb_ms: None,
+                stream_ms: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )

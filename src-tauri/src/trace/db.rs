@@ -22,6 +22,15 @@ pub struct LlmTraceRow {
     pub latency_ms: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// B3: request-send → first response signal (time-to-first-byte). NULL when
+    /// the call never reached a first byte (pure network failure) or for
+    /// pre-v18 rows. Drives the "slow to start" diagnosis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<i64>,
+    /// B3: first-byte → completion (output/stream duration). NULL when there
+    /// was no streaming phase (e.g. a headers-only non_2xx) or pre-v18 rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_ms: Option<i64>,
     pub created_at: String,
 }
 
@@ -31,8 +40,9 @@ pub fn insert_llm_trace(conn: &Connection, row: &LlmTraceRow) -> Result<(), AppE
     conn.execute(
         "INSERT INTO llm_traces
             (id, session_id, conversation_id, model, base_url, status_code, error_kind,
-             req_body, resp_body, latency_ms, input_tokens, output_tokens, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             req_body, resp_body, latency_ms, input_tokens, output_tokens, ttfb_ms, stream_ms,
+             created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             row.id,
             row.session_id,
@@ -46,6 +56,8 @@ pub fn insert_llm_trace(conn: &Connection, row: &LlmTraceRow) -> Result<(), AppE
             row.latency_ms,
             row.input_tokens,
             row.output_tokens,
+            row.ttfb_ms,
+            row.stream_ms,
             row.created_at,
         ],
     )?;
@@ -61,7 +73,8 @@ pub fn list_traces_for_session(
 ) -> Result<Vec<LlmTraceRow>, AppError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, conversation_id, model, base_url, status_code, error_kind,
-                req_body, resp_body, latency_ms, input_tokens, output_tokens, created_at
+                req_body, resp_body, latency_ms, input_tokens, output_tokens, ttfb_ms, stream_ms,
+                created_at
          FROM llm_traces
          WHERE session_id = ?1
          ORDER BY created_at ASC",
@@ -80,7 +93,9 @@ pub fn list_traces_for_session(
             latency_ms: row.get(9)?,
             input_tokens: row.get(10)?,
             output_tokens: row.get(11)?,
-            created_at: row.get(12)?,
+            ttfb_ms: row.get(12)?,
+            stream_ms: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
     let mut out = Vec::new();
@@ -190,6 +205,8 @@ mod tests {
                 latency_ms INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
+                ttfb_ms INTEGER,
+                stream_ms INTEGER,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
@@ -220,6 +237,8 @@ mod tests {
             latency_ms: Some(8),
             input_tokens: None,
             output_tokens: None,
+            ttfb_ms: None,
+            stream_ms: None,
             created_at: created.into(),
         }
     }
@@ -259,6 +278,39 @@ mod tests {
         row.error_kind = None;
         row.resp_body = None;
         insert_llm_trace(&conn, &row).unwrap();
+    }
+
+    #[test]
+    fn insert_then_list_round_trips_timing_breakdown() {
+        // B3: the ttfb_ms / stream_ms columns must survive INSERT → SELECT so
+        // TraceView can show the per-phase timing split (time-to-first-byte vs
+        // output/stream duration), not just total latency.
+        let conn = test_conn();
+        let mut row = sample("timed", "s1", "2026-06-19T00:00:00Z");
+        row.status_code = Some(200);
+        row.error_kind = None;
+        row.latency_ms = Some(5_000);
+        row.ttfb_ms = Some(1_200);
+        row.stream_ms = Some(3_800);
+        insert_llm_trace(&conn, &row).unwrap();
+
+        let rows = list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ttfb_ms, Some(1_200), "ttfb_ms must round-trip");
+        assert_eq!(rows[0].stream_ms, Some(3_800), "stream_ms must round-trip");
+        assert_eq!(rows[0].latency_ms, Some(5_000));
+    }
+
+    #[test]
+    fn timing_columns_default_null_for_legacy_shape() {
+        // A row written with ttfb/stream still None (legacy / pure network
+        // failure) must round-trip as None, not 0 — None is the honest "this
+        // phase never happened" signal the TimingChecker relies on.
+        let conn = test_conn();
+        insert_llm_trace(&conn, &sample("netfail", "s1", "2026-06-19T00:00:00Z")).unwrap();
+        let rows = list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows[0].ttfb_ms, None);
+        assert_eq!(rows[0].stream_ms, None);
     }
 
     #[test]

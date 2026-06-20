@@ -19,6 +19,8 @@ const trace400: LlmTrace = {
   latency_ms: 8,
   input_tokens: null,
   output_tokens: null,
+  ttfb_ms: null,
+  stream_ms: null,
   created_at: '2026-06-19T00:00:00Z',
 };
 

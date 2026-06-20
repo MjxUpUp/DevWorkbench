@@ -47,6 +47,15 @@ pub struct LlmTrace {
     pub latency_ms: Option<u64>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    /// B3: request-send → first response signal (time-to-first-byte), in ms.
+    /// None when the call never reached a first byte (pure network failure).
+    /// Drives the "model slow to start" diagnosis distinct from slow output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<u64>,
+    /// B3: first-byte → completion (output/stream duration), in ms. None when
+    /// there was no streaming phase (e.g. headers-only non_2xx) or pre-B3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_ms: Option<u64>,
 }
 
 /// Receives one trace record per LLM call. Implementations must be cheap to
@@ -96,6 +105,8 @@ impl TraceSink for DbTraceSink {
             latency_ms: trace.latency_ms.map(|l| l as i64),
             input_tokens: trace.input_tokens.map(|t| t as i64),
             output_tokens: trace.output_tokens.map(|t| t as i64),
+            ttfb_ms: trace.ttfb_ms.map(|t| t as i64),
+            stream_ms: trace.stream_ms.map(|t| t as i64),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         let db = self.db.clone();
@@ -191,6 +202,8 @@ mod tests {
                 latency_ms: Some(8),
                 input_tokens: None,
                 output_tokens: None,
+                ttfb_ms: None,
+                stream_ms: None,
             },
         );
         // spawn_blocking is fire-and-forget; poll the table until the row lands
@@ -232,6 +245,8 @@ mod tests {
                 latency_ms: None,
                 input_tokens: None,
                 output_tokens: None,
+                ttfb_ms: None,
+                stream_ms: None,
             },
         );
     }

@@ -549,6 +549,13 @@ export interface LlmTrace {
   latency_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  /** B3: request-send → first response signal (time-to-first-byte), in ms.
+   *  null when the call never reached a first byte (pure network failure) or for
+   *  pre-v18 rows. Drives the "model slow to start" diagnosis. */
+  ttfb_ms: number | null;
+  /** B3: first-byte → completion (output/stream duration), in ms. null when
+   *  there was no streaming phase (e.g. headers-only non_2xx) or pre-v18. */
+  stream_ms: number | null;
   created_at: string;
 }
 
