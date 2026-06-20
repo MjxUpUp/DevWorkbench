@@ -1323,33 +1323,58 @@ fn spawn_pipe_fallback(
             .ok();
     }
 
-    let resolved_conv_id = resolve_or_create_conversation(
-        &db_conn,
-        conversation_id,
-        project_path,
-        prompt,
-        agent_type,
-    )?;
-    let session = build_running_session_row(
-        &session_id,
-        project_path,
-        agent_type,
-        prompt,
-        model,
-        &resolved_conv_id,
-        linked_requirement_id,
-        parent_session_id,
-        None,
-    );
-    register_running_session(
-        &db_conn,
-        app,
-        &session,
-        conversation_id,
-        &resolved_conv_id,
-        project_path,
-        agent_type,
-    )?;
+    // DB registration runs AFTER spawn + track. If it fails here, the reader/
+    // wait threads were never started, so the child would run with nobody
+    // draining its stdout/stderr — it blocks once the OS pipe buffer fills and
+    // hangs indefinitely (un-killable from the UI, since the caller sees this
+    // spawn as failed and never wires up stop). Kill the child and untrack it
+    // before propagating the error. The process-table entry from above is
+    // already present; this removes it so the failed run leaves no live process.
+    let (resolved_conv_id, session) = {
+        let mut abort_on_db_fail = |err: String| -> String {
+            let _ = child.kill();
+            let _ = child.wait();
+            processes
+                .processes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&session_id);
+            err
+        };
+        let resolved_conv_id = match resolve_or_create_conversation(
+            &db_conn,
+            conversation_id,
+            project_path,
+            prompt,
+            agent_type,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Err(abort_on_db_fail(e)),
+        };
+        let session = build_running_session_row(
+            &session_id,
+            project_path,
+            agent_type,
+            prompt,
+            model,
+            &resolved_conv_id,
+            linked_requirement_id,
+            parent_session_id,
+            None,
+        );
+        if let Err(e) = register_running_session(
+            &db_conn,
+            app,
+            &session,
+            conversation_id,
+            &resolved_conv_id,
+            project_path,
+            agent_type,
+        ) {
+            return Err(abort_on_db_fail(e));
+        }
+        (resolved_conv_id, session)
+    };
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();

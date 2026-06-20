@@ -107,7 +107,7 @@ impl CircuitBreaker {
     /// → yes only while inflight probes are under the cap; `Open` past cooldown
     /// → flip to `HalfOpen` and allow one probe; `Open` inside cooldown → no.
     pub fn allow_request(&self, host: &str) -> bool {
-        let mut hosts = self.hosts.lock().unwrap();
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
         let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
         match c.state {
             CircuitState::Closed => true,
@@ -128,7 +128,7 @@ impl CircuitBreaker {
     /// request, so HalfOpen probe accounting is correct (a probe that was
     /// admitted must be counted as inflight until it resolves).
     pub fn on_attempt(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap();
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = hosts.get_mut(host) {
             if c.state == CircuitState::HalfOpen {
                 c.half_open_inflight += 1;
@@ -140,7 +140,7 @@ impl CircuitBreaker {
     /// clearing failures and inflight probes. A HalfOpen probe succeeding is
     /// the signal that the upstream has recovered.
     pub fn record_success(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap();
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = hosts.get_mut(host) {
             c.state = CircuitState::Closed;
             c.failures = 0;
@@ -152,7 +152,7 @@ impl CircuitBreaker {
     /// (refreshing the cooldown clock); Closed failure increments and trips at
     /// the threshold; Open stays Open (clock untouched).
     pub fn record_failure(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap();
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
         let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
         match c.state {
             CircuitState::HalfOpen => {

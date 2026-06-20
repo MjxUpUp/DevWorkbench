@@ -27,7 +27,7 @@ impl KernelTasks {
     /// is already registered for this session (shouldn't happen in normal flow),
     /// abort the stale one first to avoid leaking it.
     pub fn insert(&self, session_id: &str, handle: JoinHandle<()>) {
-        if let Some(prev) = self.0.lock().unwrap().insert(session_id.to_string(), handle) {
+        if let Some(prev) = self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id.to_string(), handle) {
             prev.abort();
         }
     }
@@ -36,7 +36,7 @@ impl KernelTasks {
     /// completes, so the entry doesn't linger). Returns false if the session
     /// was already removed/aborted — harmless, the driver just doesn't double-clean.
     pub fn remove(&self, session_id: &str) -> bool {
-        self.0.lock().unwrap().remove(session_id).is_some()
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id).is_some()
     }
 
     /// Abort a running task. Returns true if a kernel task was found and
@@ -44,7 +44,7 @@ impl KernelTasks {
     /// falls back to the pty/PID stop path. Aborting a task that already
     /// finished is a no-op (abort on a completed handle does nothing).
     pub fn abort(&self, session_id: &str) -> bool {
-        if let Some(handle) = self.0.lock().unwrap().remove(session_id) {
+        if let Some(handle) = self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id) {
             handle.abort();
             true
         } else {

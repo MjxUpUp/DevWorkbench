@@ -149,6 +149,44 @@ pub fn truncate(s: &str, max: usize) -> String {
     format!("{}...({} more)", &s[..end], s.len() - end)
 }
 
+/// Redact secret-shaped values from a string before it is persisted to a trace
+/// row or written to the operator log. Some gateways echo request credentials
+/// back inside a 4xx error body (e.g. `x-api-key: sk-...`, `Authorization:
+/// Bearer ...`), so an un-redacted `resp_body` would land the caller's API key
+/// in the `llm_traces` table.
+///
+/// Three shapes, case-insensitive:
+/// 1. Bare live keys `sk-…` / `sk_…` (OpenAI/Anthropic/GLM-style, ≥12 chars).
+/// 2. `Bearer <token>` — the credential after the scheme name.
+/// 3. `key: value` / `"key": "value"` / `key=value` for secret-bearing names
+///    (`api_key`, `x-api-key`, `authorization`, `password`, …).
+///
+/// The key list deliberately excludes bare `token`/`tokens`/`max_tokens` —
+/// those appear in every LLM usage JSON and carry counts, not credentials, so
+/// matching them would mangle legitimate trace content. Run order is SK →
+/// BEARER → KV so a `Bearer sk-…` value is consumed by the SK/BEARER passes
+/// before the KV pass can leak the tail after `Bearer`.
+pub fn redact_secrets(s: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static SK: OnceLock<Regex> = OnceLock::new();
+    static BEARER: OnceLock<Regex> = OnceLock::new();
+    static KV: OnceLock<Regex> = OnceLock::new();
+    let sk = SK.get_or_init(|| Regex::new(r"sk[_-][A-Za-z0-9_\-]{12,}").expect("static regex"));
+    let bearer = BEARER
+        .get_or_init(|| Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9_\-\.]+").expect("static regex"));
+    let kv = KV.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(api[_-]?key|x-api-key|api[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token|authorization|password|passwd|apikey)"?\s*[:=]\s*"?[^"\s,}\]]+"#,
+        )
+        .expect("static regex")
+    });
+    let out = sk.replace_all(s, "[REDACTED]");
+    let out = bearer.replace_all(&out, "bearer [REDACTED]");
+    kv.replace_all(&out, r#"$1: "[REDACTED]""#)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +216,43 @@ mod tests {
         let t = truncate(s, 7);
         let prefix = t.split("...(").next().unwrap();
         assert!(s.starts_with(prefix), "truncated prefix must sit on a char boundary: {prefix:?}");
+    }
+
+    #[test]
+    fn redact_secrets_strips_bearer_and_sk_keys() {
+        let s = "Authorization: Bearer sk-abcdef1234567890abcdefXYZ";
+        let r = redact_secrets(s);
+        assert!(!r.contains("sk-abcdef1234567890abcdefXYZ"), "live key leaked: {r}");
+        assert!(!r.contains("Bearer sk"), "bearer+token not consumed: {r}");
+    }
+
+    #[test]
+    fn redact_secrets_strips_api_key_json_and_header_forms() {
+        let json = r#"{"api_key": "sk-livekey1234567890SECRET", "model": "glm"}"#;
+        let r = redact_secrets(json);
+        assert!(!r.contains("sk-livekey"), "json api_key leaked: {r}");
+        assert!(r.contains("[REDACTED]"), "must mark redaction: {r}");
+
+        let header = "x-api-key: sk-9876543210abcdefghij";
+        let r = redact_secrets(header);
+        assert!(!r.contains("sk-9876543210"), "header key leaked: {r}");
+    }
+
+    #[test]
+    fn redact_secrets_leaves_token_counts_intact() {
+        // LLM usage JSON carries token COUNTS — these are not credentials and
+        // must not be mangled by the bare-token exclusion.
+        let s = r#"{"input_tokens": 1234, "output_tokens": 567, "max_tokens": 4096}"#;
+        let r = redact_secrets(s);
+        assert!(r.contains("1234"), "input_tokens count mangled: {r}");
+        assert!(r.contains("4096"), "max_tokens mangled: {r}");
+        assert!(!r.contains("[REDACTED]"), "counts falsely redacted: {r}");
+    }
+
+    #[test]
+    fn redact_secrets_leaves_plain_text_intact() {
+        let s = "the model returned an error about invalid request body";
+        assert_eq!(redact_secrets(s), s);
     }
 
     /// DbTraceSink::record_llm_call is fire-and-forget via spawn_blocking. This

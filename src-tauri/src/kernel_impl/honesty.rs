@@ -101,14 +101,23 @@ const WEAKENING_PAIRS: &[(&str, &str, &str, &str)] = &[
      "t.Fatal was weakened to t.Log — failing tests now silently log instead of aborting"),
     ("assert!", "println!", "assert_to_println",
      "assert! was weakened to println! — a real assertion became a non-checking statement"),
+    ("assert!", "debug_assert!", "assert_to_debug_assert",
+     "assert! was weakened to debug_assert! — the check now compiles out in release builds, vanishing in production"),
     ("assert_eq!", "unwrap_or(", "assert_eq_to_unwrap_or",
      "assert_eq! was weakened to unwrap_or() — panics became silent fallbacks"),
+    ("unwrap()", "unwrap_or(", "unwrap_to_unwrap_or",
+     "unwrap() was weakened to unwrap_or(...) — a panic became a silent fallback that hides errors"),
     ("expect(", "unwrap_or(", "expect_to_unwrap_or",
      "expect() was weakened to unwrap_or() — panics became silent fallbacks"),
     // Single-sided: an added line that ADDED an ignore/skip (hiding a test).
     // Modeled as (anything, marker) — the 'removed' side is matched as .* .
     ("", "#[ignore]", "ignore_added",
      "#[ignore] added — a test was hidden from the suite instead of being fixed"),
+    // NOTE: `t.Fatal -> t.Error` is deliberately NOT a pair. Both FAIL the
+    // test (t.Fatal fails+stops, t.Error fails+continues) so the test outcome
+    // is unchanged — control-flow style, not assertion weakening. Adding it
+    // would be a false positive. The dishonest variant t.Fatal -> t.Log
+    // (fail -> no-fail) is already covered above.
     ("", "t.Skip", "skip_added",
      "t.Skip added — a failing test is being skipped instead of repaired"),
 ];
@@ -310,6 +319,46 @@ mod tests {
         );
         let w = check_assertion_weakening(&diff);
         assert!(w.iter().any(|x| x.rule == "fatal_to_log"), "got: {w:?}");
+    }
+
+    #[test]
+    fn detects_assert_to_debug_assert_weakening() {
+        // `assert!` removed (-), `debug_assert!` added (+) — release builds drop it.
+        let diff = parse_diff(
+            "+++ b/main.rs\n-foo()\n-assert!(x > 0)\n+foo()\n+debug_assert!(x > 0)\n",
+        );
+        let w = check_assertion_weakening(&diff);
+        assert!(
+            w.iter().any(|x| x.rule == "assert_to_debug_assert"),
+            "got: {w:?}"
+        );
+    }
+
+    #[test]
+    fn detects_unwrap_to_unwrap_or_weakening() {
+        // `.unwrap()` removed (-), `.unwrap_or(` added (+) — panic became silent fallback.
+        let diff = parse_diff(
+            "+++ b/main.rs\n-let v = map.get(k).unwrap();\n+let v = map.get(k).unwrap_or(default);\n",
+        );
+        let w = check_assertion_weakening(&diff);
+        assert!(
+            w.iter().any(|x| x.rule == "unwrap_to_unwrap_or"),
+            "got: {w:?}"
+        );
+    }
+
+    /// t.Fatal -> t.Error must NOT fire: both fail the test, so it is not a
+    /// weakening. Guards against the false-positive pair we deliberately excluded.
+    #[test]
+    fn fatal_to_error_is_not_flagged() {
+        let diff = parse_diff(
+            "+++ b/x_test.go\n-foo()\n-t.Fatal(\"boom\")\n+foo()\n+t.Error(\"boom\")\n",
+        );
+        let w = check_assertion_weakening(&diff);
+        assert!(
+            !w.iter().any(|x| x.rule == "fatal_to_log"),
+            "t.Fatal->t.Error is not weakening (both fail), must not flag: {w:?}"
+        );
     }
 
     #[test]

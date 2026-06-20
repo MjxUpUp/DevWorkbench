@@ -34,7 +34,7 @@ use crate::kernel_impl::llm_recovery::{
     classify_llm_error, fatal_user_message, retry_delay, should_retry, FatalReason, LlmErrorKind,
     MAX_ATTEMPTS,
 };
-use crate::trace::{truncate, LlmTrace, TraceSink};
+use crate::trace::{redact_secrets, truncate, LlmTrace, TraceSink};
 
 /// Injectable audit callback signature (project audit: cargo check + assertion
 /// weakening scan). Shared by the config field, the builder, and test stubs.
@@ -406,7 +406,7 @@ impl ChatModel for GlmChatModel {
             // Read the error body BEFORE it's dropped — this is the actual
             // reason (quota, schema, model-not-found) that was previously lost
             // to `format!("GLM stream failed: {status}")`.
-            let err_body = resp.text().await.unwrap_or_default();
+            let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
             log::warn!(
                 "[llm] {} {} -> {}: {}",
                 model,
@@ -526,7 +526,7 @@ impl ChatModel for GlmChatModel {
                         if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                     }
                     // Read the error body BEFORE it's dropped — same fix as generate().
-                    let err_body = resp.text().await.unwrap_or_default();
+                    let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
                     log::warn!(
                         "[llm] {} {} -> {}: {}",
                         model_name, model_clone.base_url, status, truncate(&err_body, 500)
@@ -1844,7 +1844,7 @@ impl ReactAgent {
                 }
             }
         }
-        let result = match self.tools.find(&call.function.name) {
+        let mut result = match self.tools.find(&call.function.name) {
             Some(t) => t
                 .invoke(&call.function.arguments, ctx)
                 .await
@@ -1881,8 +1881,21 @@ impl ReactAgent {
                 },
             };
             let findings = hooks.after(&outcome).await;
-            for f in findings {
-                log::warn!("[hook] {}: {}", f.rule, f.explanation);
+            if !findings.is_empty() {
+                // Surface the finding to the MODEL, not just the operator log.
+                // The honesty moat only works if the agent SEES its own weakening
+                // and self-corrects; a log line the model never reads changes
+                // nothing. Appended to the tool result so it lands in the next
+                // tool_result block the model consumes.
+                let banner = findings
+                    .iter()
+                    .map(|f| format!("  - [{}] {} (evidence: {})", f.rule, f.explanation, f.evidence))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                log::warn!("[hook] assertion-weakening detected:\n{banner}");
+                result = format!(
+                    "{result}\n\n--- HonestyGuard: assertion weakening detected ---\n{banner}\nA test assertion was weakened (t.Fatal->t.Log, assert!->debug_assert!, unwrap->unwrap_or, #[ignore]/t.Skip added, etc.). This is dishonest. Restore the strong assertion; a weakened test will fail the honesty audit."
+                );
             }
         }
         result

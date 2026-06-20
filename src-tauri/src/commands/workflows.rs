@@ -203,7 +203,7 @@ pub async fn run_workflow(
                 }
                 kernel_compose::GraphEvent::GraphFailed { error } => {
                     if let Some(state) = app_for_events.try_state::<ApprovalState>() {
-                        state.0.lock().unwrap().remove(&run_id_for_events);
+                        state.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id_for_events);
                     }
                     return Err(error);
                 }
@@ -217,7 +217,7 @@ pub async fn run_workflow(
         // map doesn't leak finished runs (sender drop also unblocks any
         // lingering waiters on the receiver side).
         if let Some(state) = app_for_events.try_state::<ApprovalState>() {
-            state.0.lock().unwrap().remove(&run_id_for_events);
+            state.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id_for_events);
         }
         Ok(serde_json::json!({ "run_id": run_id_for_events, "output": last_output }))
     })

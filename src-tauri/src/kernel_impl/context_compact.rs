@@ -158,7 +158,17 @@ pub async fn summarize_middle(
     if len <= 1 + keep_recent + 2 {
         return Ok(None);
     }
-    let summarize_end = len.saturating_sub(keep_recent);
+    let mut summarize_end = len.saturating_sub(keep_recent);
+    // Never start the verbatim tail on a Tool result message: its paired
+    // assistant tool_use would land in the summarized middle, orphaning the
+    // result and breaking the tool_use/tool_result pairing the Anthropic API
+    // enforces (HTTP 400). Walk the boundary back through any leading Tool
+    // results to the spawning assistant so the pair stays whole in the tail;
+    // if the assistant is also cut, the results get absorbed into the summary
+    // text instead of being sent dangling.
+    while summarize_end > 1 && history[summarize_end].role == Role::Tool {
+        summarize_end -= 1;
+    }
     if summarize_end <= 1 {
         return Ok(None);
     }
@@ -622,6 +632,52 @@ mod tests {
         assert_eq!(model.calls().len(), 1);
         // Success resets the failure counter.
         assert_eq!(fails, 0);
+    }
+
+    #[tokio::test]
+    async fn summarize_middle_does_not_start_tail_on_orphan_tool_result() {
+        // Regression: if the naive boundary lands on a Tool result, the paired
+        // assistant tool_use sits in the summarized middle and the tail leads
+        // with an orphan tool_result → Anthropic API HTTP 400. The boundary
+        // must walk back to the spawning assistant so the pair stays whole.
+        let model = SummaryChatModel::new("摘要");
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..4 {
+            hist.push(msg(Role::User, &format!("m{i}")));
+        }
+        // A complete tool pair straddling what would be the naive cut.
+        hist.push(assistant_with_tool("call now", "tid", "read_file"));
+        hist.push(tool_msg("tid", "the result"));
+        // keep_recent=2 → naive summarize_end = len-2 lands on the Tool result.
+        hist.push(msg(Role::User, "tail-user"));
+        let len = hist.len();
+        assert_eq!(
+            hist[len - 2].role,
+            Role::Tool,
+            "test setup: naive cut must land on a Tool message"
+        );
+
+        let out = summarize_middle(&hist, &model, &ModelOptions::default(), 2)
+            .await
+            .unwrap()
+            .expect("should compact");
+
+        // system + summary + tail(3: assistant, tool, user) = 5
+        assert_eq!(out.len(), 5);
+        // The tail must NOT lead with a Tool message (no orphan result).
+        assert_eq!(
+            out[2].role,
+            Role::Assistant,
+            "tail must lead with the assistant, not an orphan tool result"
+        );
+        // The tool pair is intact: assistant tool_use + its result both present.
+        assert!(
+            out[2].tool_calls.iter().any(|tc| tc.id == "tid"),
+            "assistant tool_use preserved in tail"
+        );
+        assert_eq!(out[3].role, Role::Tool);
+        assert_eq!(out[3].tool_call_id.as_deref(), Some("tid"));
+        assert_eq!(out[3].content, "the result");
     }
 
     // ---- D1(a): summary anti-injection preamble围栏 ----

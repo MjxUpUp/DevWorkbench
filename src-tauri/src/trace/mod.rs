@@ -10,5 +10,5 @@ pub mod db;
 pub mod sink;
 pub mod timing;
 
-pub use sink::{optional_shared, truncate, DbTraceSink, LlmTrace, NullTraceSink, TraceSink};
+pub use sink::{optional_shared, redact_secrets, truncate, DbTraceSink, LlmTrace, NullTraceSink, TraceSink};
 pub use timing::{TimingChecker, TimingWarning};
