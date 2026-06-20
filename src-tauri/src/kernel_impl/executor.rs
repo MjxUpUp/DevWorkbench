@@ -340,6 +340,12 @@ pub(crate) fn build_react_agent(
         subagents.clone(),
         Arc::clone(&subagent_concurrency),
     ));
+    // C1 — dispatch_acp_agent: delegate a sub-task to an EXTERNAL ACP-speaking
+    // coding agent (codex-acp / claude via ACP) over stdio JSON-RPC. Sibling of
+    // dispatch_subagent, but drives a separate agent the kernel can't become.
+    // First (verifiable) half of the OWOz C1 bidirectional ACP support; the
+    // server half (expose THIS kernel as an ACP agent) remains TODO.
+    registry.push(crate::kernel_impl::acp_tool::AcpAgentTool::default());
 
     // Surface installed skills + MCP tools BY NAME in the system prompt, not just
     // in the tool-list descriptions. The model otherwise can't tell which skill__

@@ -56,6 +56,10 @@ async-trait = "0.1"
 futures = "0.3"
 async-stream = "0.3"
 serde_yaml = "0.9"
+# C1 ACP client — drive external ACP-speaking coding agents (codex-acp / claude via
+# ACP) over stdio JSON-RPC, mirroring deer-flow's invoke_acp_agent_tool. Default
+# features only (the `unstable_*` gates are spec drafts we don't implement).
+agent-client-protocol = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
