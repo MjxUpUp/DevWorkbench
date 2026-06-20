@@ -21,7 +21,8 @@ use crate::events::EdgeKind;
 
 pub type NodeId = String;
 
-/// Discriminator for the 7 node types + branch.
+/// Discriminator for the node types: 7 base + branch + coze/dify control-flow
+/// (loop / selector / interrupt).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
@@ -33,6 +34,12 @@ pub enum NodeType {
     Human,
     Transform,
     Branch,
+    /// Iterate a sub-graph over an array or fixed count (coze/dify 循环).
+    Loop,
+    /// Mutually-exclusive first-match routing (coze/dify 条件选择).
+    Selector,
+    /// User-intended graph halt (coze/dify 结束/终止).
+    Interrupt,
 }
 
 /// A graph node. Spec nodes carry their config inline; capability nodes
@@ -56,6 +63,12 @@ pub enum Node {
     Transform(TransformNode),
     /// Conditional routing — selects which successors fire.
     Branch(BranchNode),
+    /// Iterate a sub-graph body per array element / fixed count.
+    Loop(LoopNode),
+    /// Mutually-exclusive first-match routing (emits the chosen label).
+    Selector(SelectorNode),
+    /// Halt the whole graph run (user-intended, not a failure).
+    Interrupt(InterruptNode),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +171,76 @@ pub enum TransformOp {
 pub struct BranchNode {
     /// Expression language is intentionally minimal: "key==value" or "contains:substr".
     pub condition: String,
+}
+
+/// Loop / iteration node (coze/dify "循环/迭代"). Runs an inline sub-graph
+/// `body` once per element of an input array (or for a fixed `count`), then
+/// merges per-iteration outputs. The body is a self-contained sub-`Graph`, so
+/// the top-level graph stays acyclic — the repetition lives *inside* the node,
+/// never in the edges, so Kahn's cycle check never sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopNode {
+    /// JSON path (dot-separated) of the input array to iterate over, e.g.
+    /// "items". When present and resolves to an array, `count` is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<String>,
+    /// Fixed iteration count, used when `over` is absent or misses. If both
+    /// `over` and `count` are absent the loop runs zero times (empty output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    /// Safety cap on iterations. Bounds runaway loops over unexpectedly large
+    /// arrays; a run-time default (LOOP_DEFAULT_MAX_ITERATIONS) applies if None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<usize>,
+    /// Sub-graph executed once per element; receives the element as its input.
+    pub body: Graph,
+    /// How per-iteration outputs combine into this node's output value.
+    #[serde(default)]
+    pub strategy: MergeStrategy,
+}
+
+/// One branch of a [`SelectorNode`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorCase {
+    /// Condition evaluated against the node input — same mini-language as
+    /// [`BranchNode::condition`]: "key==value" / "contains:substr".
+    pub when: String,
+    /// Emitted as the node output when this case matches; downstream edges
+    /// route via branch edges whose `when` equals this label.
+    pub label: String,
+}
+
+/// Selector node (coze/dify "条件选择"). Classifies the input into exactly one
+/// label by FIRST-MATCH over `cases` (mutually exclusive, unlike [`Branch`]
+/// which can fire several edges independently). Emits the chosen label as the
+/// node's output value so successors route on it via branch edges.
+///
+/// [`Branch`]: Node::Branch
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectorNode {
+    /// Ordered cases; the first whose `when` matches the input wins.
+    #[serde(default)]
+    pub cases: Vec<SelectorCase>,
+    /// Label emitted when no case matches. Defaults to an empty string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// Interrupt node (coze/dify "结束/终止"). Halts the whole graph run with a
+/// [`GraphEvent::GraphInterrupted`] event — a user-intended stop, NOT a
+/// failure. If `condition` is set the interrupt only fires when it matches;
+/// otherwise it is unconditional. On a non-firing condition the node passes its
+/// input through unchanged.
+///
+/// [`GraphEvent::GraphInterrupted`]: crate::GraphEvent::GraphInterrupted
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InterruptNode {
+    /// Reason carried on the `GraphInterrupted` event.
+    #[serde(default)]
+    pub message: String,
+    /// Optional gate using the same mini-language as [`BranchNode::condition`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 /// An edge between two nodes.
@@ -270,6 +353,15 @@ impl CompiledGraph {
             }
         }
         Self::check_no_cycle(g)?;
+        // Recursively validate Loop bodies (inline sub-graphs). Each body is its
+        // own DAG; its start/end/edge/cycle validity is checked here at compile
+        // time, not deferred to run time. Nested loops are covered by the
+        // natural recursion (a body containing a Loop validates its own body).
+        for node in g.nodes.values() {
+            if let Node::Loop(lp) = node {
+                Self::validate(&lp.body).map_err(|e| format!("loop body: {e}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -436,5 +528,63 @@ mod tests {
         };
         let err = CompiledGraph::new(mk()).unwrap_err();
         assert!(err.contains("cycle"), "expected cycle error, got: {err}");
+    }
+
+    /// A cycle inside a Loop body sub-graph is caught at compile time by the
+    /// recursive validate (not deferred to run time).
+    #[test]
+    fn loop_body_cycle_is_rejected_at_compile() {
+        let body = Graph {
+            nodes: HashMap::from([
+                ("a".to_string(), Node::Merge(MergeNode::default())),
+                ("b".to_string(), Node::Merge(MergeNode::default())),
+            ]),
+            edges: vec![
+                Edge { from: "a".into(), to: "b".into(), kind: EdgeKind::Normal, when: None },
+                Edge { from: "b".into(), to: "a".into(), kind: EdgeKind::Normal, when: None },
+            ],
+            start: "a".into(),
+            end: "b".into(),
+        };
+        let g = Graph {
+            nodes: HashMap::from([(
+                "lp".to_string(),
+                Node::Loop(LoopNode {
+                    over: None,
+                    count: Some(1),
+                    max_iterations: None,
+                    body,
+                    strategy: MergeStrategy::default(),
+                }),
+            )]),
+            edges: vec![],
+            start: "lp".into(),
+            end: "lp".into(),
+        };
+        let err = CompiledGraph::new(g).unwrap_err();
+        assert!(err.contains("loop body"), "loop body error prefix: {err}");
+        assert!(err.contains("cycle"), "cycle in body must be reported: {err}");
+    }
+
+    /// Loop / Selector / Interrupt nodes parse from YAML via the serde `type`
+    /// tag (frontend builder emits this shape).
+    #[test]
+    fn control_flow_nodes_parse_from_yaml() {
+        use crate::yaml::WorkflowDef;
+        let yaml = r#"
+start: sel
+end: sel
+nodes:
+  sel:
+    type: selector
+    cases:
+      - { when: "contains:a", label: "a_path" }
+      - { when: "contains:b", label: "b_path" }
+"#;
+        let g = WorkflowDef::from_yaml(yaml).unwrap().to_graph().unwrap();
+        match &g.nodes["sel"] {
+            Node::Selector(s) => assert_eq!(s.cases.len(), 2),
+            other => panic!("expected Selector, got {other:?}"),
+        }
     }
 }

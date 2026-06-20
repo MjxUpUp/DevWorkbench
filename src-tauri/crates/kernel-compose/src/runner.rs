@@ -9,6 +9,7 @@
 //! far simpler — no Pregel supersteps, no channel abstraction, just a worklist.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_stream::stream;
 use futures::stream::BoxStream;
@@ -36,7 +37,7 @@ pub fn run_graph(
     compiled: CompiledGraph,
     input: Value,
     working_dir: Option<String>,
-    executor: Box<dyn Executor>,
+    executor: Arc<dyn Executor>,
 ) -> BoxStream<'static, GraphEvent> {
     run_graph_with_approvals(compiled, input, working_dir, executor).0
 }
@@ -49,7 +50,7 @@ pub fn run_graph_with_approvals(
     compiled: CompiledGraph,
     input: Value,
     working_dir: Option<String>,
-    executor: Box<dyn Executor>,
+    executor: Arc<dyn Executor>,
 ) -> (BoxStream<'static, GraphEvent>, tokio::sync::mpsc::Sender<HumanApproval>) {
     let (approval_tx, approval_rx) = tokio::sync::mpsc::channel::<HumanApproval>(16);
     let stream = build_run_stream(compiled, input, working_dir, executor, approval_rx);
@@ -60,7 +61,7 @@ fn build_run_stream(
     compiled: CompiledGraph,
     input: Value,
     working_dir: Option<String>,
-    executor: Box<dyn Executor>,
+    executor: Arc<dyn Executor>,
     mut approval_rx: tokio::sync::mpsc::Receiver<HumanApproval>,
 ) -> impl futures::Stream<Item = GraphEvent> {
     let g = compiled.graph.clone();
@@ -151,6 +152,27 @@ fn build_run_stream(
 
             let incoming = outputs.get(&nid).cloned().unwrap_or(Value::Null);
 
+            // Interrupt node: an unconditional or condition-gated halt of the
+            // whole graph run. Handled BEFORE the result match so a firing
+            // interrupt can short-circuit the stream (emit + return) instead of
+            // producing a value. A non-firing condition falls through to the
+            // match, where Interrupt passes its input through unchanged.
+            if let Node::Interrupt(it) = &node {
+                let fire = match &it.condition {
+                    Some(cond) => eval_branch(&incoming, cond),
+                    None => true,
+                };
+                if fire {
+                    yield GraphEvent::NodeEnd {
+                        node: nid.clone(),
+                        status: NodeStatus::Interrupted,
+                        error: None,
+                    };
+                    yield GraphEvent::GraphInterrupted { reason: it.message.clone() };
+                    return;
+                }
+            }
+
             let result: Result<Value, String> = match &node {
                 Node::Prompt(p) => Ok(Value::String(p.text.clone())),
                 Node::Agent(spec) => {
@@ -225,6 +247,64 @@ fn build_run_stream(
                 }
                 Node::Transform(t) => Ok(apply_transform(t, incoming.clone())),
                 Node::Branch(_) => Ok(incoming.clone()),
+                // Only reached when an Interrupt's condition did NOT fire (a
+                // firing interrupt returns above). Pass the input through.
+                Node::Interrupt(_) => Ok(incoming.clone()),
+                Node::Selector(s) => {
+                    // First-match over cases (mutually exclusive). Emits the
+                    // chosen label as the output value; successors route via
+                    // branch edges whose `when` equals this label (see the
+                    // fire logic below).
+                    let chosen = s
+                        .cases
+                        .iter()
+                        .find(|c| eval_branch(&incoming, &c.when))
+                        .map(|c| c.label.clone())
+                        .or_else(|| s.default.clone())
+                        .unwrap_or_default();
+                    Ok(Value::String(chosen))
+                }
+                Node::Loop(lp) => {
+                    // Resolve iteration items: the array at `over` (dot-path),
+                    // else a fixed `count`, else none (zero iterations).
+                    let raw: Vec<Value> = match &lp.over {
+                        Some(path) => extract_array(&incoming, path),
+                        None => match lp.count {
+                            Some(n) => (0..n).map(Value::from).collect(),
+                            None => Vec::new(),
+                        },
+                    };
+                    let cap = lp.max_iterations.unwrap_or(LOOP_DEFAULT_MAX_ITERATIONS);
+                    let mut results: Vec<Value> = Vec::new();
+                    let mut loop_err: Option<String> = None;
+                    for item in raw.into_iter().take(cap) {
+                        let body = match lp.body.clone().compile() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                loop_err = Some(format!("loop body: {e}"));
+                                break;
+                            }
+                        };
+                        match run_graph_to_completion(
+                            body,
+                            item,
+                            working_dir.clone(),
+                            executor.clone(),
+                        )
+                        .await
+                        {
+                            Ok(v) => results.push(v),
+                            Err(e) => {
+                                loop_err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    match loop_err {
+                        Some(e) => Err(e),
+                        None => Ok(merge_values(results, &lp.strategy)),
+                    }
+                }
             };
 
             match result {
@@ -242,6 +322,10 @@ fn build_run_stream(
                     for edge in &succs {
                         let fire = match (&node, &edge.when) {
                             (Node::Branch(_), Some(when_val)) => eval_branch(&incoming, when_val),
+                            // Selector emitted its chosen label as `v`; a
+                            // successor branch edge fires iff its `when` equals
+                            // that label (first-match, mutually exclusive).
+                            (Node::Selector(_), Some(when_val)) => eval_branch(&v, when_val),
                             _ => true,
                         };
                         // fire → settle with value, parent not skipped.
@@ -306,6 +390,46 @@ fn eval_branch(input: &Value, when_val: &str) -> bool {
     } else {
         s == when_val
     }
+}
+
+/// Default cap on Loop iterations when `max_iterations` is unset. Bounds
+/// runaway loops over unexpectedly large input arrays.
+const LOOP_DEFAULT_MAX_ITERATIONS: usize = 1000;
+
+/// Extract a JSON array at a dot-separated `path` from `input`. A missing path
+/// or a non-array value yields an empty vec — the loop then runs zero times.
+fn extract_array(input: &Value, path: &str) -> Vec<Value> {
+    let mut cur = input;
+    for seg in path.split('.') {
+        cur = cur.get(seg).unwrap_or(&Value::Null);
+    }
+    cur.as_array().cloned().unwrap_or_default()
+}
+
+/// Drive a sub-graph (a Loop body) to completion, returning its `GraphDone`
+/// output. A `GraphFailed` / `GraphInterrupted` from the body propagates as
+/// `Err`. Only the Loop node uses this; the top-level run streams events via
+/// `build_run_stream` instead. A Loop body containing a Human node will hang
+/// here (no approval channel) — that is a documented limitation.
+async fn run_graph_to_completion(
+    compiled: CompiledGraph,
+    input: Value,
+    working_dir: Option<String>,
+    executor: Arc<dyn Executor>,
+) -> Result<Value, String> {
+    use futures::StreamExt;
+    let mut s = run_graph(compiled, input, working_dir, executor);
+    while let Some(ev) = s.next().await {
+        match ev {
+            GraphEvent::GraphDone { output } => return Ok(output),
+            GraphEvent::GraphFailed { error } => return Err(error),
+            GraphEvent::GraphInterrupted { reason } => {
+                return Err(format!("interrupted: {reason}"))
+            }
+            _ => {}
+        }
+    }
+    Err("sub-graph ended without a terminal event".into())
 }
 
 #[cfg(test)]
@@ -391,7 +515,12 @@ mod tests {
         let mut s = Box::pin(stream);
         let mut out = Vec::new();
         while let Some(ev) = s.next().await {
-            let terminal = matches!(ev, GraphEvent::GraphDone { .. } | GraphEvent::GraphFailed { .. });
+            let terminal = matches!(
+                ev,
+                GraphEvent::GraphDone { .. }
+                    | GraphEvent::GraphFailed { .. }
+                    | GraphEvent::GraphInterrupted { .. }
+            );
             out.push(ev);
             if terminal { break; }
         }
@@ -409,7 +538,7 @@ mod tests {
             .edge("p", "a").edge("a", "e")
             .start("p").end("e").build().unwrap();
         let compiled = g.compile().unwrap();
-        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(MockExec))).await;
         let started: Vec<String> = events.iter().filter_map(|e| match e {
             GraphEvent::NodeStart { node } => Some(node.clone()), _ => None,
         }).collect();
@@ -432,7 +561,7 @@ mod tests {
             .edge("go_path", "out").edge("stop_path", "out")
             .start("in").end("out").build().unwrap();
         let compiled = g.compile().unwrap();
-        let events = collect_events(run_graph(compiled, json!("x"), None, Box::new(MockExec))).await;
+        let events = collect_events(run_graph(compiled, json!("x"), None, Arc::new(MockExec))).await;
         assert!(events.iter().any(|e| matches!(e,
             GraphEvent::NodeEnd { node, status: NodeStatus::Skipped, .. } if node == "stop_path")),
             "stop_path should be skipped");
@@ -456,7 +585,7 @@ mod tests {
             .edge("p", "a1").edge("p", "a2").edge("a1", "m").edge("a2", "m")
             .start("p").end("m").build().unwrap();
         let compiled = g.compile().unwrap();
-        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(MockExec))).await;
         let done = events.iter().find_map(|e| match e {
             GraphEvent::GraphDone { output } => Some(output.clone()), _ => None,
         }).expect("graph must complete");
@@ -493,7 +622,7 @@ mod tests {
             .edge("p", "a").edge("a", "e")
             .start("p").end("e").build().unwrap();
         let compiled = g.compile().unwrap();
-        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(MockExec))).await;
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(MockExec))).await;
 
         // NodeOutput for node "a" must have been emitted (Delta forwarded).
         let outputs: Vec<&GraphEvent> = events
@@ -544,11 +673,205 @@ mod tests {
             .edge("a", "e")
             .start("a").end("e").build().unwrap();
         let compiled = g.compile().unwrap();
-        let events = collect_events(run_graph(compiled, json!("in"), None, Box::new(FailExec))).await;
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(FailExec))).await;
         assert!(
             events.iter().any(|e| matches!(e, GraphEvent::GraphFailed { .. })),
             "agent Err chunk must fail the graph: {events:?}"
         );
+    }
+
+    // ---- C3: loop / selector / interrupt control-flow nodes ----
+
+    /// An unconditional Interrupt node halts the run with `GraphInterrupted`
+    /// and successors never execute.
+    #[tokio::test]
+    async fn interrupt_node_halts_the_graph() {
+        use crate::graph::{
+            GraphBuilder, InterruptNode, Node, PromptNode, TransformNode,
+        };
+        use std::collections::HashMap;
+        let g = GraphBuilder::new()
+            .node("p", Node::Prompt(PromptNode { text: "go".into(), vars: HashMap::new() }))
+            .node("br", Node::Interrupt(InterruptNode { message: "stop here".into(), condition: None }))
+            .node("after", Node::Transform(TransformNode { op: crate::graph::TransformOp::Truncate(0) }))
+            .edge("p", "br").edge("br", "after")
+            .start("p").end("after").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(MockExec))).await;
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::GraphInterrupted { reason } if reason == "stop here")),
+            "expected GraphInterrupted: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::NodeEnd { node, status: NodeStatus::Interrupted, .. } if node == "br")),
+            "interrupt node must end Interrupted: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GraphEvent::NodeStart { node } if node == "after")),
+            "successor must not run after interrupt: {events:?}"
+        );
+    }
+
+    /// A conditional Interrupt whose condition does not match passes through
+    /// and the graph completes normally.
+    #[tokio::test]
+    async fn interrupt_with_unmet_condition_passes_through() {
+        use crate::graph::{GraphBuilder, InterruptNode, MergeNode, Node, PromptNode};
+        use std::collections::HashMap;
+        let g = GraphBuilder::new()
+            .node("p", Node::Prompt(PromptNode { text: "x".into(), vars: HashMap::new() }))
+            .node("it", Node::Interrupt(InterruptNode { message: "no".into(), condition: Some("contains:go".into()) }))
+            .node("e", Node::Merge(MergeNode::default()))
+            .edge("p", "it").edge("it", "e")
+            .start("p").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("in"), None, Arc::new(MockExec))).await;
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })),
+            "non-firing interrupt should let graph finish: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GraphEvent::GraphInterrupted { .. })),
+            "no interrupt expected: {events:?}"
+        );
+    }
+
+    /// Selector routes exactly one branch (first-match); the non-matching
+    /// branch is skipped — mutually exclusive, unlike Branch.
+    #[tokio::test]
+    async fn selector_first_match_routes_exactly_one_branch() {
+        use crate::graph::{
+            GraphBuilder, MergeNode, MergeStrategy, Node, PromptNode, SelectorCase, SelectorNode,
+            TransformNode,
+        };
+        use std::collections::HashMap;
+        let g = GraphBuilder::new()
+            .node("in", Node::Prompt(PromptNode { text: "go".into(), vars: HashMap::new() }))
+            .node("sel", Node::Selector(SelectorNode {
+                cases: vec![
+                    SelectorCase { when: "contains:go".into(), label: "go".into() },
+                    SelectorCase { when: "contains:stop".into(), label: "stop".into() },
+                ],
+                default: None,
+            }))
+            .node("go_path", Node::Transform(TransformNode { op: crate::graph::TransformOp::Truncate(100) }))
+            .node("stop_path", Node::Transform(TransformNode { op: crate::graph::TransformOp::Truncate(0) }))
+            .node("out", Node::Merge(MergeNode { strategy: MergeStrategy::LastWins }))
+            .edge("in", "sel")
+            .branch_edge("sel", "go_path", "go")
+            .branch_edge("sel", "stop_path", "stop")
+            .edge("go_path", "out").edge("stop_path", "out")
+            .start("in").end("out").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("x"), None, Arc::new(MockExec))).await;
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::NodeEnd { node, status: NodeStatus::Done, .. } if node == "go_path")),
+            "go_path should run: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::NodeEnd { node, status: NodeStatus::Skipped, .. } if node == "stop_path")),
+            "stop_path should be skipped (mutual exclusion): {events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })));
+    }
+
+    /// Loop iterates its body once per element of the input array and Collects
+    /// the per-iteration outputs.
+    #[tokio::test]
+    async fn loop_iterates_over_input_array() {
+        use crate::graph::{
+            AgentNodeSpec, Edge, Graph, GraphBuilder, LoopNode, MergeNode, MergeStrategy, Node,
+        };
+        use crate::events::EdgeKind;
+        use std::collections::HashMap;
+        let body = Graph {
+            nodes: HashMap::from([
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
+            ]),
+            edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],
+            start: "ba".into(),
+            end: "be".into(),
+        };
+        let g = GraphBuilder::new()
+            .node("lp", Node::Loop(LoopNode {
+                over: Some("items".into()),
+                count: None,
+                max_iterations: None,
+                body,
+                strategy: MergeStrategy::Collect,
+            }))
+            .start("lp").end("lp").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!({ "items": ["a", "b", "c"] }), None, Arc::new(MockExec))).await;
+        let done = events.iter().find_map(|e| match e {
+            GraphEvent::GraphDone { output } => Some(output.clone()),
+            _ => None,
+        }).expect("loop graph must complete");
+        let arr = done.as_array().expect("Collect should yield an array");
+        assert_eq!(arr.len(), 3, "3 items → 3 iterations: {arr:?}");
+        assert_eq!(arr[0]["out"], "A", "iteration 0 uppercased element: {arr:?}");
+        assert_eq!(arr[1]["out"], "B");
+        assert_eq!(arr[2]["out"], "C");
+    }
+
+    /// Loop with a fixed `count` runs that many iterations.
+    #[tokio::test]
+    async fn loop_runs_fixed_count() {
+        use crate::graph::{
+            AgentNodeSpec, Edge, Graph, GraphBuilder, LoopNode, MergeNode, MergeStrategy, Node,
+        };
+        use crate::events::EdgeKind;
+        use std::collections::HashMap;
+        let body = Graph {
+            nodes: HashMap::from([
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
+            ]),
+            edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],
+            start: "ba".into(),
+            end: "be".into(),
+        };
+        let g = GraphBuilder::new()
+            .node("lp", Node::Loop(LoopNode { over: None, count: Some(3), max_iterations: None, body, strategy: MergeStrategy::Collect }))
+            .start("lp").end("lp").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("x"), None, Arc::new(MockExec))).await;
+        let done = events.iter().find_map(|e| match e {
+            GraphEvent::GraphDone { output } => Some(output.clone()),
+            _ => None,
+        }).expect("must complete");
+        assert_eq!(done.as_array().map(|a| a.len()), Some(3), "count=3 → 3 iterations: {done:?}");
+    }
+
+    /// `max_iterations` caps a loop over an oversized array (runaway guard).
+    #[tokio::test]
+    async fn loop_max_iterations_caps_runaway() {
+        use crate::graph::{
+            AgentNodeSpec, Edge, Graph, GraphBuilder, LoopNode, MergeNode, MergeStrategy, Node,
+        };
+        use crate::events::EdgeKind;
+        use std::collections::HashMap;
+        let body = Graph {
+            nodes: HashMap::from([
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
+            ]),
+            edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],
+            start: "ba".into(),
+            end: "be".into(),
+        };
+        let g = GraphBuilder::new()
+            .node("lp", Node::Loop(LoopNode { over: Some("items".into()), count: None, max_iterations: Some(5), body, strategy: MergeStrategy::Collect }))
+            .start("lp").end("lp").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let items: Vec<String> = (0..100).map(|i| format!("v{i}")).collect();
+        let events = collect_events(run_graph(compiled, json!({ "items": items }), None, Arc::new(MockExec))).await;
+        let done = events.iter().find_map(|e| match e {
+            GraphEvent::GraphDone { output } => Some(output.clone()),
+            _ => None,
+        }).expect("must complete");
+        assert_eq!(done.as_array().map(|a| a.len()), Some(5), "max_iterations=5 must cap 100 items: {done:?}");
     }
 
 }

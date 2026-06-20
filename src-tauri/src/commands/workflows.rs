@@ -110,7 +110,7 @@ pub async fn delete_workflow(db: State<'_, DbState>, id: String) -> Result<(), A
 // It has been replaced by the real graph execution engine below.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager};
@@ -167,7 +167,7 @@ pub async fn run_workflow(
         compiled,
         input,
         working_dir,
-        Box::new(executor),
+        Arc::new(executor),
     );
     // Keep the approval sender reachable so the frontend can resume a paused
     // Human node via `approve_workflow_step`. Previously this was discarded

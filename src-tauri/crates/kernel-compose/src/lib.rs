@@ -24,8 +24,9 @@ pub mod yaml;
 
 pub use events::{EdgeKind, GraphEvent, NodeStatus};
 pub use graph::{
-    BranchNode, CompiledGraph, Edge, GateNode, Graph, GraphBuilder, HumanNode, MergeNode,
-    Node, NodeId, NodeType, ParallelNode, PromptNode, TransformNode,
+    BranchNode, CompiledGraph, Edge, GateNode, Graph, GraphBuilder, HumanNode, InterruptNode,
+    LoopNode, MergeNode, Node, NodeId, NodeType, ParallelNode, PromptNode, SelectorCase,
+    SelectorNode, TransformNode,
 };
 pub use runner::{run_graph, run_graph_with_approvals, HumanApproval};
 pub use yaml::WorkflowDef;

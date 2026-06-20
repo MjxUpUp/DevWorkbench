@@ -10,6 +10,8 @@
 //! This is the proof that the eino-inspired Rust kernel is wired end-to-end
 //! and that the v1.0 "Orchestrate" surface has a working engine under it.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -88,7 +90,7 @@ async fn three_node_workflow_compiles_and_runs_end_to_end() {
         compiled,
         json!("initial"),
         None,
-        Box::new(MockExecutor),
+        Arc::new(MockExecutor),
     );
 
     let mut events = Vec::new();
@@ -166,7 +168,7 @@ edges:
         compiled,
         json!("let's go now"),
         None,
-        Box::new(MockExecutor),
+        Arc::new(MockExecutor),
     );
 
     let mut final_out = Value::Null;

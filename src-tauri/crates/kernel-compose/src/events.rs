@@ -24,6 +24,8 @@ pub enum NodeStatus {
     Skipped,
     /// Paused waiting for human approval (Human node).
     WaitingApproval,
+    /// Aborted by an Interrupt node (user-intended halt, not a failure).
+    Interrupted,
 }
 
 /// Edge semantic. Normal carries data; Branch is conditional (evaluated by
@@ -64,6 +66,10 @@ pub enum GraphEvent {
     GraphDone { output: Value },
     /// The whole graph failed.
     GraphFailed { error: String },
+    /// The graph was aborted by an Interrupt node. Distinct from `GraphFailed`:
+    /// an interrupt is a user-intended halt (e.g. a coze/dify "end/terminate"
+    /// node firing), not an error. The `reason` is the Interrupt node's message.
+    GraphInterrupted { reason: String },
 }
 
 impl GraphEvent {
