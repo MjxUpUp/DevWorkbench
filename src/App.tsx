@@ -95,9 +95,10 @@ function App() {
       }
     };
 
+    let cancelled = false;
     (async () => {
       const { listen: listenFn } = await import('@tauri-apps/api/event');
-      unlisten = await listenFn<{ sessionId: string; status: string; exitCode: number | null }>('agent:completed', async (event) => {
+      const fn = await listenFn<{ sessionId: string; status: string; exitCode: number | null }>('agent:completed', async (event) => {
         const { status } = event.payload;
         const sessions = useAgentStore.getState().sessions;
         const session = sessions.find(s => s.id === event.payload.sessionId);
@@ -118,9 +119,15 @@ function App() {
           }
         }
       });
+      if (cancelled) {
+        fn(); // component unmounted before listen() resolved — clean up now, no leak
+      } else {
+        unlisten = fn;
+      }
     })();
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, []);

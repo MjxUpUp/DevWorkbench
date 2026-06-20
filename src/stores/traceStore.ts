@@ -22,18 +22,31 @@ interface TraceState {
   clear: () => void;
 }
 
-export const useTraceStore = create<TraceState>((set) => ({
-  traces: null,
-  loading: false,
-  error: null,
-  fetchTraces: async (sessionId) => {
-    set({ loading: true, error: null });
-    try {
-      const traces = await invoke<LlmTrace[]>('list_llm_traces', { sessionId });
-      set({ traces, loading: false });
-    } catch (e) {
-      set({ traces: null, loading: false, error: String(e) });
-    }
-  },
-  clear: () => set({ traces: null, loading: false, error: null }),
-}));
+export const useTraceStore = create<TraceState>((set) => {
+  // Monotonic request id so a slow in-flight fetch can't clobber the result of
+  // a faster, newer one: switching sessions back-to-back fires two fetches, and
+  // without this guard the slower (older) one wins if it resolves last, showing
+  // the wrong turn's traces.
+  let fetchSeq = 0;
+  return {
+    traces: null,
+    loading: false,
+    error: null,
+    fetchTraces: async (sessionId) => {
+      const myId = ++fetchSeq;
+      set({ loading: true, error: null });
+      try {
+        const traces = await invoke<LlmTrace[]>('list_llm_traces', { sessionId });
+        if (myId !== fetchSeq) return; // superseded by a newer fetch — drop stale result
+        set({ traces, loading: false });
+      } catch (e) {
+        if (myId !== fetchSeq) return;
+        set({ traces: null, loading: false, error: String(e) });
+      }
+    },
+    clear: () => {
+      fetchSeq += 1; // invalidate any in-flight fetch
+      set({ traces: null, loading: false, error: null });
+    },
+  };
+});

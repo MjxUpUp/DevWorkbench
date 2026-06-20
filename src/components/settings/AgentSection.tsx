@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentStore } from '../../stores/agentStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import type { ToolStatus, TerminalInfo } from '../../types';
+import { useDebouncedCallback } from '../../hooks/useDebouncedCallback';
+import type { AppSettings, ToolStatus, TerminalInfo } from '../../types';
 
 const NON_AGENT_TOOLS = ['code', 'git'];
 
@@ -27,12 +28,20 @@ export function AgentSection() {
       .catch(() => {});
   }, []);
 
+  // Debounce saves so a typing burst is one IPC write, not one per keystroke —
+  // without this, fast typing floods the backend with concurrent save_settings
+  // calls racing into the same row (IPC backlog + last-writer-lost).
+  const debouncedSave = useDebouncedCallback(
+    (patch: Partial<AppSettings>) => { void saveSettings(patch); },
+    300,
+  );
+
   const setToolPath = (tool: string, path: string) => {
-    saveSettings({ tool_paths: { ...settings.tool_paths, [tool]: path } });
+    debouncedSave({ tool_paths: { ...settings.tool_paths, [tool]: path } });
   };
 
   const setCliFlag = (tool: string, flag: string) => {
-    saveSettings({ cli_flags: { ...settings.cli_flags, [tool]: flag } });
+    debouncedSave({ cli_flags: { ...settings.cli_flags, [tool]: flag } });
   };
 
   const setPreferredTerminal = (id: string) => {

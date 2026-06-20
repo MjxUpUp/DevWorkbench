@@ -135,32 +135,37 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Avoid emitting YAML while we're ingesting an external change (re-import).
   const importingRef = useRef(false);
+  // Mirrors of graph/positions for the yaml-driven effect below. That effect
+  // intentionally lists only [yaml] as its dep, so the closure's graph/
+  // positions would be stale; reading via refs acts on fresh state without
+  // widening the dep array (which would re-run on every drag and fight the
+  // round-trip).
+  const graphRef = useRef(graph);
+  graphRef.current = graph;
+  const positionsRef = useRef(positions);
+  positionsRef.current = positions;
 
   // Re-ingest when the bound YAML changes from the outside (e.g. user picks a
   // template in the YAML tab, or pastes YAML). Don't clobber positions for ids
   // we already know.
   useEffect(() => {
     importingRef.current = true;
+    const prev = graphRef.current;
     const next = yamlToGraph(yaml);
-    setGraph((prev) => {
-      const known = new Set(prev.nodes.map((n) => n.id));
-      setPositions((pp) => {
-        const updated = { ...pp };
-        let nextIdx = 0;
-        for (const n of next.nodes) {
-          if (!updated[n.id]) updated[n.id] = gridPosition(prev.nodes.length + nextIdx);
-          nextIdx += 1;
-        }
-        // Drop positions for removed nodes.
-        for (const id of Object.keys(updated)) {
-          if (!known.has(id) && !next.nodes.some((n) => n.id === id)) {
-            // keep — harmless, and avoids flicker if it comes back
-          }
-        }
-        return updated;
-      });
-      return next;
-    });
+    const updated = { ...positionsRef.current };
+    let nextIdx = 0;
+    for (const n of next.nodes) {
+      if (!updated[n.id]) updated[n.id] = gridPosition(prev.nodes.length + nextIdx);
+      nextIdx += 1;
+    }
+    // setGraph + setPositions as two SEPARATE, pure calls. The old code nested
+    // setPositions INSIDE the setGraph updater — an impure updater that, under
+    // React Strict Mode (double-invoke) or concurrent rendering, ran the inner
+    // dispatch twice against a stale `prev` closure and mangled grid positions.
+    // Stale positions for nodes that left the graph are intentionally kept
+    // (harmless, avoids flicker if the node returns).
+    setGraph(next);
+    setPositions(updated);
     importingRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [yaml]);

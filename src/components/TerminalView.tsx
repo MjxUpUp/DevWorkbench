@@ -198,12 +198,12 @@ export function TerminalView({ sessionId, completedSession }: TerminalViewProps)
 
     // Forward user input to PTY
     const dataDisposable = term.onData((data) => {
-      invoke('pty_write_cmd', { sessionId, data }).catch(() => {});
+      invoke('pty_write_cmd', { sessionId, data }).catch((e) => console.warn('pty_write_cmd failed', e));
     });
 
     // Forward resize to PTY
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      invoke('pty_resize_cmd', { sessionId, cols, rows }).catch(() => {});
+      invoke('pty_resize_cmd', { sessionId, cols, rows }).catch((e) => console.warn('pty_resize_cmd failed', e));
     });
 
     return () => {

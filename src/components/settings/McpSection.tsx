@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfigStore } from '../../stores/configStore';
@@ -28,17 +28,35 @@ export function McpSection() {
 
   const installedAgents = agents.filter((a) => a.installed);
 
-  // Load config when project is selected
+  // Refs to detect unsaved local edits on project switch without widening the
+  // load effect's dep array. `serversRef` mirrors the live local edits;
+  // `lastLoadedRef` is the config most recently pushed into local state. They
+  // differ by reference exactly when the user has edited but not saved.
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
+  const lastLoadedRef = useRef<McpServerConfig[] | null>(null);
+
+  // Load config when project is selected. Guard against silently discarding
+  // unsaved edits: if local servers diverge (by reference) from what was
+  // loaded, confirm before overwriting them with the new project's config.
   useEffect(() => {
-    if (activeProject) {
-      loadConfig(activeProject.path);
+    if (!activeProject) return;
+    if (
+      lastLoadedRef.current !== null &&
+      serversRef.current !== lastLoadedRef.current
+    ) {
+      if (!window.confirm('当前项目有未保存的 MCP 配置更改，切换项目将丢弃这些更改。是否继续？')) {
+        return;
+      }
     }
+    loadConfig(activeProject.path);
   }, [activeProject, loadConfig]);
 
   // Sync local state when config loads
   useEffect(() => {
     if (mcpConfig) {
       setServers(mcpConfig.servers);
+      lastLoadedRef.current = mcpConfig.servers;
     }
   }, [mcpConfig]);
 

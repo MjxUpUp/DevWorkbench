@@ -67,3 +67,54 @@ describe('traceStore.fetchTraces', () => {
     expect(useTraceStore.getState().error).toBeNull();
   });
 });
+
+describe('traceStore — fetch race guard', () => {
+  beforeEach(() => {
+    useTraceStore.setState({ traces: null, loading: false, error: null });
+    vi.clearAllMocks();
+  });
+
+  // A promise whose resolution we control, so a test can resolve fetches in a
+  // chosen order and assert the race guard keeps the right one.
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('drops the result of a superseded (slower, older) fetch', async () => {
+    const slowA = deferred<LlmTrace[]>();
+    const fastB = deferred<LlmTrace[]>();
+    vi.mocked(invoke).mockReturnValueOnce(slowA.promise).mockReturnValueOnce(fastB.promise);
+
+    const pA = useTraceStore.getState().fetchTraces('A'); // started first → stale
+    const pB = useTraceStore.getState().fetchTraces('B'); // started second → supersedes A
+
+    // B resolves first (fast) — its result applies.
+    fastB.resolve([trace400]);
+    await pB;
+    expect(useTraceStore.getState().traces).toEqual([trace400]);
+
+    // A resolves last (slow) — stale, must NOT clobber B. Without the guard the
+    // older fetch would win and the UI would show the wrong turn's traces.
+    slowA.resolve([{ ...trace400, id: 'stale' }]);
+    await pA;
+    expect(useTraceStore.getState().traces).toEqual([trace400]);
+    expect(useTraceStore.getState().loading).toBe(false);
+  });
+
+  it('clear() invalidates an in-flight fetch so its late result never lands', async () => {
+    const pending = deferred<LlmTrace[]>();
+    vi.mocked(invoke).mockReturnValueOnce(pending.promise);
+    const p = useTraceStore.getState().fetchTraces('A');
+    useTraceStore.getState().clear(); // bump seq → pending result is now stale
+    pending.resolve([{ ...trace400, id: 'late' }]);
+    await p;
+    const s = useTraceStore.getState();
+    expect(s.traces).toBeNull();
+    expect(s.loading).toBe(false);
+    expect(s.error).toBeNull();
+  });
+});

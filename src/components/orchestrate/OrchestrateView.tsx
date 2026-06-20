@@ -70,6 +70,13 @@ export function OrchestrateView() {
         const { event } = e.payload;
         applyEvent(event);
         setEventLog((prev) => [...prev.slice(-50), formatEvent(event)]);
+        // A terminal event means the run is truly over — clear the spinner.
+        // run_workflow resolves immediately with a run_id (before the graph
+        // finishes streaming), so without this the button reverts to idle while
+        // the workflow is still executing.
+        if (event.kind === 'graph_done' || event.kind === 'graph_failed') {
+          setRunning(false);
+        }
       });
       if (cancelled) {
         fn(); // already unmounted — clean up immediately
@@ -99,9 +106,10 @@ export function OrchestrateView() {
       startRun(result.run_id);
     } catch (e) {
       setEventLog((prev) => [...prev, `[error] ${String(e)}`]);
-    } finally {
-      setRunning(false);
+      setRunning(false); // start failed before any run_id — clear the spinner
     }
+    // NOTE: no finally here — the run continues after run_workflow resolves;
+    // running is cleared on the terminal graph_done/graph_failed event instead.
   };
 
   return (

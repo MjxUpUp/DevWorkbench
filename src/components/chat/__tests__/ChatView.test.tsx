@@ -9,6 +9,12 @@ import type { Project, Session, AgentInfo } from '../../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(null)) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+// ChatView calls useToast() at the top level (error toasts on send/stop). The
+// bare render here has no ToastProvider, so stub the hook to no-ops — the toast
+// UI isn't what these tests exercise.
+vi.mock('../../Toast', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), toast: vi.fn() }),
+}));
 
 const project: Project = {
   id: 'p1',

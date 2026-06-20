@@ -10,6 +10,7 @@ import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
 import { useProvidersStore } from '../../stores/providersStore';
 import type { ModelOption } from '../ModelSelector';
+import { useToast } from '../Toast';
 
 interface AttachedFile {
   path: string;
@@ -20,6 +21,7 @@ export function ChatView() {
   const project = useNavigationStore((s) => s.activeProject);
   const activeConversationId = useNavigationStore((s) => s.selectedConversationId);
   const selectConversation = useNavigationStore((s) => s.selectConversation);
+  const toast = useToast();
 
   // Agent state — the selected agent applies to the NEXT turn. Because turns
   // can switch agents within one conversation, this is per-send, not per-conversation.
@@ -318,13 +320,14 @@ export function ChatView() {
       setAttachedFiles([]);
     } catch (e) {
       console.error('Failed to send:', e);
+      toast.error(`发送失败: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [selectedAgent, prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel]);
+  }, [selectedAgent, prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel, toast]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
-    try { await stopAgent(runningSession.id); } catch (e) { console.error('Failed to stop:', e); }
-  }, [runningSession, stopAgent]);
+    try { await stopAgent(runningSession.id); } catch (e) { console.error('Failed to stop:', e); toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`); }
+  }, [runningSession, stopAgent, toast]);
 
   const handleClear = useCallback(() => {
     // "New conversation" intent — drop the selection so the empty-state shows
