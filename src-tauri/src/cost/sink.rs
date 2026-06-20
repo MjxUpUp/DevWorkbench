@@ -105,6 +105,53 @@ pub fn optional_shared(
     }
 }
 
+/// C2 per-dispatch cost counter. Wraps the parent's real sink (the DB sink, when
+/// present) and a shared [`CostAccumulator`]: every `record` increments the
+/// accumulator (so the SubAgentTool can attribute THIS dispatch's tokens + cost)
+/// AND forwards to the inner sink (so cost_records + the dashboard aggregate are
+/// unchanged — the parent turn's total still includes the child's calls). When
+/// `inner` is None the counter tallies but persists nothing (tests / ad-hoc).
+///
+/// Installed by [`crate::kernel_impl::react_agent::GlmChatModel::fork_with_counting_cost`]
+/// onto a per-dispatch forked model, so a fan-out's per-child cost is visible on
+/// the multi-agent board — the anti-"10× cost" visibility the C2 design requires
+/// (prerequisite B3/B5 cost infrastructure now in place).
+pub struct CountingCostSink {
+    inner: Option<Arc<dyn CostSink>>,
+    accumulator: Arc<kernel_core::CostAccumulator>,
+}
+
+impl CountingCostSink {
+    pub fn new(
+        inner: Option<Arc<dyn CostSink>>,
+        accumulator: Arc<kernel_core::CostAccumulator>,
+    ) -> Self {
+        Self { inner, accumulator }
+    }
+}
+
+impl CostSink for CountingCostSink {
+    fn record(&self, model: &str, usage: pricing::TokenUsage, cost_usd: f64) {
+        // Derive the same honest total the DB sink would, so the accumulator's
+        // cost matches what's persisted (a 0.0 caller means "price it here").
+        let cost = if cost_usd > 0.0 {
+            cost_usd
+        } else {
+            pricing::cost_breakdown(usage, pricing::pricing_for(model)).total()
+        };
+        self.accumulator.add(
+            usage.input as u64,
+            usage.output as u64,
+            usage.cache_read as u64,
+            usage.cache_write as u64,
+            cost,
+        );
+        if let Some(inner) = &self.inner {
+            inner.record(model, usage, cost_usd);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +179,72 @@ mod tests {
             pricing::TokenUsage { input: 10, output: 5, cache_read: 8, cache_write: 3 },
             0.0,
         );
+    }
+
+    /// Captures every record so a test can assert the inner sink still received
+    /// what the counter forwarded (DB attribution must survive the wrap).
+    #[derive(Default)]
+    struct CapturingSink {
+        records: std::sync::Mutex<Vec<(String, u32, u32, f64)>>,
+    }
+
+    impl CostSink for CapturingSink {
+        fn record(&self, model: &str, usage: pricing::TokenUsage, cost_usd: f64) {
+            self.records.lock().unwrap().push((
+                model.to_string(),
+                usage.input,
+                usage.output,
+                cost_usd,
+            ));
+        }
+    }
+
+    #[test]
+    fn counting_sink_tallies_and_forwards_to_inner() {
+        // C2 contract: the accumulator sums every record's tokens + cost so the
+        // SubAgentTool can label one dispatch, AND the inner sink still receives
+        // each record so cost_records / the dashboard total are unchanged.
+        let inner = Arc::new(CapturingSink::default());
+        let accumulator = Arc::new(kernel_core::CostAccumulator::new());
+        let sink = CountingCostSink::new(Some(Arc::clone(&inner) as Arc<dyn CostSink>), Arc::clone(&accumulator));
+
+        // glm-4.6: $1/M in, $3.2/M out. 1000 in + 500 out = $0.001 + $0.0016 = $0.0026.
+        sink.record("glm-4.6", pricing::TokenUsage::new(1000, 500), 0.0);
+        sink.record("glm-4.6", pricing::TokenUsage::new(200, 100), 0.0);
+
+        let tally = accumulator.tally();
+        assert_eq!(tally.input_tokens, 1200, "inputs accumulate");
+        assert_eq!(tally.output_tokens, 600, "outputs accumulate");
+        assert!(tally.cost_usd > 0.0, "cost derived from pricing when 0.0");
+        // Forwarding: both records reached the inner sink verbatim.
+        let recs = inner.records.lock().unwrap();
+        assert_eq!(recs.len(), 2, "inner sink received every record (DB attribution preserved)");
+        assert_eq!(recs[0].0, "glm-4.6");
+    }
+
+    #[test]
+    fn counting_sink_tallies_with_no_inner_sink() {
+        // A forked model with no parent DB sink (ad-hoc / test) must still tally
+        // without panicking — the SubAgentTool gets a cost line either way.
+        let accumulator = Arc::new(kernel_core::CostAccumulator::new());
+        let sink = CountingCostSink::new(None, Arc::clone(&accumulator));
+        sink.record("glm-4.6", pricing::TokenUsage::new(50, 25), 0.0009);
+        let tally = accumulator.tally();
+        assert_eq!(tally.input_tokens, 50);
+        assert_eq!(tally.output_tokens, 25);
+        assert!((tally.cost_usd - 0.0009).abs() < 1e-9, "non-zero caller cost used as-is");
+    }
+
+    #[test]
+    fn counting_sink_empty_tally_when_no_records() {
+        // The SubAgentTool suppresses the cost line when the child made no tracked
+        // LLM calls — a fresh accumulator must read all-zero.
+        let accumulator = Arc::new(kernel_core::CostAccumulator::new());
+        let sink = CountingCostSink::new(None, Arc::clone(&accumulator));
+        let _ = sink; // constructed but never recorded into
+        let tally = accumulator.tally();
+        assert_eq!(tally.input_tokens, 0);
+        assert_eq!(tally.output_tokens, 0);
+        assert_eq!(tally.cost_usd, 0.0);
     }
 }

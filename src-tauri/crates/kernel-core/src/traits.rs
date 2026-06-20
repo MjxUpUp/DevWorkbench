@@ -68,6 +68,66 @@ pub struct ToolContext {
     pub conversation_id: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// C2 per-dispatch cost tally (kernel-core, DB-agnostic)
+// ---------------------------------------------------------------------------
+
+/// A point-in-time read of a [`CostAccumulator`]. Plain `Copy` data so the
+/// SubAgentTool can snapshot a dispatch's totals after the child run without
+/// holding the lock. All-zero (the default) means the child made no tracked LLM
+/// calls — the cost line is suppressed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostTally {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// A thread-safe per-dispatch cost tally. Lives in kernel-core (no DB or pricing
+/// dependency) so [`ChatModel::fork_with_counting_cost`] can return it across
+/// the trait seam: the production model wraps its DB cost sink in a counter that
+/// increments this accumulator AND forwards to the DB (attribution preserved),
+/// then the SubAgentTool reads [`CostAccumulator::tally`] to label that one
+/// dispatch's token + cost usage on the multi-agent board (C2 — the
+/// anti-"10× cost" visibility the design requires, now that B3/B5 make cost
+/// computable).
+#[derive(Debug, Default)]
+pub struct CostAccumulator {
+    inner: std::sync::Mutex<CostTally>,
+}
+
+impl CostAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one LLM call's usage + cost to this dispatch's running total. Called
+    /// by the counting cost sink wrapper on every record.
+    pub fn add(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost_usd: f64,
+    ) {
+        let mut t = self.inner.lock().expect("CostAccumulator mutex poisoned");
+        t.input_tokens += input_tokens;
+        t.output_tokens += output_tokens;
+        t.cache_read_tokens += cache_read_tokens;
+        t.cache_write_tokens += cache_write_tokens;
+        t.cost_usd += cost_usd;
+    }
+
+    /// Snapshot the accumulated totals. Zero across the board when no tracked
+    /// call landed (the SubAgentTool uses that to suppress an empty cost line).
+    pub fn tally(&self) -> CostTally {
+        *self.inner.lock().expect("CostAccumulator mutex poisoned")
+    }
+}
+
 /// An LLM chat model. `generate` is the blocking path; `stream` yields tokens.
 ///
 /// `with_tools` returns a NEW model instance bound to the given tools (immutable,
@@ -93,6 +153,21 @@ pub trait ChatModel: Send + Sync {
         Err(Error::Unsupported(
             "this ChatModel does not support tool calling".into(),
         ))
+    }
+
+    /// Fork this model so a dispatched sub-agent's LLM cost is tallied
+    /// separately and can be attributed to that one dispatch (C2 per-dispatch
+    /// cost visibility on the multi-agent board). Returns `None` by default —
+    /// every test/ad-hoc model opts out, so the SubAgentTool falls back to the
+    /// shared parent model and runs cost-blind (unchanged behavior). Only the
+    /// production GlmChatModel overrides this: it clones itself with a counting
+    /// cost sink wrapping the parent's DB sink (DB attribution preserved), and
+    /// returns the forked model + the accumulator the caller reads after the
+    /// child run.
+    fn fork_with_counting_cost(
+        &self,
+    ) -> Option<(std::sync::Arc<dyn ChatModel>, std::sync::Arc<CostAccumulator>)> {
+        None
     }
 }
 

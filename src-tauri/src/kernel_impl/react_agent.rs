@@ -20,8 +20,9 @@ use tokio::sync::Semaphore;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
-    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus, ChatModel, Error,
-    Message, MessageStream, ModelOptions, Role, Tool, ToolContext, ToolInfo,
+    AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus, ChatModel,
+    CostAccumulator, CostTally, Error, Message, MessageStream, ModelOptions, Role, Tool,
+    ToolContext, ToolInfo,
 };
 use serde_json::{json, Value};
 
@@ -618,6 +619,25 @@ impl ChatModel for GlmChatModel {
         clone.bound_tools = tools.to_vec();
         Ok(Box::new(clone))
     }
+
+    /// C2: fork this model with a counting cost sink wrapping the parent's DB
+    /// sink, so a dispatched sub-agent's LLM calls are tallied into a per-
+    /// dispatch accumulator the SubAgentTool reads after the child run — while
+    /// still landing in cost_records (attribution preserved via the inner sink).
+    /// The fork shares circuit/trace/timing/session_id (all Arc) with the parent,
+    /// only the cost sink is swapped, so a fan-out's per-child cost is visible on
+    /// the multi-agent board without losing the dashboard total.
+    fn fork_with_counting_cost(
+        &self,
+    ) -> Option<(std::sync::Arc<dyn ChatModel>, std::sync::Arc<CostAccumulator>)> {
+        let accumulator = std::sync::Arc::new(CostAccumulator::new());
+        let counting = std::sync::Arc::new(crate::cost::sink::CountingCostSink::new(
+            self.cost_sink.clone(),
+            std::sync::Arc::clone(&accumulator),
+        )) as std::sync::Arc<dyn crate::cost::sink::CostSink>;
+        let forked = self.clone().with_cost_sink(counting);
+        Some((std::sync::Arc::new(forked) as std::sync::Arc<dyn ChatModel>, accumulator))
+    }
 }
 
 /// Process-wide shared circuit breaker for GLM (Anthropic-compatible)
@@ -1113,6 +1133,21 @@ impl SubAgentTool {
     }
 }
 
+/// Format the C2 per-dispatch cost footer appended to a dispatch_subagent
+/// result. Empty (no footer) when the tally is `None` (the model can't fork —
+/// test/ad-hoc models) or all-zero (the child made no tracked LLM calls). The
+/// exact `📊 子 agent 用量: A→B tok · $C` shape is the wire contract the frontend
+/// `extractDispatches` regex parses, so it's a pure fn to unit-test in isolation.
+fn format_cost_line(tally: Option<CostTally>) -> String {
+    match tally {
+        Some(t) if t.input_tokens + t.output_tokens > 0 => format!(
+            "\n\n📊 子 agent 用量: {}→{} tok · ${:.4}",
+            t.input_tokens, t.output_tokens, t.cost_usd
+        ),
+        _ => String::new(),
+    }
+}
+
 #[async_trait]
 impl Tool for SubAgentTool {
     fn info(&self) -> ToolInfo {
@@ -1174,8 +1209,17 @@ impl Tool for SubAgentTool {
         // An anonymous worker, or a spec with an empty list, inherits the full
         // read-only subset.
         let child_tools = self.child_tool_registry(&tools_allow);
+        // C2: fork the model with a per-dispatch counting cost sink when the
+        // model supports it (production GlmChatModel), so this child's LLM cost
+        // is tallied into an accumulator we read after the run and append to the
+        // tool result — the per-dispatch cost visibility the multi-agent board
+        // surfaces. Test/ad-hoc models return None and run cost-blind (unchanged).
+        let (child_model, accumulator) = match self.model.fork_with_counting_cost() {
+            Some((m, acc)) => (m, Some(acc)),
+            None => (Arc::clone(&self.model), None),
+        };
         let child =
-            ReactAgent::new_shared(Arc::clone(&self.model), child_tools, worker_prompt.as_str())
+            ReactAgent::new_shared(child_model, child_tools, worker_prompt.as_str())
                 .with_context(ctx.clone())
                 .with_max_steps(self.max_steps);
         // C2/D3: hold a concurrency permit for the whole child run so a parent
@@ -1189,7 +1233,12 @@ impl Tool for SubAgentTool {
             .await
             .expect("subagent concurrency semaphore should never be closed");
         match child.run_loop(&task, ModelOptions::default()).await {
-            Ok(out) => Ok(format!("[子 agent 结论] {out}")),
+            Ok(out) => {
+                let cost_line = format_cost_line(
+                    accumulator.as_deref().map(kernel_core::CostAccumulator::tally),
+                );
+                Ok(format!("[子 agent 结论] {out}{cost_line}"))
+            }
             Err(e) => {
                 // Surface the failure as a tool result, not an error, so the
                 // parent can adapt (retry differently / do it inline) instead
@@ -2298,6 +2347,34 @@ mod tests {
         assert_eq!(
             parse_subagent_status("[子 agent 失败: model returned 400]"),
             Some(SubagentStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn format_cost_line_renders_tally_in_the_wire_shape() {
+        // The exact "📊 子 agent 用量: A→B tok · $C" shape is the contract the
+        // frontend extractDispatches regex parses — guard it so a format drift
+        // surfaces here, not as a silent blank board.
+        let line = format_cost_line(Some(CostTally {
+            input_tokens: 1234,
+            output_tokens: 567,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.0123,
+        }));
+        assert!(line.contains("1234→567 tok"), "token split rendered: {line}");
+        assert!(line.contains("$0.0123"), "cost rendered 4dp: {line}");
+    }
+
+    #[test]
+    fn format_cost_line_suppresses_when_no_tracked_calls() {
+        // None (model can't fork) or all-zero tally (child made no LLM call) →
+        // empty string, so the board shows no spurious "0→0 tok · $0.0000".
+        assert_eq!(format_cost_line(None), "");
+        assert_eq!(
+            format_cost_line(Some(CostTally::default())),
+            "",
+            "all-zero tally suppressed"
         );
     }
 
