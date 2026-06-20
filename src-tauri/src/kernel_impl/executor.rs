@@ -255,7 +255,16 @@ pub(crate) fn build_react_agent(
                 conversation_id_owned,
             ))
             .with_session_id(session_id_owned)
-            .with_trace_sink(trace_sink),
+            .with_trace_sink(trace_sink)
+            // B3 timing observability: flags slow LLM turns (latency > 60s, or
+            // ttfb > 30s) via a warn log on every agent that reaches the HTTP
+            // boundary. Pure observability (no gating) so a hardcoded default
+            // threshold is honest here — mirrors shared_glm_circuit()'s
+            // process-wide-default pattern; unlike rate-limit/auth middleware it
+            // can't reject or stall a request, so it doesn't need Config wiring.
+            .with_timing_checker(std::sync::Arc::new(
+                crate::trace::TimingChecker::default_threshold(),
+            )),
     );
 
     // Build the tool registry: skills + MCP tools + the subagent dispatcher.

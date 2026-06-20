@@ -66,6 +66,11 @@ pub struct GlmChatModel {
     /// failed session's root cause is queryable, instead of being lost to a
     /// bare status string.
     trace_sink: Option<Arc<dyn TraceSink>>,
+    /// B3 optional timing checker — flags slow LLM turns (total latency or
+    /// time-to-first-byte over threshold) so a hung/stalled model call is
+    /// surfaced as a warn log instead of silently inflating latency. None =
+    /// unchecked (tests / ad-hoc agents). Shared across with_tools clones.
+    timing_checker: Option<Arc<crate::trace::TimingChecker>>,
     /// The session id this model is serving (for trace attribution). Set by
     /// build_react_agent from the driver's session id; None for ad-hoc/test
     /// agents. Passed to trace_sink.record_llm_call so traces join the session.
@@ -90,6 +95,7 @@ impl GlmChatModel {
             circuit: None,
             cost_sink: None,
             trace_sink: None,
+            timing_checker: None,
             session_id: None,
         }
     }
@@ -119,6 +125,15 @@ impl GlmChatModel {
         self
     }
 
+    /// Attach a TimingChecker (B3) that flags slow LLM turns. The checker is
+    /// invoked once per recorded call with the turn's latency + ttfb; a
+    /// threshold crossing is logged at warn. Pass a `disabled()` checker to
+    /// attach the seam without flagging (useful in tests).
+    pub fn with_timing_checker(mut self, checker: Arc<crate::trace::TimingChecker>) -> Self {
+        self.timing_checker = Some(checker);
+        self
+    }
+
     /// Set the session id this model serves, so traces attribute to the right
     /// session row. None for ad-hoc/test agents (traces still record, with a
     /// null session_id).
@@ -129,7 +144,13 @@ impl GlmChatModel {
 
     /// Record one LLM call to the trace sink (if attached). Centralizes
     /// `LlmTrace` construction so generate/stream stay readable; no-op when no
-    /// sink is attached (tests / ad-hoc agents).
+    /// sink is attached (tests / ad-hoc agents). B3: also runs the attached
+    /// TimingChecker so a slow turn is flagged at warn (independent of whether
+    /// a trace sink is attached — timing health surfaces either way).
+    ///
+    /// `ttfb_ms` = request-send → first response signal (None when the call
+    /// never reached a first byte). `stream_ms` = first-byte → completion (None
+    /// when there was no streaming/output phase).
     #[allow(clippy::too_many_arguments)]
     fn record_trace(
         &self,
@@ -141,7 +162,20 @@ impl GlmChatModel {
         latency_ms: u64,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
+        ttfb_ms: Option<u64>,
+        stream_ms: Option<u64>,
     ) {
+        // B3: flag slow turns before persisting. Checked regardless of the sink
+        // (timing health is observability any attached agent should get).
+        if let Some(checker) = &self.timing_checker {
+            if let Some(w) = checker.check(latency_ms, ttfb_ms) {
+                log::warn!(
+                    "[timing] {model} {}: {}",
+                    w.kind,
+                    w.message
+                );
+            }
+        }
         if let Some(sink) = &self.trace_sink {
             sink.record_llm_call(
                 self.session_id.as_deref(),
@@ -155,6 +189,8 @@ impl GlmChatModel {
                     latency_ms: Some(latency_ms),
                     input_tokens,
                     output_tokens,
+                    ttfb_ms,
+                    stream_ms,
                 },
             );
         }
@@ -345,6 +381,8 @@ impl ChatModel for GlmChatModel {
                     t0.elapsed().as_millis() as u64,
                     None,
                     None,
+                    None,
+                    None,
                 );
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
@@ -352,6 +390,11 @@ impl ChatModel for GlmChatModel {
                 return Err(Error::Network(e.to_string()));
             }
         };
+        // B3: headers received = first-byte for the non-stream path. TTFB is
+        // the model "thinking" time (send → first response signal); the body
+        // download (resp.json below) is the stream_ms phase.
+        let t_first = Instant::now();
+        let ttfb_ms = t_first.duration_since(t0).as_millis() as u64;
         let status = resp.status();
         if !status.is_success() {
             if should_failover(Some(status.as_u16()), false) {
@@ -379,6 +422,8 @@ impl ChatModel for GlmChatModel {
                 t0.elapsed().as_millis() as u64,
                 None,
                 None,
+                Some(ttfb_ms),
+                None,
             );
             return Err(Error::Model(format!("GLM stream failed: {status}")));
         }
@@ -394,6 +439,8 @@ impl ChatModel for GlmChatModel {
                     t0.elapsed().as_millis() as u64,
                     None,
                     None,
+                    Some(ttfb_ms),
+                    Some(t_first.elapsed().as_millis() as u64),
                 );
                 if let Some(cb) = &self.circuit {
                     cb.record_failure(&self.base_url);
@@ -423,6 +470,8 @@ impl ChatModel for GlmChatModel {
             t0.elapsed().as_millis() as u64,
             Some(usage.input),
             Some(usage.output),
+            Some(ttfb_ms),
+            Some(t_first.elapsed().as_millis() as u64),
         );
         decode_anthropic_message(&v)
     }
@@ -453,11 +502,15 @@ impl ChatModel for GlmChatModel {
             let resp = match resp {
                 Ok(r) => r,
                 Err(e) => {
-                    model_clone.record_trace(&model_name, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None);
+                    model_clone.record_trace(&model_name, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None, None, None);
                     if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                     Err(Error::Network(e.to_string()))?
                 }
             };
+            // B3: headers received = first-byte for the non_2xx branch. The
+            // streaming branch re-stamps ttfb_at on the FIRST byte chunk (a
+            // closer-to-true first-output signal than header receipt).
+            let t_first = Instant::now();
             let status = resp.status();
             // 消费 resp:非 2xx 读 error body 再终止流;2xx 取字节流。两 arm 各自
             // move resp(互斥),用 match 而非 if + 块外 use——try_stream! 宏的 ? 让
@@ -486,6 +539,8 @@ impl ChatModel for GlmChatModel {
                         t0.elapsed().as_millis() as u64,
                         None,
                         None,
+                        Some(t_first.duration_since(t0).as_millis() as u64),
+                        None,
                     );
                     Err(Error::Model(format!("GLM stream failed: {status}")))?;
                     unreachable!("non_2xx arm always returns via ? above")
@@ -511,15 +566,22 @@ impl ChatModel for GlmChatModel {
             // Accumulate token usage from message_start/message_delta so the
             // turn's cost is recorded when the stream completes.
             let mut usage = pricing::TokenUsage::default();
+            // B3: stamp ttfb on the FIRST streamed byte chunk (the true
+            // first-output signal for a streaming call). None until then.
+            let mut ttfb_at: Option<Instant> = None;
             while let Some(chunk_res) = byte_stream.next().await {
                 let bytes = match chunk_res {
                     Ok(b) => b,
                     Err(e) => {
-                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output));
+                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64), ttfb_at.map(|t| t.elapsed().as_millis() as u64));
                         if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
                         Err(Error::Network(e.to_string()))?
                     }
                 };
+                // First successful chunk → record first-byte time (TTFB).
+                if ttfb_at.is_none() {
+                    ttfb_at = Some(Instant::now());
+                }
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 if resp_body_buf.len() < 40_000 {
                     resp_body_buf.push_str(&String::from_utf8_lossy(&bytes));
@@ -543,7 +605,10 @@ impl ChatModel for GlmChatModel {
             // Trace: clean 2xx — store the raw SSE stream (truncated) for full
             // request↔response evidence; symmetric with the error path (which
             // stores the error body). See 2026-06-19 trace observability research.
-            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output));
+            // B3 timing: ttfb = send → first chunk; stream = first chunk → now.
+            let ttfb_ms = ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64);
+            let stream_ms = ttfb_at.map(|t| t.elapsed().as_millis() as u64);
+            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_ms, stream_ms);
         };
         Ok(Box::pin(s))
     }

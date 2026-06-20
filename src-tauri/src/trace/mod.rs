@@ -8,5 +8,7 @@
 
 pub mod db;
 pub mod sink;
+pub mod timing;
 
 pub use sink::{optional_shared, truncate, DbTraceSink, LlmTrace, NullTraceSink, TraceSink};
+pub use timing::{TimingChecker, TimingWarning};

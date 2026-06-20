@@ -123,6 +123,8 @@ pub fn run() {
                     .expect("Failed to run v15 to v16 eval_runs migration");
                 migrate::migrate_v16_to_v17(&conn)
                     .expect("Failed to run v16 to v17 cost cache-columns migration");
+                migrate::migrate_v17_to_v18(&conn)
+                    .expect("Failed to run v17 to v18 trace timing-columns migration");
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {

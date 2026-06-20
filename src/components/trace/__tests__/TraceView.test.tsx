@@ -21,6 +21,8 @@ const trace400: LlmTrace = {
   latency_ms: 8,
   input_tokens: null,
   output_tokens: null,
+  ttfb_ms: null,
+  stream_ms: null,
   created_at: '2026-06-19T00:00:00Z',
 };
 
@@ -88,5 +90,56 @@ describe('TraceView', () => {
     render(<TraceView />);
     await waitFor(() => expect(useTraceStore.getState().error).toContain('db lock'));
     expect(screen.getByText(/加载失败/)).toBeInTheDocument();
+  });
+
+  it('shows the ttfb/stream split inline and a slow-turn badge over 60s', async () => {
+    // B3: latency > 60_000 must flag "slow turn" (mirrors the Rust TimingChecker
+    // DEFAULT_SLOW_TURN_MS), and the ttfb/stream split must render inline so a
+    // user sees time-to-first-byte vs output time without expanding.
+    const slow: LlmTrace = {
+      ...trace400,
+      id: 'slow1',
+      latency_ms: 75_000,
+      ttfb_ms: 12_000,
+      stream_ms: 60_000,
+    };
+    vi.mocked(invoke).mockResolvedValue([slow]);
+    render(<TraceView />);
+    await waitFor(() => expect(useTraceStore.getState().traces).toHaveLength(1));
+    expect(screen.getByText('ttfb 12000 / stream 60000')).toBeInTheDocument();
+    expect(screen.getByText('slow turn')).toBeInTheDocument();
+  });
+
+  it('flags slow ttfb (>30s) even when total latency is under 60s', async () => {
+    // A 45s turn that spent 35s before the first byte is "slow to start", not
+    // "slow to output" — the distinct diagnosis ttfb_ms exists to surface.
+    const slowStart: LlmTrace = {
+      ...trace400,
+      id: 'slow2',
+      latency_ms: 45_000,
+      ttfb_ms: 35_000,
+      stream_ms: 8_000,
+    };
+    vi.mocked(invoke).mockResolvedValue([slowStart]);
+    render(<TraceView />);
+    await waitFor(() => expect(useTraceStore.getState().traces).toHaveLength(1));
+    expect(screen.getByText('slow ttfb')).toBeInTheDocument();
+    expect(screen.queryByText('slow turn')).not.toBeInTheDocument();
+  });
+
+  it('renders the timing breakdown equation in the expanded row', async () => {
+    const timed: LlmTrace = {
+      ...trace400,
+      id: 'timed1',
+      latency_ms: 5_000,
+      ttfb_ms: 1_200,
+      stream_ms: 3_500,
+    };
+    vi.mocked(invoke).mockResolvedValue([timed]);
+    render(<TraceView />);
+    await waitFor(() => expect(useTraceStore.getState().traces).toHaveLength(1));
+    fireEvent.click(screen.getByText('400'));
+    // total = ttfb + stream (+ other for the remainder) — the breakdown equation.
+    expect(await screen.findByText(/total 5000ms = ttfb 1200ms \+ stream 3500ms/)).toBeInTheDocument();
   });
 });

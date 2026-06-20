@@ -399,6 +399,13 @@ CREATE TABLE IF NOT EXISTS llm_traces (
     latency_ms INTEGER,
     input_tokens INTEGER,
     output_tokens INTEGER,
+    -- B3 per-call timing breakdown (eino five-timing-points model → derived
+    -- intervals). ttfb_ms = request-send → first response signal (model
+    -- thinking time); stream_ms = first-byte → completion (output time). NULL
+    -- when the phase never happened (pure network failure, or pre-B3 rows).
+    -- Added by migrate_v17_to_v18 on existing DBs; present in CREATE for fresh.
+    ttfb_ms INTEGER,
+    stream_ms INTEGER,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, created_at);
