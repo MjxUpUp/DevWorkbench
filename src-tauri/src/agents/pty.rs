@@ -1349,7 +1349,7 @@ fn spawn_pipe_fallback(
     // spawn as failed and never wires up stop). Kill the child and untrack it
     // before propagating the error. The process-table entry from above is
     // already present; this removes it so the failed run leaves no live process.
-    let (resolved_conv_id, session) = {
+    let session = {
         let mut abort_on_db_fail = |err: String| -> String {
             let _ = child.kill();
             let _ = child.wait();
@@ -1392,7 +1392,7 @@ fn spawn_pipe_fallback(
         ) {
             return Err(abort_on_db_fail(e));
         }
-        (resolved_conv_id, session)
+        session
     };
 
     let stdout = child.stdout.take();
