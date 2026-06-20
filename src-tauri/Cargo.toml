@@ -11,6 +11,13 @@ rust-version = "1.80"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# C1 ACP server binary — serves the kernel as an ACP-servable agent over stdio
+# (see src/bin/dev-workbench-acp.rs). Built from the same lib crate, so it
+# shares build_react_agent / EventBridge without duplicating logic.
+[[bin]]
+name = "dev-workbench-acp"
+path = "src/bin/dev-workbench-acp.rs"
+
 [workspace]
 # Workspace root sits in src-tauri/ so tauri.conf.json relative paths
 # (frontendDist: "../dist") keep working unchanged. The main crate (dev-workbench,
