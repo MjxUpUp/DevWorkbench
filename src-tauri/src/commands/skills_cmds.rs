@@ -101,6 +101,34 @@ pub async fn install_skill_from_catalog(
         .ok_or_else(|| AppError::Skill(format!("SKILL.md not found under {source} for {name}")))?;
     let tool = SkillTool::parse_file(&path)
         .map_err(|e| AppError::Skill(format!("parse skill: {e}")))?;
+
+    // B4: static security scan at install time. Runs over the skill's on-disk
+    // content (SKILL.md body + scripts/ + references/) and assigns a
+    // security_score + findings the catalog surfaces before the user trusts the
+    // skill. Persisted into the `metadata` JSON column so `list_skills` →
+    // enrich_from_metadata surfaces it without re-scanning.
+    let base_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(&source));
+    let scan = crate::skills::scanner::scan_skill(&base_dir);
+    log::info!(
+        "skill_scanner: '{leaf}' scored {:.0} ({} findings, has_block={})",
+        scan.security_score,
+        scan.findings.len(),
+        scan.has_block(),
+    );
+    let security_details = if scan.findings.is_empty() {
+        None
+    } else {
+        Some(scan.details_text())
+    };
+    let metadata = Some(serde_json::json!({
+        "securityScore": scan.security_score,
+        "securityDetails": security_details,
+    })
+    .to_string());
+
     let skill = Skill {
         id: uuid::Uuid::new_v4().to_string(),
         org: "local".into(),
@@ -109,17 +137,17 @@ pub async fn install_skill_from_catalog(
         installed_at: Some(chrono::Utc::now().to_rfc3339()),
         path: Some(path.display().to_string()),
         quality_score: None,
-        metadata: None,
+        metadata,
         description: Some(tool.info().description),
         icon: None,
         category: None,
-        security_score: None,
+        security_score: Some(scan.security_score),
         installs: None,
         rating: None,
         author: None,
         compatible_agents: None,
         quality_details: None,
-        security_details: None,
+        security_details: security_details,
         config_schema: None,
     };
     crate::skills::registry::install_skill(&conn, &skill)?;

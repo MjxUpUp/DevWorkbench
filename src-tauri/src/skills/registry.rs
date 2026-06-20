@@ -228,4 +228,44 @@ mod tests {
         assert_eq!(find_by_org_name(&conn, "team-a", "shared").unwrap().unwrap().id, "a1");
         assert_eq!(find_by_org_name(&conn, "team-b", "shared").unwrap().unwrap().id, "b1");
     }
+
+    #[test]
+    fn security_score_metadata_round_trips_through_enrich() {
+        // B4 contract: install_skill_from_catalog writes the scanner result into
+        // the `metadata` JSON column (camelCase securityScore/securityDetails),
+        // and list_skills / find_by_org_name must surface it back via
+        // enrich_from_metadata. This pins the key-shape contract between the
+        // writer (skills_cmds.rs) and the reader (here) so a rename on either
+        // side is caught by a test, not by a silent 0-score in the catalog.
+        let conn = mem_db();
+        let mut skill = mk_skill("sec1", "risky");
+        skill.metadata = Some(
+            serde_json::json!({
+                "securityScore": 50.0_f64,
+                "securityDetails": "[BLOCK] SKILL.md:3 (rm_rf_system): blocked",
+            })
+            .to_string(),
+        );
+        install_skill(&conn, &skill).unwrap();
+        let found = find_by_org_name(&conn, "local", "risky").unwrap().expect("skill gone");
+        assert_eq!(found.security_score, Some(50.0));
+        assert_eq!(
+            found.security_details.as_deref(),
+            Some("[BLOCK] SKILL.md:3 (rm_rf_system): blocked"),
+        );
+    }
+
+    #[test]
+    fn security_score_defaults_none_when_metadata_absent() {
+        // A skill installed before B4 (or one the scanner ran clean on, with
+        // null details) must surface security_score via the metadata key, not
+        // crash on a missing/null value.
+        let conn = mem_db();
+        let mut skill = mk_skill("sec2", "clean");
+        skill.metadata = Some(serde_json::json!({ "securityScore": 100.0_f64 }).to_string());
+        install_skill(&conn, &skill).unwrap();
+        let found = find_by_org_name(&conn, "local", "clean").unwrap().expect("skill gone");
+        assert_eq!(found.security_score, Some(100.0));
+        assert!(found.security_details.is_none());
+    }
 }
