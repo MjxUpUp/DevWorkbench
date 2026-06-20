@@ -240,61 +240,58 @@ pub fn prune_old_entries(
     let cutoff = chrono::Local::now() - chrono::Duration::days(max_age_days);
     let cutoff_str = cutoff.to_rfc3339();
 
-    // Wrap in transaction to keep FTS and main table consistent
-    conn.execute_batch("BEGIN")?;
+    // Wrap in a transaction to keep FTS and the main table consistent. Use the
+    // rusqlite Transaction guard, NOT a raw `execute_batch("BEGIN")`: the guard
+    // rolls back automatically on early return / error and `commit()` closes
+    // the txn cleanly. A raw BEGIN whose ROLLBACK is ignored (`let _ = …`) can
+    // leave a pooled connection with an open transaction, poisoning every later
+    // query routed through it. Same fix the knowledge `add_entry` path already
+    // received; `unchecked_transaction` because `conn` is borrowed immutably.
+    let tx = conn.unchecked_transaction()?;
 
-    let result = (|| -> Result<usize, AppError> {
-        // Collect IDs to delete
-        let ids: Vec<String> = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM knowledge_entries WHERE updated_at < ?1")?;
-            let rows = stmt.query_map(params![cutoff_str], |row| row.get::<_, String>(0))?;
-            let mut v = Vec::new();
-            for r in rows {
-                v.push(r?);
-            }
-            v
-        };
-
-        let count = ids.len();
-        if count == 0 {
-            return Ok(0);
+    // Collect IDs to delete
+    let ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT id FROM knowledge_entries WHERE updated_at < ?1")?;
+        let rows = stmt.query_map(params![cutoff_str], |row| row.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
         }
+        v
+    };
 
-        // Delete FTS rows first (by rowid)
-        for id in &ids {
-            let rowid: Result<i64, _> = conn.query_row(
-                "SELECT rowid FROM knowledge_entries WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            );
-            if let Ok(rid) = rowid {
-                conn.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rid])?;
-            }
-        }
+    let count = ids.len();
+    if count == 0 {
+        // Nothing to delete — commit the empty txn so the guard doesn't roll it
+        // back, then return.
+        tx.commit()?;
+        return Ok(0);
+    }
 
-        // Delete main entries
-        for id in &ids {
-            conn.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
-        }
-
-        log::info!(
-            "Knowledge prune: deleted {} entries older than {} days",
-            count,
-            max_age_days
+    // Delete FTS rows first (by rowid)
+    for id in &ids {
+        let rowid: Result<i64, _> = tx.query_row(
+            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
         );
-        Ok(count)
-    })();
-
-    match &result {
-        Ok(_) => {
-            let _ = conn.execute_batch("COMMIT");
-        }
-        Err(_) => {
-            let _ = conn.execute_batch("ROLLBACK");
+        if let Ok(rid) = rowid {
+            tx.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rid])?;
         }
     }
-    result
+
+    // Delete main entries
+    for id in &ids {
+        tx.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
+    }
+
+    log::info!(
+        "Knowledge prune: deleted {} entries older than {} days",
+        count,
+        max_age_days
+    );
+    tx.commit()?;
+    Ok(count)
 }
 
 /// Get all knowledge entries for a project.

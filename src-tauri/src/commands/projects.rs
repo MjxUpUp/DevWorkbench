@@ -207,27 +207,35 @@ pub fn record_tool_open(
     tool_name: String,
 ) -> Result<Vec<Project>, String> {
     let conn = db.get().map_err(|e| e.to_string())?;
-    let tools_json: String = conn
-        .query_row(
-            "SELECT last_opened_tools FROM projects WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
+    // Serialize the read-modify-write of last_opened_tools in a transaction so
+    // two concurrent record_tool_open calls can't both read the stale list and
+    // clobber each other's update (lost-write TOCTOU). unchecked_transaction
+    // matches the &Connection borrow; the guard rolls back on any error path.
+    {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tools_json: String = tx
+            .query_row(
+                "SELECT last_opened_tools FROM projects WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("项目 {} 不存在: {}", id, e))?;
+
+        let mut tools: Vec<String> = serde_json::from_str(&tools_json).unwrap_or_default();
+        tools.retain(|t| t != &tool_name);
+        tools.insert(0, tool_name);
+        tools.truncate(5);
+
+        tx.execute(
+            "UPDATE projects SET last_opened_tools = ?1 WHERE id = ?2",
+            params![
+                serde_json::to_string(&tools).map_err(|e| e.to_string())?,
+                id
+            ],
         )
-        .map_err(|e| format!("项目 {} 不存在: {}", id, e))?;
-
-    let mut tools: Vec<String> = serde_json::from_str(&tools_json).unwrap_or_default();
-    tools.retain(|t| t != &tool_name);
-    tools.insert(0, tool_name);
-    tools.truncate(5);
-
-    conn.execute(
-        "UPDATE projects SET last_opened_tools = ?1 WHERE id = ?2",
-        params![
-            serde_json::to_string(&tools).map_err(|e| e.to_string())?,
-            id
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
 
     load_all_projects(&conn)
 }

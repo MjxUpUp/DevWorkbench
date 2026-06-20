@@ -125,8 +125,16 @@ impl DbState {
                 drop(guard);
                 let conn = Self::make_conn(&path).map_err(|e| format!("replenish: {e}"))?;
                 guard = self.0.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard.in_use += 1;
-                return Ok(PooledConn { conn: Some(conn), pool: self.0.clone() });
+                // Re-check the cap after re-locking: another thread may have
+                // replenished while we held no lock during the open. If so,
+                // close the extra connection and fall through to wait, rather
+                // than bursting past POOL_SIZE. The wasted open only happens on
+                // this rare race, never on the steady-state path.
+                if guard.in_use + guard.idle.len() < POOL_SIZE {
+                    guard.in_use += 1;
+                    return Ok(PooledConn { conn: Some(conn), pool: self.0.clone() });
+                }
+                drop(conn);
             }
             // Wait for a connection to be returned.
             let g = self.0.cvar
