@@ -1184,50 +1184,69 @@ pub(crate) fn finalize_session(
         "[completion] Session {} locking DB for completion update...",
         session_id
     );
+    // won_race == false only when update_session_db returned Ok(0): the session
+    // was already terminal (a racing stop_agent_session won). In that case skip
+    // BOTH the activity record and the agent:completed emit — finalize already
+    // lost, and re-emitting would double-fire / log the wrong terminal status.
+    // On a DB write Err (rare) keep the prior best-effort behavior: still record
+    // + emit so the UI spinner clears instead of hanging.
+    let mut won_race = true;
     if let Ok(conn) = db_conn.get() {
         log::info!(
             "[completion] Session {} DB locked, writing completion...",
             session_id
         );
-        let _ = crate::agents::session::update_session_db(&conn, session_id, patch);
-        let event_type = match session_status {
-            SessionStatus::Completed => "session_completed",
-            _ => "session_failed",
-        };
-        let _ = crate::activity::record_event(
-            &conn,
-            &crate::activity::make_activity_event(
-                session_id,
-                project_path,
-                agent_type,
-                event_type,
-                &format!(
-                    "{} session {}",
-                    agent_type.display_name(),
-                    session_status.as_str()
+        match crate::agents::session::update_session_db(&conn, session_id, patch) {
+            Ok(rows) => won_race = rows > 0,
+            Err(e) => log::error!("[finalize] status update failed for {}: {e}", session_id),
+        }
+        if won_race {
+            let event_type = match session_status {
+                SessionStatus::Completed => "session_completed",
+                _ => "session_failed",
+            };
+            let _ = crate::activity::record_event(
+                &conn,
+                &crate::activity::make_activity_event(
+                    session_id,
+                    project_path,
+                    agent_type,
+                    event_type,
+                    &format!(
+                        "{} session {}",
+                        agent_type.display_name(),
+                        session_status.as_str()
+                    ),
+                    None,
+                    files_for_activity,
                 ),
-                None,
-                files_for_activity,
-            ),
-        );
+            );
+        }
     } else {
         log::error!(
             "[finalize] Failed to lock DB for session {} completion update",
             session_id
         );
     }
-    log::info!(
-        "[finalize] Emitting agent:completed for session {}",
-        session_id
-    );
-    let _ = app.emit(
-        "agent:completed",
-        serde_json::json!({
-            "sessionId": session_id,
-            "status": session_status.as_str(),
-            "exitCode": exit_code,
-        }),
-    );
+    if won_race {
+        log::info!(
+            "[finalize] Emitting agent:completed for session {}",
+            session_id
+        );
+        let _ = app.emit(
+            "agent:completed",
+            serde_json::json!({
+                "sessionId": session_id,
+                "status": session_status.as_str(),
+                "exitCode": exit_code,
+            }),
+        );
+    } else {
+        log::info!(
+            "[finalize] Session {} already terminal — skipping agent:completed emit",
+            session_id
+        );
+    }
 
     run_post_session_hooks(
         db_conn.clone(),

@@ -599,19 +599,26 @@ pub fn stop_agent_session(
         "exitCode": 0,
         "outputSummary": "Session cancelled by user"
     });
-    {
+    let won_race = {
         let conn = db.get()?;
-        crate::agents::session::update_session_db(&conn, &session_id, patch)?;
-    }
+        crate::agents::session::update_session_db(&conn, &session_id, patch)? > 0
+    };
 
-    let _ = app.emit(
-        "agent:completed",
-        serde_json::json!({
-            "sessionId": session_id,
-            "status": "cancelled",
-            "exitCode": 0
-        }),
-    );
+    // Only emit if this stop won the running→terminal race. If the agent had
+    // already finalized naturally (status no longer 'running'), update_session_db
+    // flipped 0 rows (CAS) and finalize_session already emitted agent:completed —
+    // emitting again would double-fire the event (duplicate notification + a
+    // non-deterministic cancelled↔completed flip).
+    if won_race {
+        let _ = app.emit(
+            "agent:completed",
+            serde_json::json!({
+                "sessionId": session_id,
+                "status": "cancelled",
+                "exitCode": 0
+            }),
+        );
+    }
 
     Ok(())
 }

@@ -157,10 +157,19 @@ pub fn insert_session_db(conn: &rusqlite::Connection, s: &Session) -> Result<(),
     Ok(())
 }
 
-pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_json::Value) -> Result<(), AppError> {
+/// Returns the number of rows affected. A terminal status (completed/failed/
+/// cancelled) is write-once: the WHERE clause carries `AND status = 'running'`
+/// so a racing second writer (e.g. the user clicking stop just as the agent
+/// finishes naturally) flips 0 rows instead of clobbering the winner. Callers
+/// use the row count to tell "I won the race" (>0) from "nothing to do" (0 —
+/// either the id is absent or the session was already terminal) and skip the
+/// duplicate `agent:completed` emit in the latter case. Err is reserved for DB
+/// failures / an invalid status.
+pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_json::Value) -> Result<usize, AppError> {
     // Build SET clause dynamically based on provided fields
     let mut set_clauses: Vec<String> = Vec::new();
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut terminal_status = false;
 
     if let Some(status) = patch.get("status").and_then(|v| v.as_str()) {
         let validated = match status {
@@ -170,6 +179,7 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
             "cancelled" => "cancelled",
             _ => return Err(AppError::Agent(format!("无效 status: {}", status))),
         };
+        terminal_status = matches!(validated, "completed" | "failed" | "cancelled");
         set_clauses.push("status = ?".to_string());
         param_values.push(Box::new(validated.to_string()));
     }
@@ -211,18 +221,20 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
     }
 
     if set_clauses.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
-    let sql = format!("UPDATE sessions SET {} WHERE id = ?", set_clauses.join(", "));
+    // CAS guard: a terminal status may only transition out of 'running'. Without
+    // this, stop_agent_session and finalize_session racing in the cancel window
+    // would both write (non-deterministic final status) and both emit
+    // agent:completed (duplicate notification). The guard makes the terminal
+    // flip atomic — the loser updates 0 rows.
+    let where_running = if terminal_status { " AND status = 'running'" } else { "" };
+    let sql = format!("UPDATE sessions SET {} WHERE id = ?{}", set_clauses.join(", "), where_running);
     param_values.push(Box::new(id.to_string()));
 
     let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-    let rows = conn.execute(&sql, params.as_slice())?;
-    if rows == 0 {
-        return Err(AppError::NotFound(format!("Session {} 不存在", id)));
-    }
-    Ok(())
+    Ok(conn.execute(&sql, params.as_slice())?)
 }
 
 pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &str) -> Result<Vec<Session>, AppError> {
@@ -756,6 +768,52 @@ mod tests {
         let loaded = load_sessions_from_db(&conn).unwrap();
         assert_eq!(loaded[0].status, SessionStatus::Cancelled);
         assert_eq!(loaded[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn terminal_status_is_write_once_cas() {
+        // Regression: stop_agent_session (status=cancelled) and finalize_session
+        // (status=completed/failed) race in the cancel window. Before the CAS
+        // guard both wrote unconditionally → non-deterministic final status AND a
+        // double agent:completed. Now a terminal status is write-once: the second
+        // writer flips 0 rows (Ok(0)) so the caller skips its duplicate emit.
+        let _guard = TempDb::new();
+        let conn = test_conn();
+        insert_session_db(&conn, &make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+
+        // Natural completion wins the race first (running → completed): 1 row.
+        let rows_complete = update_session_db(
+            &conn,
+            "s1",
+            serde_json::json!({ "status": "completed", "exitCode": 0 }),
+        )
+        .unwrap();
+        assert_eq!(rows_complete, 1, "first terminal transition from running wins");
+
+        // The racing stop arrives second (already completed → cannot flip to
+        // cancelled): 0 rows. Callers use Ok(0) to skip the duplicate emit.
+        let rows_cancel = update_session_db(
+            &conn,
+            "s1",
+            serde_json::json!({ "status": "cancelled", "exitCode": 0 }),
+        )
+        .unwrap();
+        assert_eq!(rows_cancel, 0, "a terminal status cannot overwrite another");
+
+        // Final status is the winner (completed), NOT cancelled.
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        assert_eq!(loaded[0].status, SessionStatus::Completed);
+
+        // Non-status column updates are NOT CAS-guarded: a blocks write on an
+        // already-terminal session still applies (the guard only narrows terminal
+        // status flips, not arbitrary column updates).
+        let rows_blocks = update_session_db(
+            &conn,
+            "s1",
+            serde_json::json!({ "blocks": [{ "kind": "text", "content": "late" }] }),
+        )
+        .unwrap();
+        assert_eq!(rows_blocks, 1, "non-status updates are not CAS-guarded");
     }
 
     #[test]
