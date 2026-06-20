@@ -91,6 +91,48 @@ impl Drop for ListenerGuard {
     }
 }
 
+/// RAII guard that kills the spawned opaque-CLI child when the agent stream is
+/// dropped before it yields `Done` (i.e. cancellation). `ListenerGuard` only
+/// unregisters the Tauri listeners — it leaves the subprocess running, so before
+/// this guard a cancelled opaque agent orphaned its CLI (the reader/wait threads
+/// kept the session alive until the process exited on its own). This guard calls
+/// `pty::stop_agent` on drop to actually kill it.
+///
+/// `finalize()` disarms the kill once the run completes naturally (the CLI
+/// already exited by the time we yield `Done`), so a post-completion drop does
+/// not signal an already-dead process. Deliberately free of any Tauri handle so
+/// the cancel-vs-finalize logic is unit-testable in isolation.
+struct ChildKillGuard {
+    processes: Option<Arc<AgentProcesses>>,
+    session_id: String,
+    finalized: bool,
+}
+
+impl ChildKillGuard {
+    fn new(processes: Arc<AgentProcesses>, session_id: String) -> Self {
+        Self {
+            processes: Some(processes),
+            session_id,
+            finalized: false,
+        }
+    }
+
+    /// Mark the run as naturally complete — disarms the kill-on-drop.
+    fn finalize(&mut self) {
+        self.finalized = true;
+    }
+}
+
+impl Drop for ChildKillGuard {
+    fn drop(&mut self) {
+        if !self.finalized {
+            if let Some(procs) = self.processes.take() {
+                let _ = pty::stop_agent(&procs, &self.session_id);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Agent for OpaqueAgent {
     fn kind(&self) -> AgentKind {
@@ -127,6 +169,10 @@ impl Agent for OpaqueAgent {
         let resume_from = input.resume_from.clone();
 
         let s = async_stream::try_stream! {
+            // Keep a processes handle that survives the spawn closure's move, so
+            // the kill-on-drop guard (created after spawn, once we have the
+            // session id) can still reach the process table.
+            let processes_for_kill = processes.clone();
             // 1. Spawn the CLI process (sync, returns immediately with a Session).
             let session = {
                 let app = app.clone();
@@ -150,6 +196,12 @@ impl Agent for OpaqueAgent {
                 .map_err(Error::Agent)?
             };
             let session_id = session.id.clone();
+
+            // Arm kill-on-drop as early as possible (right after spawn) so that
+            // if the stream is dropped at ANY point before Done — including
+            // during listener setup below — the child is killed instead of
+            // orphaned. `finalize()` disarms it on natural completion.
+            let mut kill_guard = ChildKillGuard::new(processes_for_kill, session_id.clone());
 
             // 2. Wire up Tauri event listeners that feed an mpsc channel. We
             //    listen for pty:output (Token chunks) and agent:completed (the
@@ -271,6 +323,10 @@ impl Agent for OpaqueAgent {
 
                         let files_changed = read_session_files(&app, &session_id);
 
+                        // Natural completion — the CLI already exited, so disarm
+                        // the kill-on-drop guard before yielding Done (otherwise
+                        // the guard's drop would signal an already-dead process).
+                        kill_guard.finalize();
                         yield AgentEvent::Done(AgentOutcome {
                             status,
                             files_changed,
@@ -743,5 +799,41 @@ mod tests {
         assert!(decode_pty_output_payload(&json!("str"), "s1").is_none());
         assert!(decode_pty_output_payload(&json!([1, 2]), "s1").is_none());
         assert!(decode_pty_output_payload(&json!(null), "s1").is_none());
+    }
+
+    #[test]
+    fn child_kill_guard_kills_on_early_drop() {
+        // Cancellation path: the agent stream is dropped before Done. The spawned
+        // CLI child is still alive and must be killed (previously it orphaned —
+        // ListenerGuard only unlistened). A bogus PID is harmless: stop_agent's
+        // kill is best-effort; we assert the table entry (the kill target) is
+        // removed, which is the observable effect of the drop calling stop_agent.
+        let procs = Arc::new(AgentProcesses::new());
+        pty::track_test_pipe(&procs, "s1", 999_999);
+        assert!(pty::is_tracked(&procs, "s1"));
+        {
+            let _g = ChildKillGuard::new(procs.clone(), "s1".into());
+        }
+        assert!(
+            !pty::is_tracked(&procs, "s1"),
+            "dropping a non-finalized guard must kill the child"
+        );
+    }
+
+    #[test]
+    fn child_kill_guard_finalize_disarms_kill() {
+        // Natural-completion path: Done was yielded, so finalize() was called.
+        // Dropping the guard must NOT call stop_agent — the CLI already exited,
+        // and killing would be a redundant signal to a dead process.
+        let procs = Arc::new(AgentProcesses::new());
+        pty::track_test_pipe(&procs, "s2", 999_998);
+        {
+            let mut g = ChildKillGuard::new(procs.clone(), "s2".into());
+            g.finalize();
+        }
+        assert!(
+            pty::is_tracked(&procs, "s2"),
+            "a finalized guard must not kill an already-completed child"
+        );
     }
 }

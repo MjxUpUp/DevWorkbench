@@ -1711,6 +1711,22 @@ pub fn pty_resize(
     Ok(())
 }
 
+// Test-only accessors for the (private) process table, so other modules' tests
+// can drive stop_agent / the kill-on-drop guard without a real spawned child.
+// Track a synthetic Pipe entry (a bogus PID is harmless — stop_agent's kill is
+// best-effort and ignores a missing process; the map removal is what tests assert).
+#[cfg(test)]
+pub(crate) fn track_test_pipe(procs: &Arc<AgentProcesses>, sid: &str, pid: u32) {
+    if let Ok(mut m) = procs.processes.lock() {
+        m.insert(sid.to_string(), TrackedProcess::Pipe(pid));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn is_tracked(procs: &Arc<AgentProcesses>, sid: &str) -> bool {
+    procs.processes.lock().map(|m| m.contains_key(sid)).unwrap_or(false)
+}
+
 /// Stop a running agent session.
 pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(), String> {
     let tracked = {
