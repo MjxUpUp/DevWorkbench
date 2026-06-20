@@ -23,12 +23,39 @@ export function parseSubagentStatus(content: string): SubagentStatus | null {
 }
 
 /**
+ * Parse the C2 per-dispatch cost footer the backend appends to a
+ * dispatch_subagent tool_result (`📊 子 agent 用量: A→B tok · $C`). Mirrors the
+ * Rust `format_cost_line` wire shape EXACTLY — both sides must agree, else the
+ * board silently drops the cost. Returns undefined when there's no footer
+ * (running dispatch / test model / child made no tracked LLM call).
+ *
+ * The arrow `→` (U+2192) and the `·` separator are matched literally; the
+ * regex tolerates surrounding whitespace so a future format tweak to spacing
+ * doesn't blank the board.
+ */
+export function parseCostLine(content: string): {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+} | null {
+  const m = content.match(/📊 子 agent 用量:\s*(\d+)→(\d+)\s*tok\s*·\s*\$([\d.]+)/);
+  if (!m) return null;
+  return {
+    inputTokens: Number(m[1]),
+    outputTokens: Number(m[2]),
+    costUsd: Number(m[3]),
+  };
+}
+
+/**
  * Extract dispatch_subagent calls from an agent:event stream so the subagent
  * board can show concurrent fan-out + per-dispatch status. A tool_use starts a
  * 'running' dispatch; the next tool_result resolves the OLDEST running one
  * (the run loop emits Started×N then results×N in call order, so FIFO pairing
  * matches tool_use↔tool_result by position). Returns [] when the stream has no
- * dispatch_subagent calls (the common case — the board stays hidden).
+ * dispatch_subagent calls (the common case — the board stays hidden). C2: a
+ * resolved dispatch also carries its per-dispatch cost when the tool_result
+ * included a cost footer (parseCostLine).
  */
 export function extractDispatches(
   events: ChatStreamEvent[] | null | undefined,
@@ -43,6 +70,13 @@ export function extractDispatches(
       if (pending) {
         const parsed = parseSubagentStatus(ev.content);
         pending.status = parsed ?? (ev.is_error ? 'failed' : 'completed');
+        // C2: attribute cost when the backend stamped a footer on this result.
+        const cost = parseCostLine(ev.content);
+        if (cost) {
+          pending.inputTokens = cost.inputTokens;
+          pending.outputTokens = cost.outputTokens;
+          pending.costUsd = cost.costUsd;
+        }
       }
     }
   }

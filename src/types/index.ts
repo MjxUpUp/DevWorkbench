@@ -583,8 +583,19 @@ export type SubagentStatus =
   | 'polling_timed_out';
 
 /** One dispatch_subagent call tracked by the subagent board. `status` is
- *  'running' until the matching tool_result resolves it. */
+ *  'running' until the matching tool_result resolves it. The optional cost
+ *  fields are C2 per-dispatch attribution: the backend appends a
+ *  `📊 子 agent 用量: A→B tok · $C` footer to the dispatch's tool_result when the
+ *  child model could fork a counting cost sink (production GlmChatModel); absent
+ *  on running dispatches, test models, or when the child made no tracked calls. */
 export interface SubagentDispatch {
   task: string;
   status: 'running' | SubagentStatus;
+  /** C2: total input tokens the dispatched child consumed (sum across its LLM
+   *  calls). undefined until the tool_result lands and carries a cost footer. */
+  inputTokens?: number;
+  /** C2: total output tokens the dispatched child consumed. */
+  outputTokens?: number;
+  /** C2: total derived USD cost of the dispatched child's LLM calls. */
+  costUsd?: number;
 }
