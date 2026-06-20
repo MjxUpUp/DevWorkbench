@@ -104,6 +104,47 @@ fn lines_of(s: &str) -> Vec<String> {
     s.lines().filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
+/// Constraint ⑤ (cline CheckpointUtils.ts:44-69) — refuse to arm a checkpoint
+/// when the project IS one of the user's sensitive roots: home / Desktop /
+/// Documents / Downloads. A rollback there (`git checkout --` + untracked
+/// delete) could wipe the user's entire personal tree, so we never arm it in
+/// the first place. Only the four exact roots are refused; a project one level
+/// deeper (e.g. `~/projects/foo`) is allowed. Mirrors cline's exact-match
+/// switch; we compare on canonicalized paths and case-insensitively on Windows.
+fn assert_not_sensitive_root(project: &Path) -> Result<(), String> {
+    let home = crate::commands::projects::dirs_home();
+    let candidates = [
+        home.clone(),
+        home.join("Desktop"),
+        home.join("Documents"),
+        home.join("Downloads"),
+    ];
+    let norm = |p: &Path| -> String {
+        // canonicalize resolves symlinks + fixes separator/case drift; fall back
+        // to the literal path when the target doesn't exist yet.
+        let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        #[cfg(target_os = "windows")]
+        {
+            c.to_string_lossy().to_ascii_lowercase()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            c.to_string_lossy().into_owned()
+        }
+    };
+    let proj_norm = norm(project);
+    for c in candidates {
+        if proj_norm == norm(&c) {
+            return Err(format!(
+                "Cannot use checkpoints in {} — it is a sensitive user root \
+                 (home/Desktop/Documents/Downloads); open the project from a subdirectory instead.",
+                c.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Capture a checkpoint at session start (before the agent touches anything).
 /// Returns Err if git is unavailable or the path isn't a repo — checkpoint is
 /// an enhancement, not a gate, so callers log a warning and continue.
@@ -113,6 +154,9 @@ pub fn create_at_session_start(
     reason: &str,
 ) -> Result<Checkpoint, String> {
     let root = Path::new(project);
+    // Constraint ⑤: never arm a checkpoint in a sensitive user root — rollback
+    // there could destroy the user's whole personal tree.
+    assert_not_sensitive_root(root)?;
     let head_sha = git_run(root, &["rev-parse", "HEAD"])?;
     // `stash create -u` prints a commit SHA, or empty when the tree is clean.
     let stash_out = git_run(root, &["stash", "create", "-u"])?;
@@ -406,5 +450,34 @@ mod tests {
             "中文 agent file removed, got: {res:?}"
         );
         assert!(!tmp.path().join(name).exists());
+    }
+
+    /// Constraint ⑤ — the four sensitive user roots (home / Desktop / Documents
+    /// / Downloads) are refused; a project that is merely *under* home is
+    /// allowed. Mirrors cline CheckpointUtils.ts:54-68's exact-match switch.
+    #[test]
+    fn refuses_sensitive_user_roots() {
+        let home = crate::commands::projects::dirs_home();
+        for sub in &["", "Desktop", "Documents", "Downloads"] {
+            let p = if sub.is_empty() { home.clone() } else { home.join(sub) };
+            let err = assert_not_sensitive_root(&p).unwrap_err();
+            assert!(
+                err.contains("sensitive"),
+                "{} should be refused as a sensitive root, got: {err}",
+                p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn allows_project_subdirectory_of_home() {
+        // A canonicalizable temp dir is not one of the four roots → allowed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_not_sensitive_root(tmp.path()).unwrap();
+        // A non-existent subdir of home is also allowed (only the exact roots
+        // match, not everything under home).
+        let home = crate::commands::projects::dirs_home();
+        let subdir = home.join("dev-workbench-shadowgit-guard-probe");
+        assert_not_sensitive_root(&subdir).unwrap();
     }
 }
