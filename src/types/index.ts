@@ -409,6 +409,16 @@ export interface CostSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   sessionCount: number;
+  /** B5 transparent cost: per-tier token totals + the per-tier USD split, so the
+   *  dashboard shows "input $X · output $Y · cache $Z" instead of one opaque
+   *  number. The split is derived backend-side (per-model tokens × pricing).
+   *  Optional because older backends / responses may omit them. */
+  totalCacheReadTokens?: number;
+  totalCacheWriteTokens?: number;
+  inputCost?: number;
+  outputCost?: number;
+  cacheReadCost?: number;
+  cacheWriteCost?: number;
 }
 
 export interface CostTrendPoint {

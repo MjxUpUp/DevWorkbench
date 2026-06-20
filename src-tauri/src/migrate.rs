@@ -629,6 +629,56 @@ pub fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v16→v17: add `cache_read_tokens` + `cache_write_tokens` columns to
+/// `cost_records` so the B5 transparent-cost dashboard can break spend down by
+/// input / output / prompt-cache tiers. Idempotent — same probe-then-ALTER
+/// shape as v10→v11/v11→v12: a fresh DB already has both columns from the
+/// static SCHEMA and skips the ALTERs; a pre-v17 DB gets them added.
+pub fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 17 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe each column by preparing
+    // a statement that references it (same idiom as v10→v11's blocks probe).
+    let read_exists = conn
+        .prepare("SELECT cache_read_tokens FROM cost_records LIMIT 0")
+        .is_ok();
+    if !read_exists {
+        conn.execute(
+            "ALTER TABLE cost_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let write_exists = conn
+        .prepare("SELECT cache_write_tokens FROM cost_records LIMIT 0")
+        .is_ok();
+    if !write_exists {
+        conn.execute(
+            "ALTER TABLE cost_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !read_exists || !write_exists {
+        log::info!(
+            "Migrated schema v16→v17: added cost_records cache token columns (B5 transparent cost)"
+        );
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (17, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,5 +1338,100 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, 15, "version bumped to 15");
+    }
+
+    /// Build an in-memory pre-v17 DB: schema_version table pinned at 16, and a
+    /// cost_records table WITHOUT the cache columns (the legacy shape). This is
+    /// the state a real v16 DB would be in before B5 ran.
+    fn legacy_v17_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (16, '2026-06-01T00:00:00Z');
+             CREATE TABLE cost_records (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT,
+                 agent_type TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 input_tokens INTEGER NOT NULL DEFAULT 0,
+                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                 cost_usd REAL NOT NULL DEFAULT 0,
+                 recorded_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn col_count(conn: &Connection, table: &str, col: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{col}'"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_adds_cache_columns_to_pre_v17_db() {
+        let conn = legacy_v17_conn();
+        // Pre-condition: legacy table has no cache columns.
+        assert_eq!(col_count(&conn, "cost_records", "cache_read_tokens"), 0);
+        assert_eq!(col_count(&conn, "cost_records", "cache_write_tokens"), 0);
+
+        migrate_v16_to_v17(&conn).expect("pre-v17 migration must add cache columns");
+
+        assert_eq!(col_count(&conn, "cost_records", "cache_read_tokens"), 1);
+        assert_eq!(col_count(&conn, "cost_records", "cache_write_tokens"), 1);
+        let version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 17, "version bumped to 17");
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_is_idempotent() {
+        let conn = legacy_v17_conn();
+        migrate_v16_to_v17(&conn).expect("first run");
+        // Second run must not error on the now-present columns (version-gated
+        // early-return makes it a no-op).
+        migrate_v16_to_v17(&conn).expect("second run (idempotent)");
+        assert_eq!(col_count(&conn, "cost_records", "cache_read_tokens"), 1);
+        assert_eq!(col_count(&conn, "cost_records", "cache_write_tokens"), 1);
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_is_a_noop_on_fresh_db() {
+        // A fresh DB (init_db already ran v17) has schema_version=17, so the
+        // migration must skip without touching the table.
+        let g = TempDb::new();
+        // Fresh init already at v17 — re-running must be a clean no-op.
+        migrate_v16_to_v17(&g.conn).expect("fresh DB v17 migration must be a no-op");
+        assert_eq!(col_count(&g.conn, "cost_records", "cache_read_tokens"), 1);
+        assert_eq!(col_count(&g.conn, "cost_records", "cache_write_tokens"), 1);
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_added_columns_default_zero_so_old_rows_aggregate() {
+        // An ALTER ADD COLUMN with DEFAULT 0 must let a pre-existing row
+        // aggregate cleanly (cache tiers read as 0). This pins the DEFAULT 0
+        // contract the aggregate query relies on.
+        let conn = legacy_v17_conn();
+        conn.execute(
+            "INSERT INTO cost_records (id, agent_type, model, input_tokens, output_tokens, cost_usd, recorded_at)
+             VALUES ('r1', 'react_kernel', 'glm-4.6', 1000, 500, 0.0026, '2026-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        migrate_v16_to_v17(&conn).unwrap();
+        let (cr, cw): (i64, i64) = conn
+            .query_row(
+                "SELECT cache_read_tokens, cache_write_tokens FROM cost_records WHERE id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cr, 0, "legacy row defaults to 0 cache_read");
+        assert_eq!(cw, 0, "legacy row defaults to 0 cache_write");
     }
 }

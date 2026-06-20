@@ -468,6 +468,14 @@ pub struct CostRecord {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// B5 transparent cost: prompt-cache tokens (Anthropic
+    /// cache_read_input_tokens / cache_creation_input_tokens). 0 for providers
+    /// (GLM) that don't report cache usage, or for pre-v17 rows. serde(default)
+    /// so older serialized records still deserialize.
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub cache_write_tokens: i64,
     pub cost_usd: f64,
     pub recorded_at: String,
 }
@@ -479,6 +487,23 @@ pub struct CostSummary {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub session_count: i64,
+    /// B5 transparent cost: per-tier token totals + the per-tier USD split, so
+    /// the dashboard shows "input $X · output $Y · cache $Z" instead of one
+    /// opaque number. The split is derived from per-model token sums × the
+    /// pricing table (aggregate_costs groups by model). serde(default) so older
+    /// clients that don't expect these fields still parse the response.
+    #[serde(default)]
+    pub total_cache_read_tokens: i64,
+    #[serde(default)]
+    pub total_cache_write_tokens: i64,
+    #[serde(default)]
+    pub input_cost: f64,
+    #[serde(default)]
+    pub output_cost: f64,
+    #[serde(default)]
+    pub cache_read_cost: f64,
+    #[serde(default)]
+    pub cache_write_cost: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

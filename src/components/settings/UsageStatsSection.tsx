@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { StatCards } from '../dashboard/StatCards';
 import { CostTrendChart } from '../dashboard/CostTrendChart';
 import { BudgetBar } from '../dashboard/BudgetBar';
+import { CostBreakdownCard } from '../dashboard/CostBreakdownCard';
 import { QualityHistory } from '../dashboard/QualityHistory';
 import { EvalPanel } from '../dashboard/EvalPanel';
 import { useDashboardStore } from '../../stores/dashboardStore';
@@ -9,7 +10,8 @@ import { useDashboardStore } from '../../stores/dashboardStore';
 /**
  * "使用统计" settings section — reuses the dashboard widgets (cost trend,
  * budget, quality history) so usage data lives in one place now that the
- * Dashboard is no longer a top-level view.
+ * Dashboard is no longer a top-level view. B5 adds the BYOK transparent cost
+ * breakdown so a user can see input/output/cache spend split, not just a total.
  */
 export function UsageStatsSection() {
   const fetchDashboard = useDashboardStore((s) => s.fetchDashboard);
@@ -34,6 +36,8 @@ export function UsageStatsSection() {
           <BudgetBar />
         </div>
       </div>
+
+      <CostBreakdownCard />
 
       <QualityHistory />
 

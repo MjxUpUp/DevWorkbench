@@ -13,8 +13,14 @@ use crate::models::CostRecord;
 /// Receives one cost record per model request. Implementations must be cheap to
 /// share (held inside GlmChatModel behind an `Arc`) and must NOT propagate
 /// errors into the caller — a failed cost write is logged, not fatal.
+///
+/// B5: the signature takes a `TokenUsage` (input/output + prompt-cache tiers)
+/// instead of bare input/output, so the transparent cost breakdown is preserved
+/// end-to-end. `cost_usd` is an optional override; 0.0 means "derive from the
+/// pricing table" (the common path — callers meter usage and let the sink price
+/// it). A non-zero value (e.g. a precomputed cost) is used as-is.
 pub trait CostSink: Send + Sync {
-    fn record(&self, model: &str, input_tokens: u32, output_tokens: u32, cost_usd: f64);
+    fn record(&self, model: &str, usage: pricing::TokenUsage, cost_usd: f64);
 }
 
 /// A CostSink that drops everything — the default when no DB/session context is
@@ -23,7 +29,7 @@ pub trait CostSink: Send + Sync {
 pub struct NullCostSink;
 
 impl CostSink for NullCostSink {
-    fn record(&self, _: &str, _: u32, _: u32, _: f64) {}
+    fn record(&self, _: &str, _: pricing::TokenUsage, _: f64) {}
 }
 
 /// A CostSink writing to the `cost_records` table. `record` spawns a blocking
@@ -50,22 +56,25 @@ impl DbCostSink {
 }
 
 impl CostSink for DbCostSink {
-    fn record(&self, model: &str, input_tokens: u32, output_tokens: u32, cost_usd: f64) {
-        // If the caller didn't precompute cost, derive it from the pricing
-        // table so a missed cost upstream still leaves an honest value rather
-        // than a silent zero.
+    fn record(&self, model: &str, usage: pricing::TokenUsage, cost_usd: f64) {
+        // If the caller didn't precompute cost, derive the total from the
+        // pricing table so a missed cost upstream still leaves an honest value
+        // rather than a silent zero. The breakdown is re-derived at read time
+        // (aggregate_costs), so only the total is persisted per row.
         let cost = if cost_usd > 0.0 {
             cost_usd
         } else {
-            pricing::cost(input_tokens, output_tokens, pricing::pricing_for(model))
+            pricing::cost_breakdown(usage, pricing::pricing_for(model)).total()
         };
         let rec = CostRecord {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
             agent_type: self.agent_type.clone(),
             model: model.to_string(),
-            input_tokens: input_tokens as i64,
-            output_tokens: output_tokens as i64,
+            input_tokens: usage.input as i64,
+            output_tokens: usage.output as i64,
+            cache_read_tokens: usage.cache_read as i64,
+            cache_write_tokens: usage.cache_write as i64,
             cost_usd: cost,
             recorded_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -103,7 +112,7 @@ mod tests {
     #[test]
     fn null_sink_silently_drops() {
         // The contract: no panic, no output, no side effect.
-        NullCostSink.record("glm-4.6", 100, 200, 0.001);
+        NullCostSink.record("glm-4.6", pricing::TokenUsage::new(100, 200), 0.001);
     }
 
     #[test]
@@ -111,6 +120,17 @@ mod tests {
         // Without a DB the sink must still be callable (NullCostSink) — no
         // runtime required, no panic.
         let s = optional_shared(None, "x", None);
-        s.record("glm-4.6", 1, 1, 0.0);
+        s.record("glm-4.6", pricing::TokenUsage::new(1, 1), 0.0);
+    }
+
+    #[test]
+    fn null_sink_accepts_cache_tiers() {
+        // B5: the new TokenUsage signature must round-trip cache tiers without
+        // panicking even on the no-op sink.
+        NullCostSink.record(
+            "claude-sonnet-4-5",
+            pricing::TokenUsage { input: 10, output: 5, cache_read: 8, cache_write: 3 },
+            0.0,
+        );
     }
 }
