@@ -36,7 +36,7 @@ import { WorkflowBuilder } from '../WorkflowBuilder';
 import yaml from 'js-yaml';
 
 describe('WorkflowBuilder', () => {
-  it('renders the 8-type palette (no loop/selector/interrupt)', () => {
+  it('renders the full palette incl. control-flow nodes', () => {
     const { container } = render(<WorkflowBuilder yaml="" onYamlChange={() => {}} />);
     const palette = container.querySelector('.wf-palette');
     expect(palette?.textContent).toContain('Prompt');
@@ -47,7 +47,10 @@ describe('WorkflowBuilder', () => {
     expect(palette?.textContent).toContain('Human');
     expect(palette?.textContent).toContain('Transform');
     expect(palette?.textContent).toContain('Branch');
-    expect(palette?.textContent).not.toContain('Loop');
+    // coze/dify control-flow nodes are offered (backend supports them).
+    expect(palette?.textContent).toContain('Selector');
+    expect(palette?.textContent).toContain('Loop');
+    expect(palette?.textContent).toContain('Interrupt');
   });
 
   it('clicking a palette item adds a node and emits YAML via onYamlChange', async () => {

@@ -143,8 +143,8 @@ describe('workflowSchema serialize/parse', () => {
   it('tolerates malformed/empty YAML without throwing', () => {
     expect(yamlToGraph('')).toEqual({ startId: null, endId: null, nodes: [], edges: [] });
     expect(yamlToGraph('::: not yaml :::\n  - [unclosed').nodes).toEqual([]);
-    // Unknown node type is dropped, not crashed on (loop is not a real type).
-    const g = yamlToGraph('start: x\nend: x\nnodes:\n  x:\n    type: loop\n');
+    // A genuinely unknown node type is dropped, not crashed on.
+    const g = yamlToGraph('start: x\nend: x\nnodes:\n  x:\n    type: bogus_kind\n');
     expect(g.nodes).toEqual([]);
   });
 
@@ -164,15 +164,59 @@ describe('workflowSchema serialize/parse', () => {
     expect(reparsed.end).toBe('last');
   });
 
-  it('defaultParams seeds each type with a usable baseline (no loop/selector/interrupt)', () => {
+  it('defaultParams seeds each type with a usable baseline', () => {
     expect(defaultParams('agent').agent).toBe('claude_code');
     expect(defaultParams('gate').gate).toBe('forge');
     expect(defaultParams('transform').op).toEqual({ extract: 'output' });
-    for (const t of ['prompt', 'agent', 'gate', 'parallel', 'merge', 'human', 'transform', 'branch'] as const) {
+    // All 11 backend node types are offered and have defaults.
+    for (const t of ['prompt', 'agent', 'gate', 'parallel', 'merge', 'human', 'transform', 'branch', 'selector', 'loop', 'interrupt'] as const) {
       expect(NODE_META[t]).toBeTruthy();
+      expect(defaultParams(t)).toBeTruthy();
     }
-    // The builder must not offer node types the backend can't run.
-    expect((NODE_META as Record<string, unknown>).loop).toBeUndefined();
-    expect((NODE_META as Record<string, unknown>).selector).toBeUndefined();
+    expect(defaultParams('selector').cases).toEqual([{ when: 'contains:a', label: 'a_path' }]);
+    expect(defaultParams('interrupt').message).toBe('');
+  });
+
+  it('round-trips selector cases + default label', () => {
+    const g: BuilderGraph = {
+      startId: 'sel',
+      endId: 'sel',
+      nodes: [{
+        id: 'sel', type: 'selector',
+        cases: [{ when: 'contains:a', label: 'a_path' }, { when: 'contains:b', label: 'b_path' }],
+        default: 'fallback',
+      }],
+      edges: [],
+    };
+    const back = roundTrip(g);
+    expect(back.nodes[0].cases).toEqual([
+      { when: 'contains:a', label: 'a_path' },
+      { when: 'contains:b', label: 'b_path' },
+    ]);
+    expect(back.nodes[0].default).toBe('fallback');
+  });
+
+  it('round-trips loop count/strategy + inline body sub-graph', () => {
+    const body = { start: 'iter', end: 'iter', nodes: { iter: { type: 'transform', op: { extract: 'output' } } }, edges: [] };
+    const g: BuilderGraph = {
+      startId: 'lp', endId: 'lp',
+      nodes: [{ id: 'lp', type: 'loop', count: 5, strategy: 'collect', body }],
+      edges: [],
+    };
+    const back = roundTrip(g);
+    expect(back.nodes[0].count).toBe(5);
+    expect(back.nodes[0].strategy).toBe('collect');
+    expect(back.nodes[0].body).toEqual(body);
+  });
+
+  it('round-trips interrupt message + condition', () => {
+    const g: BuilderGraph = {
+      startId: 'int', endId: 'int',
+      nodes: [{ id: 'int', type: 'interrupt', message: 'stop here', condition: 'status==done' }],
+      edges: [],
+    };
+    const back = roundTrip(g);
+    expect(back.nodes[0].message).toBe('stop here');
+    expect(back.nodes[0].condition).toBe('status==done');
   });
 });

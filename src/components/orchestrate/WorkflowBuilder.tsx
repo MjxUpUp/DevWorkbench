@@ -28,16 +28,16 @@ import {
 } from './workflowSchema';
 
 /**
- * C3 visual DAG builder — a React Flow canvas that composes the 8 backend
+ * C3 visual DAG builder — a React Flow canvas that composes the backend
  * node types by drag/connect and emits the `WorkflowDef` YAML the existing
  * `run_workflow` command already accepts. Mounted as a "可视化" tab next to the
  * raw YAML editor in OrchestrateView. Logic (serialize/parse/round-trip) lives
  * in `workflowBuilder.ts` and is unit-tested there; this component is the
  * interaction shell.
  *
- * Loop / selector / interrupt are deliberately absent — the backend engine
- * rejects cycles (Kahn) and dropped those eino constructs, so offering them
- * here would build UI for non-existent capability.
+ * Loop / selector / interrupt are supported (backend control-flow nodes in
+ * graph.rs); the loop's sub-graph body is edited as inline JSON in the
+ * inspector (a nested canvas is future work).
  */
 
 type WorkflowNodeData = {
@@ -101,6 +101,9 @@ function previewParam(n: BuilderNode): string {
     case 'branch': return n.condition ?? '';
     case 'human': return n.prompt ?? '';
     case 'transform': return opLabel(n.op);
+    case 'selector': return Array.isArray(n.cases) ? `${n.cases.length} 分支` : '';
+    case 'loop': return [n.over, n.count ? `${n.count}×` : null].filter(Boolean).join(' · ');
+    case 'interrupt': return n.message ?? '';
     default: return '';
   }
 }

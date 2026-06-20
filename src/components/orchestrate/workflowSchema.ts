@@ -9,10 +9,11 @@ import yaml from 'js-yaml';
  * backend already accepts, so a non-technical user can compose a 2–5 node graph
  * by drag/connect instead of hand-writing YAML.
  *
- * Node taxonomy is the 8 backend types (graph.rs:27-36). `loop`/`selector`/
- * `interrupt` do NOT exist — the engine intentionally dropped eino's
- * Pregel/selector/BSP and rejects cycles via Kahn's algorithm, so the builder
- * must not offer them.
+ * Node taxonomy mirrors the backend (graph.rs:27-43): 7 base + branch + the
+ * three coze/dify control-flow nodes. `loop` repeats an inline sub-graph
+ * `body` (the repetition lives inside the node, never in the edges, so Kahn's
+ * cycle check never sees it); `selector` emits the first-match label for
+ * branch edges to route on; `interrupt` halts the run.
  */
 
 export type NodeType =
@@ -23,7 +24,10 @@ export type NodeType =
   | 'merge'
   | 'human'
   | 'transform'
-  | 'branch';
+  | 'branch'
+  | 'loop'
+  | 'selector'
+  | 'interrupt';
 
 /** `TransformOp` mirror (graph.rs:144-153) — serde newtype/struct enum → nested. */
 export type TransformOp =
@@ -48,6 +52,17 @@ export interface BuilderNode {
   op?: TransformOp;
   condition?: string;
   vars?: Record<string, unknown>;
+  // selector: ordered first-match cases; default label when none match.
+  cases?: Array<{ when: string; label: string }>;
+  default?: string;
+  // loop: iterate an input array (over) or a fixed count; body is an inline
+  // sub-graph WorkflowDef the runner executes once per element/iteration.
+  over?: string;
+  count?: number;
+  max_iterations?: number;
+  body?: unknown;
+  // interrupt: halt reason (+ optional gate condition).
+  message?: string;
 }
 
 export interface BuilderEdge {
@@ -144,10 +159,41 @@ export const NODE_META: Record<NodeType, NodeMeta> = {
       { key: 'condition', label: '条件', input: 'text', required: true, placeholder: 'key==value 或 contains:子串' },
     ],
   },
+  selector: {
+    label: 'Selector',
+    color: '#a855f7',
+    hint: '条件选择:首个 when 命中的分支胜出,输出 label 供下游 branch 边路由',
+    fields: [
+      { key: 'cases', label: '分支 (JSON)', input: 'json', required: true, placeholder: '[{"when":"contains:a","label":"a_path"}]' },
+      { key: 'default', label: '默认 label', input: 'text' },
+    ],
+  },
+  loop: {
+    label: 'Loop',
+    color: '#06b6d4',
+    hint: '循环:对数组(over)或固定次数(count)迭代子图 body,按 strategy 合并',
+    fields: [
+      { key: 'over', label: '迭代数组路径', input: 'text', placeholder: 'items' },
+      { key: 'count', label: '固定次数', input: 'number', placeholder: 'over 缺省时用' },
+      { key: 'max_iterations', label: '最大迭代', input: 'number', placeholder: '默认 1000' },
+      { key: 'strategy', label: '合并策略', input: 'select', options: ['concat', 'last_wins', 'collect'] },
+      { key: 'body', label: '子图 (JSON)', input: 'json', placeholder: '内联 WorkflowDef' },
+    ],
+  },
+  interrupt: {
+    label: 'Interrupt',
+    color: '#dc2626',
+    hint: '终止:用户意图停止整个图(非失败);带 condition 时仅在满足时终止',
+    fields: [
+      { key: 'message', label: '终止原因', input: 'textarea' },
+      { key: 'condition', label: '条件 (可选)', input: 'text', placeholder: '留空则无条件终止' },
+    ],
+  },
 };
 
 export const NODE_TYPE_ORDER: NodeType[] = [
   'prompt', 'agent', 'gate', 'parallel', 'merge', 'human', 'transform', 'branch',
+  'selector', 'loop', 'interrupt',
 ];
 
 /** Sensible defaults for a freshly-added node of each type. */
@@ -161,6 +207,13 @@ export function defaultParams(type: NodeType): Partial<BuilderNode> {
     case 'human': return { prompt: '' };
     case 'transform': return { op: { extract: 'output' } };
     case 'branch': return { condition: '' };
+    case 'selector': return { cases: [{ when: 'contains:a', label: 'a_path' }] };
+    case 'loop': return {
+      count: 3,
+      strategy: 'collect',
+      body: { start: 'iter', end: 'iter', nodes: { iter: { type: 'transform', op: { extract: 'output' } } }, edges: [] },
+    };
+    case 'interrupt': return { message: '' };
   }
 }
 
