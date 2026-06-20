@@ -55,6 +55,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
             "running" => SessionStatus::Running,
             "completed" => SessionStatus::Completed,
             "failed" => SessionStatus::Failed,
+            "cancelled" => SessionStatus::Cancelled,
             _ => SessionStatus::Failed,
         };
 
@@ -166,6 +167,7 @@ pub fn update_session_db(conn: &rusqlite::Connection, id: &str, patch: serde_jso
             "running" => "running",
             "completed" => "completed",
             "failed" => "failed",
+            "cancelled" => "cancelled",
             _ => return Err(AppError::Agent(format!("无效 status: {}", status))),
         };
         set_clauses.push("status = ?".to_string());
@@ -242,6 +244,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
             "running" => SessionStatus::Running,
             "completed" => SessionStatus::Completed,
             "failed" => SessionStatus::Failed,
+            "cancelled" => SessionStatus::Cancelled,
             _ => SessionStatus::Failed,
         };
 
@@ -447,6 +450,7 @@ pub fn load_turns_for_conversation_db(
             "running" => SessionStatus::Running,
             "completed" => SessionStatus::Completed,
             "failed" => SessionStatus::Failed,
+            "cancelled" => SessionStatus::Cancelled,
             _ => SessionStatus::Failed,
         };
         let snapshot_str: Option<String> = row.get(10)?;
@@ -725,6 +729,32 @@ mod tests {
 
         let loaded = load_sessions_from_db(&conn).unwrap();
         assert_eq!(loaded[0].status, SessionStatus::Completed);
+        assert_eq!(loaded[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_update_session_cancelled_status() {
+        // Regression: stop_agent_session writes status="cancelled". Previously
+        // update_session_db's validator rejected it (only running/completed/
+        // failed allowed), so EVERY user stop returned Err via `?` — the
+        // subprocess was killed but the DB row stayed Running (until the stale-
+        // reconciler later flipped it to Failed) and agent:completed never
+        // fired. Now "cancelled" is first-class: it round-trips through the DB
+        // and loads back as SessionStatus::Cancelled (UI renders "已取消").
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        insert_session_db(&conn, &make_session("s1", "/proj/a", SessionStatus::Running)).unwrap();
+
+        let patch = serde_json::json!({
+            "status": "cancelled",
+            "exitCode": 0,
+            "outputSummary": "Session cancelled by user"
+        });
+        update_session_db(&conn, "s1", patch).unwrap();
+
+        let loaded = load_sessions_from_db(&conn).unwrap();
+        assert_eq!(loaded[0].status, SessionStatus::Cancelled);
         assert_eq!(loaded[0].exit_code, Some(0));
     }
 

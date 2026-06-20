@@ -15,7 +15,22 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
     //      knowledge entries were never inserted and every completion logged a
     //      [PANIC]. chars().take(200) never panics and matches SUBSTR exactly.
     let content_prefix: String = entry.content.chars().take(200).collect();
-    let exists: bool = conn
+
+    // Wrap dedup-check + BOTH inserts (main row + FTS index) in ONE transaction.
+    // Two bugs this closes:
+    //  1. Drift: if the FTS INSERT failed (locked DB / disk error) the main row
+    //     INSERT already committed, so the entry was persisted but NEVER
+    //     searchable. The dedup check reads only `knowledge_entries`, so every
+    //     retry would silently re-accept it — a lesson that lives invisibly
+    //     forever. Rolling both back together keeps the tables consistent.
+    //  2. Race: a concurrent writer (the knowledge watcher fires on .jsonl
+    //     change while a session's collector runs) could slip a near-duplicate
+    //     between our SELECT and INSERT. Holding the writer lock across both
+    //     serializes them.
+    // `unchecked_transaction` works on the borrowed pooled &Connection (the
+    // owned-`&mut` `.transaction()` is unavailable here); it rolls back on drop.
+    let tx = conn.unchecked_transaction()?;
+    let exists: bool = tx
         .query_row(
             "SELECT COUNT(*) FROM knowledge_entries WHERE project_hash = ?1 AND SUBSTR(content, 1, 200) = ?2",
             params![entry.project_hash, content_prefix],
@@ -25,10 +40,11 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
         .unwrap_or(false);
 
     if exists {
+        tx.commit()?;
         return Ok(());
     }
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO knowledge_entries
             (id, project_hash, category, title, content, source_agent,
              source_session_id, source_type, confidence, created_at, updated_at, access_count)
@@ -48,11 +64,12 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
             entry.access_count,
         ],
     )?;
-    // Keep FTS index in sync
-    conn.execute(
+    // Keep FTS index in sync (same transaction — rolls back with the row above).
+    tx.execute(
         "INSERT INTO knowledge_fts (rowid, title, content) VALUES ((SELECT rowid FROM knowledge_entries WHERE id = ?1), ?2, ?3)",
         params![entry.id, entry.title, entry.content],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -132,7 +132,14 @@ fn build_run_stream(
                     error: None,
                 };
                 if nid == end {
-                    yield GraphEvent::GraphDone { output: Value::Null };
+                    // END was skipped — EVERY predecessor was branch-deselected,
+                    // so no path reached END. That is a ROUTING FAILURE, not a
+                    // successful empty completion: emitting GraphDone{Null} would
+                    // let the frontend treat a fully deselected workflow as
+                    // success (silent wrong-path). Fail the graph instead.
+                    yield GraphEvent::GraphFailed {
+                        error: "end node unreachable: all predecessors skipped (no path taken)".into(),
+                    };
                     return;
                 }
                 for edge in &succs {
@@ -872,6 +879,37 @@ mod tests {
             _ => None,
         }).expect("must complete");
         assert_eq!(done.as_array().map(|a| a.len()), Some(5), "max_iterations=5 must cap 100 items: {done:?}");
+    }
+
+    /// Regression: when EVERY predecessor of the END node is branch-deselected,
+    /// END is skipped — and skipping END must FAIL the graph (GraphFailed), not
+    /// emit GraphDone{Null} (which the frontend renders as success). A fully
+    /// deselected workflow is a routing failure, not an empty success.
+    #[tokio::test]
+    async fn fully_deselected_end_fails_not_succeeds() {
+        use crate::graph::{BranchNode, GraphBuilder, MergeNode, Node, PromptNode};
+        use std::collections::HashMap;
+        // `in`(prompt "go") → br(Branch) → out(Merge, end). The ONLY edge into
+        // `out` carries `when: "contains:zzz"`, which "go" does not match → the
+        // edge never fires → `out` has no firing predecessor → skipped → END
+        // skipped → must GraphFailed (the old code emitted GraphDone{Null}).
+        let g = GraphBuilder::new()
+            .node("in", Node::Prompt(PromptNode { text: "go".into(), vars: HashMap::new() }))
+            .node("br", Node::Branch(BranchNode { condition: "contains:go".into() }))
+            .node("out", Node::Merge(MergeNode::default()))
+            .edge("in", "br")
+            .branch_edge("br", "out", "contains:zzz")
+            .start("in").end("out").build().unwrap();
+        let compiled = g.compile().unwrap();
+        let events = collect_events(run_graph(compiled, json!("x"), None, Arc::new(MockExec))).await;
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::GraphFailed { .. })),
+            "deselected END must fail, not succeed: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })),
+            "must NOT emit GraphDone for a fully deselected run: {events:?}"
+        );
     }
 
 }

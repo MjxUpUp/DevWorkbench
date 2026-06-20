@@ -147,6 +147,12 @@ pub enum SessionStatus {
     Running,
     Completed,
     Failed,
+    /// The user deliberately stopped the session (stop_agent_session). Distinct
+    /// from `Failed` so the UI renders "已取消" rather than "失败" — the run was
+    /// intentionally halted, not crashed. stop_agent_session writes this; it was
+    /// previously rejected by update_session_db's status validator (which only
+    /// allowed running/completed/failed), making EVERY user stop return Err.
+    Cancelled,
 }
 
 impl SessionStatus {
@@ -155,6 +161,7 @@ impl SessionStatus {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }

@@ -2170,12 +2170,22 @@ impl kernel_core::Agent for ReactAgent {
                                 }
                             })
                             .await
-                            .unwrap_or_else(|_| serde_json::json!({"status": "passed"}));
+                            // Fail-closed on every default. A panicked audit task
+                            // OR a malformed/missing `status` field must NOT be
+                            // treated as a pass — the whole point of the honesty
+                            // audit is to catch assertion-weakening, so defaulting
+                            // to "passed" (the old behavior) silently bypassed it.
+                            // audit_project returns status="passed" only when zero
+                            // Error-severity findings surface; anything else fails.
+                            .unwrap_or_else(|_| serde_json::json!({
+                                "status": "failed",
+                                "findings": "audit task panicked — treat as failure",
+                            }));
                             let passed = audit_val
                                 .get("status")
                                 .and_then(|s| s.as_str())
                                 .map(|s| s == "passed")
-                                .unwrap_or(true);
+                                .unwrap_or(false);
                             if !passed {
                                 verify_count += 1;
                                 let findings = audit_val

@@ -24,7 +24,7 @@
 //! Blueprint: `agent-client-protocol` crate `examples/simple_agent.rs` (the
 //! server-side counterpart to `yolo_one_shot_client.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -50,18 +50,24 @@ use crate::kernel_impl::hooks::PermissionMode;
 /// State is needed because the kernel's [`kernel_core::ToolCallEvent`] carries
 /// NO stable tool-call id, yet ACP links a `ToolCall` (start) to its later
 /// `ToolCallUpdate` (completion) BY id. The bridge assigns a monotonic id per
-/// `Started` tool call and remembers it as `last_tool_call_id`, so the
-/// immediately-following `Succeeded`/`Failed` update reuses it. This holds for
-/// the kernel's common sequential emit order (Started then its terminal status
-/// per call); a batched-parallel tool set could mismatch, documented as an
-/// accepted MVP approximation.
+/// `Started` tool call and queues it in `pending` (FIFO); the next terminal
+/// status pops the OLDEST queued id. This is correct under:
+///   - strict sequencing (`Started A` → `Succeeded A`),
+///   - batched dispatch in start-order (`Started A`, `Started B` → `Succeeded
+///     A`, `Succeeded B`),
+/// both of which cover the kernel's actual emit patterns (a ReactAgent fans out
+/// parallel calls via `execute_call_set` but emits each call's Started before
+/// its terminal status). It would still mismatch on INTERLEAVED completion
+/// (`Started A`, `Started B`, `Succeeded B`, `Succeeded A`); the kernel emits
+/// completions in dispatch order, so this is not observed. The proper fix is a
+/// stable id on `kernel_core::ToolCallEvent` itself (tracked TODO).
 #[derive(Debug, Default)]
 pub struct EventBridge {
     /// Monotonic counter → deterministic tool-call ids ("dw-1", "dw-2", …).
     next_id: u64,
-    /// The id assigned to the most recent `Started` tool call, so its terminal
-    /// status update can link back to it.
-    last_tool_call_id: Option<ToolCallId>,
+    /// Ids of Started-but-not-yet-terminal tool calls, in start order. A
+    /// terminal status pops the front (oldest) to link back to its Started.
+    pending: VecDeque<ToolCallId>,
 }
 
 impl EventBridge {
@@ -76,9 +82,9 @@ impl EventBridge {
     /// - [`AgentEvent::Token`] → `AgentMessageChunk` (the streamed answer).
     /// - [`AgentEvent::Reasoning`] → `AgentThoughtChunk` (thinking trace).
     /// - [`AgentEvent::ToolCall`] `Started` → `ToolCall` (assigns a fresh id,
-    ///   remembered as `last_tool_call_id`).
+    ///   queues it in `pending`).
     /// - [`AgentEvent::ToolCall`] `Succeeded`/`Failed` → `ToolCallUpdate`
-    ///   (reuses `last_tool_call_id`, clears it).
+    ///   (pops the oldest queued id from `pending`).
     /// - [`AgentEvent::FileChanged`] / [`AgentEvent::TurnBoundary`] /
     ///   [`AgentEvent::Done`] → `None` (not streamed updates: Done resolves the
     ///   `session/prompt` request itself).
@@ -91,14 +97,14 @@ impl EventBridge {
         }
     }
 
-    /// Assign a fresh tool-call id ("dw-{n}") and remember it for the matching
+    /// Assign a fresh tool-call id ("dw-{n}") and queue it for the matching
     /// terminal update.
     fn fresh_tool_id(&mut self) -> ToolCallId {
         self.next_id = self.next_id.saturating_add(1);
         // ToolCallId is #[non_exhaustive] → must use ::new (tuple-struct literal
         // is blocked from outside the crate).
         let id = ToolCallId::new(format!("dw-{}", self.next_id));
-        self.last_tool_call_id = Some(id.clone());
+        self.pending.push_back(id.clone());
         id
     }
 
@@ -114,10 +120,10 @@ impl EventBridge {
                 SessionUpdate::ToolCall(call)
             }
             KernelToolCallStatus::Succeeded | KernelToolCallStatus::Failed => {
-                // Reuse the id from the preceding Started; fall back to a fresh
-                // one if none (a terminal status with no preceding Started —
-                // shouldn't happen, but stay robust rather than drop the event).
-                let id = self.last_tool_call_id.take().unwrap_or_else(|| self.fresh_tool_id());
+                // Pop the OLDEST queued Started id (FIFO). Fall back to a fresh id
+                // if none queued — a terminal status with no preceding Started
+                // shouldn't happen, but stay robust rather than drop the event.
+                let id = self.pending.pop_front().unwrap_or_else(|| self.fresh_tool_id());
                 let acp_status = if tc.status == KernelToolCallStatus::Succeeded {
                     AcpToolCallStatus::Completed
                 } else {
