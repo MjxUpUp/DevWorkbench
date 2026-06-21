@@ -1,6 +1,13 @@
 [package]
 name = "dev-workbench"
-version = "1.0.0"
+version = "1.0.1"
+# Tauri bundler needs the main binary disambiguated: this crate builds TWO
+# bins — `dev-workbench` (src/main.rs, the Tauri app) and `dev-workbench-acp`
+# (src/bin/dev-workbench-acp.rs, the C1 ACP stdio server helper). Without
+# `default-run`, `tauri build` errors "failed to find main binary" and refuses
+# to bundle. Pin the Tauri app as the default; the ACP helper is still built
+# on demand via `cargo build --bin dev-workbench-acp`.
+default-run = "dev-workbench"
 description = "一目了然 — 本地开发工作台"
 authors = ["you"]
 license = "MIT"
