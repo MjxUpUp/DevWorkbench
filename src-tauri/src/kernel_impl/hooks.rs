@@ -278,9 +278,40 @@ impl HookManager {
     /// Run all `before` hooks. Returns the first BlockReason, or Ok.
     /// (A BlockReason stops the action; warnings are logged but don't block.)
     pub async fn before(&self, action: &Action) -> Result<(), BlockReason> {
+        // Catastrophe floor — irreversible system-destruction runs in ALL modes,
+        // including SkipPermissions (yolo). `rm -rf /`, `mkfs`, `dd` to a block
+        // device, fork bombs, and shutdown/poweroff are not "permissions" a yolo
+        // mode can waive, so this runs BEFORE the per-mode short-circuit below
+        // (mirrors `sudo --no-preserve-root`: bypass modes keep a hard floor on
+        // irrevocable ops). Normal command guards + the allowlist still only
+        // apply in non-yolo modes via the registered CommandGuardHook loop.
+        match action {
+            Action::RunCommand { command } => {
+                if let Some(reason) = classify_catastrophe(command) {
+                    return Err(reason);
+                }
+            }
+            Action::CallTool { tool, arguments } => {
+                // M7: also guard tool calls whose name suggests shell execution
+                // (same surface as CommandGuardHook, so a `bash` tool call can't
+                // smuggle `mkfs` past yolo either).
+                let dangerous_tools = ["exec", "shell", "bash", "cmd", "powershell", "sh"];
+                if dangerous_tools
+                    .iter()
+                    .any(|dt| tool.to_lowercase().contains(dt))
+                {
+                    if let Some(cmd) = extract_command_from_args(arguments) {
+                        if let Some(reason) = classify_catastrophe(&cmd) {
+                            return Err(reason);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         // Permission-mode short-circuit (runs before per-hook dispatch):
-        // skip-permissions bypasses everything; plan mode blocks writes and
-        // command execution until the user confirms the plan.
+        // skip-permissions bypasses everything [else]; plan mode blocks writes
+        // and command execution until the user confirms the plan.
         if self.mode.skips_guards() {
             return Ok(());
         }
@@ -350,6 +381,95 @@ fn extract_command_from_args(args: &str) -> Option<String> {
     None
 }
 
+/// Irreversible system-destruction check — the hard floor that runs in ALL
+/// permission modes, including [`PermissionMode::SkipPermissions`] (yolo).
+/// `rm -rf /`, `mkfs`, `dd` to a block device, fork bombs, and
+/// shutdown/poweroff are not "permissions" a yolo mode can waive: they destroy
+/// the user's system or data irrecoverably. This mirrors the consensus behind
+/// `sudo --no-preserve-root` — bypass modes still keep a hard floor on
+/// irrevocable ops.
+///
+/// Unlike [`CommandGuardHook::classify`], this does NOT consult the allowlist:
+/// the catastrophe floor is not admin-bypassable.
+/// [`HookManager::before`] calls this BEFORE the per-mode `skips_guards`
+/// short-circuit, so it applies even under SkipPermissions.
+fn classify_catastrophe(command: &str) -> Option<BlockReason> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let prog = tokens[0].to_lowercase();
+    let joined = command.to_lowercase();
+
+    // rm with recursive-force targeting root or home root.
+    if prog == "rm" || prog.ends_with("/rm") {
+        let has_rf = tokens.iter().any(|t| {
+            let t = t.trim_start_matches('-');
+            t.contains('r') && t.contains('f')
+        });
+        if has_rf {
+            // Find the path target (first non-flag token after flags).
+            let target = tokens.iter().skip(1).find(|t| !t.starts_with('-'));
+            if let Some(t) = target {
+                let t = t.trim_matches('"').trim_matches('\'');
+                // Block wiping root, home root, or system dirs.
+                let dangerous = t == "/"
+                    || t == "~"
+                    || t == "/*"
+                    || t == "/home"
+                    || t == "/usr"
+                    || t == "/bin"
+                    || t == "/etc"
+                    || t == "/var"
+                    || t == "/boot"
+                    || t.starts_with("/dev/sd")
+                    || t.starts_with("/dev/nvme");
+                if dangerous {
+                    return Some(BlockReason {
+                        hook: "command_guard".into(),
+                        message: format!("blocked rm -rf on system path: {t}"),
+                        severity: Severity::Block,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fork bomb variants.
+    if joined.contains(":(){") || joined.contains(": () {") {
+        return Some(BlockReason {
+            hook: "command_guard".into(),
+            message: "blocked fork bomb".into(),
+            severity: Severity::Block,
+        });
+    }
+
+    // Filesystem format / disk wipe. `mkfs` and its typed variants
+    // (mkfs.ext4 / mkfs.ntfs / mkfs.vfat / ...) all unconditionally format.
+    if prog == "mkfs"
+        || prog.starts_with("mkfs.")
+        || joined.contains("dd if=/dev/zero of=/dev/")
+        || joined.contains("dd if=/dev/urandom of=/dev/")
+    {
+        return Some(BlockReason {
+            hook: "command_guard".into(),
+            message: "blocked filesystem format / disk wipe".into(),
+            severity: Severity::Block,
+        });
+    }
+
+    // Shutdown / reboot.
+    if prog == "shutdown" || prog == "halt" || prog == "poweroff" {
+        return Some(BlockReason {
+            hook: "command_guard".into(),
+            message: "blocked shutdown/poweroff".into(),
+            severity: Severity::Block,
+        });
+    }
+
+    None
+}
+
 /// Reject shell commands that are genuinely destructive. Uses token-based
 /// detection (the Forge bash-guard analog) instead of naive substring matching,
 /// so `rm -rf /home/user/old-build` (legitimate) is NOT blocked while
@@ -368,85 +488,17 @@ impl CommandGuardHook {
     /// Returns a BlockReason if the command is dangerous, else None.
     /// Token-based: splits on whitespace, inspects the program + flags + target.
     fn classify(&self, command: &str) -> Option<BlockReason> {
-        let tokens: Vec<&str> = command.split_whitespace().collect();
-        if tokens.is_empty() {
-            return None;
-        }
-        let prog = tokens[0].to_lowercase();
         let joined = command.to_lowercase();
-
-        // Allowlist bypass.
+        // Allowlist bypass (does NOT apply to the catastrophe floor — an admin
+        // allowlist cannot rescue a system wipe; see classify_catastrophe,
+        // which HookManager runs unconditionally in ALL modes before this
+        // registered hook). This path only runs in non-yolo modes.
         for allowed in &self.allowlist {
             if joined.starts_with(&allowed.to_lowercase()) {
                 return None;
             }
         }
-
-        // rm with recursive-force targeting root or home root.
-        if prog == "rm" || prog.ends_with("/rm") {
-            let has_rf = tokens.iter().any(|t| {
-                let t = t.trim_start_matches('-');
-                t.contains('r') && t.contains('f')
-            });
-            if has_rf {
-                // Find the path target (first non-flag token after flags).
-                let target = tokens.iter().skip(1).find(|t| !t.starts_with('-'));
-                if let Some(t) = target {
-                    let t = t.trim_matches('"').trim_matches('\'');
-                    // Block wiping root, home root, or system dirs.
-                    let dangerous = t == "/"
-                        || t == "~"
-                        || t == "/*"
-                        || t == "/home"
-                        || t == "/usr"
-                        || t == "/bin"
-                        || t == "/etc"
-                        || t == "/var"
-                        || t == "/boot"
-                        || t.starts_with("/dev/sd")
-                        || t.starts_with("/dev/nvme");
-                    if dangerous {
-                        return Some(BlockReason {
-                            hook: "command_guard".into(),
-                            message: format!("blocked rm -rf on system path: {t}"),
-                            severity: Severity::Block,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Fork bomb variants.
-        if joined.contains(":(){") || joined.contains(": () {") {
-            return Some(BlockReason {
-                hook: "command_guard".into(),
-                message: "blocked fork bomb".into(),
-                severity: Severity::Block,
-            });
-        }
-
-        // Filesystem format / disk wipe.
-        if prog == "mkfs"
-            || joined.contains("dd if=/dev/zero of=/dev/")
-            || joined.contains("dd if=/dev/urandom of=/dev/")
-        {
-            return Some(BlockReason {
-                hook: "command_guard".into(),
-                message: "blocked filesystem format / disk wipe".into(),
-                severity: Severity::Block,
-            });
-        }
-
-        // Shutdown / reboot.
-        if prog == "shutdown" || prog == "halt" || prog == "poweroff" {
-            return Some(BlockReason {
-                hook: "command_guard".into(),
-                message: "blocked shutdown/poweroff".into(),
-                severity: Severity::Block,
-            });
-        }
-
-        None
+        classify_catastrophe(command)
     }
 }
 
@@ -727,8 +779,15 @@ mod tests {
             Some("feat/x".into()),
             Some(std::path::PathBuf::from("/proj")),
         );
-        let err = h.before(&write("/proj/../../etc/passwd")).await.unwrap_err();
-        assert_eq!(err.severity, Severity::Block, "dotdot escape must be blocked: {err:?}");
+        let err = h
+            .before(&write("/proj/../../etc/passwd"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.severity,
+            Severity::Block,
+            "dotdot escape must be blocked: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -755,8 +814,15 @@ mod tests {
             Some("feat/x".into()),
             Some(std::path::PathBuf::from("/proj")),
         );
-        let err = h.before(&write("/proj/./../../etc/shadow")).await.unwrap_err();
-        assert_eq!(err.severity, Severity::Block, "mixed ./.. escape must be blocked: {err:?}");
+        let err = h
+            .before(&write("/proj/./../../etc/shadow"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.severity,
+            Severity::Block,
+            "mixed ./.. escape must be blocked: {err:?}"
+        );
     }
 
     #[test]
@@ -1098,12 +1164,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skip_permissions_bypasses_command_guard() {
-        // Even a destructive `rm -rf /` is allowed under skip-permissions — the
-        // mode short-circuits before the command guard runs.
+    async fn skip_permissions_bypasses_normal_command_guard() {
+        // yolo still skips the NORMAL command guard: a non-catastrophic command
+        // (legitimate `rm -rf` target, not a system path) passes without prompt.
         let mut mgr = HookManager::new().with_mode(PermissionMode::SkipPermissions);
         mgr.register(Box::new(CommandGuardHook::default()));
-        assert!(mgr.before(&cmd("rm -rf /")).await.is_ok());
+        assert!(mgr
+            .before(&cmd("rm -rf /home/user/old-build"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn skip_permissions_still_blocks_catastrophe() {
+        // The catastrophe floor runs even under yolo: `rm -rf /` is blocked
+        // regardless of mode. "skip permissions" ≠ "allow system wipe".
+        let mut mgr = HookManager::new().with_mode(PermissionMode::SkipPermissions);
+        mgr.register(Box::new(CommandGuardHook::default()));
+        let err = mgr.before(&cmd("rm -rf /")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block);
+        assert!(err.message.contains("system path"));
+    }
+
+    #[tokio::test]
+    async fn skip_permissions_blocks_catastrophe_via_bash_tool() {
+        // A `bash` tool call smuggling `mkfs` cannot escape the catastrophe floor
+        // under yolo either (CallTool surface, not just RunCommand).
+        let mut mgr = HookManager::new().with_mode(PermissionMode::SkipPermissions);
+        mgr.register(Box::new(CommandGuardHook::default()));
+        let action = Action::CallTool {
+            tool: "bash".into(),
+            arguments: r#"{"command":"mkfs.ext4 /dev/sda1"}"#.into(),
+        };
+        assert!(mgr.before(&action).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catastrophe_floor_blocks_in_all_modes() {
+        // The hard floor is mode-independent: every permission mode blocks
+        // `rm -rf /`. yolo does not weaken irrevocable-op prevention.
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::Plan,
+            PermissionMode::Executing,
+            PermissionMode::DryRun,
+            PermissionMode::Silent,
+            PermissionMode::SkipPermissions,
+        ] {
+            let mut mgr = HookManager::new().with_mode(mode);
+            mgr.register(Box::new(CommandGuardHook::default()));
+            assert!(
+                mgr.before(&cmd("rm -rf /")).await.is_err(),
+                "rm -rf / must be blocked in {mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allowlist_cannot_rescue_catastrophe() {
+        // The catastrophe floor ignores the allowlist — an admin allowlist of
+        // `rm -rf /` cannot rescue a system wipe (hard floor, not a permission).
+        let mut mgr = HookManager::new().with_mode(PermissionMode::Default);
+        mgr.register(Box::new(CommandGuardHook::with_allowlist(vec![
+            "rm -rf /".into()
+        ])));
+        assert!(
+            mgr.before(&cmd("rm -rf /")).await.is_err(),
+            "allowlist must not bypass the catastrophe floor"
+        );
     }
 
     #[tokio::test]
