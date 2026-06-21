@@ -144,15 +144,18 @@ function ConversationList({
   // never triggered a re-render, and the list stayed "暂无对话" forever.
   const allConversations = useAgentStore((s) => s.conversations);
   const refreshConversations = useAgentStore((s) => s.refreshConversations);
+  const archiveConversation = useAgentStore((s) => s.archiveConversation);
+  const deleteConversation = useAgentStore((s) => s.deleteConversation);
   const toast = useToast();
 
   // A3 archive (soft-hide) + delete (soft-delete with an undo toast that
-  // restores the row to 'active'). Both go through the backend lifecycle
-  // commands so the status column stays the single source of truth.
+  // restores the row to 'active'). Both go through store actions that
+  // optimistically drop the row from local state before refreshing — without
+  // that, refreshConversations' WAL-lag merge re-adds the just-hidden row and
+  // the list only updates after an app restart.
   const handleArchive = async (id: string) => {
     try {
-      await invoke('archive_conversation', { id });
-      await refreshConversations(projectPath);
+      await archiveConversation(id, projectPath);
       toast.info('已归档');
     } catch (e) {
       toast.error(`归档失败: ${e}`);
@@ -161,8 +164,7 @@ function ConversationList({
 
   const handleDelete = async (id: string) => {
     try {
-      await invoke('delete_conversation', { id });
-      await refreshConversations(projectPath);
+      await deleteConversation(id, projectPath);
       toast.success('对话已删除', {
         label: '撤销',
         onClick: async () => {

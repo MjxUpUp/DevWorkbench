@@ -44,6 +44,14 @@ interface AgentState {
   /** Resolve the conversation a turn belongs to (for activity→conversation jumps). */
   getConversationForSession: (sessionId: string) => Conversation | null;
   updateConversation: (id: string, patch: Record<string, unknown>) => Promise<void>;
+  /** Soft-archive a conversation (status→archived, hidden from the sidebar) and
+   *  drop it from local state immediately so the list updates without a restart.
+   *  See `refreshConversations` for why naive refresh alone doesn't remove it. */
+  archiveConversation: (id: string, projectPath: string) => Promise<void>;
+  /** Soft-delete a conversation (status→deleted, hidden from the sidebar) and
+   *  drop it from local state immediately. Undo via `restore_conversation`
+   *  re-surfaces it because the DB list then includes it again. */
+  deleteConversation: (id: string, projectPath: string) => Promise<void>;
   recommendAgent: (tags: string[]) => Promise<AgentType | null>;
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
@@ -207,6 +215,28 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => ({
       conversations: s.conversations.map((c) => (c.id === id ? { ...c, ...patch } as Conversation : c)),
     }));
+  },
+
+  archiveConversation: async (id, projectPath) => {
+    await invoke('archive_conversation', { id });
+    // Optimistically drop from local state BEFORE refreshConversations. That
+    // refresh's merge preserves local-only entries to survive WAL lag on NEW
+    // conversations — but the same logic re-adds a just-archived conversation
+    // (absent from the active-only DB list looks identical to "local-only"),
+    // so the sidebar kept showing it until app restart. Removing locally first
+    // gives the merge nothing to preserve. Undo (restore→active) re-surfaces
+    // it via the next refresh because the DB list then includes it again.
+    set((s) => ({ conversations: s.conversations.filter((c) => c.id !== id) }));
+    await get().refreshConversations(projectPath);
+  },
+
+  deleteConversation: async (id, projectPath) => {
+    await invoke('delete_conversation', { id });
+    // Same optimistic-removal rationale as archiveConversation: the WAL-lag
+    // merge can't distinguish "deleted, removed from DB" from "new, not yet
+    // flushed", so remove locally before the refresh re-adds it.
+    set((s) => ({ conversations: s.conversations.filter((c) => c.id !== id) }));
+    await get().refreshConversations(projectPath);
   },
 
   recommendAgent: async (tags) => {
