@@ -154,6 +154,22 @@ mod tests {
     }
 
     #[test]
+    fn glm_5_2_base_is_returned_unchanged() {
+        // Regression (session 7f51a5d2, 2026-06-21): a user who picked glm-5.2
+        // must NOT be silently swapped to glm-4.6. The guard returns any non-
+        // STRONG base unchanged, so glm-5.2 → glm-5.2 (the router stays out of
+        // the way instead of forcing the glm-4.6↔flash family). On a first turn
+        // (no hint/tool_result/confirm) this is the exact shape of the failing
+        // session.
+        let h = [user("summarize the project goals")];
+        assert_eq!(route_step(&h, "glm-5.2"), "glm-5.2");
+        // A powerful-hint turn on a glm-5.2 base still keeps glm-5.2 — the guard
+        // fires BEFORE the hint scan, so a non-flagship GLM is never "upgraded"
+        // to STRONG_MODEL.
+        assert_eq!(route_step(&[user("plan the refactor")], "glm-5.2"), "glm-5.2");
+    }
+
+    #[test]
     fn planning_keyword_keeps_strong() {
         let h = [user("plan the migration to the new schema")];
         assert_eq!(route_step(&h, STRONG_MODEL), STRONG_MODEL);

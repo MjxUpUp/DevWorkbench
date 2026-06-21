@@ -347,6 +347,18 @@ impl GlmChatModel {
 
 #[async_trait]
 impl ChatModel for GlmChatModel {
+    fn model_id(&self) -> &str {
+        // The resolved id the provider handed back (after model_mapping). The
+        // ReactAgent router reads this as the base model when the caller didn't
+        // pass one in AgentInput.model, so a user who picked glm-5.2 is routed
+        // against glm-5.2 — not the hardcoded STRONG_MODEL flagship. Without
+        // this, the chat path (react_chat_driver builds AgentInput{model:None})
+        // fell back to STRONG_MODEL (glm-4.6) and overwrote every GLM-family
+        // turn's opts.model with it (session 7f51a5d2: 401, the user's Z.AI key
+        // has no glm-4.6).
+        &self.model
+    }
+
     async fn generate(&self, messages: &[Message], opts: &ModelOptions) -> Result<Message, Error> {
         let model = opts.model.clone().unwrap_or_else(|| self.model.clone());
         // Circuit breaker: gate the call and record the outcome.
@@ -2006,9 +2018,22 @@ impl kernel_core::Agent for ReactAgent {
             // T9: base model for per-step routing. opts.model is overridden each
             // turn when a router is wired; base_model is the "no routing" default
             // (also what route_step falls back to when the turn is high-stakes).
-            let base_model = model_opt
-                .clone()
-                .unwrap_or_else(|| crate::kernel_impl::model_router::STRONG_MODEL.to_string());
+            // Fall back to the ChatModel's OWN resolved id (the model the user
+            // picked + the provider resolved), NOT a hardcoded flagship. The chat
+            // path builds AgentInput{model:None} (the resolved id already lives
+            // inside GlmChatModel), so a blanket STRONG_MODEL fallback routed
+            // every GLM-family turn against glm-4.6 — picking glm-5.2 then sent
+            // glm-4.6 (session 7f51a5d2, 2026-06-21: 401, the user's Z.AI key has
+            // no glm-4.6). A ChatModel that doesn't expose an id (test stubs)
+            // returns "" → keep the legacy STRONG_MODEL fallback there.
+            let base_model = model_opt.clone().unwrap_or_else(|| {
+                let mid = model.model_id();
+                if mid.is_empty() {
+                    crate::kernel_impl::model_router::STRONG_MODEL.to_string()
+                } else {
+                    mid.to_string()
+                }
+            });
             let mut opts = ModelOptions { model: model_opt, thinking, ..Default::default() };
             let mut final_output = String::new();
             // C7: track why the loop ended so the terminal Done is honest —
@@ -3400,6 +3425,11 @@ mod tests {
     struct RecordingModel {
         reply: Message,
         seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        /// The id this stub reports via ChatModel::model_id. Empty by default
+        /// (existing router tests use a sentinel router that ignores base_model,
+        /// so they're unaffected); set via new_with_model_id for tests that need
+        /// a concrete id (e.g. the base_model-fallback regression below).
+        model_id: String,
     }
 
     impl RecordingModel {
@@ -3407,12 +3437,24 @@ mod tests {
             Self {
                 reply,
                 seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+                model_id: String::new(),
+            }
+        }
+
+        fn new_with_model_id(reply: Message, id: &str) -> Self {
+            Self {
+                reply,
+                seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+                model_id: id.to_string(),
             }
         }
     }
 
     #[async_trait]
     impl ChatModel for RecordingModel {
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
         async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
             Err(Error::Unsupported(
                 "RecordingModel: drive via stream()".into(),
@@ -3451,6 +3493,47 @@ mod tests {
             seen[0].as_deref(),
             Some("routed-sentinel"),
             "router must override opts.model: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_base_model_falls_back_to_chatmodel_id_not_flagship() {
+        use kernel_core::Agent;
+        // Regression (session 7f51a5d2, 2026-06-21): the chat path builds
+        // AgentInput{model:None} (the resolved id already lives inside
+        // GlmChatModel), so the per-step router's base_model used to fall back
+        // to the hardcoded STRONG_MODEL (glm-4.6). With a model that resolved
+        // to glm-5.2, that meant every GLM-family turn sent glm-4.6 → 401 (the
+        // user's Z.AI key has no glm-4.6) — the user picked GLM-5.2 but the wire
+        // body said glm-4.6. Fix: base_model falls back to the ChatModel's own
+        // model_id() instead. Drive the REAL route_step router (not a sentinel)
+        // so route_step's "non-STRONG base returned unchanged" guard is
+        // exercised end-to-end: a glm-5.2 base yields glm-5.2 on the wire,
+        // NEVER glm-4.6.
+        let model = RecordingModel::new_with_model_id(Message::assistant("done"), "glm-5.2");
+        let seen = model.seen.clone();
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
+            .with_model_router(Arc::new(crate::kernel_impl::model_router::route_step));
+        // Neutral prompt: no powerful hint, no short-confirmation keyword, so the
+        // ONLY way the wire model becomes glm-5.2 is the base_model fallback
+        // (route_step's guard returns a non-STRONG base unchanged). Pre-fix this
+        // asserted glm-4.6 (STRONG_MODEL first-turn default).
+        let input = kernel_core::AgentInput {
+            prompt: "summarize the project goals".into(),
+            working_dir: None,
+            model: None,
+            resume_from: None,
+        };
+        let s = agent.run(input).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one stream call on a converging turn: {seen:?}");
+        assert_eq!(
+            seen[0].as_deref(),
+            Some("glm-5.2"),
+            "base_model must fall back to the ChatModel's resolved id (glm-5.2), \
+             not STRONG_MODEL (glm-4.6): {seen:?}"
         );
     }
 

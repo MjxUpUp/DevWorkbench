@@ -169,6 +169,17 @@ pub trait ChatModel: Send + Sync {
     ) -> Option<(std::sync::Arc<dyn ChatModel>, std::sync::Arc<CostAccumulator>)> {
         None
     }
+
+    /// The concrete model id this instance sends in the request body (e.g.
+    /// `"glm-5.2"`). ReactAgent's per-step router uses it as the base model
+    /// when the caller didn't pass one in `AgentInput.model`, so the router
+    /// decides against the model the user ACTUALLY picked (after provider
+    /// `model_mapping` resolution) instead of a hardcoded flagship. Default
+    /// `""` → the router keeps its legacy fallback (test stubs that don't
+    /// model a concrete id are unaffected). Production models override.
+    fn model_id(&self) -> &str {
+        ""
+    }
 }
 
 // ---------------------------------------------------------------------------
