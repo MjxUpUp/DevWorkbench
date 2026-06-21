@@ -204,7 +204,7 @@ export function EvalPanel() {
           type="button"
           onClick={onRun}
           disabled={running || !selectedSessionId}
-          className="eval-trigger-button"
+          className="btn btn-primary"
         >
           {running ? '评估中…' : '运行评估'}
         </button>

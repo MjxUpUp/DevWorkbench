@@ -1,23 +1,6 @@
-/* === Form element baseline ===
-   Native <select> reset — drop the OS-default arrow so selects match the
-   design system, and inject a consistent chevron glyph. Class rules keep
-   their own border/bg/padding; they MUST use `background-color` (not the
-   `background` shorthand) or the shorthand wipes this chevron by resetting
-   background-image. This is the root fix for the "bare <select>" class of
-   bugs (chat-agent-select / skill-sort-select / provider-*-select). */
-select {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238a8a8a' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  /* Reserve room for the chevron so the selected text doesn't slide under it.
-     Without this, longer option labels get visually clipped by the arrow —
-     the "chevron covers the agent name" symptom. */
-  padding-right: 24px;
-  cursor: pointer;
-}
+/* <select> baseline (appearance/chevron/border/bg/color) now lives in base.css
+   as the single source of truth for ALL form controls. Class rules below keep
+   their own per-view overrides. */
 
 /* === Button baseline ===
    Shared .btn / .btn-primary used across views (orchestrate run/reset,
