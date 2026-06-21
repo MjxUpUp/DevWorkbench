@@ -1,9 +1,13 @@
 /* ============================================
-   DEV WORKBENCH — Clean Professional Light
+   DEV WORKBENCH — Design Tokens
+   Refined engineer-grade light + deep dark.
+   结构层对齐 Linear/Vercel/Raycast（surface ladder +
+   hairline + 负字距 + spring 曲线），装饰层用自定义
+   靛蓝 accent + 渐变做差异化。
    ============================================ */
 
 :root {
-  /* Layout tokens */
+  /* ── Layout tokens ── */
   --sidebar-width: 240px;
   --sidebar-min: 180px;
   --sidebar-max: 400px;
@@ -13,11 +17,20 @@
   --agent-status-bar-height: 28px;
   --status-bar-height: 28px;
   --session-sidebar-width: 260px;
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
 
-  /* DAG Node Colors */
+  /* ── Global palette (原始值层，便于未来换色板) ── */
+  --palette-accent: #5457d6;
+  --palette-accent-hover: #4548c9;
+  --palette-accent-soft: #818cf8;
+  --palette-accent-soft-hover: #a5acfa;
+
+  /* ── DAG Node Colors (light) ── */
   --node-prompt: #3b82f6;
   --node-prompt-bg: #eff6ff;
   --node-agent: #8b5cf6;
@@ -33,48 +46,54 @@
   --node-transform: #6b7280;
   --node-transform-bg: #f9fafb;
 
-  /* Cost Colors */
+  /* ── Cost Colors ── */
   --cost-safe: #22c55e;
   --cost-warning: #f97316;
   --cost-danger: #ef4444;
-  /* B5 transparent cost per-tier colors */
   --cost-input: #3b82f6;
   --cost-output: #8b5cf6;
   --cost-cache-read: #22c55e;
   --cost-cache-write: #f97316;
 
-  /* Quality Gate */
+  /* ── Quality Gate ── */
   --gate-pass: #22c55e;
   --gate-fail: #ef4444;
   --gate-warn: #eab308;
   --gate-skip: #9ca3af;
   --gate-warn-bg: #fef9c3;
 
-  /* Skill Types */
+  /* ── Skill Types ── */
   --skill-orchestration: #8b5cf6;
   --skill-quality: #22c55e;
   --skill-security: #ef4444;
   --skill-efficiency: #3b82f6;
 
-  /* Chat Block */
+  /* ── Chat Block ── */
   --block-border: var(--border-subtle);
   --block-header-bg: var(--surface-2);
+  --thinking-accent: #8b5cf6;
 
-  /* Typography — system font stack, no external dependencies */
+  /* ── Typography — system font stack, no external deps ── */
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+  --text-xxs: 10px;
   --text-xs: 11px;
   --text-sm: 13px;
   --text-base: 14px;
   --text-lg: 16px;
   --text-xl: 20px;
+  --text-2xl: 24px;
   --lh-xs: 16px;
   --lh-sm: 20px;
   --lh-base: 22px;
   --lh-lg: 24px;
   --lh-xl: 28px;
+  /* 负字距：display 大字收紧是“高级感”关键（Vercel 最激进） */
+  --tracking-display: -0.02em;
+  --tracking-body: -0.006em;
+  --tracking-tight: -0.011em;
 
-  /* Spacing — 4px grid */
+  /* ── Spacing — 4px grid ── */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -84,24 +103,38 @@
   --space-7: 32px;
   --space-8: 40px;
 
-  /* Timing — shorter, snappier */
+  /* ── Timing & motion ── */
   --duration-fast: 120ms;
+  --duration-micro: 150ms;
   --duration-normal: 180ms;
+  --duration-slow: 240ms;
+  /* ease-out-expo：进入动画（Framer Motion 默认曲线） */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  /* hover/微交互快速曲线（反 AI 信号：避开 linear/默认 ease） */
+  --ease-micro: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* ── Clean Professional Light (default) ── */
+  /* ── Gradients (accent / dataflow) ── */
+  --gradient-accent: linear-gradient(135deg, #5457d6 0%, #6366f1 100%);
+  --gradient-accent-hover: linear-gradient(135deg, #4548c9 0%, #5457d6 100%);
+  --gradient-surface: linear-gradient(180deg, #ffffff 0%, #fcfcfd 100%);
+  --gradient-node-wrapper: linear-gradient(100deg, #e9ebf0, rgba(233, 235, 240, 0.2));
+
+  /* ════════════════════════════════════════════════
+     Refined Light (default)
+     ════════════════════════════════════════════════ */
   --bg-canvas: #F7F8FA;
   --surface-0: #FFFFFF;
-  --surface-1: #FFFFFF;
+  --surface-1: #FCFCFD;
   --surface-2: #F3F4F6;
   --surface-3: #E5E7EB;
   --border: #E5E7EB;
   --text-primary: #111827;
   --text-secondary: #6B7280;
   --text-tertiary: #9CA3AF;
-  --accent: #2563EB;
+  --accent: var(--palette-accent);
   --text-on-accent: #FFFFFF;
-  --status-running: #2563EB;
+  --status-running: var(--palette-accent);
   --status-success: #16A34A;
   --status-error: #DC2626;
   --status-warning: #D97706;
@@ -114,80 +147,129 @@
   --border-hover: #D1D5DB;
   --text-muted: var(--text-tertiary);
   --text-accent: var(--accent);
-  --accent-hover: #1D4ED8;
-  --accent-muted: rgba(37, 99, 235, 0.08);
-  --accent-glow: rgba(37, 99, 235, 0.15);
+  --accent-hover: var(--palette-accent-hover);
+  --accent-muted: rgba(84, 87, 214, 0.10);
+  --accent-glow: rgba(84, 87, 214, 0.22);
   --star: #D97706;
   --star-muted: rgba(217, 119, 6, 0.1);
   --danger: var(--status-error);
   --danger-muted: rgba(220, 38, 38, 0.08);
   --success: var(--status-success);
+  --success-muted: rgba(22, 163, 74, 0.10);
   --warning: var(--status-warning);
+  --warning-muted: rgba(217, 119, 6, 0.10);
+  --always-white: #FFFFFF;
+  --border-strong: #D1D5DB;
+  --titlebar-close: #e81123;
+  --scrim: rgba(0, 0, 0, 0.3);
+  --scrim-strong: rgba(0, 0, 0, 0.5);
   --cover-badge-bg: rgba(255, 255, 255, 0.85);
 
   /* Focus ring */
   --focus-ring: 0 0 0 3px var(--accent-glow);
+  --focus-ring-tight: 0 0 0 2px var(--accent-glow);
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
-  --shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.12);
+  /* Shadows — hairline (shadow-as-border) + 5 段 elevation */
+  --shadow-hairline: 0 0 0 1px rgba(17, 24, 39, 0.06);
+  --ring-hairline: 0 0 0 1px var(--border-default);
+  --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.06), 0 0 0 1px rgba(17, 24, 39, 0.04);
+  --shadow-md: 0 2px 6px rgba(17, 24, 39, 0.08), 0 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-lg: 0 6px 16px rgba(17, 24, 39, 0.10), 0 2px 4px rgba(17, 24, 39, 0.06);
+  --shadow-xl: 0 12px 32px rgba(17, 24, 39, 0.12), 0 4px 8px rgba(17, 24, 39, 0.06);
+  --shadow-2xl: 0 24px 56px rgba(17, 24, 39, 0.16), 0 8px 16px rgba(17, 24, 39, 0.08);
 
-  /* No gradient covers — flat color accents */
-  --cover-1: #EFF6FF;
-  --cover-2: #F0FDF4;
+  /* Cover tints — 可作渐变起点 */
+  --cover-1: #EEF0FE;
+  --cover-2: #ECFDF5;
   --cover-3: #FFFBEB;
   --cover-4: #FAF5FF;
   --cover-5: #FFF7ED;
   --cover-6: #F0FDFA;
 }
 
-/* ── Dark theme (opt-in via data-theme="dark") ── */
+/* ════════════════════════════════════════════════
+   Dark theme (opt-in via data-theme="dark")
+   surface ladder 拉开层次，accent 提亮，node/cost/gate/skill 降饱和
+   ════════════════════════════════════════════════ */
 [data-theme="dark"] {
-  --bg-canvas: #0D0D14;
-  --surface-0: #12121A;
-  --surface-1: #16161E;
-  --surface-2: #1C1C26;
-  --surface-3: #242430;
+  --bg-canvas: #0B0B12;
+  --surface-0: #14141C;
+  --surface-1: #1A1A24;
+  --surface-2: #22222E;
+  --surface-3: #2E2E3C;
   --border: rgba(255, 255, 255, 0.08);
-  --text-primary: #E8E8F0;
-  --text-secondary: #8888A0;
-  --text-tertiary: #555570;
-  --accent: #2563EB;
-  --text-on-accent: #FFFFFF;
-  --status-running: #2563EB;
+  --text-primary: #ECECF4;
+  --text-secondary: #9494A8;
+  --text-tertiary: #5E5E74;
+  --accent: var(--palette-accent-soft);
+  --text-on-accent: #0B0B12;
+  --status-running: var(--palette-accent-soft);
   --status-success: #34C759;
   --status-error: #FF5F5F;
   --status-warning: #FFB547;
 
   --surface-elevated: var(--surface-1);
-  --surface-sunken: #0A0A10;
+  --surface-sunken: #08080D;
   --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-default: rgba(255, 255, 255, 0.08);
-  --border-hover: rgba(255, 255, 255, 0.12);
+  --border-default: rgba(255, 255, 255, 0.09);
+  --border-hover: rgba(255, 255, 255, 0.14);
   --text-muted: var(--text-tertiary);
   --text-accent: var(--accent);
-  --accent-hover: #3B82F6;
-  --accent-muted: rgba(37, 99, 235, 0.12);
-  --accent-glow: rgba(37, 99, 235, 0.25);
+  --accent-hover: var(--palette-accent-soft-hover);
+  --accent-muted: rgba(129, 140, 248, 0.14);
+  --accent-glow: rgba(129, 140, 248, 0.32);
   --star: #FFD700;
   --star-muted: rgba(255, 215, 0, 0.15);
   --danger: var(--status-error);
-  --danger-muted: rgba(255, 95, 95, 0.1);
+  --danger-muted: rgba(255, 95, 95, 0.12);
   --success: var(--status-success);
+  --success-muted: rgba(52, 199, 89, 0.14);
   --warning: var(--status-warning);
-  --cover-badge-bg: rgba(18, 18, 26, 0.75);
+  --warning-muted: rgba(255, 181, 71, 0.14);
+  --always-white: #FFFFFF;
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-strong: rgba(0, 0, 0, 0.7);
+  --cover-badge-bg: rgba(20, 20, 28, 0.75);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.4);
-  --shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.5);
+  /* 暗色阴影：更深纵深 */
+  --shadow-hairline: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --ring-hairline: 0 0 0 1px var(--border-default);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 6px 18px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 14px 36px rgba(0, 0, 0, 0.55);
+  --shadow-2xl: 0 28px 64px rgba(0, 0, 0, 0.6);
 
-  --cover-1: #1a2a3a;
-  --cover-2: #1a3a2a;
-  --cover-3: #2a2a1a;
-  --cover-4: #2a1a3a;
-  --cover-5: #2a3a1a;
-  --cover-6: #1a3a3a;
+  /* 暗色下 node/cost/gate/skill 降饱和提亮，避免在深背景上刺眼 */
+  --node-prompt: #60a5fa;
+  --node-prompt-bg: rgba(59, 130, 246, 0.12);
+  --node-agent: #a78bfa;
+  --node-agent-bg: rgba(139, 92, 246, 0.14);
+  --node-gate: #4ade80;
+  --node-gate-bg: rgba(34, 197, 94, 0.14);
+  --node-parallel: #fb923c;
+  --node-parallel-bg: rgba(249, 115, 22, 0.14);
+  --node-merge: #fb923c;
+  --node-merge-bg: rgba(249, 115, 22, 0.14);
+  --node-human: #facc15;
+  --node-human-bg: rgba(234, 179, 8, 0.14);
+  --node-transform: #9ca3af;
+  --node-transform-bg: rgba(156, 163, 175, 0.12);
+
+  --gate-warn-bg: rgba(250, 204, 21, 0.16);
+  --thinking-accent: #a78bfa;
+
+  /* 暗色渐变：accent 按钮 + node wrapper */
+  --gradient-accent: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+  --gradient-accent-hover: linear-gradient(135deg, #5457d6 0%, #6366f1 100%);
+  --gradient-surface: linear-gradient(180deg, #1A1A24 0%, #14141C 100%);
+  --gradient-node-wrapper: linear-gradient(100deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+
+  --cover-1: #1c1e30;
+  --cover-2: #18241c;
+  --cover-3: #2a2818;
+  --cover-4: #241c30;
+  --cover-5: #2a2418;
+  --cover-6: #18242a;
 }

@@ -50,7 +50,7 @@ select {
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--always-white, #fff);
+  color: var(--always-white);
 }
 .btn-primary:hover:not(:disabled) {
   filter: brightness(0.95);
@@ -330,7 +330,7 @@ select {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -901,7 +901,7 @@ select {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #D97706;
+  background: var(--star);
   flex-shrink: 0;
 }
 
@@ -1072,17 +1072,17 @@ select {
 
 .quality-check-status.passed {
   color: var(--status-success);
-  background: rgba(22, 163, 74, 0.08);
+  background: var(--success-muted);
 }
 
 .quality-check-status.failed {
   color: var(--status-error);
-  background: rgba(220, 38, 38, 0.08);
+  background: var(--danger-muted);
 }
 
 .quality-check-status.warning {
   color: var(--status-warning);
-  background: rgba(217, 119, 6, 0.08);
+  background: var(--warning-muted);
 }
 
 .quality-check-message {
@@ -1115,12 +1115,12 @@ select {
 }
 
 .quality-badge-passed {
-  background: rgba(22, 163, 74, 0.1);
+  background: var(--success-muted);
   color: var(--status-success);
 }
 
 .quality-badge-failed {
-  background: rgba(220, 38, 38, 0.1);
+  background: var(--danger-muted);
   color: var(--status-error);
 }
 

@@ -134,7 +134,7 @@ export function CommandPalette() {
 
   return (
     <div className="command-palette-overlay" onClick={close}>
-      <div className="command-palette" onClick={(e) => e.stopPropagation()}>
+      <div className="command-palette" role="dialog" aria-modal="true" aria-label="命令面板" onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           className="command-palette-input"

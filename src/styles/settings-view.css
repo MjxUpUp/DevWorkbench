@@ -283,7 +283,7 @@
 
 .settings-row-btn-icon:hover {
   background: var(--surface-2);
-  color: var(--danger, #e5484d);
+  color: var(--danger);
 }
 
 /* Segmented control (AppearanceSection) */
@@ -466,7 +466,7 @@
 .provider-dirty-badge {
   font-size: var(--text-xs, 12px);
   color: var(--accent);
-  background: var(--accent-soft, rgba(0, 122, 255, 0.1));
+  background: var(--accent-muted);
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 600;
@@ -550,7 +550,7 @@
 .provider-toggle-slider {
   position: absolute;
   inset: 0;
-  background: var(--border-strong, #999);
+  background: var(--border-strong);
   border-radius: 18px;
   transition: background 0.2s;
 }
@@ -562,7 +562,7 @@
   width: 14px;
   left: 2px;
   top: 2px;
-  background: #fff;
+  background: var(--always-white);
   border-radius: 50%;
   transition: transform 0.2s;
 }
@@ -596,12 +596,12 @@
 }
 
 .provider-delete-btn {
-  color: var(--danger, #d33);
+  color: var(--danger);
   border-color: var(--border-subtle);
 }
 
 .provider-delete-btn:hover {
-  background: var(--danger-soft, rgba(221, 51, 51, 0.08));
+  background: var(--danger-muted);
 }
 
 .provider-fields {
@@ -652,12 +652,12 @@
 }
 
 .provider-field-input.invalid {
-  border-color: var(--danger, #d33);
+  border-color: var(--danger);
 }
 
 .provider-field-error {
   font-size: var(--text-xs, 12px);
-  color: var(--danger, #d33);
+  color: var(--danger);
 }
 
 /* API Key with reveal toggle + configured badge */
@@ -697,9 +697,9 @@
 }
 
 .provider-key-badge.configured {
-  color: var(--success, #2c8a2c);
-  border-color: var(--success-soft, rgba(44, 138, 44, 0.3));
-  background: var(--success-soft, rgba(44, 138, 44, 0.08));
+  color: var(--success);
+  border-color: var(--success-muted);
+  background: var(--success-muted);
 }
 
 /* Models editable list */
@@ -760,7 +760,7 @@
 }
 
 .provider-model-remove:hover {
-  color: var(--danger, #d33);
+  color: var(--danger);
 }
 
 .provider-add-model-btn {
@@ -814,13 +814,13 @@
 }
 
 .provider-test-result.ok {
-  color: var(--success, #2c8a2c);
-  background: var(--success-soft, rgba(44, 138, 44, 0.1));
+  color: var(--success);
+  background: var(--success-muted);
 }
 
 .provider-test-result.fail {
-  color: var(--danger, #d33);
-  background: var(--danger-soft, rgba(221, 51, 51, 0.1));
+  color: var(--danger);
+  background: var(--danger-muted);
 }
 
 .provider-add-btn {
@@ -856,12 +856,12 @@
 
 .provider-btn.primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   border-color: var(--accent);
 }
 
 .provider-btn.primary:not(:disabled) {
-  background: var(--accent-strong, var(--accent));
+  background: var(--accent-hover);
 }
 
 .provider-btn.secondary {
@@ -998,8 +998,8 @@
 }
 
 .memory-card-delete:hover {
-  background: var(--danger-soft, rgba(221, 51, 51, 0.08));
-  color: var(--danger, #d33);
+  background: var(--danger-muted);
+  color: var(--danger);
 }
 
 /* ---- Skills section (技能) — reuses the memory-card shells ---- */

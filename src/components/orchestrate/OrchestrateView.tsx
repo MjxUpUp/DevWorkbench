@@ -11,14 +11,18 @@ import { BlocksView } from '../chat/BlocksView';
 import { WorkflowBuilder } from './WorkflowBuilder';
 import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
 
-/** Color per node status — drives the canvas node fill. */
+/** Color per node status — drives the canvas node fill. Maps to the
+ *  status/gate tokens in variables.css (status-* carry dark-mode
+ *  de-saturation overrides; gate-skip covers the idle/skipped grey).
+ *  The old --color-node-* names never existed, so this was silently
+ *  rendering from the hex fallbacks and ignoring the theme. */
 const STATUS_COLOR: Record<NodeState['status'], string> = {
-  pending: 'var(--color-node-idle, #9ca3af)',
-  running: 'var(--color-node-running, #3b82f6)',
-  done: 'var(--color-node-done, #22c55e)',
-  failed: 'var(--color-node-failed, #ef4444)',
-  skipped: 'var(--color-node-skipped, #6b7280)',
-  waiting_approval: 'var(--color-node-approval, #f59e0b)',
+  pending: 'var(--gate-skip)',
+  running: 'var(--status-running)',
+  done: 'var(--gate-pass)',
+  failed: 'var(--gate-fail)',
+  skipped: 'var(--gate-skip)',
+  waiting_approval: 'var(--gate-warn)',
 };
 
 const STATUS_LABEL: Record<NodeState['status'], string> = {

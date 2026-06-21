@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { IconX } from './Icons';
@@ -21,6 +21,17 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
   const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState('');
+
+  // ESC closes the modal — without this keyboard users can't dismiss it (the
+  // overlay click is mouse-only). Pairs with the overlay onClick below per the
+  // WAI-ARIA dialog pattern.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const existingPaths = new Set(existingProjects.map(p => p.path.toLowerCase()));
 
@@ -136,7 +147,7 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="添加项目" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>添加项目</h2>
           <button className="modal-close" onClick={onClose}><IconX size={16} /></button>

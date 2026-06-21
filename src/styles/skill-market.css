@@ -396,7 +396,7 @@
   width: 20px;
   height: 16px;
   border-radius: 3px;
-  color: #fff;
+  color: var(--always-white);
   font-size: 9px;
   font-weight: 700;
 }
@@ -545,7 +545,7 @@
 .skill-detail-category-tag {
   padding: 2px 8px;
   border-radius: 10px;
-  color: #fff;
+  color: var(--always-white);
   font-size: 10px;
   font-weight: 600;
   text-transform: capitalize;
@@ -627,7 +627,7 @@
 .skill-detail-section-badge {
   padding: 1px 6px;
   border-radius: 4px;
-  color: #fff;
+  color: var(--always-white);
   font-size: 10px;
   font-weight: 700;
 }

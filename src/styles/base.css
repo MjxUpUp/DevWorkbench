@@ -1,3 +1,11 @@
+/* === color-scheme: 让原生控件(scrollbar/date/select)跟随主题 === */
+:root {
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 /* === Reset === */
 *, *::before, *::after {
   margin: 0;
@@ -10,13 +18,26 @@ html, body, #root {
   height: 100%;
   font-family: var(--font-sans);
   font-size: var(--text-base);
+  letter-spacing: var(--tracking-body);
   color: var(--text-primary);
   background: var(--bg-canvas);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-/* === App Layout — TitleBar on top, then 2 cols: LeftColumn | MainStage (zcode single-column) === */
+/* 大字标题负字距收紧（高级感关键） */
+h1, h2, h3, h4 {
+  letter-spacing: var(--tracking-display);
+}
+
+/* 等宽：数据/代码列用 tabular figures 防 layout shift */
+code, pre, kbd, .font-mono, [data-tabular] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* === App Layout — TitleBar on top, then 2 cols: LeftColumn | MainStage === */
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;

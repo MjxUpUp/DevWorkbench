@@ -26,14 +26,14 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 32, color: '#ff6b6b', background: '#F7F8FA', minHeight: '100vh', fontFamily: 'monospace', whiteSpace: 'pre-wrap', fontSize: 13 }}>
+        <div style={{ padding: 32, color: 'var(--danger)', background: 'var(--bg-canvas)', minHeight: '100vh', fontFamily: 'monospace', whiteSpace: 'pre-wrap', fontSize: 13 }}>
           <h2>React Render Error</h2>
           <p><b>{this.state.error.message}</b></p>
           <p>{this.state.error.stack}</p>
           {this.state.componentStack && (
             <>
               <h3 style={{ marginTop: 16 }}>Component Stack:</h3>
-              <p style={{ color: '#888' }}>{this.state.componentStack}</p>
+              <p style={{ color: 'var(--text-tertiary)' }}>{this.state.componentStack}</p>
             </>
           )}
         </div>

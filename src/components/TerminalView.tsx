@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { Session } from '../types';
 import { useAgentStore } from '../stores/agentStore';
+import { resolvedTheme, type ResolvedTheme } from '../utils/theme';
 import '@xterm/xterm/css/xterm.css';
 
 interface TerminalViewProps {
@@ -13,26 +14,29 @@ interface TerminalViewProps {
   completedSession?: Session | null;
 }
 
-// xterm.js renders via canvas — CSS variables don't work.
-// Detect system preference directly.
-const TERMINAL_THEMES: Record<string, { background: string; foreground: string; cursor: string; selectionBackground: string }> = {
+// xterm.js renders via canvas, so CSS variables don't apply — the theme is
+// read from hex literals. These mirror the app's surface/text ladder in
+// variables.css (dark: surface-0 / text-primary; light: surface-2 /
+// text-primary) so the terminal reads as part of the app chrome, not a
+// foreign panel. resolvedTheme() follows the user's choice (incl. auto),
+// not just the OS preference.
+const TERMINAL_THEMES: Record<ResolvedTheme, { background: string; foreground: string; cursor: string; selectionBackground: string }> = {
   dark: {
-    background: '#12121A',
-    foreground: '#E4E4EA',
-    cursor: '#E4E4EA',
+    background: '#14141C',
+    foreground: '#ECECF4',
+    cursor: '#ECECF4',
     selectionBackground: 'rgba(255,255,255,0.12)',
   },
   light: {
-    background: '#F7F7F8',
-    foreground: '#1A1A1E',
-    cursor: '#1A1A1E',
+    background: '#F3F4F6',
+    foreground: '#111827',
+    cursor: '#111827',
     selectionBackground: 'rgba(0,0,0,0.1)',
   },
 };
 
 function getTerminalTheme(): typeof TERMINAL_THEMES.dark {
-  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  return TERMINAL_THEMES[isDark ? 'dark' : 'light'];
+  return TERMINAL_THEMES[resolvedTheme()];
 }
 
 export function TerminalView({ sessionId, completedSession }: TerminalViewProps) {
@@ -82,7 +86,10 @@ export function TerminalView({ sessionId, completedSession }: TerminalViewProps)
     };
   }, []);
 
-  // React to system color scheme changes
+  // React to app theme changes. resolvedTheme() reads the data-theme attribute
+  // that applyTheme() writes, so the terminal follows manual light/dark
+  // toggles too — not just the OS preference (auto mode). A MutationObserver
+  // catches the attribute swap; the mql listener covers auto-mode OS changes.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -93,9 +100,15 @@ export function TerminalView({ sessionId, completedSession }: TerminalViewProps)
 
     applyTheme();
 
+    const observer = new MutationObserver(() => applyTheme());
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
     const mql = window.matchMedia('(prefers-color-scheme: dark)');
     mql.addEventListener('change', applyTheme);
-    return () => mql.removeEventListener('change', applyTheme);
+    return () => {
+      observer.disconnect();
+      mql.removeEventListener('change', applyTheme);
+    };
   }, []);
 
   // Wire up session-specific event listeners

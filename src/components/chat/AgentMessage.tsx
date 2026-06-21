@@ -199,10 +199,10 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
       {/* Decision Chain block */}
       {chainSteps.length > 0 && (
         <div className="agent-block">
-          <div className="agent-block-header" onClick={() => setChainCollapsed(!chainCollapsed)}>
+          <button type="button" className="agent-block-header" aria-expanded={!chainCollapsed} onClick={() => setChainCollapsed(!chainCollapsed)}>
             <span className="agent-block-title">Decision Chain</span>
             <span className="agent-block-collapse">{chainCollapsed ? '▸' : '▾'}</span>
-          </div>
+          </button>
           {!chainCollapsed && (
             <div className="agent-block-body">
               <div className="decision-chain-steps">
@@ -231,10 +231,10 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
           - raw 历史会话（无 pty 缓存）未就绪：loading 占位 */}
       {showBlocks ? (
         <div className="agent-block">
-          <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
+          <button type="button" className="agent-block-header" aria-expanded={!terminalCollapsed} onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
             <span className="agent-block-title">输出</span>
             <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
-          </div>
+          </button>
           {!terminalCollapsed && (
             <div className="agent-block-body agent-output">
               <BlocksView events={blocks} running={running} />
@@ -243,10 +243,10 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         </div>
       ) : showTerminal ? (
         <div className="agent-block">
-          <div className="agent-block-header" onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
+          <button type="button" className="agent-block-header" aria-expanded={!terminalCollapsed} onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
             <span className="agent-block-title">{running ? 'Terminal Output' : '输出'}</span>
             <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
-          </div>
+          </button>
           {!terminalCollapsed && (
             <div className="agent-block-body" style={{ padding: 0 }}>
               <TerminalView sessionId={session.id} completedSession={null} />

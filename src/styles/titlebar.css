@@ -129,8 +129,8 @@
 }
 
 .window-control-close:hover {
-  background: #e81123; /* standard Windows close-red */
-  color: #fff;
+  background: var(--titlebar-close); /* standard Windows close-red */
+  color: var(--always-white);
 }
 
 .window-control svg {

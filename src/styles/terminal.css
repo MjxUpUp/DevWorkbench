@@ -178,7 +178,7 @@
 .requirement-action-btn.done:hover {
   border-color: var(--success);
   color: var(--success);
-  background: rgba(22, 163, 74, 0.08);
+  background: var(--success-muted);
 }
 
 .requirement-action-btn.continue {
@@ -397,7 +397,7 @@
 }
 
 .session-badge-completed {
-  background: rgba(22, 163, 74, 0.08);
+  background: var(--success-muted);
   color: var(--status-success);
 }
 

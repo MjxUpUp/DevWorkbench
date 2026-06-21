@@ -1,6 +1,6 @@
-/* =============================================
-   Animations & Keyframes — snappy 120ms transitions
-   ============================================= */
+/* ============================================
+   Animations & Keyframes — spring curves
+   ============================================ */
 
 @keyframes modalOverlayIn {
   from { opacity: 0; }
@@ -37,5 +37,21 @@
   to {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+/* ============================================
+   a11y 门 — WCAG 2.2 SC 2.3.3 强制
+   全局守护：前庭失调用户关闭动效时，所有动画/过渡
+   降为近瞬时。这是法律红线，不可删除。
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

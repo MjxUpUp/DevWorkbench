@@ -217,7 +217,7 @@
 .git-file-badge--M { background: var(--status-warning); }
 .git-file-badge--A { background: var(--status-success); }
 .git-file-badge--D { background: var(--status-error); }
-.git-file-badge--R { background: #8b5cf6; }
+.git-file-badge--R { background: var(--node-agent); }
 .git-file-badge--C { background: var(--status-error); }
 .git-file-badge--U { background: var(--status-success); }
 

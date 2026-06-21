@@ -30,10 +30,10 @@ const SLOW_TURN_MS = 60_000;
 const SLOW_TTFB_MS = 30_000;
 function timingBadge(t: LlmTrace): Badge | null {
   if (t.latency_ms != null && t.latency_ms > SLOW_TURN_MS) {
-    return { label: 'slow turn', color: 'var(--warning, #d97706)' };
+    return { label: 'slow turn', color: 'var(--warning)' };
   }
   if (t.ttfb_ms != null && t.ttfb_ms > SLOW_TTFB_MS) {
-    return { label: 'slow ttfb', color: 'var(--warning, #d97706)' };
+    return { label: 'slow ttfb', color: 'var(--warning)' };
   }
   return null;
 }
@@ -42,16 +42,16 @@ function statusBadge(t: LlmTrace): Badge {
   // Never-reached-HTTP failures: grey, the call died before a response.
   const preHttp = ['network', 'circuit', 'decode'];
   if (t.status_code == null) {
-    return { label: t.error_kind ?? 'unknown', color: 'var(--text-tertiary, #888)' };
+    return { label: t.error_kind ?? 'unknown', color: 'var(--text-tertiary)' };
   }
   if (t.status_code >= 200 && t.status_code < 300) {
-    return { label: String(t.status_code), color: 'var(--success, #16a34a)' };
+    return { label: String(t.status_code), color: 'var(--success)' };
   }
   // non_2xx — red, the diagnostic case this view exists for.
   if (preHttp.includes(t.error_kind ?? '')) {
-    return { label: `${t.status_code}`, color: 'var(--text-tertiary, #888)' };
+    return { label: `${t.status_code}`, color: 'var(--text-tertiary)' };
   }
-  return { label: String(t.status_code), color: 'var(--danger, #dc2626)' };
+  return { label: String(t.status_code), color: 'var(--danger)' };
 }
 
 export function TraceView() {
@@ -100,7 +100,7 @@ export function TraceView() {
         )}
         {error && (
           <div className="agent-block-body">
-            <span style={{ color: 'var(--danger, #dc2626)' }}>加载失败: {error}</span>
+            <span style={{ color: 'var(--danger)' }}>加载失败: {error}</span>
           </div>
         )}
         {!loading && !error && traces && traces.length === 0 && (
@@ -122,10 +122,12 @@ export function TraceView() {
               // response. Anything else carrying a body is an error diagnostic.
               const is2xx = t.status_code != null && t.status_code >= 200 && t.status_code < 300;
               return (
-                <div key={t.id} style={{ borderBottom: '1px solid var(--border, rgba(128,128,128,0.2))' }}>
-                  <div
+                <div key={t.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
                     onClick={() => setExpanded(isOpen ? null : t.id)}
-                    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', cursor: 'pointer' }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '8px 12px', background: 'transparent', border: 'none', textAlign: 'left', font: 'inherit', color: 'inherit', cursor: 'pointer' }}
                   >
                     <span style={{ color: 'var(--text-tertiary)', minWidth: 28 }}>#{i + 1}</span>
                     <span style={{ minWidth: 140, fontWeight: 500 }}>{t.model}</span>
@@ -150,12 +152,12 @@ export function TraceView() {
                       <span style={{ color: slow.color, fontSize: 'var(--text-xs)', fontWeight: 600 }}>{slow.label}</span>
                     )}
                     {t.error_kind && (
-                      <span style={{ color: 'var(--danger, #dc2626)', fontSize: 'var(--text-xs)' }}>{t.error_kind}</span>
+                      <span style={{ color: 'var(--danger)', fontSize: 'var(--text-xs)' }}>{t.error_kind}</span>
                     )}
                     <span style={{ marginLeft: 'auto', color: 'var(--text-tertiary)' }}>{isOpen ? '▾' : '▸'}</span>
-                  </div>
+                  </button>
                   {isOpen && (
-                    <div style={{ padding: '8px 12px 12px', background: 'var(--bg-secondary, rgba(128,128,128,0.06))' }}>
+                    <div style={{ padding: '8px 12px 12px', background: 'var(--surface-2)' }}>
                       <TimingBreakdown trace={t} />
                       <DetailSection title="Request body" body={t.req_body} />
                       {t.resp_body ? (
@@ -215,11 +217,11 @@ function TimingBreakdown({ trace }: { trace: LlmTrace }) {
         )}
       </div>
       {haveSplit && (
-        <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--bg-tertiary, rgba(0,0,0,0.06))' }}>
-          <div style={{ width: `${(ttfb / denom) * 100}%`, background: 'var(--accent, #2563eb)' }} title={`ttfb ${ttfb}ms`} />
-          <div style={{ width: `${(stream / denom) * 100}%`, background: 'var(--success, #16a34a)' }} title={`stream ${stream}ms`} />
+        <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--surface-3)' }}>
+          <div style={{ width: `${(ttfb / denom) * 100}%`, background: 'var(--accent)' }} title={`ttfb ${ttfb}ms`} />
+          <div style={{ width: `${(stream / denom) * 100}%`, background: 'var(--success)' }} title={`stream ${stream}ms`} />
           {other > 0 && (
-            <div style={{ width: `${(other / denom) * 100}%`, background: 'var(--text-tertiary, #888)' }} title={`other ${other}ms`} />
+            <div style={{ width: `${(other / denom) * 100}%`, background: 'var(--text-tertiary)' }} title={`other ${other}ms`} />
           )}
         </div>
       )}
@@ -249,7 +251,7 @@ function DetailSection({ title, body, isError }: { title: string; body: string; 
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-        <span style={{ fontWeight: 600, color: isError ? 'var(--danger, #dc2626)' : 'inherit' }}>{title}</span>
+        <span style={{ fontWeight: 600, color: isError ? 'var(--danger)' : 'inherit' }}>{title}</span>
         <button type="button" className="agent-message-copy-id" onClick={copy}>
           {copied ? '已复制' : '复制'}
         </button>
@@ -260,7 +262,7 @@ function DetailSection({ title, body, isError }: { title: string; body: string; 
           maxHeight: 360,
           overflow: 'auto',
           padding: 8,
-          background: 'var(--bg-tertiary, rgba(0,0,0,0.06))',
+          background: 'var(--surface-2)',
           borderRadius: 4,
           fontSize: 'var(--text-xs)',
           whiteSpace: 'pre-wrap',

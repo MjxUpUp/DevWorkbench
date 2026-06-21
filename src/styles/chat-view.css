@@ -38,8 +38,8 @@
   transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease, background var(--duration-fast) ease;
 }
 .chat-clear-btn:hover {
-  border-color: var(--danger, #ef4444);
-  color: var(--danger, #ef4444);
+  border-color: var(--danger);
+  color: var(--danger);
   background: var(--surface-2);
 }
 
@@ -525,7 +525,7 @@
 }
 .subagent-board-running {
   font-weight: 600;
-  color: var(--accent, var(--text-primary));
+  color: var(--accent);
 }
 .subagent-board-list {
   list-style: none;
@@ -551,12 +551,12 @@
   flex-shrink: 0;
 }
 .subagent-board-item--running .subagent-board-status {
-  color: var(--accent, var(--text-primary));
+  color: var(--accent);
 }
 .subagent-board-item--failed .subagent-board-status,
 .subagent-board-item--timed_out .subagent-board-status,
 .subagent-board-item--polling_timed_out .subagent-board-status {
-  color: var(--danger, #d33);
+  color: var(--danger);
 }
 .subagent-board-task {
   color: var(--text-tertiary);
@@ -654,8 +654,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   padding: var(--space-1) var(--space-3);
   background: var(--block-header-bg);
+  border: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
   user-select: none;
 }
@@ -761,7 +766,7 @@
 }
 
 .chat-block-toolresult.error .chat-block-toolresult-head {
-  color: var(--danger, #ef4444);
+  color: var(--danger);
 }
 
 /* Thinking / interleaved-reasoning collapsible card (GLM). Visually muted
@@ -772,7 +777,7 @@
    visually distinct from tool-use cards. */
 .chat-block-thinking {
   border: 1px solid var(--border-subtle);
-  border-left: 3px solid #8b5cf6;
+  border-left: 3px solid var(--thinking-accent);
   border-radius: var(--radius-sm);
   background: var(--surface-0);
   overflow: hidden;
@@ -797,7 +802,7 @@
   color: var(--text-secondary);
 }
 .chat-block-thinking-mark {
-  color: #8b5cf6;
+  color: var(--thinking-accent);
 }
 .chat-block-thinking-content {
   margin: 0;
@@ -829,8 +834,8 @@
   background: color-mix(in srgb, var(--success) 12%, transparent);
 }
 .chat-block-result.failed {
-  color: var(--danger, #ef4444);
-  background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .chat-block-result-icon { font-weight: 700; }
 .chat-block-result-secs {

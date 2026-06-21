@@ -141,7 +141,7 @@
 
 .left-column-project-remove:hover {
   background: var(--surface-2);
-  color: var(--danger, #e5484d);
+  color: var(--danger);
 }
 
 /* Conversations (topic list) nested under the active project. These are the
