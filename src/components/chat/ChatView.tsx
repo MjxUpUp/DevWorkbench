@@ -8,6 +8,7 @@ import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
+import { shouldFollowLatest } from './turnFollow';
 import { useProvidersStore } from '../../stores/providersStore';
 import type { ModelOption } from '../ModelSelector';
 import { useToast } from '../Toast';
@@ -103,7 +104,15 @@ export function ChatView() {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const latestTurnId = turns.length > 0 ? turns[turns.length - 1].id : null;
   useEffect(() => {
-    if (latestTurnId && (!activeLeafId || !turns.some((t) => t.id === activeLeafId))) {
+    // Follow the newest turn when it extends the branch in view. visibleTurns
+    // walks UP from activeLeafId, so a turn appended as a CHILD of the current
+    // leaf (a natural continuation) is invisible unless the leaf advances to
+    // it — which is why a follow-up in a conversation WITH history rendered
+    // neither the user's message nor the agent's streaming reply until a
+    // remount (a fresh conversation worked only because the leaf started null).
+    // shouldFollowLatest also advances on unset/stale leaves and intentionally
+    // NOT on sibling forks (A4 manual switch). See turnFollow.ts + its tests.
+    if (shouldFollowLatest(turns, activeLeafId)) {
       setActiveLeafId(latestTurnId);
     }
   }, [latestTurnId, activeLeafId, turns]);
