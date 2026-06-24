@@ -1,0 +1,46 @@
+/* Input primitive — 消费 variables.css token，禁止 hex 字面量。
+ * 视觉对齐 Modal.Body 的 input 规格（components.css 原 .modal-body input）。 */
+
+.input {
+  padding: var(--space-2) var(--space-3); /* 8px 12px */
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm); /* 6px */
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* textarea 默认垂直伸缩 */
+textarea.input {
+  resize: vertical;
+  min-height: 60px;
+}
+
+/* invalid 态：danger border + aria-invalid（a11y） */
+.input.invalid {
+  border-color: var(--danger);
+}
+
+.input.invalid:focus {
+  box-shadow: 0 0 0 3px var(--danger-muted);
+}
+
+.label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}

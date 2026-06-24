@@ -1,0 +1,113 @@
+/* L2ToolPill — 工具调用折叠 pill（Cursor 3.0 / Codex app 范式 L2 层）。
+ * 单行 pill 显示「✓ tool_name · 描述 · 耗时」，展开看完整输入/输出。
+ * pi.dev 签名：icon 用语义态色（成功绿/运行橙/错误红）。 */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.pill:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+
+/* 工具图标——语义态色 */
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  width: 16px;
+}
+.icon.ok { color: var(--color-success); }
+.icon.run { color: var(--color-sunkissed); }
+.icon.err { color: var(--color-error); }
+
+/* 工具名——accent 色 + 等宽 */
+.name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* 描述（文件名/参数摘要）*/
+.desc {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 元信息（耗时/进度/checkpoint）*/
+.meta {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* 折叠箭头 */
+.chev {
+  color: var(--text-tertiary);
+  transition: transform var(--duration-fast) var(--ease-micro);
+  flex-shrink: 0;
+}
+.expanded .chev {
+  transform: rotate(90deg);
+}
+
+/* 展开详情区 */
+.detail {
+  display: none;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-default);
+  border-top: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-base);
+}
+.expanded .detail {
+  display: block;
+}
+
+/* 详情内的 diff 高亮 */
+.add { color: var(--color-success); }
+.del { color: var(--color-error); }
+.ctx { color: var(--text-tertiary); }
+.file { color: var(--accent); margin-bottom: 4px; }
+
+/* 错误态 pill——红色边框 */
+.pill.err {
+  border-color: var(--color-error);
+}
+.pill.err:hover {
+  border-color: var(--color-error);
+  background: var(--danger-muted);
+}
+
+/* error 态整 wrap 标记（方便测试/样式定位）*/
+.errWrap {}

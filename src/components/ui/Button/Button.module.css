@@ -1,0 +1,150 @@
+/* Button primitive — 消费 variables.css token，禁止 hex 字面量。
+ * 视觉对齐现有 .btn（components.css:9）最广泛用法，作为统一基准。 */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--space-1) var(--space-3); /* 4px 12px */
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm); /* 6px */
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: var(--lh-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color var(--duration-fast) ease,
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+
+.button:active:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── variants ── */
+
+/* primary — pi.dev 钢青强调 + 底部双色硬切条（active-stripe 签名） */
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+  position: relative;
+  overflow: hidden;
+}
+
+/* primary 底部装饰条：用伪元素压一条 active-stripe（light 单色/dark 双色硬切）*/
+.primary::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--active-stripe);
+  opacity: 0.7;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.primary:hover:not(:disabled)::after {
+  opacity: 1;
+}
+
+.primary:active:not(:disabled) {
+  background: var(--palette-accent-hover);
+  border-color: var(--palette-accent-hover);
+}
+
+.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--always-white);
+}
+
+.danger:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.ghost {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+/* dangerGhost — 删除/移除类动作（替代散落的 -delete/-remove className）。
+ * transparent 默认，hover 变 danger（对齐 memory-card-delete/config-server-remove）。 */
+.dangerGhost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-tertiary);
+}
+
+.dangerGhost:hover:not(:disabled) {
+  background: var(--danger-muted);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+/* dashed — 添加类动作（替代 provider-add-btn/provider-add-model-btn）。
+ * transparent + dashed border，hover 变 accent。 */
+.dashed {
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.dashed:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dashed:disabled {
+  opacity: 0.5;
+}
+
+/* ── sizes ── */
+
+.sm {
+  padding: var(--space-1) var(--space-2); /* 4px 8px */
+  font-size: var(--text-xs);
+  gap: var(--space-1);
+}
+
+/* ── icon slot ── */
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}

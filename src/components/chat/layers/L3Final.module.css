@@ -1,0 +1,113 @@
+/* L3Final — 最终结论卡（Cursor 3.0 / Codex app 范式 L3 层）。
+ * 一等公民默认展开，highlight Frame 四角取景框强调。
+ * pi.dev 签名：accent 色四角 + DONE badge + 衡线斜体标题。 */
+
+.wrap {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--accent);
+  padding: 16px 20px;
+}
+
+/* 四角取景框——highlight 态（accent 3px 加粗）*/
+.wrap::before,
+.wrap::after,
+.bl,
+.br {
+  content: "";
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border-color: var(--accent);
+  border-style: solid;
+  pointer-events: none;
+}
+.wrap::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+.wrap::after { top: -1px; right: -1px; border-width: 2px 2px 0 0; }
+.bl { bottom: -1px; left: -1px; border-width: 0 0 2px 2px; }
+.br { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+/* 头部——badge + 衡线斜体标题 */
+.head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  flex-shrink: 0;
+}
+
+.title {
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  font-style: italic;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+/* 正文——衡线体，支持 Markdown 渲染后的 h/p/code */
+.body {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+.body p {
+  margin-bottom: 8px;
+}
+.body code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-2);
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+}
+.body b {
+  font-weight: 600;
+}
+
+/* 操作区——Apply/Branch/Reject */
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-default);
+}
+
+/* 错误态——边框 + badge 变 error 色 */
+.error {
+  border-color: var(--color-error);
+}
+.error::before,
+.error::after,
+.error .bl,
+.error .br {
+  border-color: var(--color-error);
+}
+.error .badge {
+  background: var(--color-error);
+  color: var(--always-white);
+}
+
+/* 运行中态——badge 变 success + CRT 闪烁点 */
+.running .badge::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 5px;
+  vertical-align: middle;
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}

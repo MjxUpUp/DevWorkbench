@@ -1,0 +1,166 @@
+/* BlocksView — chat block 流容器。
+ * v3：用 L1Thinking/L2ToolPill/Frame 组合，落地三段折叠范式。 */
+
+.blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 等待态——模型未响应 */
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.waitingText {
+  font-style: italic;
+}
+
+/* 流式光标——CRT 步进闪烁 */
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--accent);
+  animation: crt-cursor 1s steps(1, end) infinite;
+  vertical-align: text-bottom;
+}
+
+/* text block——Frame 包裹的 Markdown 正文 */
+.textBlock {
+  padding: 12px 16px;
+  background: var(--surface-1);
+}
+.textBody {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+.textBody :global(p) { margin-bottom: 8px; }
+.textBody :global(p:last-child) { margin-bottom: 0; }
+.textBody :global(code) {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-2);
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+}
+.textBody :global(pre) {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-sunken);
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  margin-bottom: 8px;
+}
+.textBody :global(h1),
+.textBody :global(h2),
+.textBody :global(h3) {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+
+/* tool 详情区——等宽 pre */
+.toolInput,
+.toolResultContent {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-base);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* result 行——最终状态 */
+.result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.result.ok {
+  color: var(--color-success);
+  background: var(--success-muted);
+}
+.result.failed {
+  color: var(--color-error);
+  background: var(--danger-muted);
+}
+.resultIcon {
+  font-weight: 700;
+}
+.resultSecs {
+  margin-left: auto;
+  color: var(--text-tertiary);
+}
+
+/* 自规划工作流实时节点状态条——run_workflow_graph tool_use 旁。
+ * 主题 token 全走 variables.css（mirror .result.ok/.failed，明暗分叉安全）。 */
+.workflowStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 14px 6px;
+}
+.workflowChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+}
+.wfDone {
+  color: var(--color-success);
+  border-color: var(--success-muted);
+  background: var(--success-muted);
+}
+.wfFailed {
+  color: var(--color-error);
+  border-color: var(--danger-muted);
+  background: var(--danger-muted);
+}
+.wfRunning {
+  color: var(--accent);
+  border-color: var(--accent-muted);
+  background: var(--accent-muted);
+}
+.wfSkipped,
+.wfInterrupted {
+  color: var(--text-tertiary);
+}
+.wfRetry {
+  opacity: 0.75;
+}
+
+/* file_changed 行 */
+.file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fileIcon {
+  opacity: 0.7;
+}
+.filePath {
+  color: var(--accent);
+}

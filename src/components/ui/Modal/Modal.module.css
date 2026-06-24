@@ -1,0 +1,125 @@
+/* Modal primitive — 消费 variables.css token，禁止 hex 字面量。
+ * 视觉对齐现有 .modal-overlay/.modal/.modal-header/.modal-body（components.css:276）。
+ * 表单控件样式（input/label）从 .modal-body 迁移，保证迁移零视觉 diff。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: modalOverlayIn var(--duration-fast) ease;
+}
+
+.content {
+  background: var(--surface-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md); /* 8px */
+  width: 520px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-xl);
+  animation: modalSlideIn var(--duration-normal) var(--ease-out);
+  position: relative;
+}
+
+/* pi.dev 四角取景框——伪元素实现（避免引入 Frame 依赖）*/
+.content::before,
+.content::after,
+.content > .corner-bl,
+.content > .corner-br {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: var(--accent);
+  border-style: solid;
+  pointer-events: none;
+  z-index: 2;
+}
+.content::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+.content::after { top: -1px; right: -1px; border-width: 2px 2px 0 0; }
+.content > .corner-bl { bottom: -1px; left: -1px; border-width: 0 0 2px 2px; }
+.content > .corner-br { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+/* danger 变体——危险确认模态用陶土色角标 */
+.content[data-modal-variant="danger"] {
+  border-color: var(--color-terracotta);
+}
+.content[data-modal-variant="danger"]::before,
+.content[data-modal-variant="danger"]::after,
+.content[data-modal-variant="danger"] > .corner-bl,
+.content[data-modal-variant="danger"] > .corner-br {
+  border-color: var(--color-terracotta);
+}
+
+/* ── Header ── */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* 消费方在 Header 里放 <h2>，对齐原 .modal-header h2 */
+.header h2,
+.header h3 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  margin: 0;
+}
+
+/* ── Body（含表单控件样式，从 .modal-body 迁移）── */
+
+.body {
+  padding: var(--space-5);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.body label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.body input,
+.body textarea {
+  padding: var(--space-2) var(--space-3); /* 8px 12px — 比 base.css 的 4px 8px 大 */
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+
+.body input::placeholder,
+.body textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.body input:focus,
+.body textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.body textarea {
+  resize: vertical;
+  min-height: 60px;
+}

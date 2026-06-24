@@ -1,0 +1,26 @@
+/* UserMessage — pi.dev default Frame 四角取景框 + 衬线正文。 */
+
+.wrap {
+  padding: 14px 18px;
+  background: var(--surface-1);
+}
+
+.meta {
+  margin-bottom: 6px;
+}
+
+.who {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--color-terracotta-light);
+}
+
+.body {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

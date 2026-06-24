@@ -1,0 +1,279 @@
+/* ChatHeader — 头部 + 清空按钮 + agent 选择
+ * 从 chat-view.css 拆出（class 名不变，零视觉/e2e 风险）。消费 variables.css token。 */
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-0);
+  flex-shrink: 0;
+  min-height: 40px;
+}
+
+/* Clear-conversation button — was a bare icon button with zero CSS. */
+.chat-clear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.chat-clear-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--surface-2);
+}
+
+/* Agent selector — native <select> reset to match .chat-header-btn styling. */
+.chat-agent-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-1);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238a8a8a' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--space-2) center;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease;
+  white-space: nowrap;
+  outline: none;
+}
+
+.chat-agent-select:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.chat-agent-select:focus {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.chat-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.chat-header-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+  white-space: nowrap;
+}
+
+.chat-header-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.chat-header-btn .icon-chevron {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.chat-header-btn .rec-badge {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.chat-header-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+}
+
+.chat-header-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+/* Agent dropdown (card grid style) */
+.chat-header-agent-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  min-width: 260px;
+  padding: var(--space-2);
+}
+
+.chat-header-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.chat-header-agent-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+  position: relative;
+}
+
+.chat-header-agent-card:hover:not(.disabled) {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+
+.chat-header-agent-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.chat-header-agent-card.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-header-agent-card .agent-icon {
+  font-size: 20px;
+}
+
+.chat-header-agent-card .agent-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: center;
+  line-height: 1.2;
+}
+
+.chat-header-agent-card .agent-rec {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  font-size: 9px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* Mode / Model dropdowns */
+.chat-header-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  min-width: 180px;
+  padding: 4px;
+}
+
+.chat-header-dropdown-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.chat-header-dropdown-item:hover {
+  background: var(--surface-2);
+}
+
+.chat-header-dropdown-item.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+/* === requestId 显示 + LiveDot（Cursor 3.0 范式）===
+ * 运行中 LiveDot CRT 步进闪烁 + requestId mono 小标签（成本透明/排查）。 */
+.chat-header-requestid {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 2px 8px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+
+.chat-header-livedot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}
+
+.chat-header-requestid-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}

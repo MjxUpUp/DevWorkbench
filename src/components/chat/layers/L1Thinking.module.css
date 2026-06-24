@@ -1,0 +1,102 @@
+/* L1Thinking — thinking 内容折叠卡（Cursor 3.0 / Codex app 范式 L1 层）。
+ * 默认折叠为「THOUGHT FOR Ns — 摘要」单行，展开看完整推理流。
+ * pi.dev 签名：subtle Frame 取景框 + CRT 步进闪烁（运行中）。
+ * reduced-motion 全局门覆盖（animations.css）。 */
+
+.wrap {
+  position: relative;
+  background: var(--surface-sunken);
+  border-left: 2px solid var(--text-tertiary);
+}
+
+/* 默认折叠态头——单行摘要 */
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.head:hover {
+  background: var(--surface-1);
+}
+
+/* 折叠箭头（chevron），展开时旋转 90deg */
+.chev {
+  display: inline-flex;
+  transition: transform var(--duration-fast) var(--ease-micro);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.expanded .chev {
+  transform: rotate(90deg);
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong, var(--text-secondary));
+  flex-shrink: 0;
+}
+
+/* 摘要文案——斜体，pi.dev 衬线 */
+.summary {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  font-style: italic;
+  color: var(--text-tertiary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* token 计数（右侧）*/
+.tok {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* 展开后的完整 thinking body */
+.body {
+  display: none;
+  margin: 2px 14px 12px;
+  padding: 10px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-base);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.expanded .body {
+  display: block;
+}
+
+/* 运行中态——左侧条变 accent + label 带 CRT 闪烁点 */
+.running .label::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}

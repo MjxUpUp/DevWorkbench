@@ -1,0 +1,16 @@
+/* Stripe — pi.dev 双色硬切激活条。
+ * light 主题单色，dark 主题 accent 62%→thread-blue 硬切（非渐变）。
+ * 用于状态栏激活态、BudgetBar、分隔强调。 */
+
+.stripe {
+  background: var(--active-stripe);
+  display: block;
+}
+
+/* 尺寸 */
+.h-sm { height: 3px; }
+.h-md { height: 6px; }
+.h-lg { height: 8px; }
+
+.w-full { width: 100%; }
+.w-auto { width: auto; }

@@ -1,0 +1,93 @@
+.frame {
+  position: relative;
+}
+
+/* 四角取景框——pi.dev 最强个性签名。
+ * 用 4 个伪角标代替整圈 border，像相机取景框。
+ * active 态角标用 accent 色，inactive 用 muted。 */
+.frame[data-frame-variant="default"] {
+  border: 1px solid var(--border-default);
+}
+
+/* 四个角标 */
+.corner {
+  position: absolute;
+  width: var(--frame-corner-size, 14px);
+  height: var(--frame-corner-size, 14px);
+  border-color: var(--frame-corner-color, var(--accent));
+  border-style: solid;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.cornerTopLeft {
+  top: -1px;
+  left: -1px;
+  border-width: 2px 0 0 2px;
+}
+
+.cornerTopRight {
+  top: -1px;
+  right: -1px;
+  border-width: 2px 2px 0 0;
+}
+
+.cornerBottomLeft {
+  bottom: -1px;
+  left: -1px;
+  border-width: 0 0 2px 2px;
+}
+
+.cornerBottomRight {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 2px 2px 0;
+}
+
+/* 高亮态（L3 最终结论、active 卡片）——角标更粗更亮 */
+.frame[data-frame-variant="highlight"] {
+  border-color: var(--accent);
+}
+
+.frame[data-frame-variant="highlight"] .corner {
+  width: calc(var(--frame-corner-size, 14px) * 1.1);
+  height: calc(var(--frame-corner-size, 14px) * 1.1);
+  border-width: 3px;
+}
+
+/* 次要态（thinking block、tool result）——角标更细但颜色可辨识 */
+.frame[data-frame-variant="subtle"] {
+  border: 1px solid var(--border-subtle);
+}
+.frame[data-frame-variant="subtle"] .corner {
+  border-color: var(--text-secondary);
+  border-width: 1.5px;
+}
+/* 暗色下 subtle 角标提亮，避免隐身 */
+[data-theme="dark"] .frame[data-frame-variant="subtle"] .corner {
+  border-color: var(--muted-strong, #d5d8dbcc);
+}
+
+/* 成功态（tool_result 成功）*/
+.frame[data-frame-variant="success"] {
+  border-color: var(--color-sage);
+}
+.frame[data-frame-variant="success"] .corner {
+  border-color: var(--color-sage);
+}
+
+/* 错误态（tool_result 失败、danger）*/
+.frame[data-frame-variant="danger"] {
+  border-color: var(--color-error);
+}
+.frame[data-frame-variant="danger"] .corner {
+  border-color: var(--color-error);
+}
+
+/* 警告态 */
+.frame[data-frame-variant="warning"] {
+  border-color: var(--color-warning);
+}
+.frame[data-frame-variant="warning"] .corner {
+  border-color: var(--color-warning);
+}

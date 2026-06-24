@@ -1,0 +1,28 @@
+/* LiveDot — pi.dev CRT 步进闪烁状态点。
+ * 关键：用 steps(1,end) 模拟 CRT 颗粒闪烁，非 smooth opacity。
+ * 动画在 animations.css 的 @keyframes crt-blink 定义。
+ * reduced-motion 下全局门自动降级（animations.css 已覆盖）。 */
+
+.dot {
+  display: inline-block;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}
+
+/* 尺寸 */
+.sm { width: 6px; height: 6px; }
+.md { width: 8px; height: 8px; }
+.lg { width: 10px; height: 10px; }
+
+/* 语义色——运行中/成功/警告/错误 */
+.running { background: var(--color-success); }
+.idle { background: var(--text-tertiary); }
+.success { background: var(--color-success); }
+.warning { background: var(--color-warning); }
+.error { background: var(--color-error); }
+
+/* static 态不闪烁（已完成/已停止）*/
+.static {
+  animation: none;
+}
