@@ -69,7 +69,7 @@ impl Tool for WorkflowTool {
                         "description": "DAG 定义：{nodes: {id: {type, ...}}, edges: [{from, to, when?}], start: id, end: id}。\
                             节点 type: prompt | agent | gate | parallel | merge | human | transform | branch | loop | selector | interrupt。\
                             agent 节点可配 on_failure 控制失败策略：\"fail\"（默认，失败即终止）| \"continue\"（容错，失败产出 error 值继续）| {\"retry\":{\"max_attempts\":3,\"backoff_secs\":1,\"continue_on_exhausted\":false}}（重试）。\
-                            parallel 节点把输入扇出到所有后继；graph 按依赖拓扑顺序逐节点执行（同一波独立节点当前顺序执行，非并发——纯并发提速用 dispatch_subagent）。"
+                            parallel 节点把输入扇出到所有后继；graph 按依赖拓扑执行，同一波独立节点并发运行（波式并行），任一节点失败 fail-fast 中止全图。"
                     },
                     "input": {
                         "description": "喂给 start 节点的输入值（任务描述/种子数据），缺省 null。",

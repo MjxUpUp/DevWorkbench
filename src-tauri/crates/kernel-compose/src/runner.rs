@@ -83,6 +83,8 @@ fn build_run_stream(
     }
 
     stream! {
+        use futures::StreamExt;
+
         let mut ready: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
         ready.push_back(start.clone());
         let mut outputs = outputs;
@@ -118,295 +120,457 @@ fn build_run_stream(
             }
         };
 
-        while let Some(nid) = ready.pop_front() {
-            // A node is skipped iff NONE of its predecessors fired (no real
-            // input). Diamond merge with one fired predecessor runs normally.
-            let is_skipped = !has_fire_input.contains(&nid);
-            if is_skipped {
-                skipped.insert(nid.clone());
-                let succs: Vec<crate::graph::Edge> = g.edges.iter()
-                    .filter(|e| e.from == nid).cloned().collect();
-                yield GraphEvent::NodeEnd {
-                    node: nid.clone(),
-                    status: NodeStatus::Skipped,
-                    error: None,
-                };
-                if nid == end {
-                    // END was skipped — EVERY predecessor was branch-deselected,
-                    // so no path reached END. That is a ROUTING FAILURE, not a
-                    // successful empty completion: emitting GraphDone{Null} would
-                    // let the frontend treat a fully deselected workflow as
-                    // success (silent wrong-path). Fail the graph instead.
-                    yield GraphEvent::GraphFailed {
-                        error: "end node unreachable: all predecessors skipped (no path taken)".into(),
-                    };
-                    return;
-                }
-                for edge in &succs {
-                    settle(edge, None, &mut ready, &mut outputs, &mut has_fire_input);
-                }
-                continue;
-            }
+        // Wave-parallel execution. Each ready node runs as its OWN event stream
+        // pushed onto `active` (a SelectAll). The main loop drains `active` —
+        // taking events from ANY in-flight node — and settles successors
+        // single-threaded (one owner of graph state, no locking). Same-wave
+        // independent nodes thus overlap; the fan-in counter `remaining`
+        // naturally synchronizes a Merge (it only becomes ready — and spawns —
+        // once ALL its predecessors settled, so every input is present).
+        // Fail-fast = returning drops `active`, cancelling every in-flight node
+        // stream at its next await (no JoinHandle bookkeeping).
+        let mut active: futures::stream::SelectAll<BoxStream<'static, NodeEvt>> =
+            futures::stream::SelectAll::new();
+        // Human nodes are NOT concurrent: they queue and run INLINE at wave
+        // boundaries (only when `active` is empty). The single approval
+        // Receiver is awaited with no other node mid-flight — sidestepping the
+        // cross task approval-routing problem (a single Receiver can't be
+        // shared across concurrent node tasks). A human approval is a pause
+        // point by nature, so serializing it at wave boundaries costs nothing.
+        let mut pending_human: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
 
-            let node = match g.nodes.get(&nid) {
-                Some(n) => n.clone(),
-                None => {
-                    yield GraphEvent::GraphFailed { error: format!("missing node {nid}") };
-                    return;
-                }
-            };
-            yield GraphEvent::NodeStart { node: nid.clone() };
-
-            let incoming = outputs.get(&nid).cloned().unwrap_or(Value::Null);
-
-            // Interrupt node: an unconditional or condition-gated halt of the
-            // whole graph run. Handled BEFORE the result match so a firing
-            // interrupt can short-circuit the stream (emit + return) instead of
-            // producing a value. A non-firing condition falls through to the
-            // match, where Interrupt passes its input through unchanged.
-            if let Node::Interrupt(it) = &node {
-                let fire = match &it.condition {
-                    Some(cond) => eval_branch(&incoming, cond),
-                    None => true,
-                };
-                if fire {
+        loop {
+            // --- Drain every currently-ready node: skip-cascade (yield Skipped +
+            // settle successors to None), Human → queue, anything else → push
+            // its drive stream onto `active`. Re-runs each iteration so a node
+            // that just settled new successors picks them up before dispatch. ---
+            while let Some(nid) = ready.front().cloned() {
+                ready.pop_front();
+                // A node is skipped iff NONE of its predecessors fired (no real
+                // input). Diamond merge with one fired predecessor runs normally.
+                let is_skipped = !has_fire_input.contains(&nid);
+                if is_skipped {
+                    skipped.insert(nid.clone());
+                    let succs: Vec<crate::graph::Edge> = g.edges.iter()
+                        .filter(|e| e.from == nid).cloned().collect();
                     yield GraphEvent::NodeEnd {
                         node: nid.clone(),
-                        status: NodeStatus::Interrupted,
+                        status: NodeStatus::Skipped,
                         error: None,
                     };
-                    yield GraphEvent::GraphInterrupted { reason: it.message.clone() };
-                    return;
-                }
-            }
-
-            let result: Result<Value, String> = match &node {
-                Node::Prompt(p) => Ok(Value::String(p.text.clone())),
-                Node::Agent(spec) => {
-                    // Streamed agent drive with a per-node failure policy
-                    // (OnFailure). A worker that dies is retried in-place up to
-                    // max_attempts — each failed try emits NodeRetried (attempt
-                    // no + error) so the orchestrator learns the worker's
-                    // reliability — then either tolerated (Continue → a marked
-                    // error value the graph routes around) or failed. The
-                    // orchestrator NEVER sees the worker's execution context,
-                    // only the outcome + retry sequence (no Mode-C back-flow).
-                    let policy = spec.on_failure.clone().unwrap_or(OnFailure::Fail);
-                    let (max_attempts, backoff_secs, continue_on_exhausted) = match &policy {
-                        OnFailure::Retry {
-                            max_attempts,
-                            backoff_secs,
-                            continue_on_exhausted,
-                        } => (*max_attempts, *backoff_secs, *continue_on_exhausted),
-                        OnFailure::Continue => (1, 0, true),
-                        OnFailure::Fail => (1, 0, false),
-                    };
-                    let mut attempt: usize = 0;
-                    'agent: loop {
-                        attempt += 1;
-                        match executor.run_agent(spec, incoming.clone(), working_dir.clone()) {
-                            Ok(chunk_stream) => {
-                                use futures::StreamExt;
-                                let mut s = chunk_stream;
-                                let mut final_val = Value::Null;
-                                let mut agent_err: Option<String> = None;
-                                while let Some(chunk_res) = s.next().await {
-                                    match chunk_res {
-                                        Ok(AgentChunk::Delta(chunk)) => {
-                                            yield GraphEvent::NodeOutput {
-                                                node: nid.clone(),
-                                                chunk,
-                                            };
-                                        }
-                                        Ok(AgentChunk::Final(v)) => final_val = v,
-                                        Err(e) => {
-                                            agent_err = Some(e);
-                                            break;
-                                        }
-                                    }
-                                }
-                                match agent_err {
-                                    None => break 'agent Ok(final_val),
-                                    Some(e) => {
-                                        if attempt < max_attempts {
-                                            yield GraphEvent::NodeRetried {
-                                                node: nid.clone(),
-                                                attempt,
-                                                error: e,
-                                            };
-                                            if backoff_secs > 0 {
-                                                tokio::time::sleep(
-                                                    std::time::Duration::from_secs(backoff_secs),
-                                                )
-                                                .await;
-                                            }
-                                            continue 'agent;
-                                        }
-                                        if continue_on_exhausted {
-                                            break 'agent Ok(agent_error_value(&e));
-                                        }
-                                        break 'agent Err(e);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Stream construction itself failed — same
-                                // retry/exhaustion policy as a failed chunk.
-                                if attempt < max_attempts {
-                                    yield GraphEvent::NodeRetried {
-                                        node: nid.clone(),
-                                        attempt,
-                                        error: e.clone(),
-                                    };
-                                    if backoff_secs > 0 {
-                                        tokio::time::sleep(std::time::Duration::from_secs(
-                                            backoff_secs,
-                                        ))
-                                        .await;
-                                    }
-                                    continue 'agent;
-                                }
-                                if continue_on_exhausted {
-                                    break 'agent Ok(agent_error_value(&e));
-                                }
-                                break 'agent Err(e);
-                            }
-                        }
+                    if nid == end {
+                        // END was skipped — EVERY predecessor was branch-
+                        // deselected, so no path reached END. That is a ROUTING
+                        // FAILURE, not a successful empty completion: emitting
+                        // GraphDone{Null} would let the frontend treat a fully
+                        // deselected workflow as success (silent wrong-path).
+                        yield GraphEvent::GraphFailed {
+                            error: "end node unreachable: all predecessors skipped (no path taken)".into(),
+                        };
+                        return;
                     }
+                    for edge in &succs {
+                        settle(edge, None, &mut ready, &mut outputs, &mut has_fire_input);
+                    }
+                    continue;
                 }
-                Node::Gate(gate) => {
-                    executor.run_gate(gate, incoming.clone(), working_dir.clone()).await
-                }
-                Node::Merge(m) => {
-                    // Collect only NON-skipped predecessors' outputs.
+
+                let node = match g.nodes.get(&nid) {
+                    Some(n) => n.clone(),
+                    None => {
+                        yield GraphEvent::GraphFailed { error: format!("missing node {nid}") };
+                        return;
+                    }
+                };
+                if let Node::Human(_) = &node {
+                    // Human is queued, not spawned — it runs inline at a wave
+                    // boundary below (see the pending_human branch).
+                    pending_human.push_back(nid);
+                } else {
+                    let incoming = outputs.get(&nid).cloned().unwrap_or(Value::Null);
+                    // Merge reads its non-skipped predecessors' outputs; collect
+                    // them now (the node is ready = all preds settled, so every
+                    // output is present). Non-Merge nodes ignore pred_vals.
                     let pred_vals: Vec<Value> = preds.get(&nid).cloned().unwrap_or_default()
                         .into_iter()
                         .filter(|p| !skipped.contains(p))
                         .filter_map(|p| outputs.get(&p).cloned())
                         .collect();
-                    Ok(merge_values(pred_vals, &m.strategy))
+                    active.push(drive_node_stream(
+                        nid,
+                        node,
+                        incoming,
+                        pred_vals,
+                        working_dir.clone(),
+                        executor.clone(),
+                    ));
                 }
-                Node::Parallel(_) => Ok(incoming.clone()),
-                Node::Human(h) => {
-                    let resume_token = format!("approve__{nid}");
-                    yield GraphEvent::ApprovalRequired {
-                        node: nid.clone(),
-                        prompt: h.prompt.clone(),
-                        resume_token: resume_token.clone(),
-                    };
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(300),
-                        approval_rx.recv(),
-                    ).await {
-                        Ok(Some(approval)) if approval.resume_token == resume_token => {
-                            match approval.decision {
-                                Some(v) => Ok(v),
-                                None => Err("human rejected".into()),
-                            }
-                        }
-                        Ok(_) => Err("approval channel closed".into()),
-                        Err(_) => Err("human approval timed out (300s)".into()),
+            }
+
+            // --- Dispatch: drain an in-flight node event, else run a queued
+            // Human inline, else the run is exhausted. ---
+            if !active.is_empty() {
+                match active.next().await {
+                    None => { /* all node streams ended; loop re-checks ready/human */ }
+                    Some(NodeEvt::Started(nid)) => {
+                        yield GraphEvent::NodeStart { node: nid };
                     }
-                }
-                Node::Transform(t) => Ok(apply_transform(t, incoming.clone())),
-                Node::Branch(_) => Ok(incoming.clone()),
-                // Only reached when an Interrupt's condition did NOT fire (a
-                // firing interrupt returns above). Pass the input through.
-                Node::Interrupt(_) => Ok(incoming.clone()),
-                Node::Selector(s) => {
-                    // First-match over cases (mutually exclusive). Emits the
-                    // chosen label as the output value; successors route via
-                    // branch edges whose `when` equals this label (see the
-                    // fire logic below).
-                    let chosen = s
-                        .cases
-                        .iter()
-                        .find(|c| eval_branch(&incoming, &c.when))
-                        .map(|c| c.label.clone())
-                        .or_else(|| s.default.clone())
-                        .unwrap_or_default();
-                    Ok(Value::String(chosen))
-                }
-                Node::Loop(lp) => {
-                    // Resolve iteration items: the array at `over` (dot-path),
-                    // else a fixed `count`, else none (zero iterations).
-                    let raw: Vec<Value> = match &lp.over {
-                        Some(path) => extract_array(&incoming, path),
-                        None => match lp.count {
-                            Some(n) => (0..n).map(Value::from).collect(),
-                            None => Vec::new(),
-                        },
-                    };
-                    let cap = lp.max_iterations.unwrap_or(LOOP_DEFAULT_MAX_ITERATIONS);
-                    let mut results: Vec<Value> = Vec::new();
-                    let mut loop_err: Option<String> = None;
-                    for item in raw.into_iter().take(cap) {
-                        let body = match lp.body.clone().compile() {
-                            Ok(c) => c,
-                            Err(e) => {
-                                loop_err = Some(format!("loop body: {e}"));
-                                break;
-                            }
+                    Some(NodeEvt::Output(nid, chunk)) => {
+                        yield GraphEvent::NodeOutput { node: nid, chunk };
+                    }
+                    Some(NodeEvt::Retried(nid, attempt, error)) => {
+                        yield GraphEvent::NodeRetried { node: nid, attempt, error };
+                    }
+                    Some(NodeEvt::Done(nid, v)) => {
+                        outputs.insert(nid.clone(), v.clone());
+                        yield GraphEvent::NodeEnd {
+                            node: nid.clone(),
+                            status: NodeStatus::Done,
+                            error: None,
                         };
-                        match run_graph_to_completion(
-                            body,
-                            item,
-                            working_dir.clone(),
-                            executor.clone(),
-                        )
-                        .await
-                        {
-                            Ok(v) => results.push(v),
-                            Err(e) => {
-                                loop_err = Some(e);
-                                break;
-                            }
+                        if nid == end {
+                            yield GraphEvent::GraphDone { output: v };
+                            return;
                         }
+                        // Route to successors: Branch/Selector fire selectively;
+                        // everything else fires unconditionally.
+                        let node = g.nodes.get(&nid).cloned();
+                        let incoming = outputs.get(&nid).cloned().unwrap_or(Value::Null);
+                        let succs: Vec<crate::graph::Edge> = g.edges.iter()
+                            .filter(|e| e.from == nid).cloned().collect();
+                        for edge in &succs {
+                            let fire = match (&node, &edge.when) {
+                                (Some(Node::Branch(_)), Some(when_val)) => {
+                                    eval_branch(&incoming, when_val)
+                                }
+                                // Selector emitted its chosen label as `v`; a
+                                // successor branch edge fires iff its `when`
+                                // equals that label (first-match, exclusive).
+                                (Some(Node::Selector(_)), Some(when_val)) => {
+                                    eval_branch(&v, when_val)
+                                }
+                                _ => true,
+                            };
+                            // fire → settle with value, parent not skipped.
+                            // !fire (branch deselected) → settle WITHOUT value
+                            // and mark the successor skipped (cascade).
+                            settle(
+                                edge,
+                                if fire { Some(&v) } else { None },
+                                &mut ready,
+                                &mut outputs,
+                                &mut has_fire_input,
+                            );
+                        }
+                        continue; // back to top → drain newly-ready nodes
                     }
-                    match loop_err {
-                        Some(e) => Err(e),
-                        None => Ok(merge_values(results, &lp.strategy)),
-                    }
-                }
-            };
-
-            match result {
-                Ok(v) => {
-                    outputs.insert(nid.clone(), v.clone());
-                    yield GraphEvent::NodeEnd { node: nid.clone(), status: NodeStatus::Done, error: None };
-
-                    if nid == end {
-                        yield GraphEvent::GraphDone { output: v };
+                    Some(NodeEvt::Failed(nid, e)) => {
+                        // Fail-fast: returning drops `active`, aborting every
+                        // in-flight node stream at its next await point.
+                        yield GraphEvent::NodeEnd {
+                            node: nid,
+                            status: NodeStatus::Failed,
+                            error: Some(e.clone()),
+                        };
+                        yield GraphEvent::GraphFailed { error: e };
                         return;
                     }
-
-                    let succs: Vec<crate::graph::Edge> = g.edges.iter()
-                        .filter(|e| e.from == nid).cloned().collect();
-                    for edge in &succs {
-                        let fire = match (&node, &edge.when) {
-                            (Node::Branch(_), Some(when_val)) => eval_branch(&incoming, when_val),
-                            // Selector emitted its chosen label as `v`; a
-                            // successor branch edge fires iff its `when` equals
-                            // that label (first-match, mutually exclusive).
-                            (Node::Selector(_), Some(when_val)) => eval_branch(&v, when_val),
-                            _ => true,
+                    Some(NodeEvt::Interrupt(nid, reason)) => {
+                        yield GraphEvent::NodeEnd {
+                            node: nid,
+                            status: NodeStatus::Interrupted,
+                            error: None,
                         };
-                        // fire → settle with value, parent not skipped.
-                        // !fire (branch deselected) → settle WITHOUT value and mark
-                        // the successor skipped (cascade).
-                        settle(edge, if fire { Some(&v) } else { None },
-                               &mut ready, &mut outputs, &mut has_fire_input);
+                        yield GraphEvent::GraphInterrupted { reason };
+                        return;
                     }
                 }
-                Err(e) => {
-                    yield GraphEvent::NodeEnd { node: nid.clone(), status: NodeStatus::Failed, error: Some(e.clone()) };
-                    yield GraphEvent::GraphFailed { error: e };
-                    return;
+            } else if let Some(hnid) = pending_human.pop_front() {
+                // Inline Human at a wave boundary (`active` is empty). The
+                // single approval Receiver is awaited here with no concurrent
+                // node, so no cross-task routing is needed.
+                let h = match g.nodes.get(&hnid) {
+                    Some(Node::Human(h)) => h.clone(),
+                    _ => unreachable!("only Human nodes are queued in pending_human"),
+                };
+                let resume_token = format!("approve__{hnid}");
+                yield GraphEvent::ApprovalRequired {
+                    node: hnid.clone(),
+                    prompt: h.prompt.clone(),
+                    resume_token: resume_token.clone(),
+                };
+                // Preserve the three distinct failure reasons (rejected vs
+                // channel-closed vs timeout) for diagnostics — same as the
+                // pre-parallel code; all three still fail the graph.
+                let human_result: Result<Value, String> = match tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    approval_rx.recv(),
+                ).await {
+                    Ok(Some(approval)) if approval.resume_token == resume_token => {
+                        match approval.decision {
+                            Some(v) => Ok(v),
+                            None => Err("human rejected".into()),
+                        }
+                    }
+                    Ok(_) => Err("approval channel closed".into()),
+                    Err(_) => Err("human approval timed out (300s)".into()),
+                };
+                match human_result {
+                    Ok(v) => {
+                        outputs.insert(hnid.clone(), v.clone());
+                        yield GraphEvent::NodeEnd {
+                            node: hnid.clone(),
+                            status: NodeStatus::Done,
+                            error: None,
+                        };
+                        if hnid == end {
+                            yield GraphEvent::GraphDone { output: v };
+                            return;
+                        }
+                        let succs: Vec<crate::graph::Edge> = g.edges.iter()
+                            .filter(|e| e.from == hnid).cloned().collect();
+                        for edge in &succs {
+                            settle(
+                                edge,
+                                Some(&v),
+                                &mut ready,
+                                &mut outputs,
+                                &mut has_fire_input,
+                            );
+                        }
+                        continue; // drain newly-ready
+                    }
+                    Err(e) => {
+                        yield GraphEvent::NodeEnd {
+                            node: hnid,
+                            status: NodeStatus::Failed,
+                            error: Some(e.clone()),
+                        };
+                        yield GraphEvent::GraphFailed { error: e };
+                        return;
+                    }
                 }
+            } else {
+                // Nothing in flight, nothing pending, ready drained → END was
+                // never reached (dead-end topology, or all remaining nodes were
+                // skipped without settling a path to END).
+                break;
             }
         }
         yield GraphEvent::GraphFailed { error: "graph ended without reaching END".into() };
     }
+}
+
+/// One node's execution, surfaced as a stream of events. Each ready node is
+/// pushed onto the main loop's `SelectAll` as one of these streams; the main
+/// loop drains them to observe node progress + completion. The node itself is
+/// STATELESS w.r.t. graph topology — graph state (outputs / remaining /
+/// skipped) lives in the main loop (single owner), so concurrent node streams
+/// never contend on shared mutable state. Human nodes are NOT driven here
+/// (handled inline at wave boundaries in the main loop), so this covers only
+/// the 10 non-Human node types.
+enum NodeEvt {
+    Started(NodeId),
+    Output(NodeId, Value),
+    Retried(NodeId, usize, String),
+    Done(NodeId, Value),
+    Failed(NodeId, String),
+    /// An Interrupt node whose condition fired — halts the whole graph.
+    Interrupt(NodeId, String),
+}
+
+/// Drive a single non-Human node to completion, emitting [`NodeEvt`]s for its
+/// start, streamed output (Agent deltas), retries (OnFailure), and final
+/// Done/Failed/Interrupt. This is the per-node work unit the wave-parallel run
+/// loop fans out: same-wave independent nodes each get their own drive stream
+/// and run concurrently, while fan-in (Merge) is synchronized by the `remaining`
+/// counter in the main loop (a Merge only becomes ready once all predecessors
+/// settled, so its `pred_vals` are all present by the time this runs).
+#[allow(clippy::too_many_arguments)]
+fn drive_node_stream(
+    nid: NodeId,
+    node: Node,
+    incoming: Value,
+    pred_vals: Vec<Value>,
+    working_dir: Option<String>,
+    executor: Arc<dyn Executor>,
+) -> BoxStream<'static, NodeEvt> {
+    use futures::StreamExt;
+    Box::pin(async_stream::stream! {
+        yield NodeEvt::Started(nid.clone());
+
+        // Interrupt: unconditional or condition-gated halt. Handled BEFORE the
+        // result match so a firing interrupt short-circuits (Interrupt evt +
+        // stream end) instead of producing a value. A non-firing condition
+        // falls through; the Interrupt arm below passes input through.
+        if let Node::Interrupt(it) = &node {
+            let fire = match &it.condition {
+                Some(cond) => eval_branch(&incoming, cond),
+                None => true,
+            };
+            if fire {
+                yield NodeEvt::Interrupt(nid.clone(), it.message.clone());
+                return;
+            }
+        }
+
+        let result: Result<Value, String> = match &node {
+            Node::Prompt(p) => Ok(Value::String(p.text.clone())),
+            Node::Agent(spec) => {
+                // Per-node OnFailure policy. A dead worker is retried in-place
+                // up to max_attempts — each failed try emits Retried (attempt
+                // no + error → orchestrator learns the worker's reliability) —
+                // then either tolerated (Continue → marked error value the
+                // graph routes around) or failed. The orchestrator sees ONLY
+                // outcome + retry sequence, never the worker's execution
+                // context (no Mode-C back-flow).
+                let policy = spec.on_failure.clone().unwrap_or(OnFailure::Fail);
+                let (max_attempts, backoff_secs, continue_on_exhausted) = match &policy {
+                    OnFailure::Retry { max_attempts, backoff_secs, continue_on_exhausted } => {
+                        (*max_attempts, *backoff_secs, *continue_on_exhausted)
+                    }
+                    OnFailure::Continue => (1, 0, true),
+                    OnFailure::Fail => (1, 0, false),
+                };
+                let mut attempt: usize = 0;
+                let agent_result: Result<Value, String> = 'agent: loop {
+                    attempt += 1;
+                    match executor.run_agent(spec, incoming.clone(), working_dir.clone()) {
+                        Ok(chunk_stream) => {
+                            let mut s = chunk_stream;
+                            let mut final_val = Value::Null;
+                            let mut agent_err: Option<String> = None;
+                            while let Some(chunk_res) = s.next().await {
+                                match chunk_res {
+                                    Ok(AgentChunk::Delta(chunk)) => {
+                                        yield NodeEvt::Output(nid.clone(), chunk);
+                                    }
+                                    Ok(AgentChunk::Final(v)) => final_val = v,
+                                    Err(e) => {
+                                        agent_err = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                            match agent_err {
+                                None => break 'agent Ok(final_val),
+                                Some(e) => {
+                                    if attempt < max_attempts {
+                                        yield NodeEvt::Retried(nid.clone(), attempt, e);
+                                        if backoff_secs > 0 {
+                                            tokio::time::sleep(
+                                                std::time::Duration::from_secs(backoff_secs),
+                                            )
+                                            .await;
+                                        }
+                                        continue 'agent;
+                                    }
+                                    if continue_on_exhausted {
+                                        break 'agent Ok(agent_error_value(&e));
+                                    }
+                                    break 'agent Err(e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Stream construction itself failed — same
+                            // retry/exhaustion policy as a failed chunk.
+                            if attempt < max_attempts {
+                                yield NodeEvt::Retried(nid.clone(), attempt, e.clone());
+                                if backoff_secs > 0 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
+                                        .await;
+                                }
+                                continue 'agent;
+                            }
+                            if continue_on_exhausted {
+                                break 'agent Ok(agent_error_value(&e));
+                            }
+                            break 'agent Err(e);
+                        }
+                    }
+                };
+                agent_result
+            }
+            Node::Gate(gate) => {
+                executor.run_gate(gate, incoming.clone(), working_dir.clone()).await
+            }
+            Node::Merge(m) => Ok(merge_values(pred_vals, &m.strategy)),
+            Node::Parallel(_) => Ok(incoming.clone()),
+            Node::Transform(t) => Ok(apply_transform(t, incoming.clone())),
+            Node::Branch(_) => Ok(incoming.clone()),
+            // Only reached when an Interrupt's condition did NOT fire (a firing
+            // interrupt returns above). Pass the input through unchanged.
+            Node::Interrupt(_) => Ok(incoming.clone()),
+            Node::Selector(s) => {
+                // First-match over cases (mutually exclusive). Emits the chosen
+                // label as the output value; successors route via branch edges
+                // whose `when` equals this label (see the main-loop fire logic).
+                let chosen = s
+                    .cases
+                    .iter()
+                    .find(|c| eval_branch(&incoming, &c.when))
+                    .map(|c| c.label.clone())
+                    .or_else(|| s.default.clone())
+                    .unwrap_or_default();
+                Ok(Value::String(chosen))
+            }
+            Node::Loop(lp) => {
+                // Resolve iteration items: the array at `over` (dot-path), else
+                // a fixed `count`, else none (zero iterations).
+                let raw: Vec<Value> = match &lp.over {
+                    Some(path) => extract_array(&incoming, path),
+                    None => match lp.count {
+                        Some(n) => (0..n).map(Value::from).collect(),
+                        None => Vec::new(),
+                    },
+                };
+                let cap = lp.max_iterations.unwrap_or(LOOP_DEFAULT_MAX_ITERATIONS);
+                let mut results: Vec<Value> = Vec::new();
+                let mut loop_err: Option<String> = None;
+                for item in raw.into_iter().take(cap) {
+                    let body = match lp.body.clone().compile() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            loop_err = Some(format!("loop body: {e}"));
+                            break;
+                        }
+                    };
+                    match run_graph_to_completion(
+                        body,
+                        item,
+                        working_dir.clone(),
+                        executor.clone(),
+                    )
+                    .await
+                    {
+                        Ok(v) => results.push(v),
+                        Err(e) => {
+                            loop_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match loop_err {
+                    Some(e) => Err(e),
+                    None => Ok(merge_values(results, &lp.strategy)),
+                }
+            }
+            Node::Human(_) => {
+                // Invariant: Human nodes are queued (pending_human) and driven
+                // inline in the main loop — never pushed onto `active`. Reaching
+                // here is a wiring bug; surface it loudly, not silently.
+                unreachable!(
+                    "Human nodes are handled inline in the main run loop, never via drive_node_stream"
+                )
+            }
+        };
+
+        match result {
+            Ok(v) => yield NodeEvt::Done(nid.clone(), v),
+            Err(e) => yield NodeEvt::Failed(nid.clone(), e),
+        }
+    })
 }
 
 /// The value emitted when a worker node fails under `OnFailure::Continue`
@@ -1007,6 +1171,233 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })),
             "must NOT emit GraphDone for a fully deselected run: {events:?}"
+        );
+    }
+
+    // ---- wave-parallel execution: concurrency / fail-fast / human-serial ----
+
+    /// Concurrency proof: two independent agent nodes fanned out via a Parallel
+    /// must run CONCURRENTLY, not serially. The fake executor's agent stream
+    /// awaits a `Barrier(2)` before its Final: under SERIAL execution each node
+    /// reaches the barrier alone and blocks forever (only 1 of 2 waiters) → the
+    /// run hangs → the 10s timeout fires → test FAILS. Under CONCURRENT
+    /// execution both nodes reach the barrier together → it releases → both
+    /// complete → PASS. The `max_concurrent` counter additionally asserts the
+    /// two nodes were genuinely in-flight at the same instant (== 2). This
+    /// makes parallelism observable deterministically — no timing races.
+    #[tokio::test]
+    async fn independent_nodes_in_a_wave_run_concurrently() {
+        use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, MergeStrategy, Node};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+
+        struct BarrierExec {
+            barrier: Arc<tokio::sync::Barrier>,
+            max_concurrent: Arc<AtomicUsize>,
+            in_flight: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::graph::Executor for BarrierExec {
+            fn run_agent(
+                &self,
+                spec: &crate::graph::AgentNodeSpec,
+                _input: Value,
+                _wd: Option<String>,
+            ) -> Result<futures::stream::BoxStream<'static, Result<crate::graph::AgentChunk, String>>, String> {
+                let barrier = self.barrier.clone();
+                let max_concurrent = self.max_concurrent.clone();
+                let in_flight = self.in_flight.clone();
+                let label = spec.agent.clone();
+                let s = async_stream::stream! {
+                    // Bump in_flight + track the high-water mark, THEN wait at
+                    // the barrier. Under parallel execution BOTH wave nodes are
+                    // in_flight when each reaches here → max_concurrent == 2.
+                    let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut max = max_concurrent.load(Ordering::SeqCst);
+                    while cur > max {
+                        match max_concurrent.compare_exchange(max, cur, Ordering::SeqCst, Ordering::SeqCst) {
+                            Ok(_) => break,
+                            Err(actual) => max = actual,
+                        }
+                    }
+                    // Block until BOTH wave nodes reach here. Serial execution
+                    // deadlocks (one node waits at a 2-barrier alone) → timeout.
+                    barrier.wait().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    yield Ok(crate::graph::AgentChunk::Final(json!({ "ran": label })));
+                };
+                Ok(Box::pin(s))
+            }
+            async fn run_gate(
+                &self,
+                _gate: &crate::graph::GateNode,
+                _input: Value,
+                _wd: Option<String>,
+            ) -> Result<Value, String> {
+                Ok(Value::Null)
+            }
+        }
+
+        // p(Parallel) fans out to a1, a2 — both ready after p → a concurrent
+        // wave — then both merge into `m` (Collect).
+        let g = GraphBuilder::new()
+            .node("p", Node::Parallel(crate::graph::ParallelNode::default()))
+            .node("a1", Node::Agent(AgentNodeSpec { agent: "a1".into(), ..Default::default() }))
+            .node("a2", Node::Agent(AgentNodeSpec { agent: "a2".into(), ..Default::default() }))
+            .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Collect }))
+            .edge("p", "a1").edge("p", "a2").edge("a1", "m").edge("a2", "m")
+            .start("p").end("m").build().unwrap();
+        let compiled = g.compile().unwrap();
+
+        let exec = Arc::new(BarrierExec {
+            barrier,
+            max_concurrent: max_concurrent.clone(),
+            in_flight,
+        });
+        // 10s cap: a serial regression deadlocks at the barrier and fails FAST
+        // via this timeout (with a clear message), instead of hanging the runner.
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            collect_events(run_graph(compiled, json!("in"), None, exec)),
+        )
+        .await;
+        let events = ran.expect(
+            "graph did not complete in 10s — independent wave nodes are NOT running \
+             concurrently (serial deadlock on the 2-barrier)",
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::GraphDone { .. })),
+            "graph should complete under concurrent execution: {events:?}"
+        );
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            2,
+            "both wave nodes must have been in-flight simultaneously (max_concurrent should be 2)"
+        );
+    }
+
+    /// Fail-fast proof: when one node in a concurrent wave fails, the run must
+    /// abort immediately WITHOUT waiting for a still-running sibling. Here a2
+    /// fails instantly while a1 sleeps 10s before completing — the graph must
+    /// fail in well under the 3s cap (proving a1's slow stream was dropped /
+    /// cancelled on the failure, not awaited).
+    #[tokio::test]
+    async fn fail_fast_aborts_without_waiting_for_slow_sibling() {
+        use crate::graph::{AgentNodeSpec, GraphBuilder, MergeNode, Node};
+
+        struct SlowFailExec;
+        #[async_trait::async_trait]
+        impl crate::graph::Executor for SlowFailExec {
+            fn run_agent(
+                &self,
+                spec: &crate::graph::AgentNodeSpec,
+                _input: Value,
+                _wd: Option<String>,
+            ) -> Result<futures::stream::BoxStream<'static, Result<crate::graph::AgentChunk, String>>, String> {
+                let agent = spec.agent.clone();
+                let s = async_stream::stream! {
+                    if agent == "slow" {
+                        // A sibling that would take 10s if NOT cancelled.
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        yield Ok(crate::graph::AgentChunk::Final(json!("slow-done")));
+                    } else {
+                        yield Err("a2 failed immediately".into());
+                    }
+                };
+                Ok(Box::pin(s))
+            }
+            async fn run_gate(
+                &self,
+                _gate: &crate::graph::GateNode,
+                _input: Value,
+                _wd: Option<String>,
+            ) -> Result<Value, String> {
+                Ok(Value::Null)
+            }
+        }
+
+        let g = GraphBuilder::new()
+            .node("p", Node::Parallel(crate::graph::ParallelNode::default()))
+            .node("slow", Node::Agent(AgentNodeSpec { agent: "slow".into(), ..Default::default() }))
+            .node("fast", Node::Agent(AgentNodeSpec { agent: "fast".into(), ..Default::default() }))
+            .node("m", Node::Merge(MergeNode::default()))
+            .edge("p", "slow").edge("p", "fast").edge("slow", "m").edge("fast", "m")
+            .start("p").end("m").build().unwrap();
+        let compiled = g.compile().unwrap();
+
+        let start = std::time::Instant::now();
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            collect_events(run_graph(compiled, json!("in"), None, Arc::new(SlowFailExec))),
+        )
+        .await
+        .expect("fail-fast must abort within 3s, not wait for the 10s sibling");
+        let elapsed = start.elapsed();
+        assert!(
+            ran.iter().any(|e| matches!(e, GraphEvent::GraphFailed { .. })),
+            "the failing sibling must fail the graph: {ran:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "fail-fast returned in {elapsed:?} — should be near-instant, never near the 10s sibling"
+        );
+    }
+
+    /// Human nodes still work after the wave-parallel restructure: a Human node
+    /// queues and runs INLINE at a wave boundary (active empty), awaiting the
+    /// single approval Receiver with no concurrent node. Drives the graph via
+    /// `run_graph_with_approvals`, sending an approval when `ApprovalRequired`
+    /// surfaces, and asserts the approved value flows to the end.
+    #[tokio::test]
+    async fn human_node_runs_inline_and_resumes_on_approval() {
+        use crate::graph::{GraphBuilder, HumanNode, MergeNode, Node, ParallelNode};
+        let g = GraphBuilder::new()
+            .node("p", Node::Parallel(ParallelNode::default()))
+            .node("h", Node::Human(HumanNode { prompt: "ok to proceed?".into() }))
+            .node("e", Node::Merge(MergeNode::default()))
+            .edge("p", "h").edge("h", "e")
+            .start("p").end("e").build().unwrap();
+        let compiled = g.compile().unwrap();
+
+        let (stream, approval_tx) =
+            run_graph_with_approvals(compiled, json!("seed"), None, Arc::new(MockExec));
+        use futures::StreamExt;
+        let mut s = Box::pin(stream);
+        let mut events = Vec::new();
+        let mut done = None;
+        while let Some(ev) = s.next().await {
+            let terminal = matches!(
+                ev,
+                GraphEvent::GraphDone { .. }
+                    | GraphEvent::GraphFailed { .. }
+                    | GraphEvent::GraphInterrupted { .. }
+            );
+            if let GraphEvent::ApprovalRequired { resume_token, .. } = &ev {
+                approval_tx
+                    .send(HumanApproval {
+                        resume_token: resume_token.clone(),
+                        decision: Some(json!("YES")),
+                    })
+                    .await
+                    .unwrap();
+            }
+            if let GraphEvent::GraphDone { output } = &ev {
+                done = Some(output.clone());
+            }
+            events.push(ev);
+            if terminal {
+                break;
+            }
+        }
+        let done = done.expect("graph must reach GraphDone after approval");
+        assert_eq!(done, json!("YES"), "approved value must flow to END: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, GraphEvent::ApprovalRequired { node, .. } if node == "h")),
+            "Human node must surface ApprovalRequired: {events:?}"
         );
     }
 

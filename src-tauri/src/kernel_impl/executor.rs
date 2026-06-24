@@ -174,7 +174,7 @@ const WORKFLOW_PLANNING_GUIDE: &str = r#"
 
 工作流（Anthropic 动态 workflow recipe：plan → worker → verify → report）：
 1. plan：拆成 graph——start（任务输入）→ worker（agent 节点）→ 可选 gate 验收 → merge 汇总 → end
-2. 扇出：parallel 节点把输入扇出到多个 worker 后继；graph 按依赖拓扑顺序逐节点执行（同一波独立 worker 当前为顺序执行，非真并发——要纯并发提速多子 agent 直接用 dispatch_subagent）。DAG 的价值在结构（merge/gate/条件分支/逐节点重试容错），不在并发。
+2. 扇出：parallel 节点把输入扇出到多个 worker 后继；graph 按依赖拓扑执行——同一波独立的 worker 并发跑（波式并行），merge 节点等所有前驱到齐再汇总，任一 worker 失败 fail-fast 中止全图。DAG 的价值是结构（merge/gate/条件分支/逐节点重试容错）加同波并发提速。
 3. verify：gate 节点验收 worker 产出；偶发失败的 worker 配 on_failure 重试
 4. report：merge 汇总，end 输出最终结果
 
