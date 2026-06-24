@@ -287,33 +287,21 @@ export function ChatView() {
     if (!selectedAgent || !prompt.trim() || runningSession || !project) return;
     const text = buildFullPrompt();
     try {
-      // Kernel agents (self-hosted ReactAgent) route through react_chat_driver
-      // instead of a CLI subprocess — flagged by kernel=true.
       const kernel = selectedAgent === 'react_kernel';
-      // Resolve the model for the backend: 'default'/unset → let the backend
-      // pick; any concrete id routes through the matching enabled provider.
-      // Without this the picker was decorative — the value never reached
-      // spawn_agent_session (logged model=None → fallback or send failure).
       const model = selectedModel && selectedModel !== 'default' ? selectedModel : undefined;
       if (activeConversationId && !runningSession) {
-        // Follow-up turn on the existing conversation. The agent may differ
-        // from the previous turn — that's the conversation-container model.
-        // parentSessionId links this follow-up to the prior turn — the backbone
-        // of branch-aware history (visibleTurns walks the chain; edit_and_regenerate
-        // forks off it). Undefined for the very first turn of the container.
         const parentSessionId = turns.length > 0 ? turns[turns.length - 1].id : undefined;
         const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode, model, parentSessionId);
-        // continueConversation attaches to the already-selected conversation;
-        // selection is already correct, no need to re-select.
         void session;
+        // Force store sync to guarantee ChatView re-render with new turn
+        void useAgentStore.getState().refreshSessions();
       } else {
-        // First turn of a brand-new conversation. createConversation spawns
-        // turn 1 and returns it carrying the new conversationId; select it so
-        // the main view binds to the new container.
         const agent = selectedAgent || getDefaultAgent();
         if (agent) {
           const session = await createConversation(project.path, text, agent, kernel, agentMode, model);
           selectConversation(session.conversationId);
+          // Force store sync to guarantee ChatView re-render with new turn
+          void useAgentStore.getState().refreshSessions();
         }
       }
       setPrompt('');
@@ -391,10 +379,12 @@ export function ChatView() {
           onModelChange={setSelectedModel}
           modelOptions={modelOptions}
           onClear={handleClear}
+          requestId={activeConversationId ?? undefined}
+          running={false}
         />
         <div className="chat-empty">
           <div style={{ fontSize: 32, marginBottom: 'var(--space-2)' }}>✦</div>
-          <h2>创建任务</h2>
+          <h2 data-testid="chat-empty-title">创建任务</h2>
           <p>在下方输入需求或指令，开始与 Agent 协作</p>
         </div>
         <Composer
@@ -427,6 +417,8 @@ export function ChatView() {
         onModelChange={setSelectedModel}
         modelOptions={modelOptions}
         onClear={handleClear}
+        requestId={runningSession?.id ?? activeConversationId ?? undefined}
+        running={!!runningSession}
       />
       <SubagentBoard
         events={
@@ -538,6 +530,8 @@ export function ChatView() {
         onRemoveFile={handleRemoveFile}
         agentMode={agentMode}
         onModeChange={setAgentMode}
+        steering={!!runningSession}
+        onSteer={() => toast.info('Steering 消息发送待后端支持（当前会继续运行）')}
         placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}
       />
     </div>

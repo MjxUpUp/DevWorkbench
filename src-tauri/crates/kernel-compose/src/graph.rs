@@ -92,6 +92,22 @@ pub struct AgentNodeSpec {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
+    /// Permission mode for this agent node (default/plan/auto-edit/dry-run/skip-permissions).
+    /// Only applies to transparent ReactAgent path; opaque CLI agents read their
+    /// own flags from cli_flags config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Skill names to make available to this agent node ONLY (not global).
+    /// Filter the loaded skills to this list; empty = all installed skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// MCP tool patterns to make available ("server/tool" or "server/*").
+    /// Filter the loaded MCP tools; empty = all enabled MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tools: Option<Vec<String>>,
+    /// Knowledge entry IDs to inject into this agent's system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Vec<String>>,
 }
 
 impl AgentNodeSpec {

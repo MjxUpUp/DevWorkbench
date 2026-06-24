@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSkillsStore } from '../../stores/skillsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 
 /**
  * 技能管理 — surfaces the skills subsystem that was already fully built
@@ -96,13 +97,14 @@ export function SkillsSection() {
             <div className="memory-card-meta">
               <span>{s.org}</span>
               {s.installedAt && <span>· {(s.installedAt || '').slice(0, 10)}</span>}
-              <button
-                className="memory-card-delete"
+              <Button
+                variant="dangerGhost"
+                size="sm"
                 onClick={() => onUninstall(s.id, s.name)}
                 aria-label={`卸载技能 ${s.name}`}
               >
                 卸载
-              </button>
+              </Button>
             </div>
           </div>
         ))}
@@ -130,14 +132,14 @@ export function SkillsSection() {
               {c.description && <p className="memory-card-content">{c.description}</p>}
               <div className="memory-card-meta">
                 <span className="skills-source" title={c.source}>{c.source}</span>
-                <button
-                  className="provider-btn primary skills-install-btn"
+                <Button
+                  variant="primary"
                   disabled={isInstalled || installing.has(c.name)}
                   onClick={() => onInstall(c.name, c.source)}
                   aria-label={`安装技能 ${c.name}`}
                 >
                   {isInstalled ? '已安装' : installing.has(c.name) ? '安装中…' : '安装'}
-                </button>
+                </Button>
               </div>
             </div>
           );

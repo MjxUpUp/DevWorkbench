@@ -1,4 +1,5 @@
 import type { KnowledgeEntry } from '../types';
+import { Button } from './ui/Button/Button';
 
 interface KnowledgeCardProps {
   entry: KnowledgeEntry;
@@ -23,7 +24,7 @@ export function KnowledgeCard({ entry, onDelete }: KnowledgeCardProps) {
         <span className="knowledge-card-source">{entry.sourceAgent.replace(/_/g, ' ')}</span>
         <span className="knowledge-card-time">{time}</span>
         {onDelete && (
-          <button className="knowledge-card-delete" onClick={onDelete} title="删除">×</button>
+          <Button variant="dangerGhost" size="sm" onClick={onDelete} aria-label="删除">×</Button>
         )}
       </div>
     </div>

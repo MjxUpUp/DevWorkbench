@@ -2,43 +2,6 @@
    as the single source of truth for ALL form controls. Class rules below keep
    their own per-view overrides. */
 
-/* === Button baseline ===
-   Shared .btn / .btn-primary used across views (orchestrate run/reset,
-   approval actions). Without this every consumer rendered as a bare
-   OS-default button. */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-1);
-  color: var(--text-primary);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
-}
-.btn:hover:not(:disabled) {
-  border-color: var(--border-hover);
-  background: var(--surface-2);
-}
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--always-white);
-}
-.btn-primary:hover:not(:disabled) {
-  filter: brightness(0.95);
-}
-
 /* === Project Grid === */
 .project-grid {
   display: grid;
@@ -310,69 +273,6 @@
 }
 
 /* === Modal === */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--scrim);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  animation: modalOverlayIn var(--duration-fast) ease;
-}
-
-.modal {
-  background: var(--surface-1);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  width: 520px;
-  max-width: 90vw;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: var(--shadow-xl);
-  animation: modalSlideIn var(--duration-normal) var(--ease-out);
-}
-
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.modal-header h2 {
-  font-size: var(--text-lg);
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: -0.2px;
-}
-
-.modal-close {
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background var(--duration-fast) ease;
-}
-
-.modal-close:hover {
-  background: var(--surface-2);
-  color: var(--text-secondary);
-}
-
-.modal-close svg {
-  width: 16px;
-  height: 16px;
-}
-
 .error-banner {
   background: var(--danger-muted);
   color: var(--danger);
@@ -412,61 +312,6 @@
   border-bottom-color: var(--accent);
 }
 
-.modal-body {
-  padding: var(--space-5);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.modal-body label {
-  font-size: var(--text-xs);
-  font-weight: 500;
-  color: var(--text-secondary);
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
-}
-
-.modal-body input,
-.modal-body textarea {
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  color: var(--text-primary);
-  outline: none;
-  transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
-}
-
-.modal-body input::placeholder,
-.modal-body textarea::placeholder {
-  color: var(--text-muted);
-}
-
-.modal-body input:focus,
-.modal-body textarea:focus {
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-}
-
-.modal-body textarea {
-  resize: vertical;
-  min-height: 60px;
-}
-
-/* Section heading in settings modal */
-.modal-body h3 {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  padding-top: var(--space-2);
-}
-
 .input-row {
   display: flex;
   gap: var(--space-2);
@@ -494,30 +339,6 @@
   background: var(--surface-3);
   border-color: var(--border-hover);
   color: var(--text-primary);
-}
-
-.primary-btn {
-  padding: var(--space-3) var(--space-5);
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  font-weight: 600;
-  cursor: pointer;
-  margin-top: var(--space-1);
-  transition: background var(--duration-fast) ease;
-}
-
-.primary-btn:hover {
-  background: var(--accent-hover);
-}
-
-.primary-btn:disabled {
-  background: var(--surface-3);
-  color: var(--text-muted);
-  cursor: not-allowed;
 }
 
 /* === Scan Results === */

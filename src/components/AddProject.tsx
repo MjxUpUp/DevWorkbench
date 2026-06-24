@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { IconX } from './Icons';
 import type { GitRepo, Project } from '../types';
+import { Button } from './ui/Button/Button';
+import { Modal } from './ui/Modal/Modal';
+import { Input, Textarea, Label } from './ui/Input/Input';
 
 interface AddProjectProps {
   onAdd: (project: Omit<Project, 'id' | 'open_count' | 'last_opened_at' | 'created_at' | 'starred' | 'last_opened_tools' | 'workspace_tools'>) => Promise<Project | void>;
@@ -21,17 +23,6 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
   const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState('');
-
-  // ESC closes the modal — without this keyboard users can't dismiss it (the
-  // overlay click is mouse-only). Pairs with the overlay onClick below per the
-  // WAI-ARIA dialog pattern.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
 
   const existingPaths = new Set(existingProjects.map(p => p.path.toLowerCase()));
 
@@ -146,12 +137,11 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="添加项目" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>添加项目</h2>
-          <button className="modal-close" onClick={onClose}><IconX size={16} /></button>
-        </div>
+    <Modal open onClose={onClose} aria-label="添加项目">
+      <Modal.Header>
+        <h2>添加项目</h2>
+        <Modal.Close onClose={onClose} />
+      </Modal.Header>
 
         <div className="modal-tabs">
           <button className={`tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>手动添加</button>
@@ -161,26 +151,26 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
         {error && <div className="error-banner">{error}</div>}
 
         {mode === 'manual' ? (
-          <div className="modal-body">
-            <label>项目名称 *</label>
-            <input value={name} onChange={e => { setName(e.target.value); setError(''); }} placeholder="My Project" />
+          <Modal.Body>
+            <Label>项目名称 *</Label>
+            <Input value={name} onChange={e => { setName(e.target.value); setError(''); }} placeholder="My Project" />
 
-            <label>项目路径 *</label>
+            <Label>项目路径 *</Label>
             <div className="input-row">
-              <input value={path} onChange={e => { setPath(e.target.value); setError(''); }} placeholder="/path/to/project" />
+              <Input value={path} onChange={e => { setPath(e.target.value); setError(''); }} placeholder="/path/to/project" />
               <button onClick={pickDirectory}>选择目录</button>
             </div>
 
-            <label>描述</label>
-            <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="项目简介..." rows={2} />
+            <Label>描述</Label>
+            <Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="项目简介..." rows={2} />
 
-            <label>标签（逗号分隔）</label>
-            <input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
+            <Label>标签（逗号分隔）</Label>
+            <Input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
 
-            <button className="primary-btn" onClick={addManual} disabled={!name || !path}>添加</button>
-          </div>
+            <Button variant="primary" onClick={addManual} disabled={!name || !path}>添加</Button>
+          </Modal.Body>
         ) : (
-          <div className="modal-body">
+          <Modal.Body>
             <label>扫描目录</label>
             <div className="input-row">
               <input value={scanDir} onChange={e => { setScanDir(e.target.value); setError(''); }} placeholder="选择要扫描的根目录" />
@@ -207,14 +197,13 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
                     </label>
                   );
                 })}
-                <button className="primary-btn" onClick={addScanned} disabled={selectedRepos.size === 0}>
+                <Button variant="primary" onClick={addScanned} disabled={selectedRepos.size === 0}>
                   添加选中的 {scanResults.filter(r => selectedRepos.has(r.path) && !existingPaths.has(r.path.toLowerCase())).length} 个项目
-                </button>
+                </Button>
               </div>
             )}
-          </div>
+          </Modal.Body>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

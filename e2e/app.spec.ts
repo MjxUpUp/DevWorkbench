@@ -49,15 +49,15 @@ test.describe('Full App interaction E2E', () => {
     // 1. App mounted → load_projects → Sidebar shows the seeded project. Click
     //    → selectProject → ChatView mounts in empty-state. Use the empty-state
     //    h2 (not getByText — "创建任务" also matches the Sidebar nav button).
-    await page.locator('.left-column-project').first().click();
-    await expect(page.locator('.chat-empty h2')).toHaveText('创建任务');
+    await page.getByTestId('left-column-project').first().click();
+    await expect(page.getByTestId('chat-empty-title')).toHaveText('创建任务');
 
     // 2. Type a prompt. canSend also needs selectedAgent, which ChatView's
     //    recommend-effect sets async after discover_agents_cmd resolves. Wait
     //    for the send button to be enabled (the visible signal that
     //    selectedAgent + project + prompt are all satisfied) before sending.
-    const sendBtn = page.locator('.composer-send-btn.send');
-    await page.locator('.chat-composer-input').fill('读取 Cargo.toml 的包名');
+    const sendBtn = page.getByTestId('composer-send-btn');
+    await page.getByTestId('chat-composer-input').fill('读取 Cargo.toml 的包名');
     await expect(sendBtn).toBeEnabled();
     await sendBtn.click();
 
@@ -65,7 +65,7 @@ test.describe('Full App interaction E2E', () => {
     // conv-1) → selectConversation → ChatView renders turn 1. The running
     // structured agent shows an AgentMessage (BlocksView waiting state) before
     // the first block arrives.
-    await expect(page.locator('.agent-message').first()).toBeVisible();
+    await expect(page.getByTestId('agent-message').first()).toBeVisible();
 
     // 3. Backend would emit agent:started then stream agent:event × N. Feed the
     //    REAL GLM wire — one ChatStreamEvent per agent:event — into the
@@ -84,11 +84,11 @@ test.describe('Full App interaction E2E', () => {
     // GLM run produced. GLM interleaves thinking around the tool call, so there
     // can be multiple thinking blocks; assert at least one (live trace shape
     // varies per run).
-    await expect(page.locator('.chat-block-text')).toContainText('dev-workbench');
-    await expect(page.locator('.chat-block-tool-name')).toHaveText('read_file');
-    await expect(page.locator('.chat-block-thinking').first()).toContainText('思考过程');
-    await expect(page.locator('.chat-block-toolresult')).toContainText('工具结果');
-    await expect(page.locator('.chat-block-result')).toContainText('完成');
+    await expect(page.getByTestId('chat-block-text')).toContainText('dev-workbench');
+    await expect(page.getByTestId('chat-block-tool-name')).toHaveText('read_file');
+    await expect(page.getByTestId('chat-block-thinking').first()).toContainText('思考过程');
+    await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
+    await expect(page.getByTestId('chat-block-result')).toContainText('完成');
 
     // 4. Simulate completion the way the backend would: persist the same wire
     //    into session.blocks + flip status, THEN emit agent:completed.
@@ -108,12 +108,12 @@ test.describe('Full App interaction E2E', () => {
     // COMPLETED assertion — blocks survive the live→persisted handoff. After
     // clearBlocks the AgentMessage falls back to session.blocks; the reply must
     // still render (this is the bug class where a finished turn goes blank).
-    await expect(page.locator('.chat-block-text')).toContainText('dev-workbench');
-    await expect(page.locator('.chat-block-tool-name')).toHaveText('read_file');
-    await expect(page.locator('.chat-block-toolresult')).toContainText('工具结果');
+    await expect(page.getByTestId('chat-block-text')).toContainText('dev-workbench');
+    await expect(page.getByTestId('chat-block-tool-name')).toHaveText('read_file');
+    await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
 
     // Decision Chain reflects the completed status the listener wrote.
-    await expect(page.locator('.agent-message').first()).toContainText('已完成');
+    await expect(page.getByTestId('agent-message').first()).toContainText('已完成');
 
     // No unexpected console errors / uncaught pageerrors. The shim warns on
     // unmock'd commands (informational); only surface real failures.

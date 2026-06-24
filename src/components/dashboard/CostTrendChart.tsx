@@ -34,7 +34,7 @@ export function CostTrendChart() {
         borderColor: 'var(--accent)',
         backgroundColor: 'rgba(37, 99, 235, 0.08)',
         pointBackgroundColor: 'var(--accent)',
-        pointBorderColor: '#fff',
+        pointBorderColor: 'var(--surface-0)',
         pointBorderWidth: 2,
         pointRadius: 4,
         pointHoverRadius: 6,

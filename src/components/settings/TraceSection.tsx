@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Button } from '../ui/Button/Button';
 import { useTraceSettingsStore } from '../../stores/traceSettingsStore';
 
 /**
@@ -65,18 +66,18 @@ export function TraceSection() {
           onChange={(e) => setDraft(e.target.value)}
           disabled={busy}
         />
-        <button type="button" onClick={apply} disabled={busy}>
+        <Button variant="primary" size="sm" onClick={apply} disabled={busy}>
           应用
-        </button>
+        </Button>
         <span className="settings-section-hint">
           空 / 0 = 无限保留；3–365 = 自动清理该天数之前的记录（启动时执行）。
         </span>
       </div>
 
       <div className="settings-field-row">
-        <button type="button" onClick={cleanup} disabled={busy}>
+        <Button variant="secondary" size="sm" onClick={cleanup} disabled={busy}>
           立即清理过期记录
-        </button>
+        </Button>
         <span className="settings-section-hint">
           {lastPruned !== null
             ? `上次清理：删除 ${lastPruned} 条`
@@ -87,6 +88,12 @@ export function TraceSection() {
       </div>
 
       <p className="settings-section-hint">上次 VACUUM：{settings?.last_vacuum_at ?? '从未'}</p>
+
+      <div className="mission-note" style={{ marginTop: 'var(--space-4)' }}>
+        <strong>💡 查看调用详情</strong><br />
+        保留天数只控制存储清理。实时查看每次 LLM 调用的请求体/响应体/延迟/状态，
+        请在主界面左侧导航点「Trace」切换到 LLM 追踪视图。
+      </div>
     </div>
   );
 }

@@ -11,6 +11,18 @@
   color: var(--text-secondary);
   font-size: var(--text-xs);
   user-select: none;
+  position: relative;
+}
+
+/* pi.dev 签名：状态栏左侧顶部 2px active-stripe 装饰条 */
+.status-bar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 2px;
+  background: var(--active-stripe);
 }
 
 .status-bar-left,
@@ -42,12 +54,8 @@
 
 .status-bar-item.running .status-dot {
   background: var(--accent);
-  animation: pulse-dot 1.5s ease-in-out infinite;
-}
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  /* pi.dev CRT 步进闪烁（非 smooth opacity）*/
+  animation: crt-blink 1.25s steps(1, end) infinite;
 }
 
 .status-bar-item.model-name {

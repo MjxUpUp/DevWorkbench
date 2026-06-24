@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useAgentStore } from '../../stores/agentStore';
+import { Button } from '../ui/Button/Button';
 import { McpServerList, ALL_AGENTS } from '../McpServerList';
 import type { McpServerConfig, AgentType } from '../../types';
 
@@ -171,19 +172,19 @@ export function McpSection() {
           onKeyDown={(e) => { if (e.key === 'Enter') addServer(); }}
           className="config-server-input config-server-input-wide"
         />
-        <button className="config-server-add-btn" onClick={addServer} disabled={!newName.trim() || !newCommand.trim()}>
+        <Button variant="primary" onClick={addServer} disabled={!newName.trim() || !newCommand.trim()}>
           添加
-        </button>
+        </Button>
       </div>
 
       {/* Actions */}
       <div className="config-server-actions">
-        <button className="config-server-save-btn" onClick={handleSave}>
+        <Button variant="secondary" onClick={handleSave}>
           保存配置
-        </button>
-        <button className="config-server-apply-btn" onClick={handleApply}>
+        </Button>
+        <Button variant="primary" onClick={handleApply}>
           应用到项目
-        </button>
+        </Button>
       </div>
 
       {/* Apply result */}

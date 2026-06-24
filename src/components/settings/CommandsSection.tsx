@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { SlashCommand } from '../../types';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 
 /**
  * 自定义斜杠命令管理 (D2) — surfaces the CRUD backend (list/create/update/delete
@@ -141,9 +142,9 @@ export function CommandsSection() {
       </p>
 
       {!formOpen && (
-        <button className="provider-btn primary" onClick={openCreate} style={{ marginBottom: 16 }}>
+        <Button variant="primary" onClick={openCreate} style={{ marginBottom: 16 }}>
           + 新建命令
-        </button>
+        </Button>
       )}
 
       {formOpen && (
@@ -192,12 +193,12 @@ export function CommandsSection() {
               />
             </label>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="provider-btn primary" onClick={onSave} disabled={saving}>
+              <Button variant="primary" onClick={onSave} disabled={saving}>
                 {saving ? '保存中…' : '保存'}
-              </button>
-              <button className="provider-btn" onClick={closeForm} disabled={saving}>
+              </Button>
+              <Button variant="secondary" onClick={closeForm} disabled={saving}>
                 取消
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -230,12 +231,12 @@ export function CommandsSection() {
               <div className="memory-card-meta">
                 {!isBuiltin && (
                   <>
-                    <button className="memory-card-delete" onClick={() => openEdit(c)} aria-label={`编辑命令 ${c.name}`}>
+                    <Button variant="ghost" size="sm" onClick={() => openEdit(c)} aria-label={`编辑命令 ${c.name}`}>
                       编辑
-                    </button>
-                    <button className="memory-card-delete" onClick={() => onDelete(c)} aria-label={`删除命令 ${c.name}`}>
+                    </Button>
+                    <Button variant="dangerGhost" size="sm" onClick={() => onDelete(c)} aria-label={`删除命令 ${c.name}`}>
                       删除
-                    </button>
+                    </Button>
                   </>
                 )}
                 {isBuiltin && <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>内置命令不可编辑</span>}

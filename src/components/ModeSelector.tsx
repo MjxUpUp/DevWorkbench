@@ -52,12 +52,13 @@ export function ModeSelector({ value, onChange }: ModeSelectorProps) {
         className="mode-selector-trigger"
         onClick={() => setOpen((v) => !v)}
         title={current.label}
+        data-testid="mode-selector-trigger"
       >
         <span>{current.shortLabel}</span>
         <span className="mode-selector-chevron">▾</span>
       </button>
       {open && (
-        <div className="mode-selector-dropdown" role="listbox">
+        <div className="mode-selector-dropdown" role="listbox" data-testid="mode-selector-dropdown">
           {MODE_OPTIONS.map((mode) => (
             <button
               key={mode.id}

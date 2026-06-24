@@ -41,6 +41,32 @@
 }
 
 /* ============================================
+   pi.dev 签名动效 — CRT 步进闪烁
+   非 smooth opacity，用 steps(1,end) 模拟终端 CRT 颗粒感
+   （running 状态点 / 终端光标）。reduced-motion 下自动停。
+   ============================================ */
+
+/* 实时状态点（agent 运行中） */
+@keyframes crt-blink {
+  0%, 58% { opacity: 1; }
+  59%, 100% { opacity: 0.28; }
+}
+
+/* 终端块光标（输入位置） */
+@keyframes crt-cursor {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+/* CRT 动效工具类——组件用 .dw-live-dot / .dw-cursor 引用 */
+.dw-live-dot {
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}
+.dw-cursor {
+  animation: crt-cursor 1s steps(1, end) infinite;
+}
+
+/* ============================================
    a11y 门 — WCAG 2.2 SC 2.3.3 强制
    全局守护：前庭失调用户关闭动效时，所有动画/过渡
    降为近瞬时。这是法律红线，不可删除。

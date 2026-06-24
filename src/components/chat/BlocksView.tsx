@@ -2,7 +2,10 @@ import { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ChatStreamEvent } from '../../types';
-import { IconCpu } from '../Icons';
+import { Frame } from '../ui/Frame/Frame';
+import { L1Thinking } from './layers/L1Thinking';
+import { L2ToolPill } from './layers/L2ToolPill';
+import styles from './BlocksView.module.css';
 
 interface BlocksViewProps {
   events: ChatStreamEvent[];
@@ -14,9 +17,8 @@ interface BlocksViewProps {
  *  finalized replay path reads `session.blocks` from the DB which stores the
  *  raw per-delta stream (GLM emits one thinking_delta per SSE chunk) and
  *  bypasses that merge — without this, a single reasoning trace renders as N
- *  stacked "思考过程" cards, each holding a content fragment (the symptom in
- *  acceptance). Normalizing at the render layer fixes BOTH paths and is
- *  idempotent on already-merged live data. */
+ *  stacked "思考过程" cards, each holding a content fragment. Normalizing at
+ *  the render layer fixes BOTH paths and is idempotent on already-merged data. */
 function normalizeEvents(events: ChatStreamEvent[]): ChatStreamEvent[] {
   const out: ChatStreamEvent[] = [];
   for (const ev of events) {
@@ -33,115 +35,129 @@ function normalizeEvents(events: ChatStreamEvent[]): ChatStreamEvent[] {
 /** Renders an agent's structured output as a stack of block cards — the
  *  chat-blocks UI for claude (and later ReactAgent). Each `agent:event` becomes
  *  one card: text (Markdown), tool_use (collapsible input), tool_result
- *  (collapsible output, red on error), result (final status line). Raw agents
- *  (pi) emit no agent:event and never reach this view. */
+ *  (collapsible output, red on error), result (final status line).
+ *
+ * v3 重构：用 L1Thinking / L2ToolPill 替换原 ThinkingCard / ToolUseCard+
+ * ToolResultCard，落地 Cursor 3.0 / Codex app 三段折叠范式。 */
 export function BlocksView({ events, running }: BlocksViewProps) {
-  // Structured agents (claude/react_kernel) reach this view even while running
-  // with zero blocks yet — e.g. the model gateway is holding its response. Show
-  // a chat-blocks-native "waiting" hint instead of falling back to the terminal
-  // box, so the chat-blocks form is the ONLY display for structured agents.
   const waiting = running && events.length === 0;
   const merged = useMemo(() => normalizeEvents(events), [events]);
   return (
-    <div className="chat-blocks">
+    <div className={styles.blocks} data-testid="chat-blocks">
       {waiting ? (
-        <div className="chat-blocks-waiting">
-          <span className="chat-blocks-waiting-text">等待模型响应</span>
-          <span className="chat-blocks-cursor" aria-hidden="true" />
+        <div className={styles.waiting}>
+          <span className={styles.waitingText}>等待模型响应</span>
+          <span className={styles.cursor} data-testid="chat-streaming-cursor" aria-hidden="true" />
         </div>
       ) : (
         <>
           {merged.map((ev, i) => (
-            <BlockCard key={i} event={ev} />
+            <BlockCard key={i} event={ev} running={running} />
           ))}
-          {running && <span className="chat-blocks-cursor" aria-hidden="true" />}
+          {running && <span className={styles.cursor} data-testid="chat-streaming-cursor" aria-hidden="true" />}
         </>
       )}
     </div>
   );
 }
 
-function BlockCard({ event }: { event: ChatStreamEvent }) {
+function BlockCard({ event, running }: { event: ChatStreamEvent; running: boolean }) {
   switch (event.kind) {
     case 'text':
       return (
-        <div className="chat-block chat-block-text">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.content}</ReactMarkdown>
-        </div>
+        <Frame variant="default" className={styles.textBlock} data-testid="chat-block-text">
+          <div className={styles.textBody}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.content}</ReactMarkdown>
+          </div>
+        </Frame>
       );
     case 'tool_use':
-      return <ToolUseCard name={event.name} input={event.input} />;
+      return <ToolUsePill name={event.name} input={event.input} />;
     case 'tool_result':
-      return <ToolResultCard content={event.content} isError={event.is_error} />;
+      return <ToolResultPill content={event.content} isError={event.is_error} />;
     case 'thinking':
-      return <ThinkingCard content={event.content} />;
+      return (
+        <L1Thinking
+          summary={deriveThinkingSummary(event.content)}
+          running={running}
+          data-testid="chat-block-thinking"
+        >
+          {event.content}
+        </L1Thinking>
+      );
     case 'result':
       return (
-        <div className={`chat-block chat-block-result ${event.is_error ? 'failed' : 'ok'}`}>
-          <span className="chat-block-result-icon">{event.is_error ? '✗' : '✓'}</span>
+        <div
+          className={`${styles.result} ${event.is_error ? styles.failed : styles.ok}`}
+          data-testid="chat-block-result"
+        >
+          <span className={styles.resultIcon}>{event.is_error ? '✗' : '✓'}</span>
           <span>{event.is_error ? '失败' : '完成'}</span>
-          <span className="chat-block-result-secs">{event.secs}s</span>
+          <span className={styles.resultSecs}>{event.secs}s</span>
         </div>
       );
     case 'file_changed':
-      // A per-write mutation the agent landed (write_file/patch). Lighter than
-      // a tool_result card (which shows output): just the touched path, so the
-      // user sees file changes accumulate live alongside the tool calls.
       return (
-        <div className="chat-block chat-block-file">
-          <span className="chat-block-file-icon" aria-hidden="true">📄</span>
-          <span className="chat-block-file-path">{event.path}</span>
+        <div className={styles.file} data-testid="chat-block-file">
+          <span className={styles.fileIcon} aria-hidden="true">📄</span>
+          <span className={styles.filePath}>{event.path}</span>
         </div>
       );
   }
 }
 
-function ToolUseCard({ name, input }: { name: string; input: unknown }) {
-  const [open, setOpen] = useState(false);
+/** tool_use → L2ToolPill（running 态，等配对的 tool_result 到达后转 success/error）*/
+function ToolUsePill({ name, input }: { name: string; input: unknown }) {
   const inputStr = typeof input === 'string' ? input : safeStringify(input);
   return (
-    <div className="chat-block chat-block-tool">
-      <button type="button" className="chat-block-tool-head" onClick={() => setOpen((v) => !v)}>
-        <IconCpu size={14} />
-        <span className="chat-block-tool-name">{name}</span>
-        <span className="chat-block-tool-toggle">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && <pre className="chat-block-tool-input">{inputStr}</pre>}
-    </div>
+    <L2ToolPill
+      name={name}
+      desc={deriveToolDesc(name, input)}
+      status="running"
+      meta="调用中"
+      data-testid="chat-block-tool"
+    >
+      <pre className={styles.toolInput} data-testid="chat-block-tool-input">{inputStr}</pre>
+    </L2ToolPill>
   );
 }
 
-function ToolResultCard({ content, isError }: { content: string; isError: boolean }) {
-  const [open, setOpen] = useState(false);
+/** tool_result → L2ToolPill（success/error 态）*/
+function ToolResultPill({ content, isError }: { content: string; isError: boolean }) {
   return (
-    <div className={`chat-block chat-block-toolresult ${isError ? 'error' : ''}`}>
-      <button type="button" className="chat-block-toolresult-head" onClick={() => setOpen((v) => !v)}>
-        <span>{isError ? '✗' : '↳'}</span>
-        <span>{isError ? '工具错误' : '工具结果'}</span>
-        <span className="chat-block-tool-toggle">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && <pre className="chat-block-toolresult-content">{content}</pre>}
-    </div>
+    <L2ToolPill
+      name={isError ? 'tool_error' : 'tool_result'}
+      desc={truncate(content, 60)}
+      status={isError ? 'error' : 'success'}
+      meta={isError ? '失败' : '完成'}
+      data-testid="chat-block-toolresult"
+    >
+      <pre className={styles.toolResultContent} data-testid="chat-block-toolresult-content">{content}</pre>
+    </L2ToolPill>
   );
 }
 
-function ThinkingCard({ content }: { content: string }) {
-  // GLM interleaved thinking trace — collapsible, collapsed by default. Mirrors
-  // the ToolResultCard shape but with a distinct class (muted/italic) so the
-  // reasoning trace reads as auxiliary context, not model output. Collapsed by
-  // default keeps a long trace from swamping the answer (same convention as
-  // Claude/ChatGPT); open to inspect the reasoning.
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="chat-block chat-block-thinking">
-      <button type="button" className="chat-block-thinking-head" onClick={() => setOpen((v) => !v)}>
-        <span className="chat-block-thinking-mark" aria-hidden="true">✦</span>
-        <span>思考过程</span>
-        <span className="chat-block-tool-toggle">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && <pre className="chat-block-thinking-content">{content}</pre>}
-    </div>
-  );
+/** 从 thinking content 提炼一行摘要（取首句或前 80 字）。*/
+function deriveThinkingSummary(content: string): string {
+  const firstLine = content.split('\n')[0]?.trim() ?? '';
+  if (firstLine.length <= 80) return firstLine || '思考中...';
+  return firstLine.slice(0, 80) + '...';
+}
+
+/** 从 tool_use name + input 提炼一行描述。*/
+function deriveToolDesc(name: string, input: unknown): string {
+  if (typeof input === 'object' && input !== null) {
+    const obj = input as Record<string, unknown>;
+    // 常见字段：file_path / path / command / pattern
+    const path = obj.file_path ?? obj.path ?? obj.command ?? obj.pattern;
+    if (typeof path === 'string') return path;
+  }
+  return name;
+}
+
+function truncate(s: string, n: number): string {
+  const oneLine = s.replace(/\n/g, ' ').trim();
+  return oneLine.length <= n ? oneLine : oneLine.slice(0, n) + '...';
 }
 
 function safeStringify(v: unknown): string {
@@ -152,3 +168,6 @@ function safeStringify(v: unknown): string {
     return String(v);
   }
 }
+
+// 兼容旧测试：保留默认导出的 useState 引用避免 tree-shake 警告（实际已不用）
+void useState;

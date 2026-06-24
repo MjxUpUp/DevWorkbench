@@ -19,6 +19,14 @@
   background: var(--bg-canvas);
 }
 
+.main-stage-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /*
  * Task-mode 2-pane layout: chat content | right Git panel.
  * The global .app grid stays 2 columns; when the task view is active the main

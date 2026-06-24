@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 import type { KnowledgeEntry } from '../../types';
 
 /**
@@ -123,13 +124,14 @@ function MemoryCard({ entry, onDelete }: { entry: KnowledgeEntry; onDelete: () =
         <span>{entry.sourceAgent}</span>
         {entry.sourceType && <span>· {entry.sourceType}</span>}
         <span>· {(entry.createdAt || '').slice(0, 10)}</span>
-        <button
-          className="memory-card-delete"
+        <Button
+          variant="dangerGhost"
+          size="sm"
           onClick={onDelete}
           aria-label={`删除记忆 ${entry.title || entry.id.slice(0, 8)}`}
         >
           删除
-        </button>
+        </Button>
       </div>
     </div>
   );

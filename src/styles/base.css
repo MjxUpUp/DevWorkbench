@@ -13,22 +13,28 @@
   box-sizing: border-box;
 }
 
-/* === Base — system font stack, no external loading === */
+/* === Base — pi.dev 双字体 + 暖纸质感 === */
 html, body, #root {
   height: 100%;
   font-family: var(--font-sans);
   font-size: var(--text-base);
   letter-spacing: var(--tracking-body);
   color: var(--text-primary);
-  background: var(--bg-canvas);
+  /* pi.dev 签名：暖纸纸纹 + 页面网格叠加在画布色上 */
+  background-color: var(--bg-canvas);
+  background-image: var(--paper-grain),
+    linear-gradient(var(--page-grid-major) 1px, transparent 1px),
+    linear-gradient(90deg, var(--page-grid-minor) 1px, transparent 1px);
+  background-size: auto, 100% 32px, 32px 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
-/* 大字标题负字距收紧（高级感关键） */
+/* 大字标题负字距收紧 + 衡线体（Newsreader 衡线是 pi.dev 签名）*/
 h1, h2, h3, h4 {
   letter-spacing: var(--tracking-display);
+  font-family: var(--font-serif);
 }
 
 /* 等宽：数据/代码列用 tabular figures 防 layout shift */

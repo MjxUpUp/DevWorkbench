@@ -1,10 +1,43 @@
 /* ============================================
-   DEV WORKBENCH — Design Tokens
-   Refined engineer-grade light + deep dark.
-   结构层对齐 Linear/Vercel/Raycast（surface ladder +
-   hairline + 负字距 + spring 曲线），装饰层用自定义
-   靛蓝 accent + 渐变做差异化。
+   DEV WORKBENCH — Design Tokens v3
+   Anchored to pi.dev: natural-material palette +
+   Newsreader serif + JetBrains Mono + frame corners +
+   CRT step blink + dual-color active-stripe.
+   亮色为主（pi.dev 默认），暗色为次选。
+   保留所有旧变量名（值重映射），新增 pi.dev 签名 token。
    ============================================ */
+
+/* ── Fonts: Newsreader (serif) + JetBrains Mono (mono) ──
+   开源等价于 pi.dev 的 Plantin MT Pro + Commit Mono。
+   通过 --font-serif / --font-mono 暴露给组件。 */
+@font-face {
+  font-family: 'Newsreader';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/newsreader/v26/cY9qfjOCX1hbuyalUrK49dLac06G1ZGsZBtoBCzBDXXD9JVF438weI_ADA.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Newsreader';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/newsreader/v26/cY9kfjOCX1hbuyalUrK439vogqC9yFZCYg7oRZaLP4obnf7fTXglsMwoT-ZA.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Newsreader';
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/newsreader/v26/cY9kfjOCX1hbuyalUrK439vogqC9yFZCYg7oRZaLP4obnf7fTXglsMz2SOZA.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Newsreader';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/newsreader/v26/cY9qfjOCX1hbuyalUrK49dLac06G1ZGsZBtoBCzBDXXD9JVF438wpojADA.ttf') format('truetype');
+}
 
 :root {
   /* ── Layout tokens ── */
@@ -24,11 +57,42 @@
   --radius-xl: 16px;
   --radius-full: 9999px;
 
-  /* ── Global palette (原始值层，便于未来换色板) ── */
-  --palette-accent: #5457d6;
-  --palette-accent-hover: #4548c9;
-  --palette-accent-soft: #818cf8;
-  --palette-accent-soft-hover: #a5acfa;
+  /* ── pi.dev Natural Material Palette (13 命名色) ──
+     反 AI 同质化核心：自然材质命名 + 单点强调色 */
+  --color-parchment: #dacbc2;       /* 羊皮纸 */
+  --color-moonstone: #ebe7e4;       /* 月光石 */
+  --color-driftwood: #5c5752;       /* 漂流木 */
+  --color-evening-blue: #252f3d;    /* 暮蓝 */
+  --color-terracotta: #844f3b;      /* 陶土 */
+  --color-terracotta-light: #b86b52;/* 浅陶土 */
+  --color-sunkissed: #e1b06e;       /* 暖阳金 */
+  --color-sage: #a3a473;            /* 鼠尾草 */
+  --color-tidal-blue: #4b607c;      /* 潮汐蓝 */
+  --color-success: #5db87a;         /* 成功绿 */
+  --color-warning: #e8993a;         /* 警告橙 */
+  --color-error: #e8704f;           /* 错误珊瑚 */
+  --color-warm-black: #13110f;      /* 暖黑 */
+  --color-warm-white: #f3f2f0;      /* 暖白 */
+  --color-cool-white: #f0f2f3;      /* 冷白 */
+
+  /* ── Global palette (原始值层，映射到 pi.dev 色板) ──
+     保留旧名兼容现有引用。亮色 accent=潮汐蓝。 */
+  --palette-accent: var(--color-tidal-blue);
+  --palette-accent-hover: #3a4f6a;
+  --palette-accent-soft: #6a8aab;
+  --palette-accent-soft-hover: #7a9abb;
+
+  /* ── pi.dev 签名 token（新增） ── */
+  /* 双色硬切激活条：亮色单色，暗色 accent 62%→thread-blue 硬切 */
+  --active-stripe: linear-gradient(90deg, var(--color-tidal-blue) 0%, var(--color-tidal-blue) 100%);
+  /* 页面网格背景（极低 alpha，材质感）*/
+  --page-grid-minor: rgba(37, 47, 61, 0.03);
+  --page-grid-major: rgba(37, 47, 61, 0.05);
+  /* 暖纸纸纹（径向渐变叠加）*/
+  --paper-grain: radial-gradient(circle at 20% 30%, rgba(140,120,100,0.04) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(90,90,75,0.03) 0%, transparent 50%);
+  /* 字体：Newsreader 衬线 + JetBrains Mono 等宽 */
+  --font-serif: 'Newsreader', 'Iowan Old Style', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas, monospace;
 
   /* ── DAG Node Colors (light) ── */
   --node-prompt: #3b82f6;
@@ -73,9 +137,9 @@
   --block-header-bg: var(--surface-2);
   --thinking-accent: #8b5cf6;
 
-  /* ── Typography — system font stack, no external deps ── */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
-  --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+  /* ── Typography — pi.dev 双字体（衬线标题 + 等宽标签）── */
+  --font-sans: var(--font-serif);  /* 主字体重映射到 Newsreader 衬线 */
+  /* --font-mono 已在上面定义为 JetBrains Mono */
   --text-xxs: 10px;
   --text-xs: 11px;
   --text-sm: 13px;
@@ -121,62 +185,62 @@
   --gradient-node-wrapper: linear-gradient(100deg, #e9ebf0, rgba(233, 235, 240, 0.2));
 
   /* ════════════════════════════════════════════════
-     Refined Light (default)
+     Light (pi.dev 默认) — 暖纸主题
      ════════════════════════════════════════════════ */
-  --bg-canvas: #F7F8FA;
-  --surface-0: #FFFFFF;
-  --surface-1: #FCFCFD;
-  --surface-2: #F3F4F6;
-  --surface-3: #E5E7EB;
-  --border: #E5E7EB;
-  --text-primary: #111827;
-  --text-secondary: #6B7280;
-  --text-tertiary: #9CA3AF;
-  --accent: var(--palette-accent);
-  --text-on-accent: #FFFFFF;
-  --status-running: var(--palette-accent);
-  --status-success: #16A34A;
-  --status-error: #DC2626;
-  --status-warning: #D97706;
+  --bg-canvas: var(--color-moonstone);   /* #ebe7e4 月光石 */
+  --surface-0: var(--color-warm-white);  /* #f3f2f0 暖白纸 */
+  --surface-1: #f4f2f0;                  /* 暖白面板 */
+  --surface-2: #eef1f3;                  /* 冷白 */
+  --surface-3: var(--color-parchment);   /* #dacbc2 羊皮纸 */
+  --border: rgba(139, 132, 125, 0.35);   /* 漂流木色线 */
+  --text-primary: rgba(37, 47, 61, 0.96);/* 暮蓝 96% */
+  --text-secondary: var(--color-driftwood);
+  --text-tertiary: rgba(92, 87, 82, 0.65);
+  --accent: var(--color-tidal-blue);     /* 潮汐蓝 */
+  --text-on-accent: var(--color-warm-white);
+  --status-running: var(--color-tidal-blue);
+  --status-success: var(--color-success);
+  --status-error: var(--color-error);
+  --status-warning: var(--color-warning);
 
-  /* Aliases & derived tokens */
-  --surface-elevated: #FFFFFF;
-  --surface-sunken: #F3F4F6;
-  --border-subtle: #F3F4F6;
-  --border-default: #E5E7EB;
-  --border-hover: #D1D5DB;
+  /* Aliases & derived tokens (light) */
+  --surface-elevated: var(--surface-0);
+  --surface-sunken: var(--color-parchment);
+  --border-subtle: rgba(139, 132, 125, 0.20);
+  --border-default: rgba(139, 132, 125, 0.35);
+  --border-hover: rgba(139, 132, 125, 0.50);
   --text-muted: var(--text-tertiary);
   --text-accent: var(--accent);
-  --accent-hover: var(--palette-accent-hover);
-  --accent-muted: rgba(84, 87, 214, 0.10);
-  --accent-glow: rgba(84, 87, 214, 0.22);
-  --star: #D97706;
-  --star-muted: rgba(217, 119, 6, 0.1);
+  --accent-hover: #3a4f6a;
+  --accent-muted: rgba(75, 96, 124, 0.10);
+  --accent-glow: rgba(75, 96, 124, 0.35);
+  --star: var(--color-sunkissed);
+  --star-muted: rgba(225, 176, 110, 0.15);
   --danger: var(--status-error);
-  --danger-muted: rgba(220, 38, 38, 0.08);
+  --danger-muted: rgba(232, 112, 79, 0.10);
   --success: var(--status-success);
-  --success-muted: rgba(22, 163, 74, 0.10);
+  --success-muted: rgba(93, 184, 122, 0.12);
   --warning: var(--status-warning);
-  --warning-muted: rgba(217, 119, 6, 0.10);
+  --warning-muted: rgba(232, 153, 58, 0.12);
   --always-white: #FFFFFF;
   --border-strong: #D1D5DB;
-  --titlebar-close: #e81123;
-  --scrim: rgba(0, 0, 0, 0.3);
-  --scrim-strong: rgba(0, 0, 0, 0.5);
-  --cover-badge-bg: rgba(255, 255, 255, 0.85);
+  --titlebar-close: var(--color-terracotta);
+  --scrim: rgba(37, 47, 61, 0.45);
+  --scrim-strong: rgba(37, 47, 61, 0.65);
+  --cover-badge-bg: rgba(243, 242, 240, 0.88);
 
   /* Focus ring */
   --focus-ring: 0 0 0 3px var(--accent-glow);
   --focus-ring-tight: 0 0 0 2px var(--accent-glow);
 
   /* Shadows — hairline (shadow-as-border) + 5 段 elevation */
-  --shadow-hairline: 0 0 0 1px rgba(17, 24, 39, 0.06);
+  --shadow-hairline: 0 0 0 1px rgba(60, 50, 40, 0.08);
   --ring-hairline: 0 0 0 1px var(--border-default);
-  --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.06), 0 0 0 1px rgba(17, 24, 39, 0.04);
-  --shadow-md: 0 2px 6px rgba(17, 24, 39, 0.08), 0 1px 2px rgba(17, 24, 39, 0.04);
-  --shadow-lg: 0 6px 16px rgba(17, 24, 39, 0.10), 0 2px 4px rgba(17, 24, 39, 0.06);
-  --shadow-xl: 0 12px 32px rgba(17, 24, 39, 0.12), 0 4px 8px rgba(17, 24, 39, 0.06);
-  --shadow-2xl: 0 24px 56px rgba(17, 24, 39, 0.16), 0 8px 16px rgba(17, 24, 39, 0.08);
+  --shadow-sm: 0 1px 2px rgba(60, 50, 40, 0.06), 0 0 0 1px rgba(60, 50, 40, 0.04);
+  --shadow-md: 0 2px 6px rgba(60, 50, 40, 0.10), 0 1px 2px rgba(60, 50, 40, 0.06);
+  --shadow-lg: 0 6px 16px rgba(60, 50, 40, 0.12), 0 2px 4px rgba(60, 50, 40, 0.08);
+  --shadow-xl: 0 12px 32px rgba(60, 50, 40, 0.14), 0 4px 8px rgba(60, 50, 40, 0.08);
+  --shadow-2xl: 0 24px 56px rgba(60, 50, 40, 0.18), 0 8px 16px rgba(60, 50, 40, 0.10);
 
   /* Cover tints — 可作渐变起点 */
   --cover-1: #EEF0FE;
@@ -188,49 +252,56 @@
 }
 
 /* ════════════════════════════════════════════════
-   Dark theme (opt-in via data-theme="dark")
-   surface ladder 拉开层次，accent 提亮，node/cost/gate/skill 降饱和
+   Dark theme (pi.dev 暮蓝) — surface ladder 拉开层次
+   accent 铜青提亮，active-stripe 双色硬切
    ════════════════════════════════════════════════ */
 [data-theme="dark"] {
-  --bg-canvas: #0B0B12;
-  --surface-0: #14141C;
-  --surface-1: #1A1A24;
-  --surface-2: #22222E;
-  --surface-3: #2E2E3C;
-  --border: rgba(255, 255, 255, 0.08);
-  --text-primary: #ECECF4;
-  --text-secondary: #9494A8;
-  --text-tertiary: #5E5E74;
-  --accent: var(--palette-accent-soft);
-  --text-on-accent: #0B0B12;
-  --status-running: var(--palette-accent-soft);
-  --status-success: #34C759;
-  --status-error: #FF5F5F;
-  --status-warning: #FFB547;
+  --bg-canvas: #161d27;                /* 暮蓝 */
+  --surface-0: #212730;
+  --surface-1: #1a212c;
+  --surface-2: #252f3d;                /* 暮蓝面板 */
+  --surface-3: #2a3548;
+  --border: rgba(117, 125, 137, 0.30);
+  --text-primary: #ebe7e4;             /* 月光石 */
+  --text-secondary: #d5d8db;
+  --text-tertiary: rgba(159, 164, 171, 0.68);
+  --accent: #6a9fcc;                   /* 铜青 */
+  --text-on-accent: #0d1116;
+  --status-running: #6a9fcc;
+  --status-success: var(--color-success);
+  --status-error: var(--color-error);
+  --status-warning: var(--color-warning);
+
+  /* pi.dev 签名：dark active-stripe 双色硬切（accent 62%→thread-blue）*/
+  --active-stripe: linear-gradient(90deg, #6a9fcc 0 62%, #4b607c 62% 100%);
+  --page-grid-minor: hsl(218 60% 80% / 0.009375);
+  --page-grid-major: hsl(218 60% 80% / 0.02625);
+  --paper-grain: radial-gradient(circle at 20% 30%, rgba(106,159,204,0.03) 0%, transparent 50%);
 
   --surface-elevated: var(--surface-1);
-  --surface-sunken: #08080D;
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-default: rgba(255, 255, 255, 0.09);
-  --border-hover: rgba(255, 255, 255, 0.14);
+  --surface-sunken: #0d1116;
+  --border-subtle: rgba(117, 125, 137, 0.28);
+  --border-default: rgba(117, 125, 137, 0.42);
+  --border-hover: rgba(117, 125, 137, 0.60);
   --text-muted: var(--text-tertiary);
   --text-accent: var(--accent);
-  --accent-hover: var(--palette-accent-soft-hover);
-  --accent-muted: rgba(129, 140, 248, 0.14);
-  --accent-glow: rgba(129, 140, 248, 0.32);
-  --star: #FFD700;
-  --star-muted: rgba(255, 215, 0, 0.15);
+  --accent-hover: #7aafdc;
+  --accent-muted: rgba(106, 159, 204, 0.14);
+  --accent-glow: rgba(106, 159, 204, 0.40);
+  --star: var(--color-sunkissed);
+  --star-muted: rgba(225, 176, 110, 0.18);
   --danger: var(--status-error);
-  --danger-muted: rgba(255, 95, 95, 0.12);
+  --danger-muted: rgba(232, 112, 79, 0.14);
   --success: var(--status-success);
-  --success-muted: rgba(52, 199, 89, 0.14);
+  --success-muted: rgba(93, 184, 122, 0.14);
   --warning: var(--status-warning);
-  --warning-muted: rgba(255, 181, 71, 0.14);
+  --warning-muted: rgba(232, 153, 58, 0.14);
   --always-white: #FFFFFF;
-  --border-strong: rgba(255, 255, 255, 0.16);
-  --scrim: rgba(0, 0, 0, 0.55);
-  --scrim-strong: rgba(0, 0, 0, 0.7);
-  --cover-badge-bg: rgba(20, 20, 28, 0.75);
+  --border-strong: rgba(117, 125, 137, 0.55);
+  --titlebar-close: var(--color-terracotta-light);
+  --scrim: rgba(0, 0, 0, 0.60);
+  --scrim-strong: rgba(0, 0, 0, 0.78);
+  --cover-badge-bg: rgba(33, 39, 48, 0.82);
 
   /* 暗色阴影：更深纵深 */
   --shadow-hairline: 0 0 0 1px rgba(255, 255, 255, 0.06);
@@ -272,4 +343,122 @@
   --cover-4: #241c30;
   --cover-5: #2a2418;
   --cover-6: #18242a;
+}
+
+/* ════════════════════════════════════════════════
+   Palette B: 墨砚 Ink-stone（东方水墨）
+   通过 [data-palette="ink"] 覆盖关键 token。
+   与 theme (light/dark) 正交——下面的 light/dark 块各自覆盖。
+   ════════════════════════════════════════════════ */
+
+/* B 墨砚 light（宣纸黄 + 朱砂红）*/
+[data-palette="ink"] {
+  --bg-canvas: #f5f0e6;
+  --bg-deep: #ebe4d4;
+  --surface-0: #faf7f0;
+  --surface-1: #f0ebe0;
+  --surface-2: #ebe4d4;
+  --surface-3: #e0d8c4;
+  --surface-sunken: #ebe4d4;
+  --accent: #8b2820;
+  --accent-hover: #6b1f18;
+  --text-primary: #2a2520;
+  --text-secondary: #6b5d50;
+  --text-tertiary: rgba(107, 93, 80, 0.65);
+  --text-on-accent: #faf7f0;
+  --border: rgba(139, 40, 32, 0.25);
+  --border-default: rgba(139, 40, 32, 0.25);
+  --border-subtle: rgba(139, 40, 32, 0.15);
+  --border-hover: rgba(139, 40, 32, 0.40);
+  --accent-muted: rgba(139, 40, 32, 0.10);
+  --accent-glow: rgba(139, 40, 32, 0.30);
+  --font-serif: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+  --active-stripe: linear-gradient(90deg, #8b2820 0%, #8b2820 100%);
+  --paper-grain: radial-gradient(circle at 20% 30%, rgba(139,40,32,0.04) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(60,50,40,0.03) 0%, transparent 50%);
+  --page-grid-minor: rgba(139, 40, 32, 0.03);
+  --page-grid-major: rgba(139, 40, 32, 0.05);
+}
+
+/* B 墨砚 dark（松烟墨 + 朱砂亮）*/
+[data-theme="dark"][data-palette="ink"] {
+  --bg-canvas: #1a1a1c;
+  --bg-deep: #131316;
+  --surface-0: #232325;
+  --surface-1: #1d1d20;
+  --surface-2: #2a2a2d;
+  --surface-3: #333336;
+  --surface-sunken: #131316;
+  --accent: #d4665a;
+  --accent-hover: #e07a6e;
+  --text-primary: #e8e0d0;
+  --text-secondary: #b8a890;
+  --text-tertiary: rgba(184, 168, 144, 0.65);
+  --text-on-accent: #131316;
+  --border: rgba(212, 102, 90, 0.30);
+  --border-default: rgba(212, 102, 90, 0.30);
+  --border-subtle: rgba(212, 102, 90, 0.18);
+  --border-hover: rgba(212, 102, 90, 0.45);
+  --accent-muted: rgba(212, 102, 90, 0.14);
+  --accent-glow: rgba(212, 102, 90, 0.40);
+  --active-stripe: linear-gradient(90deg, #d4665a 0 62%, #8b2820 62% 100%);
+  --page-grid-minor: rgba(212, 102, 90, 0.02);
+  --page-grid-major: rgba(212, 102, 90, 0.04);
+}
+
+/* ════════════════════════════════════════════════
+   Palette C: 苔藓 Moss（自然有机）
+   ════════════════════════════════════════════════ */
+
+/* C 苔藓 light（亚麻 + 苔藓绿）*/
+[data-palette="moss"] {
+  --bg-canvas: #ecebe3;
+  --bg-deep: #e0dfd3;
+  --surface-0: #f4f3ec;
+  --surface-1: #e8e6da;
+  --surface-2: #e0dfd3;
+  --surface-3: #d4d2c0;
+  --surface-sunken: #e0dfd3;
+  --accent: #4a6b3a;
+  --accent-hover: #3a5530;
+  --text-primary: #2d2a22;
+  --text-secondary: #6a6555;
+  --text-tertiary: rgba(106, 101, 85, 0.65);
+  --text-on-accent: #f4f3ec;
+  --border: rgba(74, 107, 58, 0.25);
+  --border-default: rgba(74, 107, 58, 0.25);
+  --border-subtle: rgba(74, 107, 58, 0.15);
+  --border-hover: rgba(74, 107, 58, 0.40);
+  --accent-muted: rgba(74, 107, 58, 0.10);
+  --accent-glow: rgba(74, 107, 58, 0.30);
+  --font-serif: "Spectral", Georgia, serif;
+  --active-stripe: linear-gradient(90deg, #4a6b3a 0%, #4a6b3a 100%);
+  --paper-grain: radial-gradient(circle at 20% 30%, rgba(74,107,58,0.04) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(90,80,60,0.03) 0%, transparent 50%);
+  --page-grid-minor: rgba(74, 107, 58, 0.03);
+  --page-grid-major: rgba(74, 107, 58, 0.05);
+}
+
+/* C 苔藓 dark（深森绿 + 亮苔藓）*/
+[data-theme="dark"][data-palette="moss"] {
+  --bg-canvas: #1c2620;
+  --bg-deep: #151d18;
+  --surface-0: #243029;
+  --surface-1: #1e2822;
+  --surface-2: #2a3830;
+  --surface-3: #334438;
+  --surface-sunken: #151d18;
+  --accent: #7da668;
+  --accent-hover: #8db870;
+  --text-primary: #e0ddc8;
+  --text-secondary: #a8a890;
+  --text-tertiary: rgba(168, 168, 144, 0.65);
+  --text-on-accent: #151d18;
+  --border: rgba(125, 166, 104, 0.30);
+  --border-default: rgba(125, 166, 104, 0.30);
+  --border-subtle: rgba(125, 166, 104, 0.18);
+  --border-hover: rgba(125, 166, 104, 0.45);
+  --accent-muted: rgba(125, 166, 104, 0.14);
+  --accent-glow: rgba(125, 166, 104, 0.40);
+  --active-stripe: linear-gradient(90deg, #7da668 0 62%, #4a6b3a 62% 100%);
+  --page-grid-minor: rgba(125, 166, 104, 0.02);
+  --page-grid-major: rgba(125, 166, 104, 0.04);
 }

@@ -25,6 +25,7 @@ describe('AgentSection crash defense', () => {
         scan_directories: [],
         tool_paths: {},
         theme: 'auto',
+        palette: 'pi' as const,
         preferred_terminal: '',
         cli_flags: {},
       },

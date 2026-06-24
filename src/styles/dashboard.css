@@ -252,7 +252,8 @@
 
 .budget-bar-footer {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .budget-bar-percentage {
@@ -260,7 +261,46 @@
   color: var(--text-tertiary);
 }
 
+/* 超限警示（学 OpenHands budgeting）*/
+.budget-bar-warning {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--color-warning);
+  letter-spacing: 0.04em;
+}
+
 /* ── Quality History ── */
+
+/* === EvalPanel grade 三态色（pi.dev 状态色）===
+ * optimal=鼠尾草绿 / suboptimal=暖阳金 / incorrect=错误珊瑚。
+ * v3：用 pi.dev 自然材质色替代通用红绿黄。 */
+.eval-grade {
+  display: inline-block;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  letter-spacing: 0.06em;
+  border-radius: var(--radius-xs);
+  border: 1px solid;
+}
+
+.eval-grade-optimal {
+  color: var(--color-sage);
+  border-color: var(--color-sage);
+  background: rgba(163, 164, 115, 0.10);
+}
+
+.eval-grade-suboptimal {
+  color: var(--color-sunkissed);
+  border-color: var(--color-sunkissed);
+  background: rgba(225, 176, 110, 0.10);
+}
+
+.eval-grade-incorrect {
+  color: var(--color-error);
+  border-color: var(--color-error);
+  background: var(--danger-muted);
+}
 
 .quality-history {
   background: var(--surface-0);

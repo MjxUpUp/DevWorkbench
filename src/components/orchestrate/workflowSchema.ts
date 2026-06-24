@@ -43,8 +43,12 @@ export interface BuilderNode {
   text?: string;
   agent?: string;
   model?: string;
+  mode?: string;
   prompt?: string;
   resume_from?: string;
+  knowledge?: string[];
+  skills?: string[];
+  mcp_tools?: string[];
   gate?: string;
   config?: unknown;
   branches?: number;
@@ -110,9 +114,13 @@ export const NODE_META: Record<NodeType, NodeMeta> = {
     color: '#3b82f6',
     hint: '运行一个 agent(外部 CLI 或透明 ReactAgent)',
     fields: [
-      { key: 'agent', label: 'Agent', input: 'text', required: true, placeholder: 'claude_code' },
-      { key: 'model', label: '模型', input: 'text', placeholder: 'sonnet' },
+      { key: 'agent', label: 'Agent', input: 'select', required: true, placeholder: 'claude_code' },
+      { key: 'model', label: '模型', input: 'select', placeholder: 'sonnet' },
+      { key: 'mode', label: '权限级别', input: 'select', options: ['default', 'auto-edit', 'plan', 'dry-run', 'skip-permissions'] },
       { key: 'prompt', label: '提示词', input: 'textarea', placeholder: '留空则用上游输入' },
+      { key: 'knowledge', label: '知识库 ID', input: 'json', placeholder: '[]' },
+      { key: 'skills', label: 'Skills', input: 'json', placeholder: '[]' },
+      { key: 'mcp_tools', label: 'MCP 工具', input: 'json', placeholder: '[]' },
       { key: 'resume_from', label: '恢复自', input: 'text' },
     ],
   },

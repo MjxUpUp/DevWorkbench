@@ -164,7 +164,9 @@
                   active: 'glm',
                 });
               case 'get_git_status':
-                return Promise.resolve({ branch: 'main', ahead: 0, behind: 0, modified: [], staged: [], untracked: [] });
+                return Promise.resolve({ branch: 'main', isDirty: false, ahead: 0, behind: 0, lastCommitTime: null, insertions: 0, deletions: 0 });
+              case 'list_changed_files':
+                return Promise.resolve([]);
 
               // --- chat data: turns / conversations / completion side-effects ---
               case 'load_sessions':

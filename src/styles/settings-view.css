@@ -234,58 +234,6 @@
   min-width: 140px;
 }
 
-.settings-row-btn-primary,
-.settings-row-btn-secondary,
-.settings-row-btn-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  padding: 5px var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease;
-}
-
-.settings-row-btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--text-on-accent);
-}
-
-.settings-row-btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-
-.settings-row-btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.settings-row-btn-secondary {
-  background: var(--surface-0);
-  color: var(--text-secondary);
-}
-
-.settings-row-btn-secondary:hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
-}
-
-.settings-row-btn-icon {
-  padding: 4px;
-  background: transparent;
-  color: var(--text-tertiary);
-}
-
-.settings-row-btn-icon:hover {
-  background: var(--surface-2);
-  color: var(--danger);
-}
-
 /* Segmented control (AppearanceSection) */
 .settings-segmented {
   display: inline-flex;
@@ -763,22 +711,7 @@
   color: var(--danger);
 }
 
-.provider-add-model-btn {
-  align-self: flex-start;
-  margin-top: var(--space-1, 6px);
-  padding: 4px 10px;
-  font-size: var(--text-xs, 12px);
-  background: transparent;
-  border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.provider-add-model-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
+/* provider-add-model-btn 已迁 Button primitive（dashed variant）*/
 
 /* Connectivity probe row — in-card result, not a transient toast */
 .provider-test-row {
@@ -823,51 +756,7 @@
   background: var(--danger-muted);
 }
 
-.provider-add-btn {
-  margin-top: var(--space-3);
-  padding: 8px 16px;
-  font-size: var(--text-sm);
-  background: transparent;
-  border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  width: 100%;
-}
-
-.provider-add-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-/* Shared button styles */
-.provider-btn {
-  padding: 6px 14px;
-  border-radius: 6px;
-  font-size: var(--text-sm);
-  cursor: pointer;
-  border: 1px solid var(--border-subtle);
-}
-
-.provider-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.provider-btn.primary {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-color: var(--accent);
-}
-
-.provider-btn.primary:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.provider-btn.secondary {
-  background: var(--surface-0);
-  color: var(--text-primary);
-}
+/* provider-add-btn 已迁 Button primitive（dashed variant）*/
 
 /* Model context-window input — narrower than the label/id, mono digits.
    Overrides the generic `.provider-model-input:not(.provider-model-id)` 140px
@@ -986,21 +875,7 @@
   color: var(--text-tertiary);
 }
 
-.memory-card-delete {
-  margin-left: auto;
-  padding: 2px 8px;
-  background: transparent;
-  border: none;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs, 12px);
-}
-
-.memory-card-delete:hover {
-  background: var(--danger-muted);
-  color: var(--danger);
-}
+/* memory-card-delete 已迁 Button primitive（dangerGhost/ghost variant）*/
 
 /* ---- Skills section (技能) — reuses the memory-card shells ---- */
 .skills-subhead {
@@ -1026,4 +901,213 @@
   margin-left: auto;
   padding: 4px 12px;
   font-size: var(--text-xs, 12px);
+}
+
+/* === Settings nav 分组标签（v3）=== */
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--space-2);
+}
+
+.settings-nav-group-label {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.settings-palette-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.settings-palette-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.settings-palette-card:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+
+.settings-palette-card.active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.settings-palette-swatch {
+  width: 100%;
+  height: 32px;
+  border-radius: var(--radius-xs);
+  margin-bottom: 4px;
+  border: 1px solid var(--border-subtle);
+}
+
+.settings-palette-name {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  font-style: italic;
+  color: var(--text-primary);
+}
+
+.settings-palette-desc {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+/* === CapabilitySection — 统计卡 + 搜索 + 表格 === */
+.capability-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.capability-stat {
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.capability-stat-num {
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 400;
+  color: var(--accent);
+  font-style: italic;
+  line-height: 1.2;
+}
+
+.capability-stat-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+  letter-spacing: 0.08em;
+  margin-top: 4px;
+}
+
+.capability-search {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  outline: none;
+}
+.capability-search:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.capability-search::placeholder { color: var(--text-muted); }
+
+/* Capability 表格行（加持原有 capability-group/capability-list/capability-item 的样式缺失）*/
+.capability-group { margin-bottom: var(--space-4); }
+.capability-group-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+  font-style: italic;
+}
+.capability-list { list-style: none; }
+.capability-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.capability-item:last-child { border-bottom: none; }
+.capability-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  white-space: nowrap;
+  min-width: 140px;
+}
+.capability-desc {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* === TraceSection — 最近统计预览 === */
+.trace-stats-preview {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.trace-stat {
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.trace-stat-num {
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--accent);
+  font-style: italic;
+}
+
+.trace-stat-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+  letter-spacing: 0.06em;
+  margin-top: 4px;
+}
+
+/* === MissionSection — 说明框 === */
+.mission-note {
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.mission-note strong {
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--accent);
 }

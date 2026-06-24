@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { SubAgentInfo, SubAgentScope } from '../../types';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 import { useNavigationStore } from '../../stores/navigationStore';
 
 /**
@@ -164,9 +165,9 @@ export function SubAgentsSection() {
       </p>
 
       {!formOpen && (
-        <button className="provider-btn primary" onClick={openCreate} style={{ marginBottom: 16 }}>
+        <Button variant="primary" onClick={openCreate} style={{ marginBottom: 16 }}>
           + 新建子智能体
-        </button>
+        </Button>
       )}
 
       {formOpen && (
@@ -232,12 +233,12 @@ export function SubAgentsSection() {
               </select>
             </label>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="provider-btn primary" onClick={onSave} disabled={saving}>
+              <Button variant="primary" onClick={onSave} disabled={saving}>
                 {saving ? '保存中…' : '保存'}
-              </button>
-              <button className="provider-btn" onClick={closeForm} disabled={saving}>
+              </Button>
+              <Button variant="secondary" onClick={closeForm} disabled={saving}>
                 取消
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -281,12 +282,12 @@ export function SubAgentsSection() {
                   <span className="settings-section-desc" style={{ fontSize: 12 }}>内置/只读（不可编辑）</span>
                 ) : (
                   <>
-                    <button className="memory-card-delete" onClick={() => openEdit(s)} aria-label={`编辑子智能体 ${s.name}`}>
+                    <Button variant="ghost" size="sm" onClick={() => openEdit(s)} aria-label={`编辑子智能体 ${s.name}`}>
                       编辑
-                    </button>
-                    <button className="memory-card-delete" onClick={() => onDelete(s)} aria-label={`删除子智能体 ${s.name}`}>
+                    </Button>
+                    <Button variant="dangerGhost" size="sm" onClick={() => onDelete(s)} aria-label={`删除子智能体 ${s.name}`}>
                       删除
-                    </button>
+                    </Button>
                   </>
                 )}
               </div>

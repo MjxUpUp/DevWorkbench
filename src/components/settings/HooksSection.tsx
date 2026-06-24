@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { UserHook, UserHookEvent } from '../../types';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 
 /**
  * 用户生命周期钩子管理 (D2) — surfaces the user_hooks CRUD backend. Each hook
@@ -182,9 +183,9 @@ export function HooksSection() {
       </p>
 
       {!formOpen && (
-        <button className="provider-btn primary" onClick={openCreate} style={{ marginBottom: 16 }}>
+        <Button variant="primary" onClick={openCreate} style={{ marginBottom: 16 }}>
           + 新建钩子
-        </button>
+        </Button>
       )}
 
       {formOpen && (
@@ -280,12 +281,12 @@ export function HooksSection() {
               </label>
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="provider-btn primary" onClick={onSave} disabled={saving}>
+              <Button variant="primary" onClick={onSave} disabled={saving}>
                 {saving ? '保存中…' : '保存'}
-              </button>
-              <button className="provider-btn" onClick={closeForm} disabled={saving}>
+              </Button>
+              <Button variant="secondary" onClick={closeForm} disabled={saving}>
                 取消
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -314,20 +315,21 @@ export function HooksSection() {
               </p>
             )}
             <div className="memory-card-meta">
-              <button
-                className="memory-card-delete"
+              <Button
+                variant="dangerGhost"
+                size="sm"
                 onClick={() => onToggleEnabled(h)}
                 aria-label={`切换钩子 ${h.name} 启用状态`}
                 title={h.enabled ? '点击禁用' : '点击启用'}
               >
                 {h.enabled ? '✓ 已启用' : '○ 已禁用'}
-              </button>
-              <button className="memory-card-delete" onClick={() => openEdit(h)} aria-label={`编辑钩子 ${h.name}`}>
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => openEdit(h)} aria-label={`编辑钩子 ${h.name}`}>
                 编辑
-              </button>
-              <button className="memory-card-delete" onClick={() => onDelete(h)} aria-label={`删除钩子 ${h.name}`}>
+              </Button>
+              <Button variant="dangerGhost" size="sm" onClick={() => onDelete(h)} aria-label={`删除钩子 ${h.name}`}>
                 删除
-              </button>
+              </Button>
             </div>
           </div>
         ))}

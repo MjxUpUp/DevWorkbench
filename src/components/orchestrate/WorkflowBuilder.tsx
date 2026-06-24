@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAgentStore } from '../../stores/agentStore';
+import { useProvidersStore } from '../../stores/providersStore';
 import {
   ReactFlow,
   Background,
@@ -7,11 +9,15 @@ import {
   Handle,
   Position,
   addEdge,
+  applyNodeChanges,
+  applyEdgeChanges,
   type Node,
   type Edge,
   type Connection,
   type NodeProps,
   type OnConnect,
+  type OnNodesChange,
+  type OnEdgesChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
@@ -122,9 +128,21 @@ export interface WorkflowBuilderProps {
   /** Two-way bound YAML (the same `yaml` the run button consumes). */
   yaml: string;
   onYamlChange: (yaml: string) => void;
+  /** Externally controlled selected node id. When provided, the builder hides
+   *  its internal inspector and reports selection changes via onSelectedChange. */
+  selectedNodeId?: string | null;
+  onSelectedChange?: (id: string | null) => void;
+  /** Lift the selected BuilderNode up to the parent (for external inspector). */
+  onSelectedNodeChange?: (node: BuilderNode | null) => void;
 }
 
-export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
+export function WorkflowBuilder({
+  yaml,
+  onYamlChange,
+  selectedNodeId,
+  onSelectedChange,
+  onSelectedNodeChange,
+}: WorkflowBuilderProps) {
   // Local canvas state, kept in sync with the bound YAML. We track positions
   // separately so drag doesn't fight the YAML round-trip (positions aren't in
   // the schema).
@@ -132,7 +150,45 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>(() =>
     initialPositions(yamlToGraph(yaml)),
   );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [internalSelectedId, setSelectedId] = useState<string | null>(null);
+  // External selection sync: if selectedNodeId prop is provided, use it
+  const selectedId = selectedNodeId !== undefined ? selectedNodeId : internalSelectedId;
+  const updateSelection = useCallback((id: string | null) => {
+    if (onSelectedChange) onSelectedChange(id);
+    else setSelectedId(id);
+  }, [onSelectedChange]);
+
+  // Undo stack: push graph snapshots before mutations, Ctrl+Z pops.
+  const undoStack = useRef<BuilderGraph[]>([]);
+  const pushUndo = useCallback(() => {
+    undoStack.current.push(graphRef.current);
+    if (undoStack.current.length > 50) undoStack.current.shift();
+  }, []);
+  const undo = useCallback(() => {
+    const prev = undoStack.current.pop();
+    if (prev) {
+      importingRef.current = true;
+      setGraph(prev);
+      importingRef.current = false;
+    }
+  }, []);
+
+  // 键盘快捷键：Ctrl+Z 撤销（Delete 删除交给 ReactFlow deleteKeyCode 处理）
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if ((e.target as HTMLElement)?.isContentEditable) return;
+
+      // Ctrl+Z / Cmd+Z = undo
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        undo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo]);
   // Avoid emitting YAML while we're ingesting an external change (re-import).
   const importingRef = useRef(false);
   // Mirrors of graph/positions for the yaml-driven effect below. That effect
@@ -177,36 +233,10 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph]);
 
-  const rfNodes: Node<WorkflowNodeData>[] = useMemo(
-    () =>
-      graph.nodes.map((n) => ({
-        id: n.id,
-        type: 'workflow',
-        position: positions[n.id] ?? { x: 40, y: 40 },
-        data: {
-          node: n,
-          isStart: graph.startId === n.id,
-          isEnd: graph.endId === n.id,
-        },
-        selected: n.id === selectedId,
-      })),
-    [graph, positions, selectedId],
-  );
-
-  const rfEdges: Edge[] = useMemo(
-    () =>
-      graph.edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        // branch edges get a dashed style so the routing is visible.
-        animated:
-          graph.nodes.find((n) => n.id === e.source)?.type === 'branch',
-      })),
-    [graph],
-  );
+  // rfNodes / rfEdges 已由上面的 useState + useEffect 管理（受控模式）
 
   const addNode = useCallback((type: NodeType) => {
+    pushUndo();
     setGraph((prev) => {
       const id = uniqueId(prev.nodes, type);
       const node: BuilderNode = { id, type, ...defaultParams(type) };
@@ -217,13 +247,14 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
         endId: prev.nodes.length === 0 ? id : prev.endId,
       };
       setPositions((p) => ({ ...p, [id]: gridPosition(prev.nodes.length) }));
-      setSelectedId(id);
+      updateSelection(id);
       return next;
     });
   }, []);
 
   const onConnect: OnConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
+    pushUndo();
     setGraph((prev) => {
       const id = `e${prev.edges.length}_${conn.source}_${conn.target}`;
       if (prev.edges.some((e) => e.source === conn.source && e.target === conn.target)) {
@@ -241,13 +272,14 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
 
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
+    pushUndo();
     setGraph((prev) => ({
       startId: prev.startId === selectedId ? null : prev.startId,
       endId: prev.endId === selectedId ? null : prev.endId,
       nodes: prev.nodes.filter((n) => n.id !== selectedId),
       edges: prev.edges.filter((e) => e.source !== selectedId && e.target !== selectedId),
     }));
-    setSelectedId(null);
+    updateSelection(null);
   }, [selectedId]);
 
   const updateNode = useCallback((id: string, patch: Partial<BuilderNode>) => {
@@ -258,23 +290,87 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
   }, []);
 
   const setEndpoint = useCallback((id: string, which: 'start' | 'end') => {
+    pushUndo();
     setGraph((prev) => ({ ...prev, [which === 'start' ? 'startId' : 'endId']: id }));
   }, []);
 
-  const onNodesChange = useCallback((changes: { type: string; id?: string; position?: { x: number; y: number } }[]) => {
-    // React Flow fires position-drag changes; persist them so re-render keeps
-    // the dropped position. Selection changes drive selectedId.
+  // ReactFlow 受控 state：独立于 graph，用 applyXxxChanges 更新
+  const [rfNodes, setRfNodes] = useState<Node<WorkflowNodeData>[]>([]);
+  const [rfEdgesState, setRfEdgesState] = useState<Edge[]>([]);
+
+  // Sync graph → ReactFlow state whenever graph/positions/selectedId changes
+  useEffect(() => {
+    setRfNodes(
+      graph.nodes.map((n) => ({
+        id: n.id,
+        type: 'workflow',
+        position: positions[n.id] ?? { x: 40, y: 40 },
+        data: {
+          node: n,
+          isStart: graph.startId === n.id,
+          isEnd: graph.endId === n.id,
+        },
+        selected: n.id === selectedId,
+      })),
+    );
+    setRfEdgesState(
+      graph.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        selectable: true,
+        animated: graph.nodes.find((n) => n.id === e.source)?.type === 'branch',
+      })),
+    );
+  }, [graph, positions, selectedId]);
+
+  const onNodesChange: OnNodesChange = useCallback((changes) => {
+    // 先让 ReactFlow 更新内部 nodes state（包括 select/remove/dimensions）
+    setRfNodes((nds) => applyNodeChanges(changes, nds) as Node<WorkflowNodeData>[]);
+    // 再同步到我们的 graph 模型
     for (const c of changes) {
       if (c.type === 'position' && c.id && c.position) {
         setPositions((p) => ({ ...p, [c.id!]: c.position! }));
       }
       if (c.type === 'select' && c.id !== undefined) {
-        setSelectedId(c.id === selectedId ? selectedId : c.id ?? null);
+        updateSelection(c.id === selectedId ? selectedId : c.id ?? null);
+      }
+      if (c.type === 'remove' && c.id) {
+        pushUndo();
+        const removeId = c.id;
+        setGraph((prev) => ({
+          startId: prev.startId === removeId ? null : prev.startId,
+          endId: prev.endId === removeId ? null : prev.endId,
+          nodes: prev.nodes.filter((n) => n.id !== removeId),
+          edges: prev.edges.filter((e) => e.source !== removeId && e.target !== removeId),
+        }));
+        updateSelection(null);
       }
     }
-  }, [selectedId]);
+  }, [selectedId, updateSelection, pushUndo]);
+
+  const onEdgesChange: OnEdgesChange = useCallback((changes) => {
+    // 先让 ReactFlow 更新内部 edges state（包括 select/remove）
+    setRfEdgesState((eds) => applyEdgeChanges(changes, eds));
+    // 再同步 remove 到我们的 graph 模型
+    for (const c of changes) {
+      if (c.type === 'remove' && c.id) {
+        pushUndo();
+        const removeId = c.id;
+        setGraph((prev) => ({
+          ...prev,
+          edges: prev.edges.filter((e) => e.id !== removeId),
+        }));
+      }
+    }
+  }, [pushUndo]);
 
   const selected = graph.nodes.find((n) => n.id === selectedId) ?? null;
+
+  // Lift selected node up to parent for external inspector sidebar
+  useEffect(() => {
+    if (onSelectedNodeChange) onSelectedNodeChange(selected);
+  }, [selected, onSelectedNodeChange]);
 
   return (
     <div className="wf-builder">
@@ -301,11 +397,13 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
       <div className="wf-canvas">
         <ReactFlow
           nodes={rfNodes}
-          edges={rfEdges}
+          edges={rfEdgesState}
           nodeTypes={nodeTypes}
           onConnect={onConnect}
           onNodesChange={onNodesChange as never}
-          onNodeClick={(_, n) => setSelectedId(n.id)}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={(_, n) => updateSelection(n.id)}
+          deleteKeyCode={['Delete', 'Backspace']}
           fitView
           proOptions={{ hideAttribution: true }}
         >
@@ -314,19 +412,22 @@ export function WorkflowBuilder({ yaml, onYamlChange }: WorkflowBuilderProps) {
         </ReactFlow>
       </div>
 
-      <aside className="wf-inspector">
-        <h4>属性</h4>
-        {!selected && <p className="muted">点选一个节点编辑参数 / 设为起点终点</p>}
-        {selected && (
-          <NodeInspector
-            node={selected}
-            isStart={graph.startId === selected.id}
-            isEnd={graph.endId === selected.id}
-            onChange={(patch) => updateNode(selected.id, patch)}
-            onSetEndpoint={(which) => setEndpoint(selected.id, which)}
-          />
-        )}
-      </aside>
+      {/* Inspector: hidden when externally controlled (OrchestrateView sidebar handles it) */}
+      {!onSelectedChange && (
+        <aside className="wf-inspector">
+          <h4>属性</h4>
+          {!selected && <p className="muted">点选一个节点编辑参数</p>}
+          {selected && (
+            <NodeInspector
+              node={selected}
+              isStart={graph.startId === selected.id}
+              isEnd={graph.endId === selected.id}
+              onChange={(patch) => updateNode(selected.id, patch)}
+              onSetEndpoint={(which) => setEndpoint(selected.id, which)}
+            />
+          )}
+        </aside>
+      )}
     </div>
   );
 }
@@ -345,6 +446,24 @@ function NodeInspector({
   onSetEndpoint: (which: 'start' | 'end') => void;
 }) {
   const meta = NODE_META[node.type];
+  // 从全局 store 获取 agent/model 选项（动态，同步全局配置）
+  const agents = useAgentStore((s) => s.agents);
+  const providersConfig = useProvidersStore((s) => s.config);
+  const agentOptions = useMemo(
+    () => agents.filter((a) => a.installed).map((a) => a.commandName),
+    [agents],
+  );
+  const modelOptions = useMemo(() => {
+    const models: string[] = [];
+    for (const p of providersConfig?.providers ?? []) {
+      if (!p.enabled) continue;
+      for (const m of p.models) {
+        if (m.enabled) models.push(m.id);
+      }
+    }
+    return models.length > 0 ? models : undefined;
+  }, [providersConfig]);
+
   return (
     <div className="wf-inspector-body">
       <div className="wf-inspector-row">
@@ -363,7 +482,14 @@ function NodeInspector({
         <TransformEditor op={node.op} onChange={(op) => onChange({ op })} />
       ) : (
         meta.fields.map((f) => (
-          <FieldEditor key={f.key} field={f} node={node} onChange={onChange} />
+          <FieldEditor
+            key={f.key}
+            field={f}
+            node={node}
+            onChange={onChange}
+            agentOptions={agentOptions}
+            modelOptions={modelOptions}
+          />
         ))
       )}
     </div>
@@ -374,13 +500,22 @@ function FieldEditor({
   field,
   node,
   onChange,
+  agentOptions,
+  modelOptions,
 }: {
   field: import('./workflowSchema').FieldDef;
   node: BuilderNode;
   onChange: (patch: Partial<BuilderNode>) => void;
+  agentOptions?: string[];
+  modelOptions?: string[];
 }) {
   const value = (node as unknown as Record<string, unknown>)[field.key] ?? '';
   const set = (v: unknown) => onChange({ [field.key]: v } as Partial<BuilderNode>);
+  // 动态选项：agent/model 字段从全局 store 获取已有配置
+  const selectOpts: string[] | undefined =
+    field.key === 'agent' ? agentOptions :
+    field.key === 'model' ? modelOptions :
+    field.options;
   return (
     <div className="wf-inspector-row">
       <label>
@@ -400,9 +535,10 @@ function FieldEditor({
           onChange={(e) => set(e.target.value === '' ? undefined : Number(e.target.value))}
         />
       )}
-      {field.input === 'select' && field.options && (
+      {field.input === 'select' && selectOpts && (
         <select value={String(value)} onChange={(e) => set(e.target.value)}>
-          {field.options.map((o) => (
+          <option value="">—</option>
+          {selectOpts.map((o) => (
             <option key={o} value={o}>
               {o}
             </option>

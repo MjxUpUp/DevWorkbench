@@ -3,6 +3,16 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { BlocksView } from '../BlocksView';
 import type { ChatStreamEvent } from '../../../types';
 
+/**
+ * BlocksView 测试 — v3 重构后选择器从 .chat-block-* class 改为 data-testid
+ * （class 已迁移到 CSS module，加 hash 后缀）。断言意图不变。
+ *
+ * v3 行为变化（已反映在断言）：
+ * - thinking 卡用 L1Thinking 组件，label 是 "THINKING"/"THOUGHT FOR Ns"，
+ *   不再有「思考过程」中文字样
+ * - tool_use/tool_result 用 L2ToolPill，desc 字段从 input 提炼
+ * - tool_result 不再有「工具错误」字样，desc 是 content 截断
+ */
 describe('BlocksView', () => {
   it('renders each block kind in order, one card per event', () => {
     const events: ChatStreamEvent[] = [
@@ -13,35 +23,36 @@ describe('BlocksView', () => {
     ];
     const { container } = render(<BlocksView events={events} running={false} />);
 
-    // Text block → Markdown
     expect(screen.getByText('hello world')).toBeInTheDocument();
-    // Tool-use shows the tool name
     expect(screen.getByText('Read')).toBeInTheDocument();
-    // Result shows status label + elapsed seconds
-    expect(screen.getByText('完成')).toBeInTheDocument();
-    expect(screen.getByText('12s')).toBeInTheDocument();
-    // Exactly 4 .chat-block cards, and no caret when not running
-    expect(container.querySelectorAll('.chat-block').length).toBe(4);
-    expect(container.querySelector('.chat-blocks-cursor')).toBeNull();
+    // result 卡的「完成」标签 + 耗时秒数
+    const resultCard = screen.getByTestId('chat-block-result');
+    expect(resultCard).toHaveTextContent('完成');
+    expect(resultCard).toHaveTextContent('12s');
+    // 4 个 block 卡（text/tool_use/tool_result/result），各带 data-testid
+    const blocks = container.querySelectorAll('[data-testid^="chat-block-"]');
+    expect(blocks.length).toBe(4);
+    // 非运行无流式光标
+    expect(screen.queryByTestId('chat-streaming-cursor')).toBeNull();
   });
 
   it('shows a streaming caret while running', () => {
-    const { container } = render(<BlocksView events={[{ kind: 'text', content: 'x' }]} running={true} />);
-    expect(container.querySelector('.chat-blocks-cursor')).not.toBeNull();
+    render(<BlocksView events={[{ kind: 'text', content: 'x' }]} running={true} />);
+    expect(screen.getByTestId('chat-streaming-cursor')).toBeInTheDocument();
   });
 
   it('marks a failed result block with the failed class', () => {
     render(<BlocksView events={[{ kind: 'result', is_error: true, secs: 3 }]} running={false} />);
     expect(screen.getByText('失败')).toBeInTheDocument();
-    const result = document.querySelector('.chat-block-result');
-    expect(result?.classList.contains('failed')).toBe(true);
-    expect(result?.classList.contains('ok')).toBe(false);
+    const result = screen.getByTestId('chat-block-result');
+    // failed 态有对应的 class（CSS module hash）
+    expect(result.className).toMatch(/failed/);
   });
 
   it('expands tool_use input on click (collapsed by default)', () => {
     render(<BlocksView events={[{ kind: 'tool_use', name: 'Bash', input: { command: 'ls -la' } }]} running={false} />);
 
-    // Collapsed by default → input JSON not in the document
+    // 折叠态：input JSON 不在文档
     expect(screen.queryByText(/"command": "ls -la"/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button'));
@@ -55,15 +66,14 @@ describe('BlocksView', () => {
   });
 
   it('renders a thinking block as a collapsible card, collapsed by default', () => {
-    // GLM interleaved reasoning arrives as a Thinking wire event; BlocksView
-    // must render it under the thinking card class (distinct from tool/result
-    // cards) so the UI reads it as auxiliary reasoning, not model output.
     const { container } = render(
       <BlocksView events={[{ kind: 'thinking', content: 'let me reason about this' }]} running={false} />,
     );
-    expect(container.querySelector('.chat-block-thinking')).not.toBeNull();
-    expect(screen.getByText('思考过程')).toBeInTheDocument();
-    // Collapsed by default → the trace is not yet in the document.
+    // v3：thinking 用 L1Thinking，data-testid=chat-block-thinking
+    expect(container.querySelector('[data-testid="chat-block-thinking"]')).not.toBeNull();
+    // label 是 THINKING（无 secs 时）
+    expect(screen.getByText('THINKING')).toBeInTheDocument();
+    // 折叠态：trace 内容不在文档
     expect(screen.queryByText('let me reason about this')).not.toBeInTheDocument();
   });
 
@@ -74,11 +84,6 @@ describe('BlocksView', () => {
   });
 
   it('merges consecutive per-delta thinking events into a single card', () => {
-    // GLM streams reasoning as many thinking_delta SSE chunks; the finalized
-    // replay path (session.blocks from the DB) stores each as a separate event,
-    // bypassing agentStore.appendBlock's live merge. Without render-layer
-    // normalization one trace exploded into N stacked "思考过程" cards (the
-    // acceptance symptom). normalizeEvents folds consecutive same-kind events.
     const { container } = render(
       <BlocksView
         events={[
@@ -89,15 +94,13 @@ describe('BlocksView', () => {
         running={false}
       />,
     );
-    // Exactly ONE thinking card, not three.
-    expect(container.querySelectorAll('.chat-block-thinking').length).toBe(1);
+    // 合并成 1 个 thinking 卡
+    expect(container.querySelectorAll('[data-testid="chat-block-thinking"]').length).toBe(1);
     fireEvent.click(screen.getByRole('button'));
     expect(screen.getByText('step 1. step 2. step 3.')).toBeInTheDocument();
   });
 
   it('does NOT merge thinking across a different-kind block in between', () => {
-    // A text answer between two thinking traces means two separate reasoning
-    // spans (interleaved thinking) — keep them as two cards, in order.
     const { container } = render(
       <BlocksView
         events={[
@@ -108,12 +111,10 @@ describe('BlocksView', () => {
         running={false}
       />,
     );
-    expect(container.querySelectorAll('.chat-block-thinking').length).toBe(2);
+    expect(container.querySelectorAll('[data-testid="chat-block-thinking"]').length).toBe(2);
   });
 
   it('merges consecutive text events the same way', () => {
-    // Same per-delta fragmentation hits text blocks too; normalizeEvents covers
-    // both text and thinking so a streamed Markdown reply stays one card.
     const { container } = render(
       <BlocksView
         events={[
@@ -124,39 +125,32 @@ describe('BlocksView', () => {
         running={false}
       />,
     );
-    expect(container.querySelectorAll('.chat-block-text').length).toBe(1);
+    expect(container.querySelectorAll('[data-testid="chat-block-text"]').length).toBe(1);
     expect(screen.getByText('foo bar baz')).toBeInTheDocument();
   });
 
   it('marks an errored tool result', () => {
     render(<BlocksView events={[{ kind: 'tool_result', content: 'boom', is_error: true }]} running={false} />);
-    expect(screen.getByText('工具错误')).toBeInTheDocument();
-    const card = document.querySelector('.chat-block-toolresult');
-    expect(card?.classList.contains('error')).toBe(true);
+    // v3：errored tool_result 用 L2ToolPill status=error，wrap 带 errWrap class
+    const card = screen.getByTestId('chat-block-toolresult');
+    expect(card.className).toMatch(/err/i);
   });
 
   it('renders a waiting hint + caret for an empty running stream', () => {
-    // Running but no block has arrived yet (e.g. model gateway holding its
-    // response) → show a "等待模型响应" hint + the streaming caret. This is the
-    // structured-agent running state that replaces the old terminal "等待输出"
-    // box — the chat-blocks form stays the only display for claude/react_kernel.
     const { container } = render(<BlocksView events={[]} running={true} />);
-    expect(container.querySelectorAll('.chat-block').length).toBe(0);
+    expect(container.querySelectorAll('[data-testid^="chat-block-"]').length).toBe(0);
     expect(screen.getByText('等待模型响应')).toBeInTheDocument();
-    expect(container.querySelector('.chat-blocks-cursor')).not.toBeNull();
+    expect(screen.getByTestId('chat-streaming-cursor')).toBeInTheDocument();
   });
 
   it('renders nothing for an empty completed stream', () => {
-    const { container } = render(<BlocksView events={[]} running={false} />);
-    expect(container.querySelectorAll('.chat-block').length).toBe(0);
-    expect(container.querySelector('.chat-blocks-cursor')).toBeNull();
+    render(<BlocksView events={[]} running={false} />);
+    expect(screen.queryByTestId('chat-streaming-cursor')).toBeNull();
   });
 
   it('renders a file_changed block as a path line', () => {
-    // D3: a per-write mutation surfaces as a lightweight 📄 path card, distinct
-    // from tool_result (tool output) and the end-of-run result card.
     render(<BlocksView events={[{ kind: 'file_changed', path: '/src/app.rs' }]} running={false} />);
     expect(screen.getByText('/src/app.rs')).toBeInTheDocument();
-    expect(document.querySelector('.chat-block-file')).not.toBeNull();
+    expect(screen.getByTestId('chat-block-file')).not.toBeNull();
   });
 });

@@ -21,7 +21,8 @@
   min-width: 0;
 }
 
-/* Brand mark — always-visible app icon, doubles as the left-column toggle (zcode/VSCode) */
+/* Brand mark — always-visible app icon, doubles as the left-column toggle.
+ * pi.dev 签名：衡线斜体品牌标（非粗体 sans）。 */
 .title-bar-brand {
   display: flex;
   align-items: center;
@@ -34,8 +35,10 @@
   background: var(--accent);
   color: var(--text-on-accent);
   border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: 700;
+  font-family: var(--font-serif);
+  font-size: 13px;
+  font-weight: 600;
+  font-style: italic;
   letter-spacing: -0.5px;
   cursor: pointer;
   transition: opacity var(--duration-fast) ease;
@@ -67,10 +70,11 @@
   max-width: 200px;
 }
 
-/* First crumb (project name) reads as the primary context */
+/* First crumb (project name) reads as the primary context — 衡线体强调 */
 .title-bar-breadcrumb .title-bar-crumb:first-child {
   color: var(--text-primary);
   font-weight: 500;
+  font-family: var(--font-serif);
 }
 
 .title-bar-crumb-sep {

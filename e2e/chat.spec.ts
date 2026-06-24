@@ -18,22 +18,22 @@ test('BlocksView renders real GLM wire across all block types', async ({ page })
 
   // text block — GLM's final answer (Markdown-rendered). The recorded run
   // replied: The package name is "dev-workbench".
-  await expect(page.locator('.chat-block-text')).toContainText('dev-workbench');
+  await expect(page.getByTestId('chat-block-text')).toContainText('dev-workbench');
 
   // tool_use head — the read_file call GLM made against Cargo.toml.
-  await expect(page.locator('.chat-block-tool-name')).toHaveText('read_file');
+  await expect(page.getByTestId('chat-block-tool-name')).toHaveText('read_file');
 
   // thinking / tool_result / result heads all render — the real block types the
   // live trace produced, not a curated subset. GLM interleaves thinking around
   // the tool call (a trace before AND after read_file), so normalize yields
   // multiple thinking blocks — assert at least one, not a fixed count (the live
   // trace shape varies per run).
-  await expect(page.locator('.chat-block-thinking').first()).toContainText('思考过程');
-  await expect(page.locator('.chat-block-toolresult')).toContainText('工具结果');
-  await expect(page.locator('.chat-block-result')).toContainText('完成');
+  await expect(page.getByTestId('chat-block-thinking').first()).toContainText('思考过程');
+  await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
+  await expect(page.getByTestId('chat-block-result')).toContainText('完成');
 
   // Expand the tool_result card — the REAL Cargo.toml bytes GLM received must
   // render into the DOM, proving genuine tool output flows through the wire.
-  await page.locator('.chat-block-toolresult-head').click();
-  await expect(page.locator('.chat-block-toolresult-content')).toContainText('name = "dev-workbench"');
+  await page.getByTestId('chat-block-toolresult-head').click();
+  await expect(page.getByTestId('chat-block-toolresult-content')).toContainText('name = "dev-workbench"');
 });

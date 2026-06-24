@@ -12,13 +12,12 @@ import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
-import { MissionSection } from './MissionSection';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconInbox,
   IconUser, IconPlay, IconEdit, IconStar,
-  IconDashboard, IconCode, IconChat, IconX, IconOrchestrate,
+  IconDashboard, IconCode, IconChat, IconX,
 } from '../Icons';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -35,7 +34,7 @@ type SettingsIcon = React.FC<{ size?: number; className?: string }>;
 export type SettingsSection =
   | 'agent-tools' | 'providers' | 'capability'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
-  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding' | 'mission';
+  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';
 
 interface SectionDef {
   id: SettingsSection;
@@ -43,24 +42,32 @@ interface SectionDef {
   Icon: SettingsIcon;
   Component?: React.FC;
   placeholder?: { title: string; desc: string; hint?: string };
+  /** 语义分组（v3：14 tab 按业务聚类，不再平铺）。 */
+  group: '智能体' | '能力扩展' | '记忆与输出' | '数据与诊断' | '入门';
 }
 
 const SECTIONS: SectionDef[] = [
-  { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection },
-  { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection },
-  { id: 'capability', label: '能力总览', Icon: IconInbox, Component: CapabilitySection },
-  { id: 'skills', label: '技能', Icon: IconSparkles, Component: SkillsSection },
-  { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection },
-  { id: 'sub-agents', label: '子智能体', Icon: IconUser, Component: SubAgentsSection },
-  { id: 'commands', label: '命令', Icon: IconPlay, Component: CommandsSection },
-  { id: 'hooks', label: '钩子', Icon: IconEdit, Component: HooksSection },
-  { id: 'memory', label: '记忆', Icon: IconStar, Component: MemorySection },
-  { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection },
-  { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection },
-  { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection },
-  { id: 'mission', label: '任务编排', Icon: IconOrchestrate, Component: MissionSection },
-  { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' } },
+  // 智能体
+  { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection, group: '智能体' },
+  { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection, group: '智能体' },
+  { id: 'capability', label: '能力总览', Icon: IconInbox, Component: CapabilitySection, group: '智能体' },
+  { id: 'sub-agents', label: '子智能体', Icon: IconUser, Component: SubAgentsSection, group: '智能体' },
+  // 能力扩展
+  { id: 'skills', label: '技能', Icon: IconSparkles, Component: SkillsSection, group: '能力扩展' },
+  { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection, group: '能力扩展' },
+  { id: 'commands', label: '命令', Icon: IconPlay, Component: CommandsSection, group: '能力扩展' },
+  { id: 'hooks', label: '钩子', Icon: IconEdit, Component: HooksSection, group: '能力扩展' },
+  // 记忆与输出
+  { id: 'memory', label: '记忆', Icon: IconStar, Component: MemorySection, group: '记忆与输出' },
+  { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection, group: '记忆与输出' },
+  // 数据与诊断
+  { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection, group: '数据与诊断' },
+  { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection, group: '数据与诊断' },
+  // 入门
+  { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' }, group: '入门' },
 ];
+
+const GROUP_ORDER: SectionDef['group'][] = ['智能体', '能力扩展', '记忆与输出', '数据与诊断', '入门'];
 
 export function SettingsView() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('agent-tools');
@@ -97,16 +104,25 @@ export function SettingsView() {
             <IconX size={16} />
           </button>
         </div>
-        {SECTIONS.map((section) => (
-          <button
-            key={section.id}
-            className={`settings-nav-item ${activeSection === section.id ? 'active' : ''}`}
-            onClick={() => setActiveSection(section.id)}
-          >
-            <span className="settings-nav-icon"><section.Icon size={16} /></span>
-            {section.label}
-          </button>
-        ))}
+        {GROUP_ORDER.map((groupName) => {
+          const groupSections = SECTIONS.filter((s) => s.group === groupName);
+          if (groupSections.length === 0) return null;
+          return (
+            <div key={groupName} className="settings-nav-group">
+              <div className="settings-nav-group-label">{groupName}</div>
+              {groupSections.map((section) => (
+                <button
+                  key={section.id}
+                  className={`settings-nav-item ${activeSection === section.id ? 'active' : ''}`}
+                  onClick={() => setActiveSection(section.id)}
+                >
+                  <span className="settings-nav-icon"><section.Icon size={16} /></span>
+                  {section.label}
+                </button>
+              ))}
+            </div>
+          );
+        })}
       </div>
       <div className="settings-view-content">
         {/* Use key to preserve local state within each section when switching */}

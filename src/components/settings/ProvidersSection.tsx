@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useProvidersStore } from '../../stores/providersStore';
 import { useToast } from '../Toast';
+import { Button } from '../ui/Button/Button';
 import type { ProviderConfig, ProvidersConfig, ModelEntry } from '../../types';
 
 /**
@@ -297,13 +298,13 @@ export function ProvidersSection() {
           per-card save only touches that card). */}
       <div className="provider-save-bar">
         {dirty && <span className="provider-dirty-badge">有未保存的更改</span>}
-        <button
-          className="provider-btn primary"
+        <Button
+          variant="primary"
           onClick={handleSave}
           disabled={saving || !dirty}
         >
           {saving ? '保存中...' : dirty ? '保存全部更改' : '已保存'}
-        </button>
+        </Button>
       </div>
 
       <div className="provider-list">
@@ -327,9 +328,9 @@ export function ProvidersSection() {
         ))}
       </div>
 
-      <button className="provider-add-btn" onClick={addProvider}>
+      <Button variant="dashed" onClick={addProvider}>
         + 添加供应商
-      </button>
+      </Button>
     </div>
   );
 }
@@ -532,9 +533,9 @@ function ProviderCard({
                 </div>
               ))}
             </div>
-            <button className="provider-add-model-btn" onClick={onAddModel}>
+            <Button variant="dashed" size="sm" onClick={onAddModel}>
               + 添加模型
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -555,13 +556,13 @@ function ProviderCard({
             </option>
           ))}
         </select>
-        <button
-          className="provider-btn secondary"
+        <Button
+          variant="secondary"
           onClick={() => onTest(testModel)}
           disabled={testing || !testModel}
         >
           {testing ? `测试中 (${testModel})` : '测试连接'}
-        </button>
+        </Button>
         {testing && (
           <span className="provider-test-context">
             正在测试 {testModel} @ {p.endpoint || '(未填)'}

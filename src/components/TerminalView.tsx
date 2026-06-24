@@ -15,23 +15,22 @@ interface TerminalViewProps {
 }
 
 // xterm.js renders via canvas, so CSS variables don't apply — the theme is
-// read from hex literals. These mirror the app's surface/text ladder in
-// variables.css (dark: surface-0 / text-primary; light: surface-2 /
-// text-primary) so the terminal reads as part of the app chrome, not a
-// foreign panel. resolvedTheme() follows the user's choice (incl. auto),
-// not just the OS preference.
+// read from hex literals. These mirror pi.dev palette:
+// dark: surface-sunken (#0d1116) + text-primary (月光石 #ebe7e4)
+// light: bg-canvas (月光石 #ebe7e4) + text-primary (暮蓝 #252f3d)
+// resolvedTheme() follows the user's choice (incl. auto), not just OS.
 const TERMINAL_THEMES: Record<ResolvedTheme, { background: string; foreground: string; cursor: string; selectionBackground: string }> = {
   dark: {
-    background: '#14141C',
-    foreground: '#ECECF4',
-    cursor: '#ECECF4',
-    selectionBackground: 'rgba(255,255,255,0.12)',
+    background: '#0d1116',   // var(--surface-sunken) 暮蓝深底
+    foreground: '#ebe7e4',   // var(--text-primary) 月光石
+    cursor: '#ebe7e4',
+    selectionBackground: 'rgba(106,159,204,0.20)',  // accent 钢青
   },
   light: {
-    background: '#F3F4F6',
-    foreground: '#111827',
-    cursor: '#111827',
-    selectionBackground: 'rgba(0,0,0,0.1)',
+    background: '#ebe7e4',   // var(--bg-canvas) 月光石暖纸
+    foreground: '#252f3d',   // var(--text-primary) 暮蓝
+    cursor: '#252f3d',
+    selectionBackground: 'rgba(75,96,124,0.15)',  // accent 潮汐蓝
   },
 };
 

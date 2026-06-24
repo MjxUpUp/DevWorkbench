@@ -14,6 +14,9 @@ export type Theme = 'light' | 'dark' | 'auto';
 /** The theme actually rendered right now (resolved from auto if needed). */
 export type ResolvedTheme = 'light' | 'dark';
 
+/** 调色板风格（与亮/暗正交）：pi / ink / moss。 */
+export type Palette = 'pi' | 'ink' | 'moss';
+
 let mediaListener: ((e: MediaQueryListEvent) => void) | null = null;
 let trackedMedia: MediaQueryList | null = null;
 
@@ -56,6 +59,22 @@ export function applyTheme(theme: Theme): ResolvedTheme {
 /** Read the persisted theme string back into the safe union. */
 export function normalizeTheme(value: unknown): Theme {
   return value === 'dark' || value === 'auto' ? value : 'light';
+}
+
+/** Read the persisted palette string back into the safe union。 */
+export function normalizePalette(value: unknown): Palette {
+  return value === 'ink' || value === 'moss' ? value : 'pi';
+}
+
+/** Apply a palette——写 data-palette 属性，CSS 据此切换 token 值。 */
+export function applyPalette(palette: Palette): void {
+  document.documentElement.setAttribute('data-palette', palette);
+}
+
+/** 读取当前生效的 palette。 */
+export function resolvedPalette(): Palette {
+  const v = document.documentElement.getAttribute('data-palette');
+  return v === 'ink' || v === 'moss' ? v : 'pi';
 }
 
 /** What is being shown right now, regardless of the chosen mode. */

@@ -57,11 +57,17 @@ export function MissionSection() {
 
   return (
     <div className="mission-section">
-      <h2 className="section-title">任务编排（Mission · Plan-Apply 二阶段）</h2>
+      <h2 className="section-title">任务验收（Mission · Plan-Apply 二阶段）</h2>
       <p className="section-desc">
         Phase 1：智能体在 plan 模式编写 <code>prd.json</code>；Phase 2：apply 后 controller-only
         执行，逐 story 验收。对齐 QwenPaw Mission Mode + Forge 三门禁。
       </p>
+
+      <div className="mission-note">
+        <strong>⚡ 与主界面「编排」的区别</strong><br />
+        此页面用于线性任务的生命周期管理（init → PRD → apply → 验收），适合顺序执行的开发任务。<br />
+        如需可视化 DAG 工作流编排（多节点并行、条件分支、审批门），请用主界面左侧导航的「编排」视图。
+      </div>
 
       <div className="mission-input-row">
         <input

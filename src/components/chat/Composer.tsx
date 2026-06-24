@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { IconPlay, IconStop } from '../Icons';
 import { TriggerMenu } from '../TriggerMenu';
+import { Button } from '../ui/Button/Button';
 import type { AgentMode } from '../ModeSelector';
 
 interface AttachedFile {
@@ -22,6 +23,12 @@ interface ComposerProps {
   agentMode?: AgentMode;
   onModeChange?: (mode: AgentMode) => void;
   placeholder?: string;
+  /** Steering 模式（Cursor 3.0 / Codex app 范式）：
+   * 运行中时允许输入插话/排队消息。true 时显示双行提示 + 不禁用 textarea。
+   * Enter=插话（当前工具后送达）/ Shift+Enter=排队（完成后送达）。 */
+  steering?: boolean;
+  /** 发送 steering 消息（插话）。只 steering=true 时可用。 */
+  onSteer?: () => void;
 }
 
 export function Composer({
@@ -34,10 +41,13 @@ export function Composer({
   attachedFiles,
   onAttachFile,
   onRemoveFile,
-  agentMode,
-  onModeChange,
+  agentMode: _agentMode,
+  onModeChange: _onModeChange,
   placeholder,
+  steering = false,
+  onSteer,
 }: ComposerProps) {
+  void _agentMode; void _onModeChange;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [triggerMenu, setTriggerMenu] = useState<{ type: '@' | '/' | '$'; position: { top: number; left: number } } | null>(null);
 
@@ -49,7 +59,19 @@ export function Composer({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Ctrl+Enter to send
+    // Steering 模式：运行中时 Enter 插话（不走默认 Ctrl+Enter 发送）
+    if (steering && isRunning && e.key === 'Enter' && !e.shiftKey && prompt.trim() && onSteer) {
+      e.preventDefault();
+      onSteer();
+      return;
+    }
+    // 普通 Enter 发送（非 steering + 非运行 + Shift+Enter 换行）
+    if (e.key === 'Enter' && !e.shiftKey && canSend && !isRunning) {
+      e.preventDefault();
+      onSend();
+      return;
+    }
+    // Ctrl+Enter 发送（兼容旧习惯，同时用于 steering 已占用 Enter 的场景）
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSend) {
       e.preventDefault();
       onSend();
@@ -100,23 +122,23 @@ export function Composer({
     setTriggerMenu((prev) => (prev?.type === type ? null : { type, position: { top: 0, left: 0 } }));
   };
 
-  // "计划模式" toggle — flips between the user's current mode and plan mode.
-  // When on, it shows as active regardless of which non-plan mode was set; the
-  // underlying value switches between 'plan' and 'default'.
-  const planActive = agentMode === 'plan';
-  const togglePlan = () => {
-    if (!onModeChange) return;
-    onModeChange(planActive ? 'default' : 'plan');
-  };
-
   return (
     <div className="chat-composer">
+      {/* Steering 提示条（运行中 + steering 开启时显示）*/}
+      {isRunning && steering && (
+        <div className="composer-steering-hint" role="status">
+          <span className="composer-steering-icon" aria-hidden="true">⚠</span>
+          <span className="composer-steering-label">STEERING MODE · agent 运行中</span>
+          <span className="composer-steering-desc">⏎ Enter = 插话（当前工具后送达）· ⇧⏎ Shift+Enter = 排队（完成后送达）</span>
+        </div>
+      )}
+
       {attachedFiles.length > 0 && (
         <div className="file-chips">
           {attachedFiles.map((file) => (
             <span key={file.path} className="file-chip">
               @{file.name}
-              <button className="file-chip-remove" onClick={() => onRemoveFile(file.path)}>×</button>
+              <Button variant="dangerGhost" size="sm" onClick={() => onRemoveFile(file.path)} aria-label="移除文件">×</Button>
             </span>
           ))}
         </div>
@@ -162,32 +184,22 @@ export function Composer({
         <textarea
           ref={textareaRef}
           className="chat-composer-input"
-          placeholder={placeholder ?? '提出后续修改要求...'}
+          data-testid="chat-composer-input"
+          placeholder={isRunning && steering ? '插话/排队消息（Enter 插话 · Shift+Enter 排队）...' : (placeholder ?? '提出后续修改要求...')}
           value={prompt}
           onChange={handlePromptChange}
           onKeyDown={handleKeyDown}
-          disabled={isRunning}
+          disabled={isRunning && !steering}
           maxLength={10000}
           rows={1}
         />
       </div>
 
-      {/* Bottom action bar: 计划模式 · 模型选择 · 发送 (aligns to target mockup) */}
+      {/* Bottom action bar: 发送 (plan mode 统一走 ChatHeader 的 ModeSelector) */}
       <div className="composer-actions">
-        <div className="composer-actions-left">
-          {onModeChange && (
-            <button
-              type="button"
-              className={`composer-action-btn ${planActive ? 'active' : ''}`}
-              onClick={togglePlan}
-              title="计划模式 — 先输出计划，确认后执行"
-            >
-              计划模式
-            </button>
-          )}
-        </div>
+        <div className="composer-actions-left"></div>
         {isRunning ? (
-          <button className="composer-send-btn stop" onClick={onStop} title="停止">
+          <button className="composer-send-btn stop" onClick={onStop} title="停止" data-testid="composer-send-btn">
             <IconStop size={16} />
           </button>
         ) : (
@@ -196,6 +208,7 @@ export function Composer({
             onClick={onSend}
             disabled={!canSend}
             title="发送 (Ctrl+Enter)"
+            data-testid="composer-send-btn"
           >
             <IconPlay size={16} />
           </button>

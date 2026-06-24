@@ -170,7 +170,7 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
   }, [session.contextSnapshot]);
 
   return (
-    <div className="agent-message">
+    <div className="agent-message" data-testid="agent-message">
       <div className="agent-message-header">
         <span className={`agent-status-dot ${statusDot}`} />
         <span className="agent-name">{session.agentType}</span>

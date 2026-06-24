@@ -35,6 +35,19 @@ export function Sidebar() {
   const setActiveView = useNavigationStore((s) => s.setActiveView);
   const setCommandPaletteOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
 
+  const handleNavClick = (view: { id: ViewId; label: string }) => {
+    if (view.id === 'search') {
+      setCommandPaletteOpen(true);
+      return;
+    }
+    // "创建任务"：如果已在 task 视图且有选中对话，清空对话以展示空态
+    if (view.id === 'task' && activeView === 'task' && selectedConversationId) {
+      selectConversation(null);
+      return;
+    }
+    setActiveView(view.id);
+  };
+
   const handleSelectProject = (project: Project) => {
     if (activeProject?.id === project.id) return;
     selectProject(project);
@@ -58,10 +71,7 @@ export function Sidebar() {
             className={`left-column-nav-item ${activeView === view.id ? 'active' : ''}`}
             // "搜索" opens the command palette as a transparent centered modal
             // that queries conversation history, instead of switching views.
-            onClick={() => {
-              if (view.id === 'search') setCommandPaletteOpen(true);
-              else setActiveView(view.id);
-            }}
+            onClick={() => handleNavClick(view)}
             title={view.label}
             aria-selected={activeView === view.id}
           >
@@ -94,7 +104,7 @@ export function Sidebar() {
                 }
               }}
             >
-              <span className="left-column-project-name">{project.name}</span>
+              <span className="left-column-project-name" data-testid="left-column-project">{project.name}</span>
               <button
                 className="left-column-project-remove"
                 onClick={(e) => { e.stopPropagation(); handleRemoveProject(project); }}

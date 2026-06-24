@@ -305,6 +305,9 @@ async fn drive_prompt_turn(
         PermissionMode::Default,
         None,
         None,
+        None, // skill_filter
+        None, // mcp_filter
+        None, // knowledge_ids
     ) {
         Ok(a) => a,
         Err(e) => {

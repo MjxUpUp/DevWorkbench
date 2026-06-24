@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { evalApi, type TrendPoint, type EvalRunRow, type Grade, type Matcher } from '../../utils/evalApi';
 import { useAgentStore } from '../../stores/agentStore';
+import { Button } from '../ui/Button/Button';
 
 /**
  * B7 trajectory-eval panel — the user-visible half of the eval pipeline. Shows
@@ -200,14 +201,13 @@ export function EvalPanel() {
             className="eval-trigger-textarea"
           />
         </label>
-        <button
-          type="button"
+        <Button
+          variant="primary"
           onClick={onRun}
           disabled={running || !selectedSessionId}
-          className="btn btn-primary"
         >
           {running ? '评估中…' : '运行评估'}
-        </button>
+        </Button>
         {runError && <p className="eval-panel-empty">评估失败：{runError}</p>}
         {lastRun && !runError && (
           <p className="eval-run-last">

@@ -1,4 +1,5 @@
 import type { McpServerConfig, AgentType } from '../types';
+import { Button } from './ui/Button/Button';
 
 const ALL_AGENTS: { value: AgentType; label: string }[] = [
   { value: 'claude_code', label: 'Claude Code' },
@@ -40,10 +41,10 @@ export function McpServerList({ servers, editIdx, onToggle, onRemove, onEdit, on
               <span className="config-server-name">{server.name}</span>
               <span className="config-server-command">{server.command} {server.args.join(' ')}</span>
             </div>
-            <button className="config-server-edit" onClick={() => onEdit(idx)}>
+            <Button variant="ghost" size="sm" onClick={() => onEdit(idx)}>
               {editIdx === idx ? '收起' : '目标'}
-            </button>
-            <button className="config-server-remove" onClick={() => onRemove(idx)}>×</button>
+            </Button>
+            <Button variant="dangerGhost" size="sm" onClick={() => onRemove(idx)} aria-label="移除">×</Button>
           </div>
           {editIdx === idx && (
             <div className="config-server-targets">

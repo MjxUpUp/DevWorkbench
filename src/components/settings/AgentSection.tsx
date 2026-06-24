@@ -15,17 +15,20 @@ export function AgentSection() {
 
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [tools, setTools] = useState<ToolStatus[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    invoke<ToolStatus[]>('detect_tools')
-      .then(t => setTools(Array.isArray(t) ? t : []))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    invoke<TerminalInfo[]>('detect_terminals')
-      .then(t => setTerminals(Array.isArray(t) ? t : []))
-      .catch(() => {});
+    let cancelled = false;
+    Promise.all([
+      invoke<ToolStatus[]>('detect_tools').catch(() => [] as ToolStatus[]),
+      invoke<TerminalInfo[]>('detect_terminals').catch(() => [] as TerminalInfo[]),
+    ]).then(([t, tm]) => {
+      if (cancelled) return;
+      setTools(Array.isArray(t) ? t : []);
+      setTerminals(Array.isArray(tm) ? tm : []);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   // Debounce saves so a typing burst is one IPC write, not one per keystroke —
@@ -79,6 +82,7 @@ export function AgentSection() {
   return (
     <>
       {error && <div className="error-banner" style={{ margin: 0, marginBottom: 16 }}>{error}</div>}
+      {loading && <div className="config-center-loading" style={{ padding: 40, textAlign: 'center' }}>检测工具与终端中...</div>}
 
       {/* Tool status — zcode card list */}
       <div className="settings-section">

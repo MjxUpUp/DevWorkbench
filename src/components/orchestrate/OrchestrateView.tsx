@@ -2,20 +2,18 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { Button } from '../ui/Button/Button';
 import {
   parseNodeIds,
   useOrchestrateStore,
   type NodeState,
 } from '../../stores/orchestrateStore';
-import { BlocksView } from '../chat/BlocksView';
+// BlocksView used in event log for running node streams (added back when needed)
+// import { BlocksView } from '../chat/BlocksView';
 import { WorkflowBuilder } from './WorkflowBuilder';
+import type { BuilderNode } from './workflowSchema';
 import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
 
-/** Color per node status — drives the canvas node fill. Maps to the
- *  status/gate tokens in variables.css (status-* carry dark-mode
- *  de-saturation overrides; gate-skip covers the idle/skipped grey).
- *  The old --color-node-* names never existed, so this was silently
- *  rendering from the hex fallbacks and ignoring the theme. */
 const STATUS_COLOR: Record<NodeState['status'], string> = {
   pending: 'var(--gate-skip)',
   running: 'var(--status-running)',
@@ -33,6 +31,8 @@ const STATUS_LABEL: Record<NodeState['status'], string> = {
   skipped: '已跳过',
   waiting_approval: '等待审批',
 };
+
+type SidebarTab = 'inspector' | 'palette' | 'history';
 
 export function OrchestrateView() {
   const activeProject = useNavigationStore((s) => s.activeProject);
@@ -52,20 +52,18 @@ export function OrchestrateView() {
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [editorMode, setEditorMode] = useState<'visual' | 'yaml'>('visual');
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('inspector');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [logCollapsed, setLogCollapsed] = useState(false);
+  const [wfSelectedId, setWfSelectedId] = useState<string | null>(null);
+  const [wfSelectedNode, setWfSelectedNode] = useState<BuilderNode | null>(null);
 
-  // Built-in workflow templates (D5): one-click starters that fill the YAML
-  // editor so the user doesn't face a blank DAG. Empty list (backend missing or
-  // rejects) is fine — the editor still works, just without the quick-start
-  // chips. Clicking a chip overwrites the editor with that template's YAML.
   useEffect(() => {
     invoke<WorkflowTemplate[]>('list_workflow_templates')
       .then(setTemplates)
       .catch(() => setTemplates([]));
   }, []);
 
-  // Subscribe to workflow:progress once. Guard against the unmount-before-
-  // resolve race: if the component unmounts while the async listen() is still
-  // pending, the cleanup runs with unlisten still null and the listener leaks.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -74,24 +72,14 @@ export function OrchestrateView() {
         const { event } = e.payload;
         applyEvent(event);
         setEventLog((prev) => [...prev.slice(-50), formatEvent(event)]);
-        // A terminal event means the run is truly over — clear the spinner.
-        // run_workflow resolves immediately with a run_id (before the graph
-        // finishes streaming), so without this the button reverts to idle while
-        // the workflow is still executing.
         if (event.kind === 'graph_done' || event.kind === 'graph_failed') {
           setRunning(false);
         }
       });
-      if (cancelled) {
-        fn(); // already unmounted — clean up immediately
-      } else {
-        unlisten = fn;
-      }
+      if (cancelled) fn();
+      else unlisten = fn;
     })();
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
+    return () => { cancelled = true; if (unlisten) unlisten(); };
   }, [applyEvent]);
 
   const nodeIds = parseNodeIds(yaml);
@@ -110,74 +98,84 @@ export function OrchestrateView() {
       startRun(result.run_id);
     } catch (e) {
       setEventLog((prev) => [...prev, `[error] ${String(e)}`]);
-      setRunning(false); // start failed before any run_id — clear the spinner
+      setRunning(false);
     }
-    // NOTE: no finally here — the run continues after run_workflow resolves;
-    // running is cleared on the terminal graph_done/graph_failed event instead.
   };
 
   return (
     <div className="orchestrate-view">
+      {/* Header */}
       <header className="orchestrate-header">
-        <h2>DAG 编排</h2>
-        <div className="orchestrate-actions">
-          <span className="orchestrate-project">
-            {activeProject ? activeProject.name : '未选项目'}
-          </span>
+        <h2>编排 · Workflow</h2>
+        <div className="mode-tabs">
           <button
-            className="btn btn-primary"
-            onClick={handleRun}
-            disabled={running || !activeProject}
-            title={!activeProject ? '请先选择项目' : ''}
-          >
-            {running ? '运行中…' : '运行 Workflow'}
-          </button>
-          <button className="btn" onClick={reset} disabled={running}>
-            重置
-          </button>
+            type="button"
+            className={`orch-mode-btn ${editorMode === 'visual' ? 'active' : ''}`}
+            onClick={() => setEditorMode('visual')}
+          >可视化</button>
+          <button
+            type="button"
+            className={`orch-mode-btn ${editorMode === 'yaml' ? 'active' : ''}`}
+            onClick={() => setEditorMode('yaml')}
+          >YAML</button>
+        </div>
+        <span className="orchestrate-project">
+          {activeProject ? activeProject.name : '未选项目'}
+        </span>
+        <div className="orchestrate-actions">
+          <Button variant="primary" onClick={handleRun} disabled={running || !activeProject}>
+            {running ? '运行中…' : '▶ 运行'}
+          </Button>
+          <Button variant="secondary" onClick={reset} disabled={running}>重置</Button>
         </div>
       </header>
 
-      <div className="orchestrate-body">
-        {/* YAML editor */}
-        <section className="orchestrate-yaml">
-          <div className="yaml-editor-header">
-            <h3>Workflow 定义</h3>
-            <div className="yaml-mode-toggle">
-              <button
-                type="button"
-                className={`btn yaml-mode-btn ${editorMode === 'visual' ? 'btn-primary' : ''}`}
-                onClick={() => setEditorMode('visual')}
-              >
-                可视化
-              </button>
-              <button
-                type="button"
-                className={`btn yaml-mode-btn ${editorMode === 'yaml' ? 'btn-primary' : ''}`}
-                onClick={() => setEditorMode('yaml')}
-              >
-                YAML
-              </button>
-            </div>
-          </div>
-          {templates.length > 0 && (
-            <div className="yaml-templates">
-              <span className="yaml-templates-label">从模板开始：</span>
-              {templates.map((t) => (
-                <button
-                  key={t.name}
-                  className="btn yaml-template-btn"
-                  title={t.description}
-                  onClick={() => setYaml(t.yamlContent)}
-                >
-                  {t.name}
-                </button>
-              ))}
-            </div>
-          )}
+      {/* Body: main area + collapsible sidebar */}
+      <div className="orch-body">
+        <div className="orch-main">
+          {/* Visual mode: DAG canvas (node status list) */}
           {editorMode === 'visual' ? (
-            <WorkflowBuilder yaml={yaml} onYamlChange={setYaml} />
+            <div className="orch-dag-canvas">
+              {/* WorkflowBuilder fills the canvas */}
+              <WorkflowBuilder
+                yaml={yaml}
+                onYamlChange={setYaml}
+                selectedNodeId={wfSelectedId}
+                onSelectedChange={setWfSelectedId}
+                onSelectedNodeChange={setWfSelectedNode}
+              />
+
+              {/* Status overlay — only when running, positioned bottom-left */}
+              {running && (
+                <div className="dag-status-bar">
+                  <span className="dag-status-dot" style={{ background: runningNode ? 'var(--status-running)' : 'var(--gate-skip)' }} />
+                  <span className="dag-status-text">
+                    {nodeIds.length} 节点{runningNode ? ` · 运行中: ${runningNode}` : ''}
+                  </span>
+                </div>
+              )}
+
+              {/* Approval overlay */}
+              {pendingApproval && (
+                <div className="approval-card">
+                  <strong>需要审批: {pendingApproval.node}</strong>
+                  <p>{pendingApproval.prompt}</p>
+                  <div className="approval-actions">
+                    <Button variant="primary" onClick={() => approve(true)}>批准</Button>
+                    <Button variant="secondary" onClick={() => approve(false)}>拒绝</Button>
+                  </div>
+                </div>
+              )}
+              {output != null && (
+                <div className="graph-output">
+                  <h4>最终输出</h4>
+                  <pre>{JSON.stringify(output, null, 2)}</pre>
+                </div>
+              )}
+              {error && <div className="graph-error">失败: {error}</div>}
+            </div>
           ) : (
+            /* YAML mode: raw textarea */
             <textarea
               value={yaml}
               onChange={(e) => setYaml(e.target.value)}
@@ -185,70 +183,156 @@ export function OrchestrateView() {
               className="yaml-editor"
             />
           )}
-        </section>
+        </div>
 
-        {/* Canvas — nodes light up by status */}
-        <section className="orchestrate-canvas">
-          <h3>节点状态 {runningNode ? `(运行中: ${runningNode})` : ''}</h3>
-          <div className="node-list">
-            {nodeIds.length === 0 && <p className="muted">YAML 中暂无节点</p>}
-            {nodeIds.map((id) => {
-              const state = nodes[id] ?? { status: 'pending' as const };
-              return (
-                <div
-                  key={id}
-                  className={`dag-node dag-node--${state.status}`}
-                  style={{ borderLeftColor: STATUS_COLOR[state.status] }}
-                >
-                  <span className="dag-node-id">{id}</span>
-                  <span
-                    className="dag-node-dot"
-                    style={{ background: STATUS_COLOR[state.status] }}
-                  />
-                  <span className="dag-node-status">{STATUS_LABEL[state.status]}</span>
-                  {state.blocks && state.blocks.length > 0 && (
-                    <div className="dag-node-stream">
-                      <BlocksView events={state.blocks} running={state.status === 'running'} />
-                    </div>
-                  )}
-                  {state.error && <pre className="dag-node-error">{state.error}</pre>}
-                </div>
-              );
-            })}
+        {/* Collapsible sidebar: 属性 / 节点 / 历史 */}
+        <aside
+          className={`orch-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}
+          onClick={() => sidebarCollapsed && setSidebarCollapsed(false)}
+        >
+          <div className="sb-tabs">
+            <button type="button" className={`sb-tab ${sidebarTab === 'inspector' ? 'active' : ''}`} onClick={() => { setSidebarTab('inspector'); setSidebarCollapsed(false); }}>属性</button>
+            <button type="button" className={`sb-tab ${sidebarTab === 'palette' ? 'active' : ''}`} onClick={() => { setSidebarTab('palette'); setSidebarCollapsed(false); }}>节点</button>
+            <button type="button" className={`sb-tab ${sidebarTab === 'history' ? 'active' : ''}`} onClick={() => { setSidebarTab('history'); setSidebarCollapsed(false); }}>历史</button>
+            <button type="button" className="sb-collapse" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="折叠/展开">◀</button>
           </div>
-
-          {pendingApproval && (
-            <div className="approval-card">
-              <strong>需要审批: {pendingApproval.node}</strong>
-              <p>{pendingApproval.prompt}</p>
-              <div className="approval-actions">
-                <button className="btn btn-primary" onClick={() => approve(true)}>批准</button>
-                <button className="btn" onClick={() => approve(false)}>拒绝</button>
+          <div className="sb-content">
+            {sidebarTab === 'inspector' && (
+              <div className="sb-section">
+                {wfSelectedNode ? (
+                  <>
+                    <div className="insp-node-head">
+                      <span className="insp-node-type">{wfSelectedNode.type}</span>
+                      <span className="insp-node-id">{wfSelectedNode.id}</span>
+                    </div>
+                    <div className="insp-group">
+                      <div className="insp-label">ID</div>
+                      <input className="insp-input" value={wfSelectedNode.id} readOnly />
+                    </div>
+                    <div className="insp-group">
+                      <div className="insp-label">类型</div>
+                      <input className="insp-input" value={wfSelectedNode.type} readOnly />
+                    </div>
+                    {wfSelectedNode.agent && (
+                      <div className="insp-group">
+                        <div className="insp-label">Agent</div>
+                        <input className="insp-input" value={wfSelectedNode.agent} readOnly />
+                      </div>
+                    )}
+                    {wfSelectedNode.model && (
+                      <div className="insp-group">
+                        <div className="insp-label">模型</div>
+                        <input className="insp-input" value={wfSelectedNode.model} readOnly />
+                      </div>
+                    )}
+                    {wfSelectedNode.prompt && (
+                      <div className="insp-group">
+                        <div className="insp-label">提示词</div>
+                        <textarea className="insp-textarea" value={wfSelectedNode.prompt} readOnly rows={4} />
+                      </div>
+                    )}
+                    {wfSelectedNode.mode && (
+                      <div className="insp-group">
+                        <div className="insp-label">权限级别</div>
+                        <input className="insp-input" value={wfSelectedNode.mode} readOnly />
+                      </div>
+                    )}
+                    {wfSelectedNode.skills && wfSelectedNode.skills.length > 0 && (
+                      <div className="insp-group">
+                        <div className="insp-label">Skills</div>
+                        <div className="kb-list">
+                          {wfSelectedNode.skills.map((s) => (
+                            <div key={s} className="kb-item selected">
+                              <span className="kb-title">{s}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {wfSelectedNode.mcp_tools && wfSelectedNode.mcp_tools.length > 0 && (
+                      <div className="insp-group">
+                        <div className="insp-label">MCP 工具</div>
+                        <div className="kb-list">
+                          {wfSelectedNode.mcp_tools.map((m) => (
+                            <div key={m} className="kb-item selected">
+                              <span className="kb-title">{m}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {wfSelectedNode.knowledge && wfSelectedNode.knowledge.length > 0 && (
+                      <div className="insp-group">
+                        <div className="insp-label">知识库</div>
+                        <div className="kb-list">
+                          {wfSelectedNode.knowledge.map((k) => (
+                            <div key={k} className="kb-item selected">
+                              <span className="kb-title">{k}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="muted" style={{ marginTop: 'var(--space-2)' }}>切换到 YAML 模式编辑完整配置</p>
+                  </>
+                ) : (
+                  <p className="muted">在画布上点击一个节点查看属性</p>
+                )}
               </div>
-            </div>
-          )}
+            )}
+            {sidebarTab === 'palette' && (
+              <div className="sb-section">
+                <div className="yaml-templates">
+                  <span className="yaml-templates-label">从模板开始：</span>
+                  {templates.length === 0 && <span className="muted">暂无模板</span>}
+                  {templates.map((t) => (
+                    <Button key={t.name} variant="secondary" size="sm" title={t.description} onClick={() => setYaml(t.yamlContent)}>{t.name}</Button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {sidebarTab === 'history' && (
+              <div className="sb-section">
+                <p className="muted">版本历史（即将上线）</p>
+                {runId && <p className="muted">当前运行: {runId.slice(0, 8)}</p>}
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
 
-          {output != null && (
-            <div className="graph-output">
-              <h4>最终输出</h4>
-              <pre>{JSON.stringify(output, null, 2)}</pre>
-            </div>
-          )}
-          {error && <div className="graph-error">失败: {error}</div>}
-        </section>
-
-        {/* Event log */}
-        <section className="orchestrate-log">
-          <h3>事件流{runId ? ` · ${runId.slice(0, 8)}` : ''}</h3>
-          <div className="event-log">
-            {eventLog.length === 0 && <p className="muted">尚无事件</p>}
+      {/* Collapsible event log */}
+      <div className="orch-event-log">
+        <div className="event-head" onClick={() => setLogCollapsed(!logCollapsed)}>
+          <span className={`event-live-dot${running ? ' running' : ''}`} />
+          <h3>事件日志</h3>
+          <span className={`event-chev${logCollapsed ? '' : ' open'}`}>›</span>
+          <span className="event-meta">{eventLog.length} 条{runningNode ? ' · 1 运行中' : ''}</span>
+        </div>
+        {!logCollapsed && (
+          <div className="event-body">
+            {/* Node status cards — only when running or has results */}
+            {(running || Object.keys(nodes).length > 0) && nodeIds.length > 0 && (
+              <div className="dag-node-list" style={{marginBottom: 'var(--space-2)'}}>
+                {nodeIds.map((id) => {
+                  const state = nodes[id] ?? { status: 'pending' as const };
+                  return (
+                    <div key={id} className={`dag-node dag-node--${state.status}`} style={{ borderLeftColor: STATUS_COLOR[state.status] }}>
+                      <span className="dag-node-id">{id}</span>
+                      <span className="dag-node-dot" style={{ background: STATUS_COLOR[state.status] }} />
+                      <span className="dag-node-status">{STATUS_LABEL[state.status]}</span>
+                      {state.error && <pre className="dag-node-error">{state.error}</pre>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {eventLog.length === 0 && <span className="muted">尚无事件</span>}
             {eventLog.map((line, i) => (
-              <div key={i} className="event-line">
-                {line}
-              </div>
+              <div key={i} className="event-line">{line}</div>
             ))}
           </div>
-        </section>
+        )}
       </div>
     </div>
   );
@@ -267,10 +351,6 @@ function formatEvent(event: WorkflowProgressPayload['event']): string {
     case 'approval_required':
       return `? ${event.node} 等待审批`;
     case 'node_output': {
-      // Real workflow chunks are now ChatStreamEvent (kind discriminator);
-      // test/mock executors still emit {partial}. Preview per kind so the event
-      // log reflects the structure (text / 🔧 tool / result) instead of a raw
-      // JSON blob.
       const c = event.chunk as unknown;
       let text: string;
       if (c && typeof c === 'object' && 'kind' in c) {
@@ -295,11 +375,6 @@ function formatEvent(event: WorkflowProgressPayload['event']): string {
       return `  ▸ ${event.node}: ${preview}`;
     }
     default: {
-      // Exhaustiveness guard: if a new WorkflowProgressEvent kind is added
-      // without a case above, `event` is no longer `never` and this line
-      // errors — forcing the author to handle it instead of silently falling
-      // through. Previously this read `event.kind`, which only compiled when
-      // the switch was *not* exhaustive.
       const _exhaustive: never = event;
       return `· unhandled: ${JSON.stringify(_exhaustive)}`;
     }

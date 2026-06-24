@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { IconX, IconFolderOpen } from '../Icons';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { Button } from '../ui/Button/Button';
 
 export function GeneralSection() {
   const settings = useSettingsStore((s) => s.settings);
@@ -43,9 +44,9 @@ export function GeneralSection() {
               <span className="settings-row-label settings-row-label-mono">{dir}</span>
             </div>
             <div className="settings-row-control">
-              <button className="settings-row-btn-icon" onClick={() => removeScanDir(dir)} title="移除">
+              <Button variant="ghost" size="sm" onClick={() => removeScanDir(dir)} title="移除">
                 <IconX size={14} />
-              </button>
+              </Button>
             </div>
           </div>
         ))}
@@ -70,13 +71,13 @@ export function GeneralSection() {
             />
           </div>
           <div className="settings-row-control">
-            <button className="settings-row-btn-secondary" onClick={pickScanDir}>
+            <Button variant="secondary" onClick={pickScanDir}>
               <IconFolderOpen size={14} />
               选择
-            </button>
-            <button className="settings-row-btn-primary" onClick={addScanDir} disabled={!newScanDir.trim()}>
+            </Button>
+            <Button variant="primary" onClick={addScanDir} disabled={!newScanDir.trim()}>
               添加
-            </button>
+            </Button>
           </div>
         </div>
       </div>

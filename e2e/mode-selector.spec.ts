@@ -15,7 +15,7 @@ test('dry-run option renders and is selectable', async ({ page }) => {
   await page.goto('/mode-selector.html');
 
   // Open the dropdown (trigger button shows the current mode's short label).
-  await page.locator('.mode-selector-trigger').click();
+  await page.getByTestId('mode-selector-trigger').click();
 
   // The dry-run option ("预演") is present — the v2.0 C6 frontend addition.
   const dryRunOption = page.getByRole('option', { name: /预演/ });
@@ -29,13 +29,13 @@ test('dry-run option renders and is selectable', async ({ page }) => {
 
 test('all six modes are offered in the dropdown', async ({ page }) => {
   await page.goto('/mode-selector.html');
-  await page.locator('.mode-selector-trigger').click();
+  await page.getByTestId('mode-selector-trigger').click();
 
   // Every mode must be reachable — guards against an accidental truncation of
   // the option list when dry-run was inserted. Scope to the dropdown (the
   // trigger also shows the active label) and match the label span EXACTLY: a
   // regex would also hit the 预演 option whose desc contains "计划".
-  const dropdown = page.locator('.mode-selector-dropdown');
+  const dropdown = page.getByTestId('mode-selector-dropdown');
   for (const label of ['默认', '自动', '计划', '预演', '静默', '跳过']) {
     await expect(dropdown.getByText(label, { exact: true })).toBeVisible();
   }

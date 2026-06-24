@@ -39,7 +39,7 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
     await user.click(screen.getByRole('button', { name: '能力总览' }));
     // CapabilitySection renders the built-in tools group + the dispatch_subagent
     // entry that proves it is the renamed component, not a leftover.
-    expect(await screen.findByText('内置工具')).toBeInTheDocument();
+    expect((await screen.findAllByText('内置工具')).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('dispatch_subagent', { exact: false })).toBeInTheDocument();
   });
 

@@ -83,6 +83,15 @@ export function CapabilitySection() {
     desc: t.description || '(无描述)',
   }));
 
+  const [search, setSearch] = useState('');
+
+  const filterFn = (r: ToolRow) =>
+    !search || r.name.toLowerCase().includes(search.toLowerCase()) || r.desc.includes(search);
+
+  const filteredBuiltin = BUILTIN_TOOLS.filter(filterFn);
+  const filteredSkills = skillRows.filter(filterFn);
+  const filteredMcp = mcpRows.filter(filterFn);
+
   return (
     <div className="settings-section">
       <h3 className="settings-section-title">能力总览</h3>
@@ -97,14 +106,44 @@ export function CapabilitySection() {
         )}
       </p>
 
+      {/* 统计卡 */}
+      <div className="capability-stats">
+        <div className="capability-stat">
+          <span className="capability-stat-num">{BUILTIN_TOOLS.length}</span>
+          <span className="capability-stat-label">内置工具</span>
+        </div>
+        <div className="capability-stat">
+          <span className="capability-stat-num">{skillRows.length}</span>
+          <span className="capability-stat-label">Skills</span>
+        </div>
+        <div className="capability-stat">
+          <span className="capability-stat-num">{mcpRows.length}</span>
+          <span className="capability-stat-label">MCP 工具</span>
+        </div>
+        <div className="capability-stat">
+          <span className="capability-stat-num">{BUILTIN_TOOLS.length + skillRows.length + mcpRows.length}</span>
+          <span className="capability-stat-label">总计</span>
+        </div>
+      </div>
+
+      {/* 搜索 */}
+      <input
+        className="capability-search"
+        type="text"
+        placeholder="搜索工具/Skill/MCP 名称或描述..."
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
       {loading && <div className="config-center-loading">加载中...</div>}
 
-      <ToolGroup title="内置工具" rows={BUILTIN_TOOLS} />
-      <ToolGroup title={`Skills（${skillRows.length}）`} rows={skillRows} empty="暂无已安装 Skill" />
+      <ToolGroup title="内置工具" rows={filteredBuiltin} searchActive={!!search} />
+      <ToolGroup title={`Skills（${filteredSkills.length}）`} rows={filteredSkills} empty="暂无已安装 Skill" searchActive={!!search} />
       <ToolGroup
-        title={`MCP 工具（${mcpRows.length}）`}
-        rows={mcpRows}
+        title={`MCP 工具（${filteredMcp.length}）`}
+        rows={filteredMcp}
         empty="暂无已连接 MCP 工具（在 MCP 服务器页连接后此处可见）"
+        searchActive={!!search}
       />
     </div>
   );
@@ -114,11 +153,14 @@ function ToolGroup({
   title,
   rows,
   empty,
+  searchActive,
 }: {
   title: string;
   rows: ToolRow[];
   empty?: string;
+  searchActive?: boolean;
 }) {
+  (void searchActive); // consumed by CSS if needed
   return (
     <div className="capability-group">
       <h4 className="capability-group-title">{title}</h4>
