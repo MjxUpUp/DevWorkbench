@@ -184,7 +184,7 @@ const WORKFLOW_PLANNING_GUIDE: &str = r#"
 - on_failure：偶发失败（限流/超时）配 {"retry":{"max_attempts":3}}；关键 worker 用 "fail"；部分失败可接受用 "continue"。
 - 动态 arity：plan 出 N 个子任务就建 N 个 worker，数量运行时定。
 
-graph 结构：{nodes: {id: {type, ...}}, edges: [{from, to, when?}], start, end}。节点 type: prompt/agent/gate/parallel/merge/transform/branch/loop/selector/interrupt。
+graph 结构：{nodes:{id:{type,字段...}}, edges:[{from,to,when?}], start, end}。每种 type 都有【必需字段】，缺一个 graph 反序列化就失败（务必给全）：prompt 必需 text；agent 必需 agent（标识：claude_code/codex/gemini_cli/qwen_code/copilot/pi 走 CLI worker，react_kernel 等其他串走自研内核 worker），建议带 prompt（给 worker 的指令）；gate 必需 gate；transform 必需 op；branch 必需 condition；loop 必需 body。完整字段表 + 最小 fan-out 示例见 run_workflow_graph 工具描述——照抄示例里的字段名即可，别自己编字段名。
 "#;
 
 /// Build a transparent ReactAgent, resolving credentials from the user's

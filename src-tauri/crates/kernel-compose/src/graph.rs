@@ -649,4 +649,45 @@ nodes:
             other => panic!("expected Selector, got {other:?}"),
         }
     }
+
+    /// The `run_workflow_graph` tool description ships a minimal fan-out
+    /// example (prompt → parallel → agents → merge → prompt). Parse that exact
+    /// shape from JSON to prove the field names the orchestrator is told to use
+    /// (prompt.text, agent.agent, agent.prompt, agent.on_failure, merge.strategy)
+    /// actually deserialize + compile — a guard against drifting the structs OR
+    /// shipping a misleading example. Regression for the c9a5eeb7 session where
+    /// glm-5.2 omitted `text`/`agent` and the graph rejected 3 times in a row.
+    #[test]
+    fn fanout_example_shape_parses_and_compiles() {
+        let json = serde_json::json!({
+            "nodes": {
+                "start": {"type": "prompt", "text": "审查安全问题"},
+                "fan": {"type": "parallel"},
+                "w1": {"type": "agent", "agent": "react_kernel",
+                       "prompt": "查shell注入", "on_failure": "continue"},
+                "w2": {"type": "agent", "agent": "react_kernel",
+                       "prompt": "查路径穿越", "on_failure": "continue"},
+                "gather": {"type": "merge", "strategy": "concat"},
+                "report": {"type": "prompt", "text": "汇总为报告"}
+            },
+            "edges": [
+                {"from": "start", "to": "fan"},
+                {"from": "fan", "to": "w1"},
+                {"from": "fan", "to": "w2"},
+                {"from": "w1", "to": "gather"},
+                {"from": "w2", "to": "gather"},
+                {"from": "gather", "to": "report"}
+            ],
+            "start": "start",
+            "end": "report"
+        });
+        let g: Graph = serde_json::from_value(json)
+            .expect("tool-description example must deserialize");
+        let compiled = g.compile()
+            .expect("tool-description example must compile");
+        // Spot-check parsed node types so a silent schema change is caught.
+        assert!(matches!(compiled.graph.nodes["w1"], Node::Agent(_)), "w1 is Agent");
+        assert!(matches!(compiled.graph.nodes["start"], Node::Prompt(_)), "start is Prompt");
+        assert!(matches!(compiled.graph.nodes["gather"], Node::Merge(_)), "gather is Merge");
+    }
 }
