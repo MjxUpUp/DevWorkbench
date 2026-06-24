@@ -288,6 +288,9 @@ fn react_chat_driver(
             None, // skill_filter
             None, // mcp_filter
             None, // knowledge_ids
+            // Main orchestrator agent — give it WorkflowTool so it can
+            // self-plan a DAG for complex multi-step tasks.
+            Some(app_drv.clone()),
         ) {
             Ok(a) => a,
             Err(e) => {

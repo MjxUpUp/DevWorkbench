@@ -308,6 +308,7 @@ async fn drive_prompt_turn(
         None, // skill_filter
         None, // mcp_filter
         None, // knowledge_ids
+        None, // app — ACP stdio server has no AppHandle; no WorkflowTool here.
     ) {
         Ok(a) => a,
         Err(e) => {

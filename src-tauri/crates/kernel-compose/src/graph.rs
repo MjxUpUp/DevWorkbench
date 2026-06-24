@@ -79,9 +79,50 @@ pub struct PromptNode {
     pub vars: HashMap<String, Value>,
 }
 
+/// Failure policy for a capability node. The orchestrator's reliability knob:
+/// when a worker dies it is either resuscitated in-place (`Retry`) or tolerated
+/// (`Continue` — the error becomes a routed value) — the orchestrator NEVER
+/// reaches into the worker's execution context, it only sees the outcome + the
+/// [`crate::GraphEvent::NodeRetried`] sequence. A node without a policy uses the
+/// graph-wide default ([`OnFailure::Fail`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    /// Fail the whole graph immediately (the default; backward-compatible).
+    Fail,
+    /// Tolerate the failure: emit an error-descriptor value as the node output
+    /// and continue, so a Parallel/Merge can route around a dead worker without
+    /// aborting the whole run.
+    Continue,
+    /// Retry the node up to `max_attempts` total tries, sleeping `backoff_secs`
+    /// between attempts. Each failed attempt emits a `NodeRetried` event
+    /// (attempt no + last error) so the orchestrator learns the worker's
+    /// reliability. Once exhausted, `continue_on_exhausted` decides Fail vs
+    /// Continue.
+    Retry {
+        /// Total tries including the first (3 = 1 initial + 2 retries).
+        #[serde(default = "OnFailure::default_max_attempts")]
+        max_attempts: usize,
+        /// Seconds to sleep between attempts (0 = immediate retry).
+        #[serde(default)]
+        backoff_secs: u64,
+        /// On exhaustion: true → Continue (error value, graph keeps going);
+        /// false → Fail the whole graph (the default).
+        #[serde(default)]
+        continue_on_exhausted: bool,
+    },
+}
+
+impl OnFailure {
+    /// Default total attempts (1 initial + 2 retries).
+    pub fn default_max_attempts() -> usize {
+        3
+    }
+}
+
 /// Spec for an agent node. The host's Executor resolves `agent` + `model` into
 /// a concrete `Box<dyn Agent>` at run time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentNodeSpec {
     /// Agent identifier, e.g. "claude_code", "codex", "react" (transparent).
     pub agent: String,
@@ -108,6 +149,11 @@ pub struct AgentNodeSpec {
     /// Knowledge entry IDs to inject into this agent's system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<Vec<String>>,
+    /// Failure policy for this worker node (None = graph default `Fail`). Lets
+    /// the orchestrator retry or tolerate a dead worker WITHOUT touching its
+    /// execution context. See [`OnFailure`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailure>,
 }
 
 impl AgentNodeSpec {

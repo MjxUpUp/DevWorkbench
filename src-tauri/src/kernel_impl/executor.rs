@@ -97,6 +97,9 @@ impl Executor for KernelExecutor {
                     spec.skills.as_deref(),
                     spec.mcp_tools.as_deref(),
                     spec.knowledge.as_deref(),
+                    // Worker (graph Agent node) — NO WorkflowTool, else it could
+                    // self-plan a sub-workflow and recurse unboundedly.
+                    None,
                 )?)
             }
         };
@@ -156,6 +159,34 @@ impl Executor for KernelExecutor {
 // Dual-mode dispatch helpers
 // ---------------------------------------------------------------------------
 
+/// System-prompt guidance teaching an orchestrator agent WHEN to self-plan a
+/// DAG and HOW to author one (the Anthropic plan → parallel workers → verify →
+/// report recipe). Injected only for orchestrator agents (app = Some),
+/// alongside WorkflowTool registration — without it the agent never reaches for
+/// run_workflow_graph and the tool sits idle.
+const WORKFLOW_PLANNING_GUIDE: &str = r#"
+
+## 自规划工作流（run_workflow_graph）
+遇到复杂任务，优先判断能否用 `run_workflow_graph` 自规划成结构化 DAG 执行，而不是自己一步步做、或零散地 dispatch_subagent（后者虽内置 Semaphore 并发，但无结构：没有 merge/gate/条件分支/逐节点重试容错）。适用（满足任一）：
+- 能拆成 3+ 个相对独立的子任务
+- 子任务间有依赖、需要 merge 汇总或 gate 验收
+- 需要条件分支或逐节点失败重试
+
+工作流（Anthropic 动态 workflow recipe：plan → worker → verify → report）：
+1. plan：拆成 graph——start（任务输入）→ worker（agent 节点）→ 可选 gate 验收 → merge 汇总 → end
+2. 扇出：parallel 节点把输入扇出到多个 worker 后继；graph 按依赖拓扑顺序逐节点执行（同一波独立 worker 当前为顺序执行，非真并发——要纯并发提速多子 agent 直接用 dispatch_subagent）。DAG 的价值在结构（merge/gate/条件分支/逐节点重试容错），不在并发。
+3. verify：gate 节点验收 worker 产出；偶发失败的 worker 配 on_failure 重试
+4. report：merge 汇总，end 输出最终结果
+
+关键纪律：
+- worker 隔离：每个 worker 在全新上下文跑，你看不到它的执行过程，只看到最终产出 + 重试历史（判断可靠性）。这是设计——避免弱模型的执行上下文污染你的上下文。
+- 不插手：worker 失败靠 on_failure（retry/continue）让引擎处理，绝不把 worker 中间状态拉回自己分析。
+- on_failure：偶发失败（限流/超时）配 {"retry":{"max_attempts":3}}；关键 worker 用 "fail"；部分失败可接受用 "continue"。
+- 动态 arity：plan 出 N 个子任务就建 N 个 worker，数量运行时定。
+
+graph 结构：{nodes: {id: {type, ...}}, edges: [{from, to, when?}], start, end}。节点 type: prompt/agent/gate/parallel/merge/transform/branch/loop/selector/interrupt。
+"#;
+
 /// Build a transparent ReactAgent, resolving credentials from the user's
 /// `providers.toml` (gap-②). The default model is `glm-4.6` — the strongest
 /// tool-calling GLM on the Anthropic-compatible endpoint — overridable via
@@ -186,6 +217,10 @@ pub(crate) fn build_react_agent(
     mcp_filter: Option<&[String]>,
     // Knowledge entry IDs to inject into the system prompt.
     knowledge_ids: Option<&[String]>,
+    // AppHandle for orchestrator agents — registers WorkflowTool so the agent
+    // can self-plan a DAG. None for worker agents (graph Agent nodes) and tests,
+    // bounding self-planning recursion at depth 1.
+    app: Option<tauri::AppHandle>,
 ) -> Result<ReactAgent, String> {
     let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
@@ -380,6 +415,18 @@ pub(crate) fn build_react_agent(
     // First (verifiable) half of the OWOz C1 bidirectional ACP support; the
     // server half (expose THIS kernel as an ACP agent) remains TODO.
     registry.push(crate::kernel_impl::acp_tool::AcpAgentTool::default());
+
+    // WorkflowTool — the orchestrator's self-planning bridge. Registered ONLY
+    // for orchestrator agents (app = Some): the agent authors a DAG and calls
+    // run_workflow_graph to execute it. Worker agents (graph Agent nodes, built
+    // with app = None) get no WorkflowTool, bounding self-planning recursion at
+    // depth 1 — an orchestrator's worker cannot spawn its own sub-workflow.
+    if let Some(app) = app {
+        registry.push(crate::kernel_impl::workflow_tool::WorkflowTool::new(app));
+        // Teach the orchestrator WHEN/HOW to self-plan a DAG — injected here
+        // (app = Some, same gate as the tool) so only orchestrators see it.
+        sys_prompt.push_str(WORKFLOW_PLANNING_GUIDE);
+    }
 
     // Surface installed skills + MCP tools BY NAME in the system prompt, not just
     // in the tool-list descriptions. The model otherwise can't tell which skill__

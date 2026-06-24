@@ -5,6 +5,7 @@ import type { ChatStreamEvent } from '../../types';
 import { Frame } from '../ui/Frame/Frame';
 import { L1Thinking } from './layers/L1Thinking';
 import { L2ToolPill } from './layers/L2ToolPill';
+import { WorkflowProgressStrip } from './WorkflowProgressStrip';
 import styles from './BlocksView.module.css';
 
 interface BlocksViewProps {
@@ -72,7 +73,17 @@ function BlockCard({ event, running }: { event: ChatStreamEvent; running: boolea
         </Frame>
       );
     case 'tool_use':
-      return <ToolUsePill name={event.name} input={event.input} />;
+      // run_workflow_graph：tool_use pill 下挂实时节点状态条（orchestrator
+      // 自规划 DAG 执行时逐节点点亮；图 settle 后 strip 自隐，交给
+      // tool_result 的 format_outcome 文本作持久记录）。
+      return event.name === 'run_workflow_graph' ? (
+        <div>
+          <ToolUsePill name={event.name} input={event.input} />
+          <WorkflowProgressStrip />
+        </div>
+      ) : (
+        <ToolUsePill name={event.name} input={event.input} />
+      );
     case 'tool_result':
       return <ToolResultPill content={event.content} isError={event.is_error} />;
     case 'thinking':
@@ -146,6 +157,13 @@ function deriveThinkingSummary(content: string): string {
 
 /** 从 tool_use name + input 提炼一行描述。*/
 function deriveToolDesc(name: string, input: unknown): string {
+  if (name === 'run_workflow_graph') {
+    // 自规划工作流：从 graph.nodes 计数，让用户一眼看到 DAG 规模。
+    const graph = (input as Record<string, unknown> | null)?.graph;
+    const nodes = (graph as Record<string, unknown> | null | undefined)?.nodes;
+    const n = nodes && typeof nodes === 'object' ? Object.keys(nodes as Record<string, unknown>).length : 0;
+    return n > 0 ? `自规划工作流 · ${n} 节点` : '自规划工作流';
+  }
   if (typeof input === 'object' && input !== null) {
     const obj = input as Record<string, unknown>;
     // 常见字段：file_path / path / command / pattern

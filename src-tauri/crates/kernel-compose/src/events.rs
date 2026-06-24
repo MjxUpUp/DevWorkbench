@@ -26,6 +26,9 @@ pub enum NodeStatus {
     WaitingApproval,
     /// Aborted by an Interrupt node (user-intended halt, not a failure).
     Interrupted,
+    /// A failed attempt is being retried (transient state between attempts, not
+    /// the node's final status).
+    Retried,
 }
 
 /// Edge semantic. Normal carries data; Branch is conditional (evaluated by
@@ -62,6 +65,12 @@ pub enum GraphEvent {
     },
     /// Incremental output produced by a node (agent token stream forwarded).
     NodeOutput { node: NodeId, chunk: Value },
+    /// A node's attempt failed and will be retried. Carries the 1-based attempt
+    /// that just failed (next attempt is this + 1) and the error. The
+    /// orchestrator reads this sequence to learn a worker's reliability WITHOUT
+    /// ever seeing the worker's execution context — the whole point of the
+    /// strong-orchestrator / weak-worker split (no Mode-C context back-flow).
+    NodeRetried { node: NodeId, attempt: usize, error: String },
     /// The whole graph finished; carries the final output value.
     GraphDone { output: Value },
     /// The whole graph failed.

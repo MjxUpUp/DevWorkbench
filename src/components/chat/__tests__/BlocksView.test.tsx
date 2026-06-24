@@ -1,7 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { BlocksView } from '../BlocksView';
 import type { ChatStreamEvent } from '../../../types';
+
+// run_workflow_graph tool_use mounts WorkflowProgressStrip, which subscribes
+// to a Tauri event. Stub listen so the strip's effect is inert under jsdom.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
 
 /**
  * BlocksView 测试 — v3 重构后选择器从 .chat-block-* class 改为 data-testid
@@ -152,5 +158,21 @@ describe('BlocksView', () => {
     render(<BlocksView events={[{ kind: 'file_changed', path: '/src/app.rs' }]} running={false} />);
     expect(screen.getByText('/src/app.rs')).toBeInTheDocument();
     expect(screen.getByTestId('chat-block-file')).not.toBeNull();
+  });
+
+  it('derives a friendly node-count desc for run_workflow_graph', () => {
+    render(
+      <BlocksView
+        events={[
+          {
+            kind: 'tool_use',
+            name: 'run_workflow_graph',
+            input: { graph: { nodes: { a: {}, b: {}, c: {} }, edges: [], start: 'a', end: 'c' } },
+          },
+        ]}
+        running={true}
+      />,
+    );
+    expect(screen.getByText(/自规划工作流 · 3 节点/)).toBeInTheDocument();
   });
 });

@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::events::NodeStatus;
 use crate::graph::{
-    AgentChunk, CompiledGraph, Executor, MergeStrategy, Node, NodeId, TransformNode,
+    AgentChunk, CompiledGraph, Executor, MergeStrategy, Node, NodeId, OnFailure, TransformNode,
 };
 use crate::GraphEvent;
 
@@ -183,39 +183,95 @@ fn build_run_stream(
             let result: Result<Value, String> = match &node {
                 Node::Prompt(p) => Ok(Value::String(p.text.clone())),
                 Node::Agent(spec) => {
-                    // Streamed: drive the chunk stream, forwarding each Delta as
-                    // a `NodeOutput` event and collecting the single `Final` as
-                    // this node's output value. An `Err` chunk (or a failed
-                    // stream construction) fails the node immediately.
-                    match executor.run_agent(spec, incoming.clone(), working_dir.clone()) {
-                        Ok(chunk_stream) => {
-                            use futures::StreamExt;
-                            let mut s = chunk_stream;
-                            let mut final_val = Value::Null;
-                            let mut agent_err: Option<String> = None;
-                            while let Some(chunk_res) = s.next().await {
-                                match chunk_res {
-                                    Ok(AgentChunk::Delta(chunk)) => {
-                                        yield GraphEvent::NodeOutput {
-                                            node: nid.clone(),
-                                            chunk,
-                                        };
+                    // Streamed agent drive with a per-node failure policy
+                    // (OnFailure). A worker that dies is retried in-place up to
+                    // max_attempts — each failed try emits NodeRetried (attempt
+                    // no + error) so the orchestrator learns the worker's
+                    // reliability — then either tolerated (Continue → a marked
+                    // error value the graph routes around) or failed. The
+                    // orchestrator NEVER sees the worker's execution context,
+                    // only the outcome + retry sequence (no Mode-C back-flow).
+                    let policy = spec.on_failure.clone().unwrap_or(OnFailure::Fail);
+                    let (max_attempts, backoff_secs, continue_on_exhausted) = match &policy {
+                        OnFailure::Retry {
+                            max_attempts,
+                            backoff_secs,
+                            continue_on_exhausted,
+                        } => (*max_attempts, *backoff_secs, *continue_on_exhausted),
+                        OnFailure::Continue => (1, 0, true),
+                        OnFailure::Fail => (1, 0, false),
+                    };
+                    let mut attempt: usize = 0;
+                    'agent: loop {
+                        attempt += 1;
+                        match executor.run_agent(spec, incoming.clone(), working_dir.clone()) {
+                            Ok(chunk_stream) => {
+                                use futures::StreamExt;
+                                let mut s = chunk_stream;
+                                let mut final_val = Value::Null;
+                                let mut agent_err: Option<String> = None;
+                                while let Some(chunk_res) = s.next().await {
+                                    match chunk_res {
+                                        Ok(AgentChunk::Delta(chunk)) => {
+                                            yield GraphEvent::NodeOutput {
+                                                node: nid.clone(),
+                                                chunk,
+                                            };
+                                        }
+                                        Ok(AgentChunk::Final(v)) => final_val = v,
+                                        Err(e) => {
+                                            agent_err = Some(e);
+                                            break;
+                                        }
                                     }
-                                    Ok(AgentChunk::Final(v)) => {
-                                        final_val = v;
-                                    }
-                                    Err(e) => {
-                                        agent_err = Some(e);
-                                        break;
+                                }
+                                match agent_err {
+                                    None => break 'agent Ok(final_val),
+                                    Some(e) => {
+                                        if attempt < max_attempts {
+                                            yield GraphEvent::NodeRetried {
+                                                node: nid.clone(),
+                                                attempt,
+                                                error: e,
+                                            };
+                                            if backoff_secs > 0 {
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_secs(backoff_secs),
+                                                )
+                                                .await;
+                                            }
+                                            continue 'agent;
+                                        }
+                                        if continue_on_exhausted {
+                                            break 'agent Ok(agent_error_value(&e));
+                                        }
+                                        break 'agent Err(e);
                                     }
                                 }
                             }
-                            match agent_err {
-                                Some(e) => Err(e),
-                                None => Ok(final_val),
+                            Err(e) => {
+                                // Stream construction itself failed — same
+                                // retry/exhaustion policy as a failed chunk.
+                                if attempt < max_attempts {
+                                    yield GraphEvent::NodeRetried {
+                                        node: nid.clone(),
+                                        attempt,
+                                        error: e.clone(),
+                                    };
+                                    if backoff_secs > 0 {
+                                        tokio::time::sleep(std::time::Duration::from_secs(
+                                            backoff_secs,
+                                        ))
+                                        .await;
+                                    }
+                                    continue 'agent;
+                                }
+                                if continue_on_exhausted {
+                                    break 'agent Ok(agent_error_value(&e));
+                                }
+                                break 'agent Err(e);
                             }
                         }
-                        Err(e) => Err(e),
                     }
                 }
                 Node::Gate(gate) => {
@@ -351,6 +407,14 @@ fn build_run_stream(
         }
         yield GraphEvent::GraphFailed { error: "graph ended without reaching END".into() };
     }
+}
+
+/// The value emitted when a worker node fails under `OnFailure::Continue`
+/// (or `Retry` exhausted with `continue_on_exhausted`). A clearly-marked error
+/// string so downstream Merge/agents recognize a dead worker and route around
+/// it rather than treating its output as a success.
+fn agent_error_value(err: &str) -> Value {
+    Value::String(format!("[worker failed: {err}]"))
 }
 
 fn merge_values(vals: Vec<Value>, strategy: &MergeStrategy) -> Value {
@@ -553,7 +617,7 @@ mod tests {
         use std::collections::HashMap;
         let g = GraphBuilder::new()
             .node("p", Node::Prompt(PromptNode { text: "start".into(), vars: HashMap::new() }))
-            .node("a", Node::Agent(crate::graph::AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None }))
+            .node("a", Node::Agent(crate::graph::AgentNodeSpec { agent: "mock".into(), ..Default::default() }))
             .node("e", Node::Merge(MergeNode::default()))
             .edge("p", "a").edge("a", "e")
             .start("p").end("e").build().unwrap();
@@ -622,8 +686,8 @@ mod tests {
         // Collect strategy gathers both predecessor outputs into an array.
         let g = GraphBuilder::new()
             .node("p", Node::Prompt(crate::graph::PromptNode { text: "go".into(), vars: std::collections::HashMap::new() }))
-            .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), model: None, prompt: Some("alpha".into()), resume_from: None }))
-            .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), model: None, prompt: Some("beta".into()), resume_from: None }))
+            .node("a1", Node::Agent(AgentNodeSpec { agent: "x".into(), prompt: Some("alpha".into()), ..Default::default() }))
+            .node("a2", Node::Agent(AgentNodeSpec { agent: "y".into(), prompt: Some("beta".into()), ..Default::default() }))
             .node("m", Node::Merge(MergeNode { strategy: MergeStrategy::Collect }))
             .edge("p", "a1").edge("p", "a2").edge("a1", "m").edge("a2", "m")
             .start("p").end("m").build().unwrap();
@@ -654,9 +718,8 @@ mod tests {
             }))
             .node("a", Node::Agent(AgentNodeSpec {
                 agent: "mock".into(),
-                model: None,
                 prompt: Some("hello".into()),
-                resume_from: None,
+                ..Default::default()
             }))
             // LastWins picks the agent's Final (a JSON object) — Concat would
             // drop non-string values and yield empty, which is what made the
@@ -708,9 +771,8 @@ mod tests {
         let g = GraphBuilder::new()
             .node("a", Node::Agent(AgentNodeSpec {
                 agent: "fail".into(),
-                model: None,
                 prompt: Some("x".into()),
-                resume_from: None,
+                ..Default::default()
             }))
             .node("e", Node::Merge(MergeNode::default()))
             .edge("a", "e")
@@ -829,7 +891,7 @@ mod tests {
         use std::collections::HashMap;
         let body = Graph {
             nodes: HashMap::from([
-                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), ..Default::default() })),
                 ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
             ]),
             edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],
@@ -868,7 +930,7 @@ mod tests {
         use std::collections::HashMap;
         let body = Graph {
             nodes: HashMap::from([
-                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), ..Default::default() })),
                 ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
             ]),
             edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],
@@ -897,7 +959,7 @@ mod tests {
         use std::collections::HashMap;
         let body = Graph {
             nodes: HashMap::from([
-                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), model: None, prompt: None, resume_from: None })),
+                ("ba".to_string(), Node::Agent(AgentNodeSpec { agent: "mock".into(), ..Default::default() })),
                 ("be".to_string(), Node::Merge(MergeNode { strategy: MergeStrategy::LastWins })),
             ]),
             edges: vec![Edge { from: "ba".into(), to: "be".into(), kind: EdgeKind::Normal, when: None }],

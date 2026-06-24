@@ -4989,6 +4989,7 @@ mod tests {
             None, // skill_filter
             None, // mcp_filter
             None, // knowledge_ids
+            None, // app — test agents get no WorkflowTool
         )
         .expect("build_react_agent assembles from GUI provider config");
         let mut stream = agent
@@ -5063,6 +5064,7 @@ mod tests {
             None, // skill_filter
             None, // mcp_filter
             None, // knowledge_ids
+            None, // app — test agents get no WorkflowTool
         )
         .expect("build_react_agent");
         // 强引导并行:"一次性发出两个tool调用,不要分开做"。
@@ -5289,6 +5291,7 @@ mod tests {
             None, // skill_filter
             None, // mcp_filter
             None, // knowledge_ids
+            None, // app — test agents get no WorkflowTool
         )
         .expect("build_react_agent");
         let mut stream = agent
@@ -5403,6 +5406,7 @@ mod tests {
             None, // skill_filter
             None, // mcp_filter
             None, // knowledge_ids
+            None, // app — test agents get no WorkflowTool
         )
         .expect("build_react_agent");
         let mut stream = agent
