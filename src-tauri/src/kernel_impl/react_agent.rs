@@ -1246,6 +1246,28 @@ impl Tool for SubAgentTool {
             ReactAgent::new_shared(child_model, child_tools, worker_prompt.as_str())
                 .with_context(ctx.clone())
                 .with_max_steps(self.max_steps);
+        // "Model half" of sub-agent dispatch — 机器科层制: 贵模型只在裁决节点,
+        // 不干杂活。fork_with_counting_cost 只换成本计数器、不改 model id,所以
+        // 此前子 agent 每一轮都克隆父的旗舰模型。这里按任务类型提前分类,给子
+        // agent 挂对应逐轮 router,让劳动轮跑 glm-4-flash:
+        //   CheapOnly(明确杂活:搜索/读取/抽取) → 全程 flash
+        //   Routed(含推理关键词或歧义)         → 挂 route_step(首轮 strong + 回声轮 cheap)
+        // 非 glm-4.6 子 agent(glm-5.2/claude/deepseek)返回 None → 不挂 router,
+        // 子 agent 用自身模型均匀跑,与 executor.rs wire-time 的 is_glm_family 守门
+        // 及 route_step 自身 base guard 对称,规避把 GLM id 灌进异端点的 400
+        // (executor.rs:454-460)。裁决仍在 main:降档错了产出弱结论会被 main 抓回重派。
+        let child = match crate::kernel_impl::model_router::dispatch_tier_for(
+            self.model.model_id(),
+            &task,
+        ) {
+            Some(crate::kernel_impl::model_router::DispatchTier::CheapOnly) => child
+                .with_model_router(Arc::new(
+                    crate::kernel_impl::model_router::force_cheap_router,
+                )),
+            Some(crate::kernel_impl::model_router::DispatchTier::Routed) => child
+                .with_model_router(Arc::new(crate::kernel_impl::model_router::route_step)),
+            None => child,
+        };
         // C2/D3: hold a concurrency permit for the whole child run so a parent
         // that fans out multiple dispatch_subagent calls in one turn is bounded.
         // The Semaphore is Arc-shared across concurrent invocations, so the Nth
@@ -4964,6 +4986,9 @@ mod tests {
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
             None, // session_id: test agents — traces record with a null session_id
+            None, // skill_filter
+            None, // mcp_filter
+            None, // knowledge_ids
         )
         .expect("build_react_agent assembles from GUI provider config");
         let mut stream = agent
@@ -5035,6 +5060,9 @@ mod tests {
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
             None,
+            None, // skill_filter
+            None, // mcp_filter
+            None, // knowledge_ids
         )
         .expect("build_react_agent");
         // 强引导并行:"一次性发出两个tool调用,不要分开做"。
@@ -5258,6 +5286,9 @@ mod tests {
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
             None, // session_id: test agents — traces record with a null session_id
+            None, // skill_filter
+            None, // mcp_filter
+            None, // knowledge_ids
         )
         .expect("build_react_agent");
         let mut stream = agent
@@ -5369,6 +5400,9 @@ mod tests {
             crate::kernel_impl::hooks::PermissionMode::default(),
             None,
             None, // session_id: test agents — traces record with a null session_id
+            None, // skill_filter
+            None, // mcp_filter
+            None, // knowledge_ids
         )
         .expect("build_react_agent");
         let mut stream = agent

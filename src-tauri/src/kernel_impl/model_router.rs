@@ -100,6 +100,92 @@ fn last_instruction(history: &[Message]) -> Option<&Message> {
         .find(|m| m.role == Role::User && m.tool_call_id.is_none())
 }
 
+// ---------------------------------------------------------------------------
+// Sub-agent dispatch tiering (the "model half" of dispatch_subagent)
+// ---------------------------------------------------------------------------
+//
+// Per-turn [`route_step`] above decides which model fits ONE turn of a
+// conversation. Dispatch tiering decides, up-front from the TASK text, which
+// router a *child* ReactAgent should carry for its whole run — so a dispatched
+// sub-agent's labor turns (the bulk of search/extraction) run on glm-4-flash
+// instead of cloning the parent's flagship for every turn.
+//
+// The motivating frame: a sub-agent is mostly 劳动 token (search/read/extract),
+// so it should not burn the flagship model on grunt work; the flagship belongs
+// at the 裁决 nodes, which sit on the MAIN agent (it re-reasons over the
+// child's `[子 agent 结论]`). Mis-tiering is safe: a cheap run that produces a
+// weak conclusion is judged and re-dispatched by the controller.
+
+/// Unambiguously grunt-work keywords (EN + ZH) → the child is pure labor and
+/// can run the cheap model for every turn. Deliberately NARROW: ambiguous verbs
+/// (summarize/test/analyze/check) are excluded so an unrecognized reasoning
+/// task is never silently downgraded. A task with BOTH a grunt word and a
+/// [`POWERFUL_HINTS`] word is treated as reasoning (see [`classify_dispatch`]).
+const GRUNT_KEYWORDS: &[&str] = &[
+    "search", "find", "grep", "glob", "list", "read", "lookup", "fetch",
+    "extract", "enumerate", "collect", "gather",
+    "搜索", "查找", "查询", "读取", "列出", "枚举", "收集", "抽取", "获取",
+];
+
+/// The model tier chosen for a sub-agent dispatch. See [`classify_dispatch`].
+pub enum DispatchTier {
+    /// Pure grunt task → the child runs glm-4-flash for ALL turns (it never
+    /// needs to reason; even the opening parse is grunt work). Maximum savings,
+    /// low risk because grunt tasks are mechanical.
+    CheapOnly,
+    /// The task may need reasoning → the child carries [`route_step`] (strong
+    /// for the opening/ planning turn, cheap for tool-echo turns). Still saves
+    /// on the bulk labor turns while preserving the child's reasoning ability.
+    Routed,
+}
+
+/// Decide a sub-agent dispatch's model tier from the task text (NOT the
+/// conversation — the child starts with a fresh empty history).
+///
+/// Priority: reasoning beats grunt, and ambiguous defaults to [`Routed`].
+/// Reuses [`POWERFUL_HINTS`] so dispatch tiering and [`route_step`]'s per-turn
+/// tiering agree on what counts as "reasoning". Defaulting ambiguous tasks to
+/// Routed (not CheapOnly) is deliberate: a task we don't recognize as grunt
+/// keeps its reasoning capability — route_step still sends its labor turns to
+/// the cheap model, so we capture most of the savings without risking a silent
+/// quality regression on an unrecognized reasoning task.
+pub fn classify_dispatch(task: &str) -> DispatchTier {
+    let lower = task.to_lowercase();
+    if POWERFUL_HINTS.iter().any(|h| lower.contains(h)) {
+        return DispatchTier::Routed;
+    }
+    if GRUNT_KEYWORDS.iter().any(|h| lower.contains(h)) {
+        return DispatchTier::CheapOnly;
+    }
+    DispatchTier::Routed
+}
+
+/// Per-turn router for a [`DispatchTier::CheapOnly`] child: always the cheap
+/// model within the GLM family, ignoring history — the task was already judged
+/// grunt work by [`classify_dispatch`], so no turn deserves the flagship.
+/// Self-gates exactly like [`route_step`]: a non-glm-4.6 base (glm-5.2 or a
+/// foreign model) is returned unchanged, so attaching it is never harmful.
+pub fn force_cheap_router(_history: &[Message], base_model: &str) -> String {
+    if base_model.eq_ignore_ascii_case(STRONG_MODEL) {
+        CHEAP_MODEL.to_string()
+    } else {
+        base_model.to_string()
+    }
+}
+
+/// Resolve a dispatch to its tier, or `None` when the child's model isn't the
+/// tierable flagship. Combines the family gate (only glm-4.6 is tierable —
+/// glm-5.2 keeps the user's pick, foreign models can't receive a GLM id) with
+/// [`classify_dispatch`]. `None` ⇒ the caller attaches NO router and the child
+/// runs its own model uniformly (symmetric with executor.rs's wire-time
+/// `is_glm_family` gate and [`route_step`]'s own base guard).
+pub fn dispatch_tier_for(model_id: &str, task: &str) -> Option<DispatchTier> {
+    if !model_id.eq_ignore_ascii_case(STRONG_MODEL) {
+        return None;
+    }
+    Some(classify_dispatch(task))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +292,94 @@ mod tests {
         // A long message that merely starts with "ok" is not a confirmation.
         let h = [user("ok so here is the detailed plan for the whole refactor ...")];
         assert_eq!(route_step(&h, STRONG_MODEL), STRONG_MODEL);
+    }
+
+    // ---- sub-agent dispatch tiering (classify_dispatch / force_cheap_router /
+    // dispatch_tier_for) ----
+
+    #[test]
+    fn classify_explicit_grunt_task_is_cheap_only() {
+        assert!(matches!(
+            classify_dispatch("search the repo for callers of model_router"),
+            DispatchTier::CheapOnly
+        ));
+        assert!(matches!(
+            classify_dispatch("读取 src 下所有 toml 文件并列出依赖"),
+            DispatchTier::CheapOnly
+        ));
+    }
+
+    #[test]
+    fn classify_reasoning_task_is_routed() {
+        // POWERFUL_HINTS keyword → needs to think → Routed.
+        assert!(matches!(
+            classify_dispatch("重构 dispatch 模块,拆出独立分类器"),
+            DispatchTier::Routed
+        ));
+        assert!(matches!(
+            classify_dispatch("analyze why the sub-agent 400s on deepseek"),
+            DispatchTier::Routed
+        ));
+    }
+
+    #[test]
+    fn classify_reasoning_beats_grunt_when_both_present() {
+        // "analyze the search results" is reasoning, not grunt — the powerful
+        // hint wins so the child keeps its reasoning capability.
+        assert!(matches!(
+            classify_dispatch("analyze the search results and refactor"),
+            DispatchTier::Routed
+        ));
+    }
+
+    #[test]
+    fn classify_ambiguous_defaults_to_routed_not_cheap() {
+        // A task with NEITHER a grunt word nor a reasoning word must NOT be
+        // silently downgraded — defaulting to Routed preserves reasoning while
+        // route_step still sends the labor turns cheap.
+        assert!(matches!(
+            classify_dispatch("把这个子任务处理一下"),
+            DispatchTier::Routed
+        ));
+    }
+
+    #[test]
+    fn force_cheap_router_returns_cheap_for_flagship_base() {
+        assert_eq!(force_cheap_router(&[], STRONG_MODEL), CHEAP_MODEL);
+        // History is ignored — grunt work means every turn is cheap.
+        assert_eq!(force_cheap_router(&[user("plan the refactor")], STRONG_MODEL), CHEAP_MODEL);
+    }
+
+    #[test]
+    fn force_cheap_router_passes_through_non_flagship_base() {
+        // glm-5.2 (user's explicit pick) and foreign models are returned
+        // unchanged — symmetric with route_step's base guard, so attaching the
+        // router to a non-tierable child is a harmless no-op.
+        assert_eq!(force_cheap_router(&[], "glm-5.2"), "glm-5.2");
+        assert_eq!(force_cheap_router(&[], "claude-opus-4"), "claude-opus-4");
+        assert_eq!(force_cheap_router(&[], "deepseek-v4-flash"), "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn dispatch_tier_for_non_flagship_model_is_none() {
+        // Non-tierable models → no router attached (the child runs uniformly).
+        // Covers the foreign-endpoint-400 trap: a deepseek/claude child must
+        // never receive a GLM id via a router.
+        assert!(dispatch_tier_for("glm-5.2", "搜索文件").is_none());
+        assert!(dispatch_tier_for("claude-opus-4", "搜索文件").is_none());
+        assert!(dispatch_tier_for("deepseek-v4-flash", "analyze the bug").is_none());
+    }
+
+    #[test]
+    fn dispatch_tier_for_flagship_routes_by_task_type() {
+        // glm-4.6 flagship → tier by task. Grunt → CheapOnly, reasoning → Routed.
+        assert!(matches!(
+            dispatch_tier_for(STRONG_MODEL, "grep for callers"),
+            Some(DispatchTier::CheapOnly)
+        ));
+        assert!(matches!(
+            dispatch_tier_for(STRONG_MODEL, "重构这个模块"),
+            Some(DispatchTier::Routed)
+        ));
     }
 }
