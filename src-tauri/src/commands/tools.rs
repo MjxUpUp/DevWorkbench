@@ -42,12 +42,14 @@ pub(crate) fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
 ///   2. custom 参数（预留：未来从 settings DB 列读；当前调用方传 None）
 ///   3. %ProgramFiles%\Git\bin\bash.exe
 ///   4. %ProgramFiles(x86)%\Git\bin\bash.exe
-///   5. which::which("bash.exe")（PATH 上任意 bash）
+///   5. PATH 上首个非 WSL 的 bash.exe（which_all 遍历，跳过 System32\bash.exe）
 ///
 /// 每步用 `.exists()` 校验；全部失败返回 None。**不降级到 cmd**——由调用方
 /// 决定 None 的处理（BashTool 返回 Err 带安装指引，终端启动器报错）。
 /// 之前 BashTool 用 cmd /C 导致 agent 发的 Unix 命令（ls/find）失败、盲切
 /// 语法死循环烧光步数预算（回归 70e762f7），锁 git-bash 从源头消除该问题。
+/// 兜底（第 5 步）会跳过 WSL 的 bash.exe——它在路径风格/用户态上与 git-bash
+/// 不一致，静默采用会让 agent 的 bash 工具跑进 WSL（见 looks_like_wsl_bash）。
 #[cfg(target_os = "windows")]
 pub fn resolve_git_bash(custom: Option<&str>) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
@@ -67,7 +69,41 @@ pub fn resolve_git_bash(custom: Option<&str>) -> Option<std::path::PathBuf> {
             return Some(c);
         }
     }
-    which::which("bash.exe").ok()
+    // 遍历 PATH 上所有 bash.exe，跳过 WSL 入口（<SystemRoot>\System32\bash.exe）。
+    // 装了 WSL 的机器 System32 在 PATH 最前，旧实现用 which::which 只取首个会
+    // 恒命中 WSL 的 bash.exe，被静默当 git-bash 采用——agent 的 bash 工具就跑
+    // 进了 WSL（pwd=/mnt/e/...、Linux 用户态）而非 MINGW git-bash（pwd=/e/...）。
+    // 两者路径风格/工具链不一致会持续扰动 agent；故遍历找首个非 WSL 的，找不到
+    // 就返回 None（上层 BashTool 报"git-bash 未找到"带安装指引），不静默采用
+    // WSL。手动 split_paths 而非 which_all，绕开 which 各版本迭代器 item 类型
+    // 差异（PathBuf vs Result<PathBuf>），显式控制跳过逻辑。
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join("bash.exe");
+            if cand.exists() && !looks_like_wsl_bash(&cand) {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// 判断 bash.exe 路径是否为 WSL 安装入口（而非 MINGW git-bash）。WSL 在
+/// <SystemRoot>\System32\bash.exe 放入口；git-bash 永不落此。优先精确比对
+/// SystemRoot 环境变量，再退到路径启发式（小写 + 斜杠统一），兜住非标准
+/// SystemRoot 的 WSL 安装。
+#[cfg(target_os = "windows")]
+fn looks_like_wsl_bash(path: &std::path::Path) -> bool {
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('/', r"\").to_ascii_lowercase();
+    if let Some(sr) = std::env::var_os("SystemRoot") {
+        let wsl = std::path::PathBuf::from(sr)
+            .join("System32")
+            .join("bash.exe");
+        if norm(path) == norm(&wsl) {
+            return true;
+        }
+    }
+    norm(path).ends_with(r"\system32\bash.exe")
 }
 
 /// Unix 永远用原生 sh（见 BashTool / terminal.rs 的非 Windows 分支），此函数
@@ -208,5 +244,31 @@ mod tests {
             got.map(|p| p.to_string_lossy().to_string()),
             Some(bogus.to_string())
         );
+    }
+
+    #[test]
+    fn looks_like_wsl_bash_detects_system32_entry() {
+        // 标准 WSL 入口（大小写/盘符/正反斜杠变体都要命中）。
+        assert!(looks_like_wsl_bash(std::path::Path::new(
+            r"C:\Windows\System32\bash.exe"
+        )));
+        assert!(looks_like_wsl_bash(std::path::Path::new(
+            r"c:\windows\system32\bash.exe"
+        )));
+        assert!(looks_like_wsl_bash(std::path::Path::new(
+            r"C:/Windows/System32/bash.exe"
+        )));
+    }
+
+    #[test]
+    fn looks_like_wsl_bash_rejects_git_bash_locations() {
+        // 真 MINGW git-bash（标准位 + 便携位）绝不能被误判为 WSL——否则兜底
+        // 会把用户真正想用的 git-bash 也跳过。
+        assert!(!looks_like_wsl_bash(std::path::Path::new(
+            r"C:\Program Files\Git\bin\bash.exe"
+        )));
+        assert!(!looks_like_wsl_bash(std::path::Path::new(
+            r"D:\tools\PortableGit\bin\bash.exe"
+        )));
     }
 }
