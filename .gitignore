@@ -47,3 +47,7 @@ _cleanup_orphans.js
 # Product docs live outside the repo per AGENTS.md rule (commits = code only)
 doc-v1-full.xml
 e2e-test-plan.md
+
+# Design process snapshot pages (moved out of public/ — must NOT ship in the
+# installer; kept locally as design archive only)
+design-archive/
