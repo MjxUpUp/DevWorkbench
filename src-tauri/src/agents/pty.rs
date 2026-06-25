@@ -87,23 +87,47 @@ impl AgentProcesses {
             // matches `Some(TrackedProcess::Pipe(pid))` with no other arm), so
             // this destructures unconditionally.
             let TrackedProcess::Pipe(pid) = tracked;
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                    .output();
+            // Best-effort: on exit the process may already be gone, so a
+            // non-zero kill status is expected. Distinguish success from
+            // failure in the log rather than claiming "killed" unconditionally
+            // — an honest warn when the signal didn't land helps diagnose
+            // orphaned-process leaks instead of masking them.
+            if kill_orphan(*pid) {
+                log::info!("[agent-processes] killed orphan on exit: {sid} (pid {pid})");
+            } else {
+                log::warn!(
+                    "[agent-processes] failed to kill orphan on exit: {sid} (pid {pid}) — likely already exited"
+                );
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .output();
-            }
-            log::info!("[agent-processes] killed orphan on exit: {sid} (pid {pid})");
         }
     }
+}
+
+/// Signal an agent/orphan process to terminate. Returns whether the kill
+/// command ran AND reported success. Best-effort: the target may already be
+/// gone, in which case the OS reports a non-zero status (callers log a warn,
+/// not a spurious "killed"). `CREATE_NO_WINDOW` avoids a flashing console on
+/// Windows; `-TERM` gives the child a chance to clean up on Unix. Shared by
+/// `kill_all` (exit cleanup) and `stop_agent` (user-initiated stop) so the
+/// two stay in sync instead of duplicating the platform branches.
+#[cfg(target_os = "windows")]
+fn kill_orphan(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_orphan(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,7 +1785,11 @@ pub(crate) fn track_test_pipe(procs: &Arc<AgentProcesses>, sid: &str, pid: u32) 
 
 #[cfg(test)]
 pub(crate) fn is_tracked(procs: &Arc<AgentProcesses>, sid: &str) -> bool {
-    procs.processes.lock().map(|m| m.contains_key(sid)).unwrap_or(false)
+    procs
+        .processes
+        .lock()
+        .map(|m| m.contains_key(sid))
+        .unwrap_or(false)
 }
 
 /// Stop a running agent session.
@@ -1776,19 +1804,12 @@ pub fn stop_agent(processes: &Arc<AgentProcesses>, session_id: &str) -> Result<(
 
     match tracked {
         Some(TrackedProcess::Pipe(pid)) => {
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                    .output();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .output();
+            // Reuses kill_all's helper. Best-effort: the agent may have already
+            // exited; a warn (not a silent `let _ =`) keeps stop failures visible.
+            if !kill_orphan(pid) {
+                log::warn!(
+                    "[agent-processes] failed to kill session {session_id} (pid {pid}) — likely already exited"
+                );
             }
         }
         None => {}
@@ -3001,8 +3022,14 @@ mod tests {
     #[test]
     fn extract_pty_usage_non_result_and_malformed_return_none() {
         // assistant / system / user lines and malformed JSON carry no usage.
-        assert_eq!(extract_pty_usage(r#"{"type":"assistant","message":{"content":[]}}"#), None);
-        assert_eq!(extract_pty_usage(r#"{"type":"system","subtype":"init"}"#), None);
+        assert_eq!(
+            extract_pty_usage(r#"{"type":"assistant","message":{"content":[]}}"#),
+            None
+        );
+        assert_eq!(
+            extract_pty_usage(r#"{"type":"system","subtype":"init"}"#),
+            None
+        );
         assert_eq!(extract_pty_usage("not json"), None);
         assert_eq!(extract_pty_usage(""), None);
     }
@@ -3022,7 +3049,14 @@ mod tests {
         // (cline claude-code.ts:177: input_tokens recorded verbatim incl. cache.)
         let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
         let usage = extract_pty_usage(line).expect("explicit zeros are still Some");
-        assert_eq!(usage, PtyUsage { input_tokens: 0, output_tokens: 0, cost_usd: None });
+        assert_eq!(
+            usage,
+            PtyUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None
+            }
+        );
         // The guard the reader applies:
         let bookable = usage.input_tokens > 0
             || usage.output_tokens > 0

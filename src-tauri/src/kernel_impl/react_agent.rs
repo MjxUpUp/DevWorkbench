@@ -415,7 +415,7 @@ impl ChatModel for GlmChatModel {
                 }
             } else if let Some(cb) = &self.circuit {
                 // Non-failover 4xx (caller error) is neither success nor an
-                // upstream failure: release the HalfOpen probe slot on_attempt
+                // upstream failure: release the HalfOpen probe slot try_admit
                 // took. Without this, under half_open_max=1 a single 400 during
                 // the probe wedges the circuit in HalfOpen (record_success is
                 // skipped by the early return below, so half_open_inflight leaks).

@@ -1,9 +1,9 @@
 //! Upstream circuit breaker — protects against cascading failures when the GLM
 //! endpoint (or any model gateway) starts failing. Ported 1:1 from AgentFare's
 //! `packages/hook/src/failover.ts`, adapted to Rust's thread model: the TS
-//! single-threaded `Map` becomes a `Mutex<HashMap>`, and the allow→attempt→
-//! record sequence stays coherent because each decision holds the lock for its
-//! whole critical section.
+//! single-threaded `Map` becomes a `Mutex<HashMap>`, and the admit→record
+//! sequence stays coherent because each decision holds the lock for its whole
+//! critical section.
 //!
 //! Per-host state machine: `Closed` (normal) → `Open` (tripped, fast-fail) after
 //! `failure_threshold` consecutive failures → `HalfOpen` (one probe allowed
@@ -103,51 +103,18 @@ impl CircuitBreaker {
         }
     }
 
-    /// Gate check: may a request to `host` proceed? `Closed` → yes; `HalfOpen`
-    /// → yes only while inflight probes are under the cap; `Open` past cooldown
-    /// → flip to `HalfOpen` and allow one probe; `Open` inside cooldown → no.
-    pub fn allow_request(&self, host: &str) -> bool {
-        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
-        match c.state {
-            CircuitState::Closed => true,
-            CircuitState::HalfOpen => c.half_open_inflight < self.config.half_open_max,
-            CircuitState::Open => {
-                if c.opened_at.elapsed() >= self.config.cooldown {
-                    c.state = CircuitState::HalfOpen;
-                    c.half_open_inflight = 0;
-                    true
-                } else {
-                    false
-                }
-            }
-        }
-    }
-
-    /// Must be called AFTER `allow_request` returns true and BEFORE issuing the
-    /// request, so HalfOpen probe accounting is correct (a probe that was
-    /// admitted must be counted as inflight until it resolves).
-    pub fn on_attempt(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(c) = hosts.get_mut(host) {
-            if c.state == CircuitState::HalfOpen {
-                c.half_open_inflight += 1;
-            }
-        }
-    }
-
-    /// Atomic "admit + count" in ONE lock — replaces the TOCTOU-prone
-    /// `allow_request` + `on_attempt` pair (F1). The HalfOpen `inflight < cap`
+    /// Atomic "admit + count" in ONE lock (F1). The HalfOpen `inflight < cap`
     /// check and the `inflight += 1` increment share a single critical section,
-    /// so two concurrent probes can no longer both observe `0 < 1` and both
-    /// increment (which the two-lock pair allowed). Closed admits freely (no
-    /// inflight accounting, matching the original); Open past cooldown flips to
-    /// HalfOpen and counts itself as the first probe. Production callers should
-    /// use this instead of the separate gate+count dance.
+    /// so two concurrent probes can never both observe `0 < 1` and both
+    /// increment. Closed admits freely (no inflight accounting); Open past
+    /// cooldown flips to HalfOpen and counts itself as the first probe. This is
+    /// the only gate the production request path uses.
     #[must_use]
     pub fn try_admit(&self, host: &str) -> bool {
         let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
+        let c = hosts
+            .entry(host.to_string())
+            .or_insert_with(HostCircuit::fresh);
         match c.state {
             CircuitState::Closed => true,
             CircuitState::HalfOpen => {
@@ -187,7 +154,9 @@ impl CircuitBreaker {
     /// the threshold; Open stays Open (clock untouched).
     pub fn record_failure(&self, host: &str) {
         let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
+        let c = hosts
+            .entry(host.to_string())
+            .or_insert_with(HostCircuit::fresh);
         match c.state {
             CircuitState::HalfOpen => {
                 c.state = CircuitState::Open;
@@ -208,7 +177,7 @@ impl CircuitBreaker {
     /// Record a probe outcome that is neither a success nor an upstream
     /// failure — a non-failover 4xx (caller error: bad request shape, a 401 on
     /// one call, etc.). The probe slot it occupied in HalfOpen must be released
-    /// (`on_attempt` incremented `half_open_inflight`), but the outcome carries
+    /// (`try_admit` incremented `half_open_inflight`), but the outcome carries
     /// no signal about upstream health, so the state is left in HalfOpen rather
     /// than collapsing to Closed (a 400 doesn't prove recovery) or tripping to
     /// Open (a 400 isn't an upstream failure). Without this, a single 400 during
@@ -262,13 +231,12 @@ mod tests {
         let cb = CircuitBreaker::new(fast(3));
         let host = "glm";
         for _ in 0..3 {
-            assert!(cb.allow_request(host), "should admit while closed");
-            cb.on_attempt(host);
+            assert!(cb.try_admit(host), "should admit while closed");
             cb.record_failure(host);
         }
         assert_eq!(cb.state(host), CircuitState::Open);
         // Open inside cooldown → blocked.
-        assert!(!cb.allow_request(host));
+        assert!(!cb.try_admit(host));
     }
 
     #[test]
@@ -326,12 +294,11 @@ mod tests {
         cb.record_failure("h");
         assert_eq!(cb.state("h"), CircuitState::Open);
         std::thread::sleep(Duration::from_millis(20));
-        // Past cooldown → flip to HalfOpen, allow the single probe.
-        assert!(cb.allow_request("h"));
-        cb.on_attempt("h");
+        // Past cooldown → flip to HalfOpen, admit + count the single probe.
+        assert!(cb.try_admit("h"));
         assert_eq!(cb.state("h"), CircuitState::HalfOpen);
         // A second probe while one is inflight is blocked.
-        assert!(!cb.allow_request("h"));
+        assert!(!cb.try_admit("h"));
     }
 
     #[test]
@@ -343,8 +310,7 @@ mod tests {
         });
         cb.record_failure("h");
         std::thread::sleep(Duration::from_millis(20));
-        assert!(cb.allow_request("h"));
-        cb.on_attempt("h");
+        assert!(cb.try_admit("h"));
         cb.record_success("h");
         assert_eq!(cb.state("h"), CircuitState::Closed);
     }
@@ -352,7 +318,7 @@ mod tests {
     #[test]
     fn non_failover_4xx_in_half_open_releases_probe_slot() {
         // Regression: a non-failover 4xx (e.g. 400) during a HalfOpen probe used
-        // to leak the probe slot — on_attempt incremented half_open_inflight but
+        // to leak the probe slot — try_admit incremented half_open_inflight but
         // neither record_success nor record_failure ran, so under half_open_max=1
         // the circuit wedged in HalfOpen forever (no probe re-admitted, no path
         // back to Open). record_probe_inconclusive releases the slot.
@@ -363,15 +329,14 @@ mod tests {
         });
         cb.record_failure("h");
         std::thread::sleep(Duration::from_millis(20));
-        assert!(cb.allow_request("h")); // Open → HalfOpen, probe admitted
-        cb.on_attempt("h"); // half_open_inflight = 1
+        assert!(cb.try_admit("h")); // Open → HalfOpen, probe admitted + counted
         assert_eq!(cb.state("h"), CircuitState::HalfOpen);
-        assert!(!cb.allow_request("h"), "slot occupied: second probe blocked");
+        assert!(!cb.try_admit("h"), "slot occupied: second probe blocked");
         // 400 is a caller error, not an upstream failure:
         assert!(!should_failover(Some(400), false));
         cb.record_probe_inconclusive("h");
         // Slot freed, still HalfOpen → a follow-up probe is admitted (not wedged).
-        assert!(cb.allow_request("h"), "probe slot must be released, not leaked");
+        assert!(cb.try_admit("h"), "probe slot must be released, not leaked");
         assert_eq!(cb.state("h"), CircuitState::HalfOpen);
     }
 
@@ -384,8 +349,7 @@ mod tests {
         });
         cb.record_failure("h");
         std::thread::sleep(Duration::from_millis(20));
-        assert!(cb.allow_request("h"));
-        cb.on_attempt("h");
+        assert!(cb.try_admit("h"));
         cb.record_failure("h");
         assert_eq!(cb.state("h"), CircuitState::Open);
     }
@@ -418,6 +382,6 @@ mod tests {
         cb.record_failure("a");
         assert_eq!(cb.state("a"), CircuitState::Open);
         assert_eq!(cb.state("b"), CircuitState::Closed);
-        assert!(cb.allow_request("b"));
+        assert!(cb.try_admit("b"));
     }
 }
