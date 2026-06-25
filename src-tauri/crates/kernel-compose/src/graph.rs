@@ -438,7 +438,11 @@ impl CompiledGraph {
             adj.entry(&e.from).or_default().push(&e.to);
             *indeg.get_mut(&e.to).unwrap() += 1;
         }
-        let mut queue: Vec<&NodeId> = indeg.iter().filter(|(_, &d)| d == 0).map(|(n, _)| *n).collect();
+        let mut queue: Vec<&NodeId> = indeg
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(n, _)| *n)
+            .collect();
         let mut visited = 0usize;
         while let Some(n) = queue.pop() {
             visited += 1;
@@ -546,7 +550,13 @@ mod tests {
 
     fn linear_graph() -> Graph {
         GraphBuilder::new()
-            .node("p", Node::Prompt(PromptNode { text: "hi".into(), vars: HashMap::new() }))
+            .node(
+                "p",
+                Node::Prompt(PromptNode {
+                    text: "hi".into(),
+                    vars: HashMap::new(),
+                }),
+            )
             .node("e", Node::Merge(MergeNode::default()))
             .edge("p", "e")
             .start("p")
@@ -582,8 +592,18 @@ mod tests {
                 ("b".to_string(), Node::Merge(MergeNode::default())),
             ]),
             edges: vec![
-                Edge { from: "a".into(), to: "b".into(), kind: EdgeKind::Normal, when: None },
-                Edge { from: "b".into(), to: "a".into(), kind: EdgeKind::Normal, when: None },
+                Edge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    kind: EdgeKind::Normal,
+                    when: None,
+                },
+                Edge {
+                    from: "b".into(),
+                    to: "a".into(),
+                    kind: EdgeKind::Normal,
+                    when: None,
+                },
             ],
             start: "a".into(),
             end: "b".into(),
@@ -602,8 +622,18 @@ mod tests {
                 ("b".to_string(), Node::Merge(MergeNode::default())),
             ]),
             edges: vec![
-                Edge { from: "a".into(), to: "b".into(), kind: EdgeKind::Normal, when: None },
-                Edge { from: "b".into(), to: "a".into(), kind: EdgeKind::Normal, when: None },
+                Edge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    kind: EdgeKind::Normal,
+                    when: None,
+                },
+                Edge {
+                    from: "b".into(),
+                    to: "a".into(),
+                    kind: EdgeKind::Normal,
+                    when: None,
+                },
             ],
             start: "a".into(),
             end: "b".into(),
@@ -625,7 +655,10 @@ mod tests {
         };
         let err = CompiledGraph::new(g).unwrap_err();
         assert!(err.contains("loop body"), "loop body error prefix: {err}");
-        assert!(err.contains("cycle"), "cycle in body must be reported: {err}");
+        assert!(
+            err.contains("cycle"),
+            "cycle in body must be reported: {err}"
+        );
     }
 
     /// Loop / Selector / Interrupt nodes parse from YAML via the serde `type`
@@ -681,13 +714,104 @@ nodes:
             "start": "start",
             "end": "report"
         });
-        let g: Graph = serde_json::from_value(json)
-            .expect("tool-description example must deserialize");
-        let compiled = g.compile()
-            .expect("tool-description example must compile");
+        let g: Graph =
+            serde_json::from_value(json).expect("tool-description example must deserialize");
+        let compiled = g.compile().expect("tool-description example must compile");
         // Spot-check parsed node types so a silent schema change is caught.
-        assert!(matches!(compiled.graph.nodes["w1"], Node::Agent(_)), "w1 is Agent");
-        assert!(matches!(compiled.graph.nodes["start"], Node::Prompt(_)), "start is Prompt");
-        assert!(matches!(compiled.graph.nodes["gather"], Node::Merge(_)), "gather is Merge");
+        assert!(
+            matches!(compiled.graph.nodes["w1"], Node::Agent(_)),
+            "w1 is Agent"
+        );
+        assert!(
+            matches!(compiled.graph.nodes["start"], Node::Prompt(_)),
+            "start is Prompt"
+        );
+        assert!(
+            matches!(compiled.graph.nodes["gather"], Node::Merge(_)),
+            "gather is Merge"
+        );
+    }
+
+    /// Wrap a single node as a minimal single-node graph (start == end == "n").
+    fn single_node_graph(node: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"nodes": {"n": node}, "edges": [], "start": "n", "end": "n"})
+    }
+
+    /// The `run_workflow_graph` tool description marks some fields 【必需】
+    /// (prompt.text, agent.agent, gate.gate, transform.op, branch.condition,
+    /// loop.body). Missing one MUST fail deserialization — this locks the
+    /// "description-claimed required ↔ struct-actually-required" contract, so a
+    /// future struct change that silently defaults a field (or a description
+    /// that mis-claims required) is caught. prompt.text / agent.agent are
+    /// already exercised by `fanout_example_shape_parses_and_compiles`; this
+    /// covers gate / transform / branch / loop. Regression for the c9a5eeb7
+    /// session where glm-5.2 omitted `text`/`agent` and the graph rejected 3×.
+    #[test]
+    fn required_fields_missing_cause_deserialize_error() {
+        let cases: &[(&str, serde_json::Value)] = &[
+            ("gate 缺 gate", serde_json::json!({"type": "gate"})),
+            ("transform 缺 op", serde_json::json!({"type": "transform"})),
+            ("branch 缺 condition", serde_json::json!({"type": "branch"})),
+            (
+                "loop 缺 body",
+                serde_json::json!({"type": "loop", "over": "items"}),
+            ),
+        ];
+        for (label, node) in cases {
+            let g: Result<Graph, _> = serde_json::from_value(single_node_graph(node.clone()));
+            let err = g.expect_err(&format!("{label}: 缺必需字段应反序列化失败"));
+            assert!(
+                err.to_string().contains("missing field"),
+                "{label}: 期望 missing field 错误，实际: {err}"
+            );
+        }
+    }
+
+    /// Symmetric counterpart: with required fields present, each node type
+    /// parses AND compiles, with the correct Node variant. Proves the field
+    /// names/shapes the description tells the orchestrator to use are real.
+    #[test]
+    fn required_fields_present_parse_and_compile() {
+        let g: Graph = serde_json::from_value(single_node_graph(serde_json::json!(
+            {"type": "gate", "gate": "compile"}
+        )))
+        .unwrap();
+        assert!(
+            matches!(g.compile().unwrap().graph.nodes["n"], Node::Gate(_)),
+            "gate parses+compiles"
+        );
+
+        let g: Graph = serde_json::from_value(single_node_graph(serde_json::json!(
+            {"type": "transform", "op": {"extract": "output.summary"}}
+        )))
+        .unwrap();
+        assert!(
+            matches!(g.compile().unwrap().graph.nodes["n"], Node::Transform(_)),
+            "transform parses+compiles"
+        );
+
+        let g: Graph = serde_json::from_value(single_node_graph(serde_json::json!(
+            {"type": "branch", "condition": "lang==zh"}
+        )))
+        .unwrap();
+        assert!(
+            matches!(g.compile().unwrap().graph.nodes["n"], Node::Branch(_)),
+            "branch parses+compiles"
+        );
+
+        let g: Graph = serde_json::from_value(single_node_graph(serde_json::json!({
+            "type": "loop",
+            "body": {
+                "nodes": {"s": {"type": "prompt", "text": "处理一个元素"}},
+                "edges": [],
+                "start": "s",
+                "end": "s"
+            }
+        })))
+        .unwrap();
+        assert!(
+            matches!(g.compile().unwrap().graph.nodes["n"], Node::Loop(_)),
+            "loop parses+compiles"
+        );
     }
 }
