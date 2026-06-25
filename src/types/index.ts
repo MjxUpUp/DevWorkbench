@@ -91,7 +91,7 @@ export type AgentType =
   | 'pi'
   | 'react_kernel';
 
-export type SessionStatus = 'running' | 'completed' | 'failed';
+export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface AgentInfo {
   agentType: AgentType;

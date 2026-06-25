@@ -343,7 +343,11 @@ async fn drive_prompt_turn(
 
     use futures::StreamExt;
     let mut bridge = EventBridge::new();
-    let mut outcome_status = AgentRunStatus::Completed;
+    // Default to Failed so a stream that ends WITHOUT a `Done` event (upstream
+    // error / panic / disconnect — the `Err` arm below only logs + sends a text
+    // chunk, never setting outcome_status) maps to Refusal, not a false EndTurn.
+    // Only a real `Done(outcome)` overrides this with the kernel's true status.
+    let mut outcome_status = AgentRunStatus::Failed;
     while let Some(ev) = events.next().await {
         match ev {
             Ok(AgentEvent::Done(outcome)) => {

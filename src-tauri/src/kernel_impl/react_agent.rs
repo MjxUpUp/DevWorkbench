@@ -363,13 +363,12 @@ impl ChatModel for GlmChatModel {
         let model = opts.model.clone().unwrap_or_else(|| self.model.clone());
         // Circuit breaker: gate the call and record the outcome.
         if let Some(cb) = &self.circuit {
-            if !cb.allow_request(&self.base_url) {
+            if !cb.try_admit(&self.base_url) {
                 return Err(Error::Model(format!(
                     "upstream circuit open: {}",
                     self.base_url
                 )));
             }
-            cb.on_attempt(&self.base_url);
         }
         let body = self.build_body(&model, messages, opts, false);
         let req_body = truncate(&body.to_string(), 32_000);
@@ -504,10 +503,9 @@ impl ChatModel for GlmChatModel {
             let model_name = opts.model.clone().unwrap_or_else(|| model_clone.model.clone());
             // Circuit breaker gate.
             if let Some(cb) = &model_clone.circuit {
-                if !cb.allow_request(&model_clone.base_url) {
+                if !cb.try_admit(&model_clone.base_url) {
                     Err(Error::Model(format!("upstream circuit open: {}", model_clone.base_url)))?;
                 }
-                cb.on_attempt(&model_clone.base_url);
             }
             let body = model_clone.build_body(&model_name, &messages, &opts, true);
             let req_body = truncate(&body.to_string(), 32_000);

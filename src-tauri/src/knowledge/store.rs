@@ -142,6 +142,16 @@ pub fn build_session_reflection_entry(
     }
 }
 
+/// Wrap a raw user query as an FTS5 phrase so bare `"`, `*`, `(`, `)`, `OR`,
+/// `NOT` aren't parsed as operators — they'd raise `fts5: syntax error` and
+/// fail the whole knowledge search (F8). Doubling internal `"` is the phrase
+/// escape. Phrase match is slightly less flexible than a tokenized OR query,
+/// but never crashes on odd input.
+fn sanitize_fts_query(query: &str) -> String {
+    let escaped = query.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
 /// Search knowledge entries using FTS5 full-text search.
 pub fn search_entries(
     conn: &rusqlite::Connection,
@@ -157,7 +167,8 @@ pub fn search_entries(
          LIMIT ?2",
     )?;
 
-    let entries = stmt.query_map(params![query, limit as i64], row_to_entry)?;
+    let safe = sanitize_fts_query(query);
+    let entries = stmt.query_map(params![&safe, limit as i64], row_to_entry)?;
     let mut result = Vec::new();
     for e in entries {
         result.push(e?);
@@ -185,8 +196,9 @@ pub fn search_entries_for_project(
          LIMIT ?4",
     )?;
 
+    let safe = sanitize_fts_query(fts_query);
     let entries = stmt.query_map(
-        params![fts_query, project_hash, confidence_min, limit as i64],
+        params![&safe, project_hash, confidence_min, limit as i64],
         row_to_entry,
     )?;
     let mut result = Vec::new();
@@ -215,9 +227,10 @@ pub fn search_entries_cross_project(
          LIMIT ?4",
     )?;
 
+    let safe = sanitize_fts_query(fts_query);
     let entries = stmt.query_map(
         params![
-            fts_query,
+            &safe,
             exclude_project_hash,
             confidence_min,
             limit as i64
@@ -371,6 +384,18 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::models::AgentType;
+
+    #[test]
+    fn sanitize_fts_query_wraps_as_phrase_and_escapes_quotes() {
+        // F8: bare special chars (`"`/`*`/`(`/`)`/`OR`/`NOT`) would raise
+        // `fts5: syntax error` and fail the whole knowledge search. Phrase
+        // wrapping neutralizes operators; internal `"` is doubled per FTS5's
+        // phrase escape rule.
+        assert_eq!(sanitize_fts_query("rust async"), "\"rust async\"");
+        assert_eq!(sanitize_fts_query("c++ (templates)"), "\"c++ (templates)\"");
+        assert_eq!(sanitize_fts_query("a \"b\" c"), "\"a \"\"b\"\" c\"");
+        assert_eq!(sanitize_fts_query(""), "\"\"");
+    }
 
     struct TempDb {
         _tmp: tempfile::TempDir,

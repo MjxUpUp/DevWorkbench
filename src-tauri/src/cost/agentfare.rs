@@ -158,6 +158,19 @@ pub fn load_budget_settings(conn: &Connection) -> Result<BudgetSettings, AppErro
     }
 }
 
+/// Clamp `alert_threshold` into a sane `[0.1, 1.0]` band. NaN/inf/negative
+/// would otherwise either trip the alert forever (0/negative → `cost >= budget*0`
+/// is always true) or never fire (`>=1` always false; NaN makes every `>=`
+/// comparison false) — silently disabling the alert (F9). Falls back to 0.8
+/// (the schema default) when the stored value isn't finite.
+fn normalize_alert_threshold(raw: f64) -> f64 {
+    if raw.is_finite() {
+        raw.clamp(0.1, 1.0)
+    } else {
+        0.8
+    }
+}
+
 /// Save budget settings.
 pub fn save_budget_settings(conn: &Connection, settings: &BudgetSettings) -> Result<(), AppError> {
     conn.execute(
@@ -165,7 +178,7 @@ pub fn save_budget_settings(conn: &Connection, settings: &BudgetSettings) -> Res
          VALUES (1, ?1, ?2, ?3)",
         rusqlite::params![
             settings.monthly_budget_usd,
-            settings.alert_threshold,
+            normalize_alert_threshold(settings.alert_threshold),
             chrono::Utc::now().to_rfc3339(),
         ],
     )?;
@@ -186,7 +199,7 @@ pub fn check_budget_alert(conn: &Connection) -> Result<bool, AppError> {
         |row| row.get(0),
     )?;
 
-    Ok(month_cost >= budget * settings.alert_threshold)
+    Ok(month_cost >= budget * normalize_alert_threshold(settings.alert_threshold))
 }
 
 /// Month-to-date spend (USD). The window is `start of month` to now, matching
@@ -218,6 +231,19 @@ pub fn is_budget_exhausted(conn: &Connection) -> Result<bool, AppError> {
 mod tests {
     use super::*;
     use crate::models::CostRecord;
+
+    #[test]
+    fn normalize_alert_threshold_clamps_and_handles_nan() {
+        // F9: NaN/inf/out-of-band thresholds silently disabled the alert
+        // (0/negative → trip forever; NaN/inf → `>=` always false → never fire).
+        assert_eq!(normalize_alert_threshold(0.8), 0.8);
+        assert_eq!(normalize_alert_threshold(0.05), 0.1, "clamps up to 0.1");
+        assert_eq!(normalize_alert_threshold(1.5), 1.0, "clamps down to 1.0");
+        assert_eq!(normalize_alert_threshold(0.0), 0.1, "0 → 0.1 (was: trip forever)");
+        assert_eq!(normalize_alert_threshold(-0.5), 0.1, "negative → 0.1");
+        assert_eq!(normalize_alert_threshold(f64::NAN), 0.8, "NaN → default 0.8");
+        assert_eq!(normalize_alert_threshold(f64::INFINITY), 0.8, "inf → default 0.8");
+    }
 
     /// In-memory DB with the cost_records table applied — so insert_cost_record
     /// runs against the real table definition. Mirrors the DDL in db.rs SCHEMA;

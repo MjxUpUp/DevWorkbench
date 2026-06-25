@@ -136,6 +136,40 @@ impl CircuitBreaker {
         }
     }
 
+    /// Atomic "admit + count" in ONE lock — replaces the TOCTOU-prone
+    /// `allow_request` + `on_attempt` pair (F1). The HalfOpen `inflight < cap`
+    /// check and the `inflight += 1` increment share a single critical section,
+    /// so two concurrent probes can no longer both observe `0 < 1` and both
+    /// increment (which the two-lock pair allowed). Closed admits freely (no
+    /// inflight accounting, matching the original); Open past cooldown flips to
+    /// HalfOpen and counts itself as the first probe. Production callers should
+    /// use this instead of the separate gate+count dance.
+    #[must_use]
+    pub fn try_admit(&self, host: &str) -> bool {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let c = hosts.entry(host.to_string()).or_insert_with(HostCircuit::fresh);
+        match c.state {
+            CircuitState::Closed => true,
+            CircuitState::HalfOpen => {
+                if c.half_open_inflight < self.config.half_open_max {
+                    c.half_open_inflight += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            CircuitState::Open => {
+                if c.opened_at.elapsed() >= self.config.cooldown {
+                    c.state = CircuitState::HalfOpen;
+                    c.half_open_inflight = 1;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Record a successful request: any state collapses back to `Closed`,
     /// clearing failures and inflight probes. A HalfOpen probe succeeding is
     /// the signal that the upstream has recovered.
@@ -235,6 +269,30 @@ mod tests {
         assert_eq!(cb.state(host), CircuitState::Open);
         // Open inside cooldown → blocked.
         assert!(!cb.allow_request(host));
+    }
+
+    #[test]
+    fn try_admit_counts_atomically_so_halfopen_second_probe_is_blocked() {
+        // F1 regression: try_admit must judge + count under one lock. With
+        // half_open_max=1, the first HalfOpen probe is admitted and counted;
+        // the second must be rejected because inflight is already at the cap.
+        // The old allow_request + on_attempt pair took the lock twice, so two
+        // concurrent probes could both pass the `0 < 1` check before either
+        // incremented. Single-threaded here verifies the counting contract;
+        // concurrency safety is "one lock" by construction.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            cooldown: Duration::from_millis(10),
+            half_open_max: 1,
+        });
+        cb.record_failure("h");
+        assert_eq!(cb.state("h"), CircuitState::Open);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(cb.try_admit("h"), "first HalfOpen probe admitted + counted");
+        assert!(
+            !cb.try_admit("h"),
+            "second probe blocked: atomic admit already filled the slot"
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ export const SESSION_STATUS_LABELS: Record<SessionStatus, string> = {
   running: '运行中',
   completed: '完成',
   failed: '失败',
+  cancelled: '已取消',
 };
 
 /**
@@ -17,4 +18,5 @@ export const SESSION_STATUS_CLASSES: Record<SessionStatus, string> = {
   running: 'session-badge-running',
   completed: 'session-badge-completed',
   failed: 'session-badge-failed',
+  cancelled: 'session-badge-cancelled',
 };
