@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useAgentStore } from '../../stores/agentStore';
+import { useProvidersStore } from '../../stores/providersStore';
 import { Button } from '../ui/Button/Button';
 import {
   parseNodeIds,
@@ -47,6 +49,11 @@ export function OrchestrateView() {
   const approve = useOrchestrateStore((s) => s.approve);
   const startRun = useOrchestrateStore((s) => s.startRun);
   const reset = useOrchestrateStore((s) => s.reset);
+  // Agent/model dropdowns in the WorkflowBuilder node inspector read these
+  // global stores. ChatView/Settings load them; load here too so the orchestrate
+  // page works standalone (entering it directly left both empty → no options).
+  const refreshAgents = useAgentStore((s) => s.refreshAgents);
+  const loadProviders = useProvidersStore((s) => s.loadProviders);
 
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
@@ -61,7 +68,13 @@ export function OrchestrateView() {
     invoke<WorkflowTemplate[]>('list_workflow_templates')
       .then(setTemplates)
       .catch(() => setTemplates([]));
-  }, []);
+    // WorkflowBuilder's agent/model <select>s read useAgentStore.agents +
+    // useProvidersStore.config. ChatView/Settings load those; without loading
+    // here, entering orchestrate directly left both empty → dropdowns had no
+    // options. Sync with the unified agent + model management.
+    void refreshAgents();
+    void loadProviders();
+  }, [refreshAgents, loadProviders]);
 
   // Single source of truth: running === runId !== null. The store flips runId
   // to non-null on startRun and back to null on graph_done / graph_failed /

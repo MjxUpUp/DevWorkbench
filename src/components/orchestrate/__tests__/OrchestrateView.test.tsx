@@ -114,3 +114,43 @@ describe('OrchestrateView — running derived from runId (F11: no stuck-true)', 
     });
   });
 });
+
+describe('OrchestrateView — 加载统一 agent/模型管理(打通节点下拉数据源)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useNavigationStore.setState({
+      activeProject: project,
+      activeView: 'orchestrate',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    useOrchestrateStore.setState({
+      yaml: 'nodes: []',
+      nodes: {},
+      runId: null,
+      output: null,
+      error: null,
+      pendingApproval: null,
+    } as Partial<ReturnType<typeof useOrchestrateStore.getState>> as never);
+  });
+
+  it('挂载即触发 discover_agents_cmd + get_providers_config,节点 agent/model 下拉拿到统一数据', async () => {
+    // WorkflowBuilder reads useAgentStore.agents + useProvidersStore.config for
+    // the agent-node inspector dropdowns. Both stores are loaded by ChatView /
+    // Settings only — entering orchestrate directly left them empty. The fix
+    // fires refreshAgents() + loadProviders() on mount.
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'discover_agents_cmd') return [] as never;
+      if (cmd === 'get_providers_config') return { providers: [] } as never;
+      return null as never;
+    });
+
+    render(<OrchestrateView />);
+
+    await waitFor(() => {
+      const cmds = vi.mocked(invoke).mock.calls.map(([c]) => c as string);
+      expect(cmds).toContain('discover_agents_cmd');
+      expect(cmds).toContain('get_providers_config');
+    });
+  });
+});
