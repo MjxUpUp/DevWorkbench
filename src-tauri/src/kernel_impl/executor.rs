@@ -253,7 +253,12 @@ pub(crate) fn build_react_agent(
             // lessons) + v1.2 T7 quality-failure lessons, both prepended to the
             // system prompt so the ReactAgent reuses what prior sessions learned
             // — the same flywheel `knowledge/injector` gives the opaque path.
-            sys_prompt.push_str(&memory_prompt_suffix(&conn, &hash));
+            // is_continuation: a non-empty history means this is a follow-up
+            // turn in an existing conversation. Gate cross-session memory on it
+            // (see memory_prompt_suffix) so a continuation doesn't pull in OTHER
+            // sessions' react_session/reflection output — the 互串 regression.
+            let is_continuation = !history.is_empty();
+            sys_prompt.push_str(&memory_prompt_suffix(&conn, &hash, is_continuation));
             sys_prompt.push_str(&experience_prompt_suffix(&conn, &hash));
             // Per-node knowledge injection: fetch specified knowledge entries
             // and append to the system prompt. Empty/missing = no injection.
@@ -578,7 +583,18 @@ const BASE_SYSTEM_PROMPT: &str = concat!(
     "fresh and route through the matching abstraction. Conversation history carries ",
     "NO tool calls precisely so past tool choices cannot bias the next run.\n",
     "- For code work: investigate with read_file/glob/grep before writing ",
-    "(write_file/bash), then verify with the project's own tests/build.",
+    "(write_file/bash), then verify with the project's own tests/build.\n",
+    "\n",
+    "Sub-agent delegation discipline (dispatch_subagent):\n",
+    "- The child ReactAgent is capped at 8 steps for FOCUSED, bounded work only ",
+    "(read a few files / answer one scoped question). It is NOT for broad ",
+    "multi-source research or any task needing 5+ tool calls.\n",
+    "- If a task is open-ended — '调研业界做法', '摸清整个项目', multi-file ",
+    "synthesis, or you cannot name its single concrete deliverable — do it ",
+    "YOURSELF with your own 30-step budget. Handing such a task to the child ",
+    "exhausts its 8 steps without a final answer and wastes the whole turn ",
+    "(regression: a parent once dispatched 'evaluate the project' to the child, ",
+    "which ran 8 steps and failed; the parent redid the work itself anyway).\n",
 );
 
 /// Format the installed `skill__*` and `mcp__*` tools into a system-prompt
@@ -671,6 +687,11 @@ mod executor_tests {
         // History stripping is enforced in react_chat, but the prompt must TELL
         // the agent not to lean on past tool calls — the two changes are a pair.
         assert!(BASE_SYSTEM_PROMPT.contains("NO tool calls"));
+        // Sub-agent delegation discipline must also be a standing rule so the
+        // agent doesn't hand open-ended research to the 8-step child.
+        assert!(BASE_SYSTEM_PROMPT.contains("dispatch_subagent"));
+        assert!(BASE_SYSTEM_PROMPT.contains("8 steps"));
+        assert!(BASE_SYSTEM_PROMPT.contains("YOURSELF"));
     }
 
     #[test]
@@ -864,12 +885,26 @@ fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> 
 /// Excludes `quality_failure` (that's [`experience_prompt_suffix`]'s lane) and
 /// keeps only confidence ≥ 0.6, ranked by confidence then recency. Empty → no
 /// prompt bloat.
-fn memory_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> String {
+fn memory_prompt_suffix(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+    is_continuation: bool,
+) -> String {
     let entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
         .unwrap_or_default();
     let mut mems: Vec<_> = entries
         .iter()
+        // quality_failure is experience_prompt_suffix's lane; sub-threshold
+        // entries are noise. Both gates always apply.
         .filter(|e| e.category != "quality_failure" && e.confidence >= 0.6)
+        // 互串修复 (session 369c0ee9): 续聊 turn 排除别的会话的产出/反思摘要
+        // (react_session / react_reflection)。这两类是其他会话的完整产出，注入
+        // 续聊会让 agent 误判"我前面做过"——续聊把评测会话的产出当成了自己的三轮
+        // 调研历史。续聊有自己的 history；这两类留给新会话首 turn 复用 flywheel。
+        .filter(|e| {
+            !is_continuation
+                || !matches!(e.category.as_str(), "react_session" | "react_reflection")
+        })
         .collect();
     mems.sort_by(|a, b| {
         b.confidence
@@ -1112,7 +1147,7 @@ mod tests {
         add_entry(&conn, &mk("k2", "quality_failure", "断言被弱化", 0.9)).unwrap();
         // Low confidence → filtered out.
         add_entry(&conn, &mk("k3", "insight", "噪声条目", 0.4)).unwrap();
-        let suffix = memory_prompt_suffix(&conn, "h");
+        let suffix = memory_prompt_suffix(&conn, "h", false);
         assert!(suffix.contains("项目长期记忆"), "header present: {suffix}");
         assert!(suffix.contains("thiserror"), "high-conf insight included: {suffix}");
         assert!(
@@ -1150,7 +1185,50 @@ mod tests {
             access_count: 0,
         };
         add_entry(&conn, &e).unwrap();
-        assert_eq!(memory_prompt_suffix(&conn, "h"), "");
+        assert_eq!(memory_prompt_suffix(&conn, "h", false), "");
+    }
+
+    #[test]
+    fn memory_prompt_skips_session_reflection_on_continuation() {
+        // 互串回归 (session 369c0ee9): 续聊 turn 不能注入别的会话的产出/反思摘要
+        // (react_session / react_reflection)，否则 agent 把别的会话工作当成自己
+        // 的历史。新会话首 turn (is_continuation=false) 仍注入复用 flywheel。
+        use crate::db;
+        use crate::knowledge::store::add_entry;
+        use crate::models::{AgentType, KnowledgeEntry};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = db::init_db(&tmp.path().join("t.db")).unwrap();
+        let mk = |id: &str, cat: &str, conf: f64| KnowledgeEntry {
+            id: id.into(),
+            project_hash: "h".into(),
+            category: cat.into(),
+            title: format!("{id}-title"),
+            content: "内容".into(),
+            source_agent: AgentType::ClaudeCode,
+            source_session_id: Some("other-session".into()),
+            source_type: "react".into(),
+            confidence: conf,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            access_count: 0,
+        };
+        // react_session = another session's full output; react_reflection = its reflection.
+        add_entry(&conn, &mk("s1", "react_session", 0.8)).unwrap();
+        add_entry(&conn, &mk("r1", "react_reflection", 0.7)).unwrap();
+        // insight = a genuine reusable lesson; must survive both paths.
+        add_entry(&conn, &mk("i1", "insight", 0.9)).unwrap();
+
+        // First turn of a NEW conversation: flywheel full strength — all three.
+        let first = memory_prompt_suffix(&conn, "h", false);
+        assert!(first.contains("s1-title"), "new turn injects react_session: {first}");
+        assert!(first.contains("r1-title"), "new turn injects react_reflection: {first}");
+        assert!(first.contains("i1-title"), "new turn injects insight: {first}");
+
+        // Continuation turn: drop other sessions' output/reflection, keep insight.
+        let cont = memory_prompt_suffix(&conn, "h", true);
+        assert!(!cont.contains("s1-title"), "continuation drops react_session: {cont}");
+        assert!(!cont.contains("r1-title"), "continuation drops react_reflection: {cont}");
+        assert!(cont.contains("i1-title"), "continuation keeps insight: {cont}");
     }
 
     #[tokio::test]

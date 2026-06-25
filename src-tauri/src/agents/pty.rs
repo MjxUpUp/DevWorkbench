@@ -815,20 +815,31 @@ impl ClaudeBlock {
     }
 }
 
-/// Fold consecutive `Text` events into one (same semantics as the frontend's
-/// `appendBlock` merge). Persisted blocks should match what the live in-memory
-/// Map held — not one entry per streaming token delta — otherwise a reloaded
-/// session renders N tiny text cards instead of the single merged paragraph.
-pub(crate) fn merge_consecutive_text(events: Vec<ChatStreamEvent>) -> Vec<ChatStreamEvent> {
+/// Fold consecutive `Text`/`Thinking` events into one run each (same semantics
+/// as the frontend's `appendBlock` merge). Persisted blocks should match what
+/// the live in-memory Map held — not one entry per streaming token delta —
+/// otherwise a reloaded session renders N tiny text/thinking cards instead of
+/// the single merged paragraph.
+///
+/// Thinking must fold too: GLM Interleaved Thinking streams chunk-by-chunk, and
+/// the old Text-only fold left thinking as one block per token. Session 82e56ebe
+/// (4 min, glm-5.2) persisted 1681 single-token thinking blocks into a 128 KB
+/// `sessions.blocks` row — the frontend merges for LIVE render
+/// (`BlocksView::normalizeEvents`), but the persisted replica did not, so
+/// history replay / direct DB reads saw the碎片. Folding both kinds here makes
+/// the persisted copy match the live view.
+pub(crate) fn merge_consecutive_runs(events: Vec<ChatStreamEvent>) -> Vec<ChatStreamEvent> {
     let mut out: Vec<ChatStreamEvent> = Vec::with_capacity(events.len());
     for ev in events {
         match (&ev, out.last_mut()) {
             (
                 ChatStreamEvent::Text { content: incoming },
                 Some(ChatStreamEvent::Text { content: acc }),
-            ) => {
-                acc.push_str(incoming);
-            }
+            ) => acc.push_str(incoming),
+            (
+                ChatStreamEvent::Thinking { content: incoming },
+                Some(ChatStreamEvent::Thinking { content: acc }),
+            ) => acc.push_str(incoming),
             _ => out.push(ev),
         }
     }
@@ -1235,7 +1246,7 @@ pub(crate) fn finalize_session(
         // instead of falling back to the raw terminal log. Merge consecutive
         // text deltas (match the live Map's shape) and cap giant ToolUse inputs
         // before serializing — live emit is untouched.
-        let persisted = cap_blocks_for_persist(merge_consecutive_text(blocks), 8000);
+        let persisted = cap_blocks_for_persist(merge_consecutive_runs(blocks), 8000);
         if let Ok(val) = serde_json::to_value(persisted) {
             patch["blocks"] = val;
         }
@@ -2242,7 +2253,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merge_consecutive_text_folds_runs_and_leaves_others() {
+    fn merge_consecutive_runs_folds_runs_and_leaves_others() {
         let evs = vec![
             ChatStreamEvent::Text {
                 content: "a".into(),
@@ -2258,7 +2269,7 @@ mod tests {
                 content: "c".into(),
             },
         ];
-        let merged = merge_consecutive_text(evs);
+        let merged = merge_consecutive_runs(evs);
         assert_eq!(merged.len(), 3);
         assert_eq!(
             merged[0],
@@ -2275,13 +2286,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_consecutive_text_empty_and_single() {
-        assert!(merge_consecutive_text(vec![]).is_empty());
+    fn merge_consecutive_runs_empty_and_single() {
+        assert!(merge_consecutive_runs(vec![]).is_empty());
         let one = vec![ChatStreamEvent::Text {
             content: "solo".into(),
         }];
         assert_eq!(
-            merge_consecutive_text(one),
+            merge_consecutive_runs(one),
             vec![ChatStreamEvent::Text {
                 content: "solo".into()
             }]
@@ -2289,7 +2300,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_consecutive_text_all_tool_use_unchanged() {
+    fn merge_consecutive_runs_all_tool_use_unchanged() {
         let evs = vec![
             ChatStreamEvent::ToolUse {
                 name: "A".into(),
@@ -2300,8 +2311,31 @@ mod tests {
                 input: serde_json::Value::Null,
             },
         ];
-        let merged = merge_consecutive_text(evs.clone());
+        let merged = merge_consecutive_runs(evs.clone());
         assert_eq!(merged, evs);
+    }
+
+    #[test]
+    fn merge_consecutive_runs_folds_thinking_too() {
+        // Regression (session 82e56ebe): GLM streams thinking chunk-by-chunk;
+        // the persisted row held 1681 single-token thinking blocks (128 KB).
+        // Folding must collapse a run of Thinking into one exactly like Text —
+        // and must NOT merge across a different-kind block in between.
+        let evs = vec![
+            ChatStreamEvent::Thinking { content: "The".into() },
+            ChatStreamEvent::Thinking { content: " user".into() },
+            ChatStreamEvent::Thinking { content: " wants".into() },
+            ChatStreamEvent::Text { content: "answer".into() },
+            ChatStreamEvent::Thinking { content: "more".into() },
+        ];
+        let merged = merge_consecutive_runs(evs);
+        assert_eq!(merged.len(), 3, "two thinking runs + one text in between");
+        assert_eq!(
+            merged[0],
+            ChatStreamEvent::Thinking { content: "The user wants".into() }
+        );
+        assert_eq!(merged[1], ChatStreamEvent::Text { content: "answer".into() });
+        assert_eq!(merged[2], ChatStreamEvent::Thinking { content: "more".into() });
     }
 
     #[test]
