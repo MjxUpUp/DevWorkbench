@@ -106,17 +106,15 @@ impl DbState {
     /// pool is below capacity, opens a fresh connection (replenishment). Errors
     /// only if the timeout elapses with nothing available.
     pub fn get(&self) -> Result<PooledConn, PoolError> {
-        let mut guard = self
-            .0
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(GET_TIMEOUT_SECS);
+        let mut guard = self.0.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GET_TIMEOUT_SECS);
         loop {
             if let Some(c) = guard.idle.pop_front() {
                 guard.in_use += 1;
-                return Ok(PooledConn { conn: Some(c), pool: self.0.clone() });
+                return Ok(PooledConn {
+                    conn: Some(c),
+                    pool: self.0.clone(),
+                });
             }
             // Replenish: if total (idle+in_use) < POOL_SIZE, open a new conn.
             if guard.in_use + guard.idle.len() < POOL_SIZE {
@@ -132,14 +130,20 @@ impl DbState {
                 // this rare race, never on the steady-state path.
                 if guard.in_use + guard.idle.len() < POOL_SIZE {
                     guard.in_use += 1;
-                    return Ok(PooledConn { conn: Some(conn), pool: self.0.clone() });
+                    return Ok(PooledConn {
+                        conn: Some(conn),
+                        pool: self.0.clone(),
+                    });
                 }
                 drop(conn);
             }
             // Wait for a connection to be returned.
-            let g = self.0.cvar
+            let g = self
+                .0
+                .cvar
                 .wait_timeout(guard, std::time::Duration::from_secs(1))
-                .unwrap_or_else(|e| e.into_inner()).0;
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
             guard = g;
             if std::time::Instant::now() >= deadline {
                 return Err(format!(
@@ -280,6 +284,7 @@ CREATE TABLE IF NOT EXISTS settings (
     scan_directories TEXT NOT NULL DEFAULT '[]',
     tool_paths TEXT NOT NULL DEFAULT '{}',
     theme TEXT NOT NULL DEFAULT 'auto',
+    palette TEXT NOT NULL DEFAULT 'pi',
     preferred_terminal TEXT NOT NULL DEFAULT '',
     cli_flags TEXT NOT NULL DEFAULT '{}'
 );

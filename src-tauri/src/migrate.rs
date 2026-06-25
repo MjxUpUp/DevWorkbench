@@ -221,12 +221,13 @@ fn insert_project(conn: &Connection, p: &Project) -> Result<(), AppError> {
 fn insert_settings(conn: &Connection, s: &AppSettings) -> Result<(), AppError> {
     conn.execute(
         "INSERT OR REPLACE INTO settings
-            (id, scan_directories, tool_paths, theme, preferred_terminal, cli_flags)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+            (id, scan_directories, tool_paths, theme, palette, preferred_terminal, cli_flags)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             serde_json::to_string(&s.scan_directories)?,
             serde_json::to_string(&s.tool_paths)?,
             s.theme,
+            s.palette,
             s.preferred_terminal,
             serde_json::to_string(&s.cli_flags)?,
         ],
@@ -723,22 +724,66 @@ pub fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let ttfb_exists = conn.prepare("SELECT ttfb_ms FROM llm_traces LIMIT 0").is_ok();
+    let ttfb_exists = conn
+        .prepare("SELECT ttfb_ms FROM llm_traces LIMIT 0")
+        .is_ok();
     if !ttfb_exists {
         conn.execute("ALTER TABLE llm_traces ADD COLUMN ttfb_ms INTEGER", [])?;
     }
-    let stream_exists = conn.prepare("SELECT stream_ms FROM llm_traces LIMIT 0").is_ok();
+    let stream_exists = conn
+        .prepare("SELECT stream_ms FROM llm_traces LIMIT 0")
+        .is_ok();
     if !stream_exists {
         conn.execute("ALTER TABLE llm_traces ADD COLUMN stream_ms INTEGER", [])?;
     }
     if !ttfb_exists || !stream_exists {
-        log::info!(
-            "Migrated schema v17→v18: added llm_traces timing columns (B3 ttfb/stream)"
-        );
+        log::info!("Migrated schema v17→v18: added llm_traces timing columns (B3 ttfb/stream)");
     }
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (18, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// v18→v19: add `settings.palette TEXT` so the v3 palette flavor (pi | ink |
+/// moss, orthogonal to light/dark `theme`) survives a save → restart round-trip.
+/// Before this, the TS `AppSettings.palette` field was silently dropped by
+/// serde on save_settings_to_db (the column didn't exist → struct field was
+/// never read) and never came back on load_settings_from_db, so a user
+/// switching palette saw it reset to default on every app relaunch. Same
+/// idempotent shape as v10→v13: probe the column (fresh DBs already have it
+/// from the static SCHEMA), ALTER only if missing, then bump the version.
+/// ALTER without a DEFAULT yields NULL on existing rows; load_settings_from_db
+/// maps NULL → "pi" (default_palette), so pre-v19 rows behave unchanged.
+pub fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 19 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
+    // that references the column (same idiom as v10→v11's blocks probe). A fresh
+    // DB already has `palette` from the static SCHEMA and skips the ALTER.
+    let col_exists = conn.prepare("SELECT palette FROM settings LIMIT 0").is_ok();
+    if !col_exists {
+        // No DEFAULT here on purpose: ADD COLUMN with a constant DEFAULT rewrites
+        // every row on SQLite (and is a schema-level decision we'd rather keep
+        // in the static SCHEMA for fresh DBs). Existing rows get NULL, which
+        // load_settings_from_db coerces to default_palette()="pi".
+        conn.execute("ALTER TABLE settings ADD COLUMN palette TEXT", [])?;
+        log::info!("Migrated schema v18→v19: added settings.palette column");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (19, ?1)",
         [chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
@@ -817,7 +862,10 @@ mod tests {
         migrate_v6_to_v7(&g.conn, data_dir).unwrap();
 
         // Corrupt file quarantined, not left in place to crash the next launch.
-        assert!(!sessions.exists(), "corrupt sessions.json must be moved aside");
+        assert!(
+            !sessions.exists(),
+            "corrupt sessions.json must be moved aside"
+        );
         assert!(
             agents_dir.join("sessions.json.corrupt").exists(),
             "corrupt file should be quarantined as .corrupt"
@@ -1487,7 +1535,11 @@ mod tests {
         assert_eq!(col_count(&conn, "cost_records", "cache_read_tokens"), 1);
         assert_eq!(col_count(&conn, "cost_records", "cache_write_tokens"), 1);
         let version: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(version, 17, "version bumped to 17");
     }
@@ -1536,5 +1588,107 @@ mod tests {
             .unwrap();
         assert_eq!(cr, 0, "legacy row defaults to 0 cache_read");
         assert_eq!(cw, 0, "legacy row defaults to 0 cache_write");
+    }
+
+    /// Build a legacy v18 settings table WITHOUT the palette column (the exact
+    /// shape a pre-v19 DB ships with). schema_version pinned to 18 so
+    /// migrate_v18_to_v19 actually does work.
+    fn legacy_v19_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (18, '2026-06-01T00:00:00Z');
+             CREATE TABLE settings (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 scan_directories TEXT NOT NULL DEFAULT '[]',
+                 tool_paths TEXT NOT NULL DEFAULT '{}',
+                 theme TEXT NOT NULL DEFAULT 'auto',
+                 preferred_terminal TEXT NOT NULL DEFAULT '',
+                 cli_flags TEXT NOT NULL DEFAULT '{}'
+             );
+             INSERT INTO settings (id) VALUES (1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrate_v18_to_v19_adds_palette_column_to_pre_v19_db() {
+        let conn = legacy_v19_conn();
+        // Pre-condition: legacy settings table has no palette column.
+        assert_eq!(col_count(&conn, "settings", "palette"), 0);
+
+        migrate_v18_to_v19(&conn).expect("pre-v19 migration must add palette column");
+
+        assert_eq!(col_count(&conn, "settings", "palette"), 1);
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 19, "version bumped to 19");
+    }
+
+    #[test]
+    fn migrate_v18_to_v19_is_idempotent() {
+        let conn = legacy_v19_conn();
+        migrate_v18_to_v19(&conn).expect("first run");
+        // Second run must not error on the now-present column (version-gated
+        // early-return makes it a no-op).
+        migrate_v18_to_v19(&conn).expect("second run (idempotent)");
+        assert_eq!(col_count(&conn, "settings", "palette"), 1);
+    }
+
+    #[test]
+    fn migrate_v18_to_v19_is_a_noop_on_fresh_db() {
+        // A fresh DB (init_db ran the static SCHEMA with palette already present
+        // and no schema_version rows) must migrate cleanly: probe finds the
+        // column (skips ALTER), then writes version=19.
+        let g = TempDb::new();
+        migrate_v18_to_v19(&g.conn).expect("fresh DB v19 migration must be a no-op");
+        assert_eq!(col_count(&g.conn, "settings", "palette"), 1);
+    }
+
+    /// B2 end-to-end pin: after v18→v19 on a legacy DB, the palette column on a
+    /// pre-existing row is NULL (ALTER without DEFAULT), and load_settings_from_db
+    /// must coerce that NULL → "pi" (default_palette). This is the round-trip a
+    /// user upgrading from v18 actually experiences.
+    #[test]
+    fn migrate_v18_to_v19_legacy_row_null_palette_loads_as_pi_default() {
+        let conn = legacy_v19_conn();
+        migrate_v18_to_v19(&conn).unwrap();
+        // The legacy row's palette is NULL (ALTER ADD COLUMN without DEFAULT).
+        let raw: Option<String> = conn
+            .query_row("SELECT palette FROM settings WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert!(raw.is_none(), "ALTER without DEFAULT leaves NULL");
+
+        let loaded = crate::commands::projects::load_settings_from_db(&conn).unwrap();
+        assert_eq!(
+            loaded.palette, "pi",
+            "NULL palette must load as default 'pi', not empty string"
+        );
+    }
+
+    /// B2 end-to-end pin: save_settings_to_db then load_settings_from_db must
+    /// round-trip a non-default palette ("moss"). This is the actual user-facing
+    /// regression — pre-fix, the column didn't exist so save silently lost it.
+    #[test]
+    fn save_then_load_settings_roundtrips_palette() {
+        let g = TempDb::new();
+        let custom = crate::models::AppSettings {
+            scan_directories: vec![],
+            tool_paths: std::collections::HashMap::new(),
+            theme: "dark".into(),
+            palette: "moss".into(),
+            preferred_terminal: String::new(),
+            cli_flags: std::collections::HashMap::new(),
+        };
+        crate::commands::projects::save_settings_to_db(&g.conn, &custom).unwrap();
+        let back = crate::commands::projects::load_settings_from_db(&g.conn).unwrap();
+        assert_eq!(back.palette, "moss", "palette must survive save→load");
+        assert_eq!(back.theme, "dark");
     }
 }

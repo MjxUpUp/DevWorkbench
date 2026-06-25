@@ -33,6 +33,15 @@ pub struct AppSettings {
     pub tool_paths: std::collections::HashMap<String, String>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Palette flavor (v3 theme switching), orthogonal to `theme` (light/dark).
+    /// Must match the TS union "pi" | "ink" | "moss". serde(default) so a JSON
+    /// blob (legacy settings.json import via migrate_v7_to_v8) missing the key
+    /// fills it with default_palette()="pi". Persisted in the columnar `settings`
+    /// table via load_settings_from_db / save_settings_to_db — those read/write
+    /// the column explicitly (added by migrate_v18_to_v19), so this default only
+    /// fires on JSON deserialization, not on the DB path.
+    #[serde(default = "default_palette")]
+    pub palette: String,
     #[serde(default)]
     pub preferred_terminal: String,
     #[serde(default)]
@@ -42,6 +51,12 @@ pub struct AppSettings {
 fn default_theme() -> String {
     // Must match the TS union "light" | "dark" | "auto".
     "auto".to_string()
+}
+
+fn default_palette() -> String {
+    // Must match the TS union "pi" | "ink" | "moss". "pi" = pi.dev warm-paper
+    // default (per the TS AppSettings.palette doc comment).
+    "pi".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +80,8 @@ pub struct GitStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentType { // NOTE: do NOT derive Copy — contains variants without trivial copy
+pub enum AgentType {
+    // NOTE: do NOT derive Copy — contains variants without trivial copy
     ClaudeCode,
     Codex,
     CursorAgent,
@@ -526,4 +542,74 @@ pub struct CostTrendPoint {
 pub struct BudgetSettings {
     pub monthly_budget_usd: Option<f64>,
     pub alert_threshold: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B2: a legacy JSON blob (from the v0.7 settings.json migration path or an
+    /// older app version that never knew about `palette`) must deserialize with
+    /// palette filled by default_palette()="pi", NOT fail and NOT silently
+    /// become empty. This is the round-trip the settings table column also
+    /// relies on (load_settings_from_db → AppSettings).
+    #[test]
+    fn app_settings_legacy_json_without_palette_defaults_to_pi() {
+        // Mirrors a settings.json written before palette shipped — every other
+        // field present, palette absent.
+        let json = r#"{
+            "scan_directories": ["/tmp"],
+            "tool_paths": {"go": "/usr/bin/go"},
+            "theme": "dark",
+            "preferred_terminal": "wezterm",
+            "cli_flags": {"pi": "--model glm"}
+        }"#;
+        let s: AppSettings = serde_json::from_str(json).expect("legacy JSON must parse");
+        assert_eq!(
+            s.palette, "pi",
+            "missing palette must fall back to default 'pi'"
+        );
+        assert_eq!(s.theme, "dark");
+    }
+
+    /// B2: empty JSON object — every field is serde(default), so all of them
+    /// (including palette) take their default. Guards against a regression that
+    /// makes palette required and breaks deserialization of `{}`.
+    #[test]
+    fn app_settings_empty_json_uses_all_defaults_including_palette() {
+        let s: AppSettings = serde_json::from_str("{}").expect("{} must parse");
+        assert_eq!(s.palette, "pi");
+        assert_eq!(s.theme, "auto");
+        assert!(s.scan_directories.is_empty());
+    }
+
+    /// B2: serialize → deserialize round-trip preserves an explicitly-set
+    /// palette. Without the field on the struct, serde would silently drop it
+    /// on the save side; this test pins that the column value "ink" survives a
+    /// full JSON round-trip (which is what save_settings_to_db effectively does
+    /// for the complex sub-fields, and what the v7→v8 settings.json migration
+    /// did for the whole struct).
+    #[test]
+    fn app_settings_roundtrip_preserves_palette() {
+        let original = AppSettings {
+            scan_directories: vec!["/a".into()],
+            tool_paths: std::collections::HashMap::new(),
+            theme: "light".into(),
+            palette: "moss".into(),
+            preferred_terminal: String::new(),
+            cli_flags: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let back: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.palette, "moss", "palette must survive round-trip");
+        assert_eq!(back.theme, "light");
+    }
+
+    /// B2: default_palette() is the single source the DB column DEFAULT, the
+    /// serde fallback, and the TS default all agree on. Pinning the value keeps
+    /// a future "rename default to 'pi-dev'" change honest.
+    #[test]
+    fn default_palette_is_pi() {
+        assert_eq!(default_palette(), "pi");
+    }
 }

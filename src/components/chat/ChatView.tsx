@@ -80,13 +80,20 @@ export function ChatView() {
   useEffect(() => {
     if (!activeConversationId) { setBranches([]); return; }
     let cancelled = false;
-    // Re-fetch whenever the session set changes (a new fork/turn lands) so the
-    // switcher reflects the latest siblings.
+    // Re-fetch only on conversation switch or when a new turn lands
+    // (turns.length changes). Previously this depended on `allSessions`, which
+    // `refreshSessions` re-creates on every token / agent event during
+    // streaming — that triggered a DB-table-scan get_conversation_branches per
+    // token. turns.length is the real "a new turn landed" signal; the flat
+    // session-array identity is not.
     getConversationBranches(activeConversationId)
       .then((bs) => { if (!cancelled) setBranches(bs); })
       .catch(() => { if (!cancelled) setBranches([]); });
     return () => { cancelled = true; };
-  }, [activeConversationId, getConversationBranches, allSessions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- turns.length is the
+    // intentional re-fetch signal (new turn landed); turns itself is not needed
+    // inside the effect, only its count.
+  }, [activeConversationId, getConversationBranches, turns.length]);
 
   // parent_id → children (siblings grouped). null key = root-level turns.
   const childrenByParent = useMemo(() => {
@@ -292,8 +299,19 @@ export function ChatView() {
     return fullPrompt;
   }, [prompt, attachedFiles]);
 
+  // Local re-entry guard against the closure-stale race in handleSend. The
+  // guard at the top of handleSend reads `runningSession` from the closure,
+  // which is a snapshot captured when the callback was rebuilt. During the
+  // `await createConversation(...)` window the store flips runningSession to
+  // non-empty (agent:started), but the still-resident closure sees the old
+  // null and a second click would slip past the guard → two spawn_agent_session
+  // calls → two turns. A ref is read live (not from the closure), so it's an
+  // atomic per-instance lock independent of when the callback was last rebuilt.
+  const sendingRef = useRef(false);
   const handleSend = useCallback(async () => {
+    if (sendingRef.current) return;
     if (!selectedAgent || !prompt.trim() || runningSession || !project) return;
+    sendingRef.current = true;
     const text = buildFullPrompt();
     try {
       const kernel = selectedAgent === 'react_kernel';
@@ -318,6 +336,8 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to send:', e);
       toast.error(`发送失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      sendingRef.current = false;
     }
   }, [selectedAgent, prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel, toast]);
 

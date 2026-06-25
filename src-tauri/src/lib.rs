@@ -93,39 +93,98 @@ pub fn run() {
                 app.handle().plugin(log_builder.build())?;
             }
 
-            // Initialize SQLite database (connection pool + schema + pragmas)
+            // Initialize SQLite database (connection pool + schema + pragmas).
+            // F15: any failure here previously panic'd via .expect, so the app
+            // vanished on startup with no UI — only a panic.log the user would
+            // never think to read. Now we surface a blocking native dialog with
+            // the stage + error + actionable suggestions, THEN exit(1). Still a
+            // hard failure (we do NOT pretend to succeed and run on a broken
+            // DB), just no longer a silent crash. db_state.open and every
+            // migration are covered by this guard.
             let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
             let db_path = data_dir.join("data.db");
-            let db_state = db::DbState::open(&db_path).expect("Failed to initialize database");
+            use tauri_plugin_dialog::DialogExt;
+            let fail = |app: &tauri::App, stage: &str, e: crate::error::AppError| -> ! {
+                let msg = format_migration_error(stage, &e);
+                log::error!("Startup abort at stage `{stage}`: {e}");
+                app.dialog()
+                    .message(msg)
+                    .title("数据库初始化失败")
+                    .blocking_show();
+                std::process::exit(1);
+            };
+            let db_state = match db::DbState::open(&db_path) {
+                Ok(s) => s,
+                Err(e) => fail(app, "open DB pool", e),
+            };
 
             // Run migrations on one pooled connection (idempotent).
             {
-                let conn = db_state
-                    .get()
-                    .expect("Failed to get DB connection from pool for migrations");
+                let conn = match db_state.get() {
+                    Ok(c) => c,
+                    Err(e) => fail(app, "acquire migration connection", e.into()),
+                };
 
-                migrate::migrate_v6_to_v7(&conn, &data_dir).expect("Failed to run data migration");
-                migrate::migrate_v7_to_v8(&conn, &data_dir)
-                    .expect("Failed to run projects/settings migration");
-                migrate::migrate_v8_to_v9(&conn).expect("Failed to run v8 to v9 schema migration");
-                migrate::migrate_v9_to_v10(&conn)
-                    .expect("Failed to run v9 to v10 conversation migration");
-                migrate::migrate_v10_to_v11(&conn)
-                    .expect("Failed to run v10 to v11 blocks column migration");
-                migrate::migrate_v11_to_v12(&conn)
-                    .expect("Failed to run v11 to v12 task_ref column migration");
-                migrate::migrate_v12_to_v13(&conn)
-                    .expect("Failed to run v12 to v13 user_hooks.matcher column migration");
-                migrate::migrate_v13_to_v14(&conn)
-                    .expect("Failed to run v13 to v14 llm_traces table migration");
-                migrate::migrate_v14_to_v15(&conn)
-                    .expect("Failed to run v14 to v15 trace_settings + index migration");
-                migrate::migrate_v15_to_v16(&conn)
-                    .expect("Failed to run v15 to v16 eval_runs migration");
-                migrate::migrate_v16_to_v17(&conn)
-                    .expect("Failed to run v16 to v17 cost cache-columns migration");
-                migrate::migrate_v17_to_v18(&conn)
-                    .expect("Failed to run v17 to v18 trace timing-columns migration");
+                // Helper macro so each migration maps its AppError to a dialog+exit
+                // instead of .expect. Inline closure would also work; the macro
+                // preserves the per-stage label with less ceremony.
+                macro_rules! run_migrate {
+                    ($stage:expr, $call:expr) => {
+                        match $call {
+                            Ok(()) => {}
+                            Err(e) => fail(app, $stage, e),
+                        }
+                    };
+                }
+                run_migrate!(
+                    "v6→v7 data migration",
+                    migrate::migrate_v6_to_v7(&conn, &data_dir)
+                );
+                run_migrate!(
+                    "v7→v8 projects/settings migration",
+                    migrate::migrate_v7_to_v8(&conn, &data_dir)
+                );
+                run_migrate!("v8→v9 schema migration", migrate::migrate_v8_to_v9(&conn));
+                run_migrate!(
+                    "v9→v10 conversation migration",
+                    migrate::migrate_v9_to_v10(&conn)
+                );
+                run_migrate!(
+                    "v10→v11 blocks column migration",
+                    migrate::migrate_v10_to_v11(&conn)
+                );
+                run_migrate!(
+                    "v11→v12 task_ref column migration",
+                    migrate::migrate_v11_to_v12(&conn)
+                );
+                run_migrate!(
+                    "v12→v13 user_hooks.matcher column migration",
+                    migrate::migrate_v12_to_v13(&conn)
+                );
+                run_migrate!(
+                    "v13→v14 llm_traces table migration",
+                    migrate::migrate_v13_to_v14(&conn)
+                );
+                run_migrate!(
+                    "v14→v15 trace_settings + index migration",
+                    migrate::migrate_v14_to_v15(&conn)
+                );
+                run_migrate!(
+                    "v15→v16 eval_runs migration",
+                    migrate::migrate_v15_to_v16(&conn)
+                );
+                run_migrate!(
+                    "v16→v17 cost cache-columns migration",
+                    migrate::migrate_v16_to_v17(&conn)
+                );
+                run_migrate!(
+                    "v17→v18 trace timing-columns migration",
+                    migrate::migrate_v17_to_v18(&conn)
+                );
+                run_migrate!(
+                    "v18→v19 settings.palette column migration",
+                    migrate::migrate_v18_to_v19(&conn)
+                );
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -295,4 +354,89 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Format a migration / DB-init failure into a user-facing message for the
+/// blocking native dialog shown before exit. Extracted as a pure function so
+/// the wording (error + actionable suggestion) is unit-testable without
+/// spinning up a Tauri AppHandle (which would be required to mock
+/// `app.dialog()`). The dialog title is set by the caller; this returns ONLY
+/// the body.
+///
+/// Kept deliberately low-tech (no i18n, no templating) — the dialog is the last
+/// line of defense before a hard exit, so it must not itself be able to fail.
+fn format_migration_error(stage: &str, e: &crate::error::AppError) -> String {
+    format!(
+        "数据库初始化在「{stage}」阶段失败，应用无法继续启动。\n\n\
+         错误详情：{e}\n\n\
+         你可以尝试：\n\
+         1. 备份 ~/.dev-workbench/data.db 后删除它（会重置本地数据，但不影响代码）\n\
+         2. 检查磁盘空间和文件权限\n\
+         3. 联系支持并附上 ~/.dev-workbench/panic.log",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+
+    /// F15: the message names the failing stage so the user (and support reading
+    /// a screenshot) can localize whether it was the pool open, a specific
+    /// migration, etc. — instead of a generic "something broke".
+    #[test]
+    fn format_migration_error_includes_stage_and_error_message() {
+        let e = AppError::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(14), // SQLITE_CANTOPEN
+            Some("disk I/O error".into()),
+        ));
+        let msg = format_migration_error("v9→v10 conversation migration", &e);
+        assert!(
+            msg.contains("v9→v10 conversation migration"),
+            "stage must be in the message: {msg}"
+        );
+        assert!(
+            msg.contains("Database error") || msg.contains("disk I/O error"),
+            "underlying error text must be in the message: {msg}"
+        );
+    }
+
+    /// F15: the message must carry the actionable suggestions (backup path,
+    /// disk, panic.log) so the dialog is actually useful, not just a panic line.
+    /// Pinning the three suggestion lines guards against a future "trim the
+    /// dialog text" change that drops them.
+    #[test]
+    fn format_migration_error_includes_actionable_suggestions() {
+        let e = AppError::Internal("schema conflict".into());
+        let msg = format_migration_error("schema migration", &e);
+        assert!(msg.contains("data.db"), "must point at the DB file: {msg}");
+        assert!(
+            msg.contains("panic.log"),
+            "must mention the log file: {msg}"
+        );
+        assert!(
+            msg.contains("磁盘空间") || msg.contains("disk"),
+            "must suggest disk check: {msg}"
+        );
+    }
+
+    /// F15: every AppError variant carries a Display impl (thiserror) — the
+    /// formatter must not panic on any of them. Sanity check with a couple of
+    /// the variants that actually flow through migrations (Db, Io, Internal).
+    #[test]
+    fn format_migration_error_handles_multiple_variants_without_panic() {
+        let cases = [
+            AppError::Db(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                None,
+            )),
+            AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, "lock")),
+            AppError::Internal("pool exhausted".into()),
+        ];
+        for e in cases {
+            let msg = format_migration_error("any stage", &e);
+            assert!(!msg.is_empty());
+            assert!(msg.contains("any stage"));
+        }
+    }
 }

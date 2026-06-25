@@ -48,7 +48,6 @@ export function OrchestrateView() {
   const startRun = useOrchestrateStore((s) => s.startRun);
   const reset = useOrchestrateStore((s) => s.reset);
 
-  const [running, setRunning] = useState(false);
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [editorMode, setEditorMode] = useState<'visual' | 'yaml'>('visual');
@@ -64,6 +63,14 @@ export function OrchestrateView() {
       .catch(() => setTemplates([]));
   }, []);
 
+  // Single source of truth: running === runId !== null. The store flips runId
+  // to non-null on startRun and back to null on graph_done / graph_failed /
+  // reset (see orchestrateStore.applyEvent + reset). Deriving (instead of a
+  // parallel useState that mirrors the same transitions) avoids the deadlock
+  // where the boolean never resets if the backend panics / disconnects and the
+  // terminal event never arrives — runId is what actually reflects run lifecycle.
+  const running = runId !== null;
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -72,9 +79,6 @@ export function OrchestrateView() {
         const { event } = e.payload;
         applyEvent(event);
         setEventLog((prev) => [...prev.slice(-50), formatEvent(event)]);
-        if (event.kind === 'graph_done' || event.kind === 'graph_failed') {
-          setRunning(false);
-        }
       });
       if (cancelled) fn();
       else unlisten = fn;
@@ -86,7 +90,6 @@ export function OrchestrateView() {
   const runningNode = Object.entries(nodes).find(([, s]) => s.status === 'running')?.[0];
 
   const handleRun = async () => {
-    setRunning(true);
     setEventLog([]);
     reset();
     try {
@@ -98,7 +101,6 @@ export function OrchestrateView() {
       startRun(result.run_id);
     } catch (e) {
       setEventLog((prev) => [...prev, `[error] ${String(e)}`]);
-      setRunning(false);
     }
   };
 
