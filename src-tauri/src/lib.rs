@@ -282,6 +282,17 @@ pub fn run() {
             commands::trace::set_trace_retention_cmd,
             commands::trace::prune_llm_traces_now,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // B3: on exit, kill every tracked agent child so closing the window
+            // while an agent is running doesn't orphan the CLI processes
+            // (claude/codex/gemini keep holding file locks + burning API quota).
+            // `taskkill /F /T` takes the whole tree, MCP grandchildren included.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app.try_state::<commands::agents::AgentState>() {
+                    state.inner().0.kill_all();
+                }
+            }
+        });
 }

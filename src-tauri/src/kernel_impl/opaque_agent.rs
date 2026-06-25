@@ -208,7 +208,13 @@ impl Agent for OpaqueAgent {
             //    CLI exited). Listeners are sync Tauri callbacks, so they only
             //    send a lightweight AgentMsg signal; the async main loop below
             //    does the heavy work (honesty audit + building the outcome).
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentMsg>(64);
+            // F6: cap 512 (was 64). A long claude stream-json / codex stdout
+            // burst can fill a small buffer; the drain task runs the post-hoc
+            // audit AFTER Completed (blocking recv), so a full channel could
+            // drop the terminal Completed → the agent appears to never finish.
+            // 512 + the error logs on the try_send sites make that vanishingly
+            // unlikely; a dedicated oneshot for Completed is the full fix (TODO).
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentMsg>(512);
 
             // Dual-channel dispatch by agent_type. Structured CLIs
             // (claude/gemini/qwen) run in OutputMode::StructuredJson
@@ -246,7 +252,9 @@ impl Agent for OpaqueAgent {
                     // no contention in practice — each session owns its own pending and the
                     // reader thread emits events serially.
                     for ae in decode_agent_event_payload(&v, &sid_ev, &mut guard) {
-                        let _ = tx_ev.try_send(AgentMsg::Structured(ae));
+                        if tx_ev.try_send(AgentMsg::Structured(ae)).is_err() {
+                            log::warn!("[opaque-agent] event channel full, dropping structured event");
+                        }
                     }
                 });
                 listener_ids.push(ev_id);
@@ -263,7 +271,9 @@ impl Agent for OpaqueAgent {
                 let output_id = app.listen("pty:output", move |event| {
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
                     if let Some(text) = decode_pty_output_payload(&v, &sid_for_output) {
-                        let _ = tx_out.try_send(AgentMsg::Token(text));
+                        if tx_out.try_send(AgentMsg::Token(text)).is_err() {
+                            log::warn!("[opaque-agent] event channel full, dropping pty token");
+                        }
                     }
                 });
                 listener_ids.push(output_id);
@@ -286,10 +296,21 @@ impl Agent for OpaqueAgent {
                         } else {
                             AgentRunStatus::Failed
                         };
-                        let _ = tx_done.try_send(AgentMsg::Completed {
-                            status: run_status,
-                            exit_code,
-                        });
+                        if tx_done
+                            .try_send(AgentMsg::Completed {
+                                status: run_status,
+                                exit_code,
+                            })
+                            .is_err()
+                        {
+                            // F6: dropping Completed is catastrophic — the drain
+                            // loop awaits it to terminate the stream, so a drop
+                            // makes the agent appear to run forever. Log at error
+                            // so it's observable (the 512 cap makes it rare).
+                            log::error!(
+                                "[opaque-agent] event channel full on Completed — stream may stall forever"
+                            );
+                        }
                     }
                 }
             });

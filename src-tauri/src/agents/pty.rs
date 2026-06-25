@@ -67,6 +67,43 @@ impl AgentProcesses {
             processes: Mutex::new(HashMap::new()),
         }
     }
+
+    /// Kill every tracked agent process — used on app exit so closing the
+    /// window while an agent is running doesn't leave orphan CLI children
+    /// (claude/codex/gemini) holding file locks and burning API quota (B3).
+    /// Windows `taskkill /F /T` takes the whole tree (MCP server grandchildren
+    /// included). Best-effort: a kill failure is logged, not fatal, since the
+    /// app is exiting anyway.
+    pub fn kill_all(&self) {
+        let map = match self.processes.lock() {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("[agent-processes] processes lock poisoned on exit: {e}");
+                return;
+            }
+        };
+        for (sid, tracked) in map.iter() {
+            // TrackedProcess has a single Pipe(pid) variant today (stop_agent
+            // matches `Some(TrackedProcess::Pipe(pid))` with no other arm), so
+            // this destructures unconditionally.
+            let TrackedProcess::Pipe(pid) = tracked;
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                    .output();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .output();
+            }
+            log::info!("[agent-processes] killed orphan on exit: {sid} (pid {pid})");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2047,6 +2084,15 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
         }
 
         let full_match: String = chars[i..path_end].iter().collect();
+
+        // F13: only treat as a file reference if it actually exists on disk.
+        // The loose `looks_like_path` heuristic (contains '.'/'/'/'\') otherwise
+        // matches `@1.0`, `@docs/api`, version strings — reading + injecting
+        // those as file contents pollutes the prompt / leaks unrelated files.
+        if !std::path::Path::new(&full_match).exists() {
+            i = path_end;
+            continue;
+        }
 
         // Skip if already processed
         if replacements.iter().any(|(m, _)| m == &full_match) {
