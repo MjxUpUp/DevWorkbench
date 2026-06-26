@@ -100,4 +100,16 @@ describe('CommandPalette', () => {
     expect(useNavigationStore.getState().activeView).toBe('settings');
     expect(useNavigationStore.getState().commandPaletteOpen).toBe(false);
   });
+
+  it('技能 command routes to settings and targets the skills section', async () => {
+    // 技能目录已下放设置页统一管理——命令面板的「技能」直达设置页技能分区，
+    // 不再切到旧的主页 skills view。
+    const user = userEvent.setup();
+    render(<CommandPalette />);
+    await user.click(screen.getByRole('button', { name: '技能' }));
+    const nav = useNavigationStore.getState();
+    expect(nav.activeView).toBe('settings');
+    expect(nav.settingsInitialSection).toBe('skills');
+    expect(nav.commandPaletteOpen).toBe(false);
+  });
 });

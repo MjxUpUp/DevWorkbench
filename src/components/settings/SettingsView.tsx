@@ -70,12 +70,29 @@ const SECTIONS: SectionDef[] = [
 const GROUP_ORDER: SectionDef['group'][] = ['智能体', '能力扩展', '记忆与输出', '数据与诊断', '入门'];
 
 export function SettingsView() {
-  const [activeSection, setActiveSection] = useState<SettingsSection>('agent-tools');
+  // 外部入口（命令面板「技能」）可指定进设置页时直达的分区：initializer 消费一次，
+  // 下方的 useEffect 随即清空，避免下次从用户菜单进设置仍落在该分区。
+  const setSettingsInitialSection = useNavigationStore((s) => s.setSettingsInitialSection);
+  const [activeSection, setActiveSection] = useState<SettingsSection>(() => {
+    const initial = useNavigationStore.getState().settingsInitialSection;
+    if (initial) {
+      const match = SECTIONS.find((s) => s.id === initial);
+      if (match) return match.id;
+    }
+    return 'agent-tools';
+  });
   const loadSettings = useSettingsStore((s) => s.loadSettings);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
 
   // Load settings once on mount — shared store eliminates per-section loading
   useEffect(() => { loadSettings(); }, [loadSettings]);
+
+  // 消费外部入口指定的直达分区后清空，防止污染下次正常进入设置。
+  useEffect(() => {
+    if (useNavigationStore.getState().settingsInitialSection !== null) {
+      setSettingsInitialSection(null);
+    }
+  }, [setSettingsInitialSection]);
 
   // ESC closes the settings overlay (returns to the task view).
   useEffect(() => {

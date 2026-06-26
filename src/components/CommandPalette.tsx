@@ -29,6 +29,7 @@ export function CommandPalette() {
   const open = useNavigationStore((s) => s.commandPaletteOpen);
   const setOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
+  const setSettingsInitialSection = useNavigationStore((s) => s.setSettingsInitialSection);
   const selectProject = useNavigationStore((s) => s.selectProject);
   const selectConversation = useNavigationStore((s) => s.selectConversation);
 
@@ -77,7 +78,7 @@ export function CommandPalette() {
 
   const commands: ResultItem[] = [
     { kind: 'command', label: '创建任务', action: () => { setActiveView('task'); close(); } },
-    { kind: 'command', label: '技能', action: () => { setActiveView('skills'); close(); } },
+    { kind: 'command', label: '技能', action: () => { setSettingsInitialSection('skills'); setActiveView('settings'); close(); } },
     { kind: 'command', label: '设置', action: () => { setActiveView('settings'); close(); } },
   ];
 

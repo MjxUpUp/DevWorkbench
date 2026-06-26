@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SettingsView } from '../SettingsView';
+import { useNavigationStore } from '../../../stores/navigationStore';
+import { useSkillsStore } from '../../../stores/skillsStore';
 
 /**
  * SettingsView owns the section nav + routing. This pins the A7 rename:
@@ -11,12 +13,17 @@ import { SettingsView } from '../SettingsView';
  * nothing should reference the dead PluginsSection / DashboardView.
  */
 const mockInvoke = vi.hoisted(() => vi.fn());
+const toastSpies = vi.hoisted(() => ({
+  success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(),
+}));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
+vi.mock('../../Toast', () => ({ useToast: () => toastSpies }));
 
 function setupInvoke() {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === 'load_settings') return Promise.resolve({});
     if (cmd === 'list_skills') return Promise.resolve([]);
+    if (cmd === 'skill_catalog') return Promise.resolve([]);
     if (cmd === 'mcp_catalog') return Promise.resolve([]);
     return Promise.resolve(undefined);
   });
@@ -47,5 +54,18 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
     render(<SettingsView />);
     // The capability overview is NOT the default landing section.
     expect(screen.queryByText('内置工具')).not.toBeInTheDocument();
+  });
+
+  it('lands on the skills section when entered via settingsInitialSection', () => {
+    // 命令面板「技能」会先把 settingsInitialSection 置为 'skills'，SettingsView 应消费它
+    // 直达技能分区（技能目录统一归设置页管理的入口路径），而非默认的 agent-tools。
+    useNavigationStore.setState({ settingsInitialSection: 'skills' });
+    // SkillsSection 同步读 skillsStore.catalog — render 前先初始化，且 setupInvoke
+    // 已让 load_catalog 解析为 []，避免 catalog 为 undefined 时 catalog.length 抛错。
+    useSkillsStore.setState({ installed: [], catalog: [], loading: false });
+    render(<SettingsView />);
+    expect(screen.getByText('技能管理')).toBeInTheDocument();
+    // 消费后随即清空，避免下次从用户菜单进设置仍落在技能分区。
+    expect(useNavigationStore.getState().settingsInitialSection).toBeNull();
   });
 });

@@ -153,10 +153,10 @@ function App() {
         useNavigationStore.getState().toggleSidebar();
       }
 
-      // Ctrl+1~5: Switch views (task / search / skills / orchestrate / settings)
-      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '5') {
+      // Ctrl+1~4: Switch views (task / search / orchestrate / settings)
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '4') {
         e.preventDefault();
-        const views: ViewId[] = ['task', 'search', 'skills', 'orchestrate', 'settings'];
+        const views: ViewId[] = ['task', 'search', 'orchestrate', 'settings'];
         const idx = parseInt(e.key) - 1;
         if (idx < views.length) {
           useNavigationStore.getState().setActiveView(views[idx]);

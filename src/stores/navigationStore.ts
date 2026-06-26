@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
 
-export type ViewId = 'task' | 'search' | 'skills' | 'orchestrate' | 'settings' | 'trace';
+export type ViewId = 'task' | 'search' | 'orchestrate' | 'settings' | 'trace';
 
 interface NavigationState {
   /** Currently active view in the main stage */
@@ -26,6 +26,11 @@ interface NavigationState {
    *  「🔍 Trace」 button; cleared when leaving the trace view. null = no session
    *  selected → TraceView shows its empty state. */
   traceSessionId: string | null;
+  /** 进设置页时默认展开的分区。技能目录已下放到设置页统一管理，外部入口（命令面板
+   *  「技能」）跳设置页时设为 'skills' 直达该分区；SettingsView 读取后清空，避免下次从
+   *  用户菜单进设置仍落在该分区。null = 用默认分区。值为 SettingsSection，此处用 string
+   *  以避免与 SettingsView 形成循环依赖。 */
+  settingsInitialSection: string | null;
 
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
@@ -39,6 +44,7 @@ interface NavigationState {
   /** Jump to the trace view scoped to one session (a turn). The trace view then
    *  fetches that session's LLM HTTP calls via traceStore. */
   setTrace: (sessionId: string) => void;
+  setSettingsInitialSection: (section: string | null) => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -51,6 +57,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   sidebarWidth: 240,
   sidebarOpen: true,
   traceSessionId: null,
+  settingsInitialSection: null,
 
   setActiveView: (view) => set({ activeView: view }),
   // Switching project resets the active conversation — a conversation belongs to
@@ -70,4 +77,5 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setTrace: (sessionId) => set({ traceSessionId: sessionId, activeView: 'trace' }),
+  setSettingsInitialSection: (section) => set({ settingsInitialSection: section }),
 }));

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Project } from '../types';
-import { IconSearch, IconSparkles, IconPlus, IconUser, IconSettings, IconOrchestrate, IconTrash } from './Icons';
+import { IconSearch, IconPlus, IconUser, IconSettings, IconOrchestrate, IconTrash } from './Icons';
 import type { IconProps } from './Icons';
 import type { ViewId } from '../stores/navigationStore';
 import { useNavigationStore } from '../stores/navigationStore';
@@ -11,8 +11,8 @@ import { useToast } from './Toast';
 
 /**
  * Primary navigation — aligns to the target layout:
- *   创建任务 / 搜索 / 技能 → 工作区 (project list; the active project expands to
- *   show its conversations — the topic containers) → 用户资料 (设置 menu).
+ *   创建任务 / 搜索 → 工作区 (project list; the active project expands to show
+ *   its conversations — the topic containers) → 用户资料 (设置 menu, 含技能管理).
  *
  * A conversation is the Claude-Code "session": a multi-turn topic. Selecting one
  * loads its turns in the main task view.
@@ -20,7 +20,6 @@ import { useToast } from './Toast';
 const VIEWS: { id: ViewId; label: string; Icon: React.FC<IconProps> }[] = [
   { id: 'task', label: '创建任务', Icon: IconPlus },
   { id: 'search', label: '搜索', Icon: IconSearch },
-  { id: 'skills', label: '技能', Icon: IconSparkles },
   { id: 'orchestrate', label: '编排', Icon: IconOrchestrate },
 ];
 
@@ -61,7 +60,7 @@ export function Sidebar() {
 
   return (
     <aside className="left-column">
-      {/* Primary navigation — 创建任务 / 搜索 / 技能. The brand mark and the
+      {/* Primary navigation — 创建任务 / 搜索 / 编排. The brand mark and the
           sidebar toggle both live in the title bar (TitleBar.tsx); not
           duplicated as a "Z" logo here. */}
       <nav className="left-column-nav" aria-label="主导航">
