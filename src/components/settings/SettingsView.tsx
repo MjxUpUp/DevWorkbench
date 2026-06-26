@@ -12,6 +12,7 @@ import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
+import type { SettingsSection } from './types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
@@ -29,12 +30,11 @@ type SettingsIcon = React.FC<{ size?: number; className?: string }>;
  *   - removed "代码预览" (placeholder)
  *   - removed "索引" (placeholder)
  * Remaining sections map to a real component or share the PlaceholderSection
- * aesthetic.
+ * aesthetic. The SettingsSection id union lives in ./types — shared with
+ * navigationStore so the command palette's deep-link target is type-checked
+ * (a typo'd section id fails at compile time instead of silently falling back
+ * to the default section at runtime).
  */
-export type SettingsSection =
-  | 'agent-tools' | 'providers' | 'capability'
-  | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
-  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';
 
 interface SectionDef {
   id: SettingsSection;

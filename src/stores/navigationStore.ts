@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Project } from '../types';
+import type { SettingsSection } from '../components/settings/types';
 
 export type ViewId = 'task' | 'search' | 'orchestrate' | 'settings' | 'trace';
 
@@ -28,9 +29,9 @@ interface NavigationState {
   traceSessionId: string | null;
   /** 进设置页时默认展开的分区。技能目录已下放到设置页统一管理，外部入口（命令面板
    *  「技能」）跳设置页时设为 'skills' 直达该分区；SettingsView 读取后清空，避免下次从
-   *  用户菜单进设置仍落在该分区。null = 用默认分区。值为 SettingsSection，此处用 string
-   *  以避免与 SettingsView 形成循环依赖。 */
-  settingsInitialSection: string | null;
+   *  用户菜单进设置仍落在该分区。null = 用默认分区。类型为 SettingsSection（type-only
+   *  import 自 ../components/settings/types，编译期擦除，运行时无循环依赖）。 */
+  settingsInitialSection: SettingsSection | null;
 
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
@@ -44,7 +45,7 @@ interface NavigationState {
   /** Jump to the trace view scoped to one session (a turn). The trace view then
    *  fetches that session's LLM HTTP calls via traceStore. */
   setTrace: (sessionId: string) => void;
-  setSettingsInitialSection: (section: string | null) => void;
+  setSettingsInitialSection: (section: SettingsSection | null) => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({

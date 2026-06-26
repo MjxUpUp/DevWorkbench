@@ -33,6 +33,10 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     setupInvoke();
+    // 每个用例从干净基线开始——navigationStore/skillsStore 是模块级单例，上一用例
+    // 残留的 settingsInitialSection 会污染默认分区断言（直达 skills 后未重置则默认用例假绿）。
+    useNavigationStore.setState({ settingsInitialSection: null });
+    useSkillsStore.setState({ installed: [], catalog: [], loading: false });
   });
 
   it('renders the 能力总览 nav entry', () => {
@@ -60,12 +64,22 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
     // 命令面板「技能」会先把 settingsInitialSection 置为 'skills'，SettingsView 应消费它
     // 直达技能分区（技能目录统一归设置页管理的入口路径），而非默认的 agent-tools。
     useNavigationStore.setState({ settingsInitialSection: 'skills' });
-    // SkillsSection 同步读 skillsStore.catalog — render 前先初始化，且 setupInvoke
-    // 已让 load_catalog 解析为 []，避免 catalog 为 undefined 时 catalog.length 抛错。
-    useSkillsStore.setState({ installed: [], catalog: [], loading: false });
     render(<SettingsView />);
     expect(screen.getByText('技能管理')).toBeInTheDocument();
     // 消费后随即清空，避免下次从用户菜单进设置仍落在技能分区。
     expect(useNavigationStore.getState().settingsInitialSection).toBeNull();
+  });
+
+  it('clears settingsInitialSection after consuming so a later normal entry defaults back', () => {
+    // 锁死「消费即清空」语义：直达 skills 一次后，再次正常进入设置不应残留 skills 分区。
+    useNavigationStore.setState({ settingsInitialSection: 'skills' });
+    const { unmount } = render(<SettingsView />);
+    expect(screen.getByText('技能管理')).toBeInTheDocument();
+    expect(useNavigationStore.getState().settingsInitialSection).toBeNull();
+    unmount();
+
+    // 第二次进入：用户菜单正常进设置（无直达意图）→ 应回默认 agent-tools。
+    render(<SettingsView />);
+    expect(screen.queryByText('技能管理')).not.toBeInTheDocument();
   });
 });
