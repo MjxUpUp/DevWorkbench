@@ -10,7 +10,7 @@ version = "1.0.5"
 default-run = "dev-workbench"
 description = "一目了然 — 本地开发工作台"
 authors = ["you"]
-license = "MIT"
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.80"
 
