@@ -1,6 +1,6 @@
 [package]
 name = "dev-workbench"
-version = "1.0.4"
+version = "1.0.5"
 # Tauri bundler needs the main binary disambiguated: this crate builds TWO
 # bins — `dev-workbench` (src/main.rs, the Tauri app) and `dev-workbench-acp`
 # (src/bin/dev-workbench-acp.rs, the C1 ACP stdio server helper). Without
