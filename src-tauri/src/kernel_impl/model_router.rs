@@ -1,63 +1,69 @@
 //! Per-step model routing (v1.2 T9). AgentFare-inspired rule-based tiering:
-//! look at the conversation so far and pick a cheaper model for turns that
-//! don't need the flagship, keeping glm-4.6 for planning/reasoning/final
-//! answers.
+//! look at the conversation so far and pick the cheap model for turns that
+//! don't need the strong one, keeping the strong model for planning/reasoning/
+//! final answers.
 //!
-//! Same-provider routing only — glm-4.6 ↔ glm-4-flash on the Z.AI endpoint — so
-//! endpoint/api_key stay constant and no second `ChatModel` impl is needed
-//! (`GlmChatModel` already honors `opts.model` per call). This is AgentFare's
+//! Provider-agnostic since the multi-protocol refactor: the strong + cheap ids
+//! come from a [`TierCtx`] built by the executor from the resolved provider's
+//! declared `ModelTier`s (Z.AI: glm-4.6 ↔ glm-4-flash; any provider declaring
+//! both tiers routes the same way). Same-provider routing only, so endpoint /
+//! api_key stay constant and no second credential is needed. This is AgentFare's
 //! "rules → tier → same-provider model" path, ported 1:1; its proxy/hook layer
 //! and LLM secondary router are out of scope (a ReactAgent's turn type is
 //! structurally known from history, so the rules suffice — no extra LLM call).
 
 use kernel_core::{Message, Role};
 
-/// The strong default (flagship tool-calling GLM) and the cheap fallback within
-/// the Z.AI family. glm-4-flash is far cheaper per token yet capable for
-/// tool-result echoes, confirmations, and short formatting turns.
-pub const STRONG_MODEL: &str = "glm-4.6";
-pub const CHEAP_MODEL: &str = "glm-4-flash";
+/// The strong + cheap model ids for one provider's per-step routing. Replaces
+/// the old hardcoded `STRONG_MODEL`/`CHEAP_MODEL` constants: each provider now
+/// declares its own pair via `ModelTier` on its `ModelEntry`s, and the executor
+/// builds a `TierCtx` from the resolved provider's declared tiers. Routing is
+/// `tier.strong ↔ tier.cheap` for ANY provider, not just Z.AI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TierCtx {
+    pub strong: String,
+    pub cheap: String,
+}
 
 /// Planning / reasoning / review keywords (EN + ZH) → keep the strong model.
 /// Mirrors AgentFare's PLANNING/REASONING/REVIEWING patterns.
 const POWERFUL_HINTS: &[&str] = &[
-    "plan", "design", "architect", "refactor", "debug", "analyze", "review",
-    "rewrite", "migrate", "why", "investigate", "规划", "设计", "重构", "排查",
-    "分析", "审查", "为什么",
+    "plan", "design", "architect", "refactor", "debug", "analyze", "review", "rewrite", "migrate",
+    "why", "investigate", "规划", "设计", "重构", "排查", "分析", "审查", "为什么",
 ];
 
 /// Short yes/no/go confirmations → cheap model. (ZH: 继续/好的/确认/可以.)
 const CHEAP_CONFIRM: &[&str] = &[
-    "yes", "ok", "done", "continue", "go ahead", "sure", "next", "继续", "好的",
-    "确认", "可以", "下一步", "继续吧",
+    "yes", "ok", "done", "continue", "go ahead", "sure", "next", "继续", "好的", "确认", "可以",
+    "下一步", "继续吧",
 ];
 
-/// Decide the model id for the next turn, given the conversation so far and the
-/// agent's configured base model.
+/// Decide the model id for the next turn, given the conversation so far, the
+/// agent's configured base model, and the provider's tier pair.
 ///
-/// - Non-GLM base → returned unchanged (don't silently swap a user's explicit
-///   claude/gpt pick; routing assumes the Z.AI family).
-/// - A powerful hint in the recent window → strong (planning/reasoning needs the
-///   flagship).
+/// - Base model isn't this provider's declared strong model → returned unchanged
+///   (don't silently swap a user's explicit pick; routing only applies within a
+///   provider's own tier pair, so a different model can't receive the pair's ids).
+/// - A powerful hint in the recent window → strong (planning/reasoning needs it).
 /// - Otherwise, if the last message is a tool result (agent branching on tool
 ///   output) or the current instruction is a short confirmation → cheap.
 /// - Default (incl. the first turn parsing a fresh task) → strong.
-pub fn route_step(history: &[Message], base_model: &str) -> String {
-    // Only route within the GLM family.
-    if !base_model.eq_ignore_ascii_case(STRONG_MODEL) {
+pub fn route_step(history: &[Message], base_model: &str, tier: &TierCtx) -> String {
+    // Only route within the provider's own tier pair.
+    if !base_model.eq_ignore_ascii_case(&tier.strong) {
         return base_model.to_string();
     }
     let recent = recent_text(history);
     if POWERFUL_HINTS.iter().any(|h| recent.contains(h)) {
-        return STRONG_MODEL.to_string();
+        return tier.strong.clone();
     }
     if last_is_tool_result(history) {
-        return CHEAP_MODEL.to_string();
+        return tier.cheap.clone();
     }
     if is_short_confirmation(history) {
-        return CHEAP_MODEL.to_string();
+        return tier.cheap.clone();
     }
-    STRONG_MODEL.to_string()
+    tier.strong.clone()
 }
 
 /// Lowercased concatenation of the last few messages' text, for keyword scan.
@@ -107,11 +113,11 @@ fn last_instruction(history: &[Message]) -> Option<&Message> {
 // Per-turn [`route_step`] above decides which model fits ONE turn of a
 // conversation. Dispatch tiering decides, up-front from the TASK text, which
 // router a *child* ReactAgent should carry for its whole run — so a dispatched
-// sub-agent's labor turns (the bulk of search/extraction) run on glm-4-flash
-// instead of cloning the parent's flagship for every turn.
+// sub-agent's labor turns (the bulk of search/extraction) run on the cheap
+// model instead of cloning the parent's strong model for every turn.
 //
 // The motivating frame: a sub-agent is mostly 劳动 token (search/read/extract),
-// so it should not burn the flagship model on grunt work; the flagship belongs
+// so it should not burn the strong model on grunt work; the strong model belongs
 // at the 裁决 nodes, which sit on the MAIN agent (it re-reasons over the
 // child's `[子 agent 结论]`). Mis-tiering is safe: a cheap run that produces a
 // weak conclusion is judged and re-dispatched by the controller.
@@ -122,19 +128,18 @@ fn last_instruction(history: &[Message]) -> Option<&Message> {
 /// task is never silently downgraded. A task with BOTH a grunt word and a
 /// [`POWERFUL_HINTS`] word is treated as reasoning (see [`classify_dispatch`]).
 const GRUNT_KEYWORDS: &[&str] = &[
-    "search", "find", "grep", "glob", "list", "read", "lookup", "fetch",
-    "extract", "enumerate", "collect", "gather",
-    "搜索", "查找", "查询", "读取", "列出", "枚举", "收集", "抽取", "获取",
+    "search", "find", "grep", "glob", "list", "read", "lookup", "fetch", "extract", "enumerate",
+    "collect", "gather", "搜索", "查找", "查询", "读取", "列出", "枚举", "收集", "抽取", "获取",
 ];
 
 /// The model tier chosen for a sub-agent dispatch. See [`classify_dispatch`].
 pub enum DispatchTier {
-    /// Pure grunt task → the child runs glm-4-flash for ALL turns (it never
+    /// Pure grunt task → the child runs the cheap model for ALL turns (it never
     /// needs to reason; even the opening parse is grunt work). Maximum savings,
     /// low risk because grunt tasks are mechanical.
     CheapOnly,
     /// The task may need reasoning → the child carries [`route_step`] (strong
-    /// for the opening/ planning turn, cheap for tool-echo turns). Still saves
+    /// for the opening/planning turn, cheap for tool-echo turns). Still saves
     /// on the bulk labor turns while preserving the child's reasoning ability.
     Routed,
 }
@@ -161,26 +166,27 @@ pub fn classify_dispatch(task: &str) -> DispatchTier {
 }
 
 /// Per-turn router for a [`DispatchTier::CheapOnly`] child: always the cheap
-/// model within the GLM family, ignoring history — the task was already judged
-/// grunt work by [`classify_dispatch`], so no turn deserves the flagship.
-/// Self-gates exactly like [`route_step`]: a non-glm-4.6 base (glm-5.2 or a
-/// foreign model) is returned unchanged, so attaching it is never harmful.
-pub fn force_cheap_router(_history: &[Message], base_model: &str) -> String {
-    if base_model.eq_ignore_ascii_case(STRONG_MODEL) {
-        CHEAP_MODEL.to_string()
+/// model within the provider's tier pair, ignoring history — the task was
+/// already judged grunt work by [`classify_dispatch`], so no turn deserves the
+/// strong model. Self-gates exactly like [`route_step`]: a base that isn't the
+/// declared strong model is returned unchanged, so attaching it is never harmful.
+pub fn force_cheap_router(_history: &[Message], base_model: &str, tier: &TierCtx) -> String {
+    if base_model.eq_ignore_ascii_case(&tier.strong) {
+        tier.cheap.clone()
     } else {
         base_model.to_string()
     }
 }
 
 /// Resolve a dispatch to its tier, or `None` when the child's model isn't the
-/// tierable flagship. Combines the family gate (only glm-4.6 is tierable —
-/// glm-5.2 keeps the user's pick, foreign models can't receive a GLM id) with
-/// [`classify_dispatch`]. `None` ⇒ the caller attaches NO router and the child
-/// runs its own model uniformly (symmetric with executor.rs's wire-time
-/// `is_glm_family` gate and [`route_step`]'s own base guard).
-pub fn dispatch_tier_for(model_id: &str, task: &str) -> Option<DispatchTier> {
-    if !model_id.eq_ignore_ascii_case(STRONG_MODEL) {
+/// tierable strong model. Combines the tier-pair gate (only the provider's
+/// declared strong model is tierable — a different model keeps the user's pick
+/// and can't receive the pair's ids) with [`classify_dispatch`]. `None` ⇒ the
+/// caller attaches NO router and the child runs its own model uniformly
+/// (symmetric with executor.rs's wire-time tierable gate and [`route_step`]'s
+/// own base guard).
+pub fn dispatch_tier_for(base_model: &str, task: &str, tier: &TierCtx) -> Option<DispatchTier> {
+    if !base_model.eq_ignore_ascii_case(&tier.strong) {
         return None;
     }
     Some(classify_dispatch(task))
@@ -190,6 +196,16 @@ pub fn dispatch_tier_for(model_id: &str, task: &str) -> Option<DispatchTier> {
 mod tests {
     use super::*;
     use kernel_core::FunctionCall;
+
+    /// The Z.AI tier pair used throughout these tests (strong=glm-4.6,
+    /// cheap=glm-4-flash). Post-refactor the ids are data, not constants —
+    /// this helper stands in for the TierCtx the executor builds.
+    fn tier() -> TierCtx {
+        TierCtx {
+            strong: "glm-4.6".to_string(),
+            cheap: "glm-4-flash".to_string(),
+        }
+    }
 
     fn user(text: &str) -> Message {
         Message::user(text)
@@ -223,45 +239,49 @@ mod tests {
     }
 
     #[test]
-    fn non_glm_base_is_returned_unchanged() {
-        // The user explicitly mapped to a non-GLM model — don't swap it.
+    fn non_strong_base_is_returned_unchanged() {
+        // The user explicitly mapped to a model outside this provider's tier
+        // pair — don't swap it.
         let h = [user("ok")];
-        assert_eq!(route_step(&h, "claude-opus-4"), "claude-opus-4");
-        assert_eq!(route_step(&h, "gpt-5"), "gpt-5");
+        let t = tier();
+        assert_eq!(route_step(&h, "claude-opus-4", &t), "claude-opus-4");
+        assert_eq!(route_step(&h, "gpt-5", &t), "gpt-5");
         // Regression (session 1ef23cbc, 2026-06-19): a DeepSeek base model must
         // NEVER be swapped to glm-4.6 — that sends a GLM model id to the DeepSeek
         // endpoint → 400 invalid_request_error. The guard here is the runtime
-        // backstop; executor.rs additionally gates the router off at wire-time for
-        // non-GLM providers (only resolved_model.starts_with("glm-") wires it).
-        // Both must hold — a power-hint turn on a DeepSeek base must still return
-        // the DeepSeek id, not STRONG_MODEL.
-        assert_eq!(route_step(&[user("plan the refactor")], "deepseek-v4-flash"), "deepseek-v4-flash");
-        assert_eq!(route_step(&h, "deepseek-v4-flash"), "deepseek-v4-flash");
+        // backstop; executor.rs additionally gates the router off at wire-time
+        // when the provider has no tier pair. Both must hold — a power-hint turn
+        // on a DeepSeek base must still return the DeepSeek id, not the strong id.
+        assert_eq!(
+            route_step(&[user("plan the refactor")], "deepseek-v4-flash", &t),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(route_step(&h, "deepseek-v4-flash", &t), "deepseek-v4-flash");
     }
 
     #[test]
-    fn glm_5_2_base_is_returned_unchanged() {
+    fn non_flagship_same_provider_base_is_returned_unchanged() {
         // Regression (session 7f51a5d2, 2026-06-21): a user who picked glm-5.2
-        // must NOT be silently swapped to glm-4.6. The guard returns any non-
-        // STRONG base unchanged, so glm-5.2 → glm-5.2 (the router stays out of
-        // the way instead of forcing the glm-4.6↔flash family). On a first turn
-        // (no hint/tool_result/confirm) this is the exact shape of the failing
-        // session.
+        // must NOT be silently swapped to glm-4.6. The guard returns any base
+        // that isn't the declared strong model unchanged, so glm-5.2 → glm-5.2
+        // (the router stays out of the way instead of forcing the pair).
         let h = [user("summarize the project goals")];
-        assert_eq!(route_step(&h, "glm-5.2"), "glm-5.2");
+        let t = tier();
+        assert_eq!(route_step(&h, "glm-5.2", &t), "glm-5.2");
         // A powerful-hint turn on a glm-5.2 base still keeps glm-5.2 — the guard
-        // fires BEFORE the hint scan, so a non-flagship GLM is never "upgraded"
-        // to STRONG_MODEL.
-        assert_eq!(route_step(&[user("plan the refactor")], "glm-5.2"), "glm-5.2");
+        // fires BEFORE the hint scan, so a non-strong same-provider model is
+        // never "upgraded" to the strong id.
+        assert_eq!(route_step(&[user("plan the refactor")], "glm-5.2", &t), "glm-5.2");
     }
 
     #[test]
     fn planning_keyword_keeps_strong() {
+        let t = tier();
         let h = [user("plan the migration to the new schema")];
-        assert_eq!(route_step(&h, STRONG_MODEL), STRONG_MODEL);
+        assert_eq!(route_step(&h, "glm-4.6", &t), "glm-4.6");
         // ZH hint too.
         let h2 = [user("帮我重构这个模块")];
-        assert_eq!(route_step(&h2, STRONG_MODEL), STRONG_MODEL);
+        assert_eq!(route_step(&h2, "glm-4.6", &t), "glm-4.6");
     }
 
     #[test]
@@ -269,14 +289,19 @@ mod tests {
         // Assistant called a tool, tool result is now the last message → the
         // next turn is the agent reacting to tool output → cheap.
         let h = [user("list files"), assistant_tool_call(), tool_result()];
-        assert_eq!(route_step(&h, STRONG_MODEL), CHEAP_MODEL);
+        let t = tier();
+        assert_eq!(route_step(&h, "glm-4.6", &t), "glm-4-flash");
     }
 
     #[test]
     fn short_confirmation_routes_cheap() {
-        assert_eq!(route_step(&[user("ok")], STRONG_MODEL), CHEAP_MODEL);
-        assert_eq!(route_step(&[user("继续")], STRONG_MODEL), CHEAP_MODEL);
-        assert_eq!(route_step(&[user("yes, go ahead")], STRONG_MODEL), CHEAP_MODEL);
+        let t = tier();
+        assert_eq!(route_step(&[user("ok")], "glm-4.6", &t), "glm-4-flash");
+        assert_eq!(route_step(&[user("继续")], "glm-4.6", &t), "glm-4-flash");
+        assert_eq!(
+            route_step(&[user("yes, go ahead")], "glm-4.6", &t),
+            "glm-4-flash"
+        );
     }
 
     #[test]
@@ -284,14 +309,32 @@ mod tests {
         // No powerful hint, no tool result, not a confirmation → strong (parse
         // the task properly on the opening turn).
         let h = [user("add a hello world endpoint")];
-        assert_eq!(route_step(&h, STRONG_MODEL), STRONG_MODEL);
+        let t = tier();
+        assert_eq!(route_step(&h, "glm-4.6", &t), "glm-4.6");
     }
 
     #[test]
     fn long_message_is_not_treated_as_confirmation() {
         // A long message that merely starts with "ok" is not a confirmation.
         let h = [user("ok so here is the detailed plan for the whole refactor ...")];
-        assert_eq!(route_step(&h, STRONG_MODEL), STRONG_MODEL);
+        let t = tier();
+        assert_eq!(route_step(&h, "glm-4.6", &t), "glm-4.6");
+    }
+
+    #[test]
+    fn tier_pair_is_data_driven_any_ids_work() {
+        // Post-refactor proof: the router works for ANY strong/cheap pair a
+        // provider declares, not just Z.AI's. A hypothetical provider with
+        // strong=big-model, cheap=small-model routes identically.
+        let t = TierCtx {
+            strong: "big-model".to_string(),
+            cheap: "small-model".to_string(),
+        };
+        assert_eq!(route_step(&[user("ok")], "big-model", &t), "small-model");
+        assert_eq!(
+            route_step(&[user("plan the work")], "big-model", &t),
+            "big-model"
+        );
     }
 
     // ---- sub-agent dispatch tiering (classify_dispatch / force_cheap_router /
@@ -344,41 +387,52 @@ mod tests {
     }
 
     #[test]
-    fn force_cheap_router_returns_cheap_for_flagship_base() {
-        assert_eq!(force_cheap_router(&[], STRONG_MODEL), CHEAP_MODEL);
+    fn force_cheap_router_returns_cheap_for_strong_base() {
+        let t = tier();
+        assert_eq!(force_cheap_router(&[], "glm-4.6", &t), "glm-4-flash");
         // History is ignored — grunt work means every turn is cheap.
-        assert_eq!(force_cheap_router(&[user("plan the refactor")], STRONG_MODEL), CHEAP_MODEL);
+        assert_eq!(
+            force_cheap_router(&[user("plan the refactor")], "glm-4.6", &t),
+            "glm-4-flash"
+        );
     }
 
     #[test]
-    fn force_cheap_router_passes_through_non_flagship_base() {
-        // glm-5.2 (user's explicit pick) and foreign models are returned
-        // unchanged — symmetric with route_step's base guard, so attaching the
-        // router to a non-tierable child is a harmless no-op.
-        assert_eq!(force_cheap_router(&[], "glm-5.2"), "glm-5.2");
-        assert_eq!(force_cheap_router(&[], "claude-opus-4"), "claude-opus-4");
-        assert_eq!(force_cheap_router(&[], "deepseek-v4-flash"), "deepseek-v4-flash");
+    fn force_cheap_router_passes_through_non_strong_base() {
+        // A base that isn't the declared strong model (user's explicit pick or
+        // a foreign model) is returned unchanged — symmetric with route_step's
+        // base guard, so attaching the router to a non-tierable child is a
+        // harmless no-op.
+        let t = tier();
+        assert_eq!(force_cheap_router(&[], "glm-5.2", &t), "glm-5.2");
+        assert_eq!(force_cheap_router(&[], "claude-opus-4", &t), "claude-opus-4");
+        assert_eq!(
+            force_cheap_router(&[], "deepseek-v4-flash", &t),
+            "deepseek-v4-flash"
+        );
     }
 
     #[test]
-    fn dispatch_tier_for_non_flagship_model_is_none() {
+    fn dispatch_tier_for_non_strong_model_is_none() {
         // Non-tierable models → no router attached (the child runs uniformly).
         // Covers the foreign-endpoint-400 trap: a deepseek/claude child must
-        // never receive a GLM id via a router.
-        assert!(dispatch_tier_for("glm-5.2", "搜索文件").is_none());
-        assert!(dispatch_tier_for("claude-opus-4", "搜索文件").is_none());
-        assert!(dispatch_tier_for("deepseek-v4-flash", "analyze the bug").is_none());
+        // never receive the provider's strong id via a router.
+        let t = tier();
+        assert!(dispatch_tier_for("glm-5.2", "搜索文件", &t).is_none());
+        assert!(dispatch_tier_for("claude-opus-4", "搜索文件", &t).is_none());
+        assert!(dispatch_tier_for("deepseek-v4-flash", "analyze the bug", &t).is_none());
     }
 
     #[test]
-    fn dispatch_tier_for_flagship_routes_by_task_type() {
-        // glm-4.6 flagship → tier by task. Grunt → CheapOnly, reasoning → Routed.
+    fn dispatch_tier_for_strong_model_routes_by_task_type() {
+        // Declared strong model → tier by task. Grunt → CheapOnly, reasoning → Routed.
+        let t = tier();
         assert!(matches!(
-            dispatch_tier_for(STRONG_MODEL, "grep for callers"),
+            dispatch_tier_for("glm-4.6", "grep for callers", &t),
             Some(DispatchTier::CheapOnly)
         ));
         assert!(matches!(
-            dispatch_tier_for(STRONG_MODEL, "重构这个模块"),
+            dispatch_tier_for("glm-4.6", "重构这个模块", &t),
             Some(DispatchTier::Routed)
         ));
     }

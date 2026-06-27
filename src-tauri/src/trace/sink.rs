@@ -1,13 +1,13 @@
-//! LLM call trace sink — the seam between GlmChatModel (which observes each
+//! LLM call trace sink — the seam between the ChatModel (which observes each
 //! HTTP request/response to an Anthropic-compatible endpoint) and the
-//! `llm_traces` table. GlmChatModel holds an `Option<Arc<dyn TraceSink>>`; when
+//! `llm_traces` table. The ChatModel holds an `Option<Arc<dyn TraceSink>>`; when
 //! present, every LLM call records its request body, HTTP status, response
 //! body (on error), latency, and token usage. `DbTraceSink` writes to SQLite
 //! on a blocking thread (fire-and-forget — a trace-write failure must never
 //! break the agent loop). Mirrors `crate::cost::sink` exactly.
 //!
 //! WHY this exists: before tracing, a non-2xx response was compressed to
-//! `format!("GLM stream failed: {status}")` and the error body (the actual
+//! `format!("LLM stream failed: {status}")` and the error body (the actual
 //! reason — quota, schema, model-not-found) was discarded along with the
 //! request body. Sessions like 41f2ddca failed in 0.8s with no recoverable
 //! clue. This sink keeps the real request/response on disk so the cause is
@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::db::DbState;
-use crate::trace::db::{insert_llm_trace, LlmTraceRow};
+use crate::trace::db::{LlmTraceRow, insert_llm_trace};
 
-/// One LLM HTTP call observed at the GlmChatModel boundary. Built by the call
+/// One LLM HTTP call observed at the ChatModel boundary. Built by the call
 /// site (stream/generate); `DbTraceSink` maps it to a table row. `session_id`
-/// is passed separately to `record_llm_call` (it lives on GlmChatModel, not on
+/// is passed separately to `record_llm_call` (it lives on the ChatModel, not on
 /// the per-call trace).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmTrace {
@@ -59,7 +59,7 @@ pub struct LlmTrace {
 }
 
 /// Receives one trace record per LLM call. Implementations must be cheap to
-/// share (held inside GlmChatModel behind an `Arc`) and must NOT propagate
+/// share (held inside the ChatModel behind an `Arc`) and must NOT propagate
 /// errors into the caller — a failed trace write is logged, not fatal.
 pub trait TraceSink: Send + Sync {
     fn record_llm_call(&self, session_id: Option<&str>, trace: LlmTrace);
@@ -78,7 +78,7 @@ impl TraceSink for NullTraceSink {
 /// blocking task so the synchronous rusqlite INSERT never stalls the async
 /// stream, and swallows errors (logged at warn) so tracing can't crash the
 /// agent. Holds `conversation_id` (known at agent build time); `session_id`
-/// arrives per-call from GlmChatModel.
+/// arrives per-call from the ChatModel.
 pub struct DbTraceSink {
     db: DbState,
     conversation_id: Option<String>,
@@ -86,7 +86,10 @@ pub struct DbTraceSink {
 
 impl DbTraceSink {
     pub fn new(db: DbState, conversation_id: Option<String>) -> Self {
-        Self { db, conversation_id }
+        Self {
+            db,
+            conversation_id,
+        }
     }
 }
 
@@ -125,10 +128,7 @@ impl TraceSink for DbTraceSink {
 
 /// Build a shared sink, or a `NullTraceSink` when `db` is absent. Convenience
 /// for the agent construction path (build_react_agent).
-pub fn optional_shared(
-    db: Option<DbState>,
-    conversation_id: Option<String>,
-) -> Arc<dyn TraceSink> {
+pub fn optional_shared(db: Option<DbState>, conversation_id: Option<String>) -> Arc<dyn TraceSink> {
     match db {
         Some(db) => Arc::new(DbTraceSink::new(db, conversation_id)),
         None => Arc::new(NullTraceSink),
@@ -183,8 +183,7 @@ pub fn redact_secrets(s: &str) -> String {
     });
     let out = sk.replace_all(s, "[REDACTED]");
     let out = bearer.replace_all(&out, "bearer [REDACTED]");
-    kv.replace_all(&out, r#"$1: "[REDACTED]""#)
-        .to_string()
+    kv.replace_all(&out, r#"$1: "[REDACTED]""#).to_string()
 }
 
 #[cfg(test)]
@@ -215,14 +214,20 @@ mod tests {
         let s = "你好你好";
         let t = truncate(s, 7);
         let prefix = t.split("...(").next().unwrap();
-        assert!(s.starts_with(prefix), "truncated prefix must sit on a char boundary: {prefix:?}");
+        assert!(
+            s.starts_with(prefix),
+            "truncated prefix must sit on a char boundary: {prefix:?}"
+        );
     }
 
     #[test]
     fn redact_secrets_strips_bearer_and_sk_keys() {
         let s = "Authorization: Bearer sk-abcdef1234567890abcdefXYZ";
         let r = redact_secrets(s);
-        assert!(!r.contains("sk-abcdef1234567890abcdefXYZ"), "live key leaked: {r}");
+        assert!(
+            !r.contains("sk-abcdef1234567890abcdefXYZ"),
+            "live key leaked: {r}"
+        );
         assert!(!r.contains("Bearer sk"), "bearer+token not consumed: {r}");
     }
 

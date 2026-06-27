@@ -1,5 +1,5 @@
-//! Cost recording sink — the seam between GlmChatModel (which observes token
-//! usage per request) and the `cost_records` table. GlmChatModel holds an
+//! Cost recording sink — the seam between the ChatModel (which observes token
+//! usage per request) and the `cost_records` table. The ChatModel holds an
 //! `Option<Arc<dyn CostSink>>`; when present, each completed request records its
 //! usage + computed cost. `DbCostSink` writes to SQLite on a blocking thread
 //! (fire-and-forget — a cost-write failure must never break the agent loop).
@@ -11,7 +11,7 @@ use crate::db::DbState;
 use crate::models::CostRecord;
 
 /// Receives one cost record per model request. Implementations must be cheap to
-/// share (held inside GlmChatModel behind an `Arc`) and must NOT propagate
+/// share (held inside the ChatModel behind an `Arc`) and must NOT propagate
 /// errors into the caller — a failed cost write is logged, not fatal.
 ///
 /// B5: the signature takes a `TokenUsage` (input/output + prompt-cache tiers)
@@ -42,11 +42,7 @@ pub struct DbCostSink {
 }
 
 impl DbCostSink {
-    pub fn new(
-        db: DbState,
-        agent_type: impl Into<String>,
-        session_id: Option<String>,
-    ) -> Self {
+    pub fn new(db: DbState, agent_type: impl Into<String>, session_id: Option<String>) -> Self {
         Self {
             db,
             agent_type: agent_type.into(),
@@ -112,7 +108,7 @@ pub fn optional_shared(
 /// unchanged — the parent turn's total still includes the child's calls). When
 /// `inner` is None the counter tallies but persists nothing (tests / ad-hoc).
 ///
-/// Installed by [`crate::kernel_impl::react_agent::GlmChatModel::fork_with_counting_cost`]
+/// Installed by [`crate::kernel_impl::anthropic_chat_model::AnthropicChatModel::fork_with_counting_cost`]
 /// onto a per-dispatch forked model, so a fan-out's per-child cost is visible on
 /// the multi-agent board — the anti-"10× cost" visibility the C2 design requires
 /// (prerequisite B3/B5 cost infrastructure now in place).
@@ -176,7 +172,12 @@ mod tests {
         // panicking even on the no-op sink.
         NullCostSink.record(
             "claude-sonnet-4-5",
-            pricing::TokenUsage { input: 10, output: 5, cache_read: 8, cache_write: 3 },
+            pricing::TokenUsage {
+                input: 10,
+                output: 5,
+                cache_read: 8,
+                cache_write: 3,
+            },
             0.0,
         );
     }
@@ -206,7 +207,10 @@ mod tests {
         // each record so cost_records / the dashboard total are unchanged.
         let inner = Arc::new(CapturingSink::default());
         let accumulator = Arc::new(kernel_core::CostAccumulator::new());
-        let sink = CountingCostSink::new(Some(Arc::clone(&inner) as Arc<dyn CostSink>), Arc::clone(&accumulator));
+        let sink = CountingCostSink::new(
+            Some(Arc::clone(&inner) as Arc<dyn CostSink>),
+            Arc::clone(&accumulator),
+        );
 
         // glm-4.6: $1/M in, $3.2/M out. 1000 in + 500 out = $0.001 + $0.0016 = $0.0026.
         sink.record("glm-4.6", pricing::TokenUsage::new(1000, 500), 0.0);
@@ -218,7 +222,11 @@ mod tests {
         assert!(tally.cost_usd > 0.0, "cost derived from pricing when 0.0");
         // Forwarding: both records reached the inner sink verbatim.
         let recs = inner.records.lock().unwrap();
-        assert_eq!(recs.len(), 2, "inner sink received every record (DB attribution preserved)");
+        assert_eq!(
+            recs.len(),
+            2,
+            "inner sink received every record (DB attribution preserved)"
+        );
         assert_eq!(recs[0].0, "glm-4.6");
     }
 
@@ -232,7 +240,10 @@ mod tests {
         let tally = accumulator.tally();
         assert_eq!(tally.input_tokens, 50);
         assert_eq!(tally.output_tokens, 25);
-        assert!((tally.cost_usd - 0.0009).abs() < 1e-9, "non-zero caller cost used as-is");
+        assert!(
+            (tally.cost_usd - 0.0009).abs() < 1e-9,
+            "non-zero caller cost used as-is"
+        );
     }
 
     #[test]

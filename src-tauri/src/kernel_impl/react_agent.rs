@@ -1,957 +1,43 @@
-//! Transparent ReactAgent + GLM ChatModel + ToolRegistry.
+//! Transparent ReactAgent + ToolRegistry.
 //!
 //! The "transparent" agent: the kernel controls the LLM call AND the tool loop
 //! directly (eino `adk/react.go` Rust port). Used for kernel-internal tasks and
 //! as a self-built agent that can call MCP tools and Skills.
 //!
-//! Three pieces:
-//! - [`GlmChatModel`]: `ChatModel` impl calling Zhipu GLM via Anthropic API,
-//!   with real SSE streaming and tool binding.
+//! Two pieces live here:
 //! - [`ToolRegistry`]: a cloneable collection of `dyn Tool` (MCP + Skill + builtin).
 //! - [`ReactAgent`]: reason->act->observe loop, bounded by max_steps, implements
 //!   `kernel_core::Agent`. Binds tools to the model, dispatches hooks around
 //!   tool calls, and streams AgentEvents.
+//!
+//! The `ChatModel` implementations live in sibling modules: the Anthropic
+//! Messages API in [`crate::kernel_impl::anthropic_chat_model`] and the OpenAI
+//! Chat Completions API in [`crate::kernel_impl::openai_chat_model`], both
+//! sharing cross-cutting state via [`crate::kernel_impl::chat_model_shared`].
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::Semaphore;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_core::{
     AgentCaps, AgentEvent, AgentInput, AgentKind, AgentOutcome, AgentRunStatus, ChatModel,
-    CostAccumulator, CostTally, Error, Message, MessageStream, ModelOptions, Role, Tool,
-    ToolContext, ToolInfo,
+    CostTally, Error, Message, ModelOptions, Role, Tool, ToolContext, ToolInfo,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::cost::circuit_breaker::{should_failover, CircuitBreaker};
-use crate::cost::pricing;
-use crate::cost::sink::CostSink;
 use crate::kernel_impl::hooks::HookManager;
 use crate::kernel_impl::llm_recovery::{
-    classify_llm_error, fatal_user_message, retry_delay, should_retry, FatalReason, LlmErrorKind,
-    MAX_ATTEMPTS,
+    FatalReason, LlmErrorKind, MAX_ATTEMPTS, classify_llm_error, fatal_user_message, retry_delay,
+    should_retry,
 };
-use crate::trace::{redact_secrets, truncate, LlmTrace, TraceSink};
+use crate::kernel_impl::model_router::TierCtx;
 
 /// Injectable audit callback signature (project audit: cargo check + assertion
 /// weakening scan). Shared by the config field, the builder, and test stubs.
 type AuditFn = Arc<dyn Fn(&std::path::Path, &str) -> Value + Send + Sync>;
 /// Per-step model router callback: (history, base_model) -> chosen model_id.
 type ModelRouterFn = Arc<dyn Fn(&[Message], &str) -> String + Send + Sync>;
-
-// ---------------------------------------------------------------------------
-// GlmChatModel
-// ---------------------------------------------------------------------------
-
-/// A ChatModel calling Zhipu GLM via its Anthropic-compatible Messages API.
-#[derive(Clone)]
-pub struct GlmChatModel {
-    base_url: String,
-    api_key: String,
-    model: String,
-    client: reqwest::Client,
-    bound_tools: Vec<ToolInfo>,
-    /// Shared upstream circuit breaker. When Some, every request is gated +
-    /// its outcome recorded, so a failing GLM endpoint trips open instead of
-    /// every agent turn hammering it. None = unprotected (tests / offline).
-    circuit: Option<Arc<CircuitBreaker>>,
-    /// Optional cost sink — records token usage + cost per completed request.
-    /// None = untracked (tests / ad-hoc agents without a session).
-    cost_sink: Option<Arc<dyn CostSink>>,
-    /// Optional trace sink — records the request/response of every LLM HTTP
-    /// call to `llm_traces`. None = untraced (tests / ad-hoc agents). The
-    /// observability layer: keeps the real build_body + error body on disk so a
-    /// failed session's root cause is queryable, instead of being lost to a
-    /// bare status string.
-    trace_sink: Option<Arc<dyn TraceSink>>,
-    /// B3 optional timing checker — flags slow LLM turns (total latency or
-    /// time-to-first-byte over threshold) so a hung/stalled model call is
-    /// surfaced as a warn log instead of silently inflating latency. None =
-    /// unchecked (tests / ad-hoc agents). Shared across with_tools clones.
-    timing_checker: Option<Arc<crate::trace::TimingChecker>>,
-    /// The session id this model is serving (for trace attribution). Set by
-    /// build_react_agent from the driver's session id; None for ad-hoc/test
-    /// agents. Passed to trace_sink.record_llm_call so traces join the session.
-    session_id: Option<String>,
-}
-
-impl GlmChatModel {
-    pub fn new(
-        base_url: impl Into<String>,
-        api_key: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Self {
-        Self {
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            model: model.into(),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            bound_tools: Vec::new(),
-            circuit: None,
-            cost_sink: None,
-            trace_sink: None,
-            timing_checker: None,
-            session_id: None,
-        }
-    }
-
-    pub fn bigmodel(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://open.bigmodel.cn/api/anthropic", api_key, model)
-    }
-
-    /// Attach a shared circuit breaker. The same breaker should be shared
-    /// across every GlmChatModel instance that targets the same upstream, so a
-    /// trip in one agent is observed by all (see `shared_glm_circuit` below).
-    pub fn with_circuit(mut self, circuit: Arc<CircuitBreaker>) -> Self {
-        self.circuit = Some(circuit);
-        self
-    }
-
-    /// Attach a cost sink that records token usage + cost per request.
-    pub fn with_cost_sink(mut self, sink: Arc<dyn CostSink>) -> Self {
-        self.cost_sink = Some(sink);
-        self
-    }
-
-    /// Attach a trace sink that records every LLM HTTP call (request body,
-    /// HTTP status, error body on non-2xx, latency, tokens) to `llm_traces`.
-    pub fn with_trace_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
-        self.trace_sink = Some(sink);
-        self
-    }
-
-    /// Attach a TimingChecker (B3) that flags slow LLM turns. The checker is
-    /// invoked once per recorded call with the turn's latency + ttfb; a
-    /// threshold crossing is logged at warn. Pass a `disabled()` checker to
-    /// attach the seam without flagging (useful in tests).
-    pub fn with_timing_checker(mut self, checker: Arc<crate::trace::TimingChecker>) -> Self {
-        self.timing_checker = Some(checker);
-        self
-    }
-
-    /// Set the session id this model serves, so traces attribute to the right
-    /// session row. None for ad-hoc/test agents (traces still record, with a
-    /// null session_id).
-    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
-        self.session_id = session_id;
-        self
-    }
-
-    /// Record one LLM call to the trace sink (if attached). Centralizes
-    /// `LlmTrace` construction so generate/stream stay readable; no-op when no
-    /// sink is attached (tests / ad-hoc agents). B3: also runs the attached
-    /// TimingChecker so a slow turn is flagged at warn (independent of whether
-    /// a trace sink is attached — timing health surfaces either way).
-    ///
-    /// `ttfb_ms` = request-send → first response signal (None when the call
-    /// never reached a first byte). `stream_ms` = first-byte → completion (None
-    /// when there was no streaming/output phase).
-    #[allow(clippy::too_many_arguments)]
-    fn record_trace(
-        &self,
-        model: &str,
-        status_code: Option<u16>,
-        error_kind: Option<&str>,
-        req_body: &str,
-        resp_body: Option<&str>,
-        latency_ms: u64,
-        input_tokens: Option<u32>,
-        output_tokens: Option<u32>,
-        ttfb_ms: Option<u64>,
-        stream_ms: Option<u64>,
-    ) {
-        // B3: flag slow turns before persisting. Checked regardless of the sink
-        // (timing health is observability any attached agent should get).
-        if let Some(checker) = &self.timing_checker {
-            if let Some(w) = checker.check(latency_ms, ttfb_ms) {
-                log::warn!(
-                    "[timing] {model} {}: {}",
-                    w.kind,
-                    w.message
-                );
-            }
-        }
-        if let Some(sink) = &self.trace_sink {
-            sink.record_llm_call(
-                self.session_id.as_deref(),
-                LlmTrace {
-                    model: model.to_string(),
-                    base_url: self.base_url.clone(),
-                    status_code,
-                    error_kind: error_kind.map(str::to_string),
-                    req_body: req_body.to_string(),
-                    resp_body: resp_body.map(str::to_string),
-                    latency_ms: Some(latency_ms),
-                    input_tokens,
-                    output_tokens,
-                    ttfb_ms,
-                    stream_ms,
-                },
-            );
-        }
-    }
-
-    fn build_body(
-        &self,
-        model: &str,
-        messages: &[Message],
-        opts: &ModelOptions,
-        stream: bool,
-    ) -> Value {
-        // M5 + parallel-tool-use fix: Anthropic requires ALL tool_results for one
-        // assistant turn to live in a SINGLE user message (an array of
-        // tool_result blocks), and messages must strictly alternate user/
-        // assistant. Our internal history stores one Role::Tool Message per
-        // executed call (see the run loop), so a turn that issued N parallel
-        // tool_use calls yields N consecutive Tool Messages. Serializing each
-        // into its own user message would emit N back-to-back user messages and
-        // trip the provider's 400: "tool_use ids were found without tool_result
-        // blocks immediately after". Merge consecutive Tool Messages into one
-        // user message here, at the wire boundary — the internal
-        // one-Message-per-call representation stays intact.
-        let mut msgs: Vec<Value> = Vec::with_capacity(messages.len());
-        let mut pending_tool_results: Vec<Value> = Vec::new();
-        for m in messages.iter().filter(|m| m.role != Role::System) {
-            if m.role == Role::Tool {
-                pending_tool_results.push(json!({
-                    "type": "tool_result",
-                    "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
-                    "content": m.content,
-                }));
-                continue;
-            }
-            // A non-Tool message: flush any accumulated tool_results as one
-            // user message before serializing the next turn.
-            if !pending_tool_results.is_empty() {
-                msgs.push(
-                    json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }),
-                );
-            }
-            let entry = match m.role {
-                Role::User => json!({ "role": "user", "content": m.content }),
-                _ => {
-                    // Assistant. When the prior turn carried reasoning, replay
-                    // it as a leading `thinking` block so the model can build on
-                    // it (Anthropic/GLM preserved thinking — the signature is
-                    // required or the replayed block is rejected). Turns with no
-                    // reasoning keep the original wire shape exactly.
-                    match (
-                        m.reasoning.as_ref().filter(|s| !s.is_empty()),
-                        m.tool_calls.is_empty(),
-                    ) {
-                        (None, true) => json!({ "role": "assistant", "content": m.content }),
-                        (None, false) => {
-                            let mut content: Vec<Value> =
-                                vec![json!({"type":"text","text":m.content})];
-                            for tc in &m.tool_calls {
-                                let input: Value = serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(json!({}));
-                                content.push(json!({
-                                    "type": "tool_use",
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "input": input,
-                                }));
-                            }
-                            json!({ "role": "assistant", "content": content })
-                        }
-                        (Some(thinking), _) => {
-                            let mut content: Vec<Value> = Vec::new();
-                            let mut block = json!({"type":"thinking","thinking": thinking});
-                            if let Some(sig) =
-                                m.reasoning_signature.as_ref().filter(|s| !s.is_empty())
-                            {
-                                block["signature"] = json!(sig);
-                            }
-                            content.push(block);
-                            if !m.content.is_empty() {
-                                content.push(json!({"type":"text","text": m.content}));
-                            }
-                            for tc in &m.tool_calls {
-                                let input: Value = serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(json!({}));
-                                content.push(json!({
-                                    "type": "tool_use",
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "input": input,
-                                }));
-                            }
-                            json!({ "role": "assistant", "content": content })
-                        }
-                    }
-                }
-            };
-            msgs.push(entry);
-        }
-        // Flush trailing tool_results: history can legitimately end on Tool
-        // messages (the run loop appends them and re-invokes the model).
-        if !pending_tool_results.is_empty() {
-            msgs.push(
-                json!({ "role": "user", "content": std::mem::take(&mut pending_tool_results) }),
-            );
-        }
-        let system: String = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut max_tokens = opts.max_tokens.unwrap_or(4096);
-        // Anthropic requires max_tokens > thinking.budget_tokens. Raise the
-        // floor so a small caller-supplied max_tokens (or the 4096 default)
-        // can't make the request 400 when thinking is on.
-        if let Some(tc) = opts.thinking {
-            if max_tokens <= tc.budget_tokens {
-                max_tokens = tc.budget_tokens + 4096;
-            }
-        }
-        let mut body = json!({
-            "model": model,
-            "messages": msgs,
-            "max_tokens": max_tokens,
-            "stream": stream,
-        });
-        if !system.is_empty() {
-            body["system"] = Value::String(system);
-        }
-        if let Some(tc) = opts.thinking {
-            body["thinking"] = json!({"type":"enabled","budget_tokens": tc.budget_tokens});
-        }
-        if let Some(t) = opts.temperature {
-            body["temperature"] = json!(t);
-        }
-        if !self.bound_tools.is_empty() {
-            let tools: Vec<Value> = self
-                .bound_tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters_schema,
-                    })
-                })
-                .collect();
-            body["tools"] = Value::Array(tools);
-        }
-        body
-    }
-}
-
-#[async_trait]
-impl ChatModel for GlmChatModel {
-    fn model_id(&self) -> &str {
-        // The resolved id the provider handed back (after model_mapping). The
-        // ReactAgent router reads this as the base model when the caller didn't
-        // pass one in AgentInput.model, so a user who picked glm-5.2 is routed
-        // against glm-5.2 — not the hardcoded STRONG_MODEL flagship. Without
-        // this, the chat path (react_chat_driver builds AgentInput{model:None})
-        // fell back to STRONG_MODEL (glm-4.6) and overwrote every GLM-family
-        // turn's opts.model with it (session 7f51a5d2: 401, the user's Z.AI key
-        // has no glm-4.6).
-        &self.model
-    }
-
-    async fn generate(&self, messages: &[Message], opts: &ModelOptions) -> Result<Message, Error> {
-        let model = opts.model.clone().unwrap_or_else(|| self.model.clone());
-        // Circuit breaker: gate the call and record the outcome.
-        if let Some(cb) = &self.circuit {
-            if !cb.try_admit(&self.base_url) {
-                return Err(Error::Model(format!(
-                    "upstream circuit open: {}",
-                    self.base_url
-                )));
-            }
-        }
-        let body = self.build_body(&model, messages, opts, false);
-        let req_body = truncate(&body.to_string(), 32_000);
-        let t0 = Instant::now();
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await;
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
-                self.record_trace(
-                    &model,
-                    None,
-                    Some("network"),
-                    &req_body,
-                    None,
-                    t0.elapsed().as_millis() as u64,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                if let Some(cb) = &self.circuit {
-                    cb.record_failure(&self.base_url);
-                }
-                return Err(Error::Network(e.to_string()));
-            }
-        };
-        // B3: headers received = first-byte for the non-stream path. TTFB is
-        // the model "thinking" time (send → first response signal); the body
-        // download (resp.json below) is the stream_ms phase.
-        let t_first = Instant::now();
-        let ttfb_ms = t_first.duration_since(t0).as_millis() as u64;
-        let status = resp.status();
-        if !status.is_success() {
-            if should_failover(Some(status.as_u16()), false) {
-                if let Some(cb) = &self.circuit {
-                    cb.record_failure(&self.base_url);
-                }
-            } else if let Some(cb) = &self.circuit {
-                // Non-failover 4xx (caller error) is neither success nor an
-                // upstream failure: release the HalfOpen probe slot try_admit
-                // took. Without this, under half_open_max=1 a single 400 during
-                // the probe wedges the circuit in HalfOpen (record_success is
-                // skipped by the early return below, so half_open_inflight leaks).
-                cb.record_probe_inconclusive(&self.base_url);
-            }
-            // Read the error body BEFORE it's dropped — this is the actual
-            // reason (quota, schema, model-not-found) that was previously lost
-            // to `format!("GLM stream failed: {status}")`.
-            let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
-            log::warn!(
-                "[llm] {} {} -> {}: {}",
-                model,
-                self.base_url,
-                status,
-                truncate(&err_body, 500)
-            );
-            self.record_trace(
-                &model,
-                Some(status.as_u16()),
-                Some("non_2xx"),
-                &req_body,
-                Some(&truncate(&err_body, 8_192)),
-                t0.elapsed().as_millis() as u64,
-                None,
-                None,
-                Some(ttfb_ms),
-                None,
-            );
-            return Err(Error::Model(format!("GLM stream failed: {status}")));
-        }
-        let v: Value = match resp.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_trace(
-                    &model,
-                    Some(status.as_u16()),
-                    Some("decode"),
-                    &req_body,
-                    None,
-                    t0.elapsed().as_millis() as u64,
-                    None,
-                    None,
-                    Some(ttfb_ms),
-                    Some(t_first.elapsed().as_millis() as u64),
-                );
-                if let Some(cb) = &self.circuit {
-                    cb.record_failure(&self.base_url);
-                }
-                return Err(Error::Model(format!("decode: {e}")));
-            }
-        };
-        if let Some(cb) = &self.circuit {
-            cb.record_success(&self.base_url);
-        }
-        // Cost + trace: record token usage; cost is derived in the sink when 0.
-        let usage = usage_from_response(&v);
-        if let Some(sink) = &self.cost_sink {
-            sink.record(&model, usage, 0.0);
-        }
-        // Trace: clean 2xx — store the raw response body (truncated) so the full
-        // request↔response evidence is one query away. Industry norm is to record
-        // success and failure symmetrically (see 2026-06-19 trace observability
-        // research); the decoded message below is a separate concern.
-        let resp_body = serde_json::to_string(&v).unwrap_or_default();
-        self.record_trace(
-            &model,
-            Some(status.as_u16()),
-            None,
-            &req_body,
-            Some(&truncate(&resp_body, 32_000)),
-            t0.elapsed().as_millis() as u64,
-            Some(usage.input),
-            Some(usage.output),
-            Some(ttfb_ms),
-            Some(t_first.elapsed().as_millis() as u64),
-        );
-        decode_anthropic_message(&v)
-    }
-
-    fn stream(&self, messages: &[Message], opts: &ModelOptions) -> Result<MessageStream, Error> {
-        let model_clone = self.clone();
-        let messages = messages.to_vec();
-        let opts = opts.clone();
-        let s = async_stream::try_stream! {
-            let model_name = opts.model.clone().unwrap_or_else(|| model_clone.model.clone());
-            // Circuit breaker gate.
-            if let Some(cb) = &model_clone.circuit {
-                if !cb.try_admit(&model_clone.base_url) {
-                    Err(Error::Model(format!("upstream circuit open: {}", model_clone.base_url)))?;
-                }
-            }
-            let body = model_clone.build_body(&model_name, &messages, &opts, true);
-            let req_body = truncate(&body.to_string(), 32_000);
-            let t0 = Instant::now();
-            let resp = model_clone.client
-                .post(format!("{}/v1/messages", model_clone.base_url))
-                .header("x-api-key", &model_clone.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-                .await;
-            let resp = match resp {
-                Ok(r) => r,
-                Err(e) => {
-                    model_clone.record_trace(&model_name, None, Some("network"), &req_body, None, t0.elapsed().as_millis() as u64, None, None, None, None);
-                    if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
-                    Err(Error::Network(e.to_string()))?
-                }
-            };
-            // B3: headers received = first-byte for the non_2xx branch. The
-            // streaming branch re-stamps ttfb_at on the FIRST byte chunk (a
-            // closer-to-true first-output signal than header receipt).
-            let t_first = Instant::now();
-            let status = resp.status();
-            // 消费 resp:非 2xx 读 error body 再终止流;2xx 取字节流。两 arm 各自
-            // move resp(互斥),用 match 而非 if + 块外 use——try_stream! 宏的 ? 让
-            // 编译器无法证明 if 块必 return,块外 resp.bytes_stream() 会报
-            // use-after-move(resp.text() 已 move resp)。match 把 resp 的消费收敛
-            // 到一处,编译器一眼看到它被消费一次。
-            use futures::StreamExt;
-            let mut byte_stream = match status.is_success() {
-                true => resp.bytes_stream(),
-                false => {
-                    if should_failover(Some(status.as_u16()), false) {
-                        if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
-                    } else if let Some(cb) = &model_clone.circuit {
-                        // Non-failover 4xx: release the HalfOpen probe slot (see
-                        // generate()'s matching branch) so a caller-error response
-                        // doesn't wedge the breaker in HalfOpen under half_open_max=1.
-                        cb.record_probe_inconclusive(&model_clone.base_url);
-                    }
-                    // Read the error body BEFORE it's dropped — same fix as generate().
-                    let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
-                    log::warn!(
-                        "[llm] {} {} -> {}: {}",
-                        model_name, model_clone.base_url, status, truncate(&err_body, 500)
-                    );
-                    model_clone.record_trace(
-                        &model_name,
-                        Some(status.as_u16()),
-                        Some("non_2xx"),
-                        &req_body,
-                        Some(&truncate(&err_body, 8_192)),
-                        t0.elapsed().as_millis() as u64,
-                        None,
-                        None,
-                        Some(t_first.duration_since(t0).as_millis() as u64),
-                        None,
-                    );
-                    Err(Error::Model(format!("GLM stream failed: {status}")))?;
-                    unreachable!("non_2xx arm always returns via ? above")
-                }
-            };
-            let mut buf = String::new();
-            // Parallel accumulator for the raw SSE stream — unlike `buf` this is
-            // never drained, so it holds the full wire response body for the
-            // trace. Industry norm: record success responses verbatim, symmetric
-            // with the error path (see 2026-06-19 trace observability research).
-            // Capped at ~40 KB while accumulating so a long stream can't balloon
-            // memory; the tail is already past the 32 KB trace cap anyway.
-            let mut resp_body_buf = String::new();
-            // Accumulate tool_use blocks by Anthropic content_block index, then
-            // reassemble into a terminal tool_calls Message on message_stop. Text
-            // deltas are yielded inline for real token-by-token streaming. The
-            // per-line decision lives in handle_sse_line (unit-testable, no HTTP).
-            let mut tool_bufs: HashMap<u64, (String, String, String)> = HashMap::new();
-            // Accumulates the thinking signature for THIS turn (signature_delta
-            // chunks arrive out of band from the thinking_delta reasoning text).
-            // Reset per request — one stream() call == one assistant turn.
-            let mut sig_buf = String::new();
-            // Accumulate token usage from message_start/message_delta so the
-            // turn's cost is recorded when the stream completes.
-            let mut usage = pricing::TokenUsage::default();
-            // B3: stamp ttfb on the FIRST streamed byte chunk (the true
-            // first-output signal for a streaming call). None until then.
-            let mut ttfb_at: Option<Instant> = None;
-            while let Some(chunk_res) = byte_stream.next().await {
-                let bytes = match chunk_res {
-                    Ok(b) => b,
-                    Err(e) => {
-                        model_clone.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64), ttfb_at.map(|t| t.elapsed().as_millis() as u64));
-                        if let Some(cb) = &model_clone.circuit { cb.record_failure(&model_clone.base_url); }
-                        Err(Error::Network(e.to_string()))?
-                    }
-                };
-                // First successful chunk → record first-byte time (TTFB).
-                if ttfb_at.is_none() {
-                    ttfb_at = Some(Instant::now());
-                }
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                if resp_body_buf.len() < 40_000 {
-                    resp_body_buf.push_str(&String::from_utf8_lossy(&bytes));
-                }
-                while let Some(nl) = buf.find('\n') {
-                    let line = buf[..nl].trim().to_string();
-                    buf.drain(..=nl);
-                    if let Some(delta) = parse_usage(&line) {
-                        usage = usage.saturating_add(delta);
-                    }
-                    if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
-                        yield msg;
-                    }
-                }
-            }
-            // Stream consumed cleanly → upstream healthy + record the turn's cost.
-            if let Some(cb) = &model_clone.circuit { cb.record_success(&model_clone.base_url); }
-            if let Some(sink) = &model_clone.cost_sink {
-                sink.record(&model_name, usage, 0.0);
-            }
-            // Trace: clean 2xx — store the raw SSE stream (truncated) for full
-            // request↔response evidence; symmetric with the error path (which
-            // stores the error body). See 2026-06-19 trace observability research.
-            // B3 timing: ttfb = send → first chunk; stream = first chunk → now.
-            let ttfb_ms = ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64);
-            let stream_ms = ttfb_at.map(|t| t.elapsed().as_millis() as u64);
-            model_clone.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_ms, stream_ms);
-        };
-        Ok(Box::pin(s))
-    }
-
-    fn with_tools(&self, tools: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
-        let mut clone = self.clone();
-        clone.bound_tools = tools.to_vec();
-        Ok(Box::new(clone))
-    }
-
-    /// C2: fork this model with a counting cost sink wrapping the parent's DB
-    /// sink, so a dispatched sub-agent's LLM calls are tallied into a per-
-    /// dispatch accumulator the SubAgentTool reads after the child run — while
-    /// still landing in cost_records (attribution preserved via the inner sink).
-    /// The fork shares circuit/trace/timing/session_id (all Arc) with the parent,
-    /// only the cost sink is swapped, so a fan-out's per-child cost is visible on
-    /// the multi-agent board without losing the dashboard total.
-    fn fork_with_counting_cost(
-        &self,
-    ) -> Option<(std::sync::Arc<dyn ChatModel>, std::sync::Arc<CostAccumulator>)> {
-        let accumulator = std::sync::Arc::new(CostAccumulator::new());
-        let counting = std::sync::Arc::new(crate::cost::sink::CountingCostSink::new(
-            self.cost_sink.clone(),
-            std::sync::Arc::clone(&accumulator),
-        )) as std::sync::Arc<dyn crate::cost::sink::CostSink>;
-        let forked = self.clone().with_cost_sink(counting);
-        Some((std::sync::Arc::new(forked) as std::sync::Arc<dyn ChatModel>, accumulator))
-    }
-}
-
-/// Process-wide shared circuit breaker for GLM (Anthropic-compatible)
-/// endpoints. Every ReactAgent built via `build_react_agent` taps the same
-/// breaker so a sustained upstream outage trips the circuit for all sessions
-/// at once, rather than each session rediscovering the failure and flooding a
-/// down endpoint. State is keyed by base_url inside the breaker, so distinct
-/// endpoints coexist under one instance. Lazily initialized on first use.
-pub fn shared_glm_circuit() -> Arc<CircuitBreaker> {
-    static CIRCUIT: std::sync::OnceLock<Arc<CircuitBreaker>> = std::sync::OnceLock::new();
-    CIRCUIT
-        .get_or_init(|| {
-            Arc::new(CircuitBreaker::new(
-                crate::cost::circuit_breaker::CircuitBreakerConfig::default(),
-            ))
-        })
-        .clone()
-}
-
-/// Extract token usage from an Anthropic SSE line. `message_start` carries
-/// `usage.input_tokens` (+ the prompt-cache tiers on real Anthropic);
-/// `message_delta` carries the cumulative `usage.output_tokens` AND — on GLM —
-/// the real `usage.input_tokens`. Standard Anthropic reports authoritative
-/// input on message_start; GLM puts a 0 placeholder there and reports input on
-/// message_delta. Reading BOTH fields on message_delta + the caller's
-/// `saturating_add` yields the correct input for either provider (standard =
-/// start_input + 0, GLM = 0 + delta_input) without double-counting.
-///
-/// B5: also reads `cache_read_input_tokens` / `cache_creation_input_tokens`
-/// from message_start (these only appear there). GLM doesn't emit them → 0.
-/// Non-usage / non-`data:` lines → None. Used to meter cost on the streaming
-/// path.
-fn parse_usage(line: &str) -> Option<pricing::TokenUsage> {
-    let data = line.trim().strip_prefix("data: ")?;
-    let ev: Value = serde_json::from_str(data).ok()?;
-    match ev.get("type").and_then(|t| t.as_str())? {
-        "message_start" => {
-            let usage = ev.get("message").and_then(|m| m.get("usage"));
-            let input = read_u32(usage, "input_tokens");
-            // Cache tiers are reported once, on message_start (Anthropic).
-            let cache_read = read_u32(usage, "cache_read_input_tokens");
-            let cache_write = read_u32(usage, "cache_creation_input_tokens");
-            Some(pricing::TokenUsage {
-                input,
-                output: 0,
-                cache_read,
-                cache_write,
-            })
-        }
-        "message_delta" => {
-            let usage = ev.get("usage");
-            let input = read_u32(usage, "input_tokens");
-            let output = read_u32(usage, "output_tokens");
-            Some(pricing::TokenUsage {
-                input,
-                output,
-                cache_read: 0,
-                cache_write: 0,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Read an optional u64→u32 usage field from a JSON object (which may be null
-/// or absent). Centralized so the two branches above stay readable.
-fn read_u32(obj: Option<&Value>, key: &str) -> u32 {
-    obj.and_then(|u| u.get(key))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32
-}
-
-/// Extract usage from a non-streaming Anthropic response
-/// (`usage.input_tokens` / `usage.output_tokens` + cache tiers). Returns an
-/// all-zero TokenUsage if no usage object is present — the sink still records
-/// the call with a derived/zero cost.
-fn usage_from_response(v: &Value) -> pricing::TokenUsage {
-    let u = match v.get("usage") {
-        Some(u) => u,
-        None => return pricing::TokenUsage::default(),
-    };
-    pricing::TokenUsage {
-        input: read_u32(Some(u), "input_tokens"),
-        output: read_u32(Some(u), "output_tokens"),
-        cache_read: read_u32(Some(u), "cache_read_input_tokens"),
-        cache_write: read_u32(Some(u), "cache_creation_input_tokens"),
-    }
-}
-
-fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
-    let mut text_parts = Vec::new();
-    let mut tool_calls = Vec::new();
-    let mut reasoning_parts = Vec::new();
-    let mut signature_parts = Vec::new();
-    if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
-        for block in arr {
-            match block.get("type").and_then(|t| t.as_str()) {
-                Some("text") => {
-                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                        text_parts.push(t.to_string());
-                    }
-                }
-                Some("tool_use") => {
-                    let id = block
-                        .get("id")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = block
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let args = block
-                        .get("input")
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "{}".to_string());
-                    tool_calls.push(kernel_core::ToolCall {
-                        id,
-                        call_type: "function".into(),
-                        function: kernel_core::FunctionCall {
-                            name,
-                            arguments: args,
-                        },
-                    });
-                }
-                Some("thinking") => {
-                    // GLM Interleaved Thinking content block. Capture the trace
-                    // + its signature (needed to preserve the block next turn).
-                    if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
-                        reasoning_parts.push(t.to_string());
-                    }
-                    if let Some(s) = block.get("signature").and_then(|s| s.as_str()) {
-                        signature_parts.push(s.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(Message {
-        role: Role::Assistant,
-        content: text_parts.join(""),
-        tool_calls,
-        tool_call_id: None,
-        reasoning: if reasoning_parts.is_empty() {
-            None
-        } else {
-            Some(reasoning_parts.join(""))
-        },
-        reasoning_signature: if signature_parts.is_empty() {
-            None
-        } else {
-            Some(signature_parts.join(""))
-        },
-    })
-}
-
-/// Parse one SSE `data: <json>` line from an Anthropic Messages stream, mutate
-/// the tool_use accumulator, and return any Message to yield. Returns None for
-/// non-data lines, malformed JSON, and event types that carry no Message (ping,
-/// message_start, content_block_stop). Text deltas become assistant Messages
-/// immediately (real streaming); tool_use blocks accumulate and reassemble into
-/// a terminal tool_calls Message on message_stop. Extracted from stream() so the
-/// tool_use accumulation is unit-testable without HTTP.
-fn handle_sse_line(
-    line: &str,
-    tool_bufs: &mut HashMap<u64, (String, String, String)>,
-    sig_buf: &mut String,
-) -> Option<Message> {
-    let data = line.trim().strip_prefix("data: ")?;
-    let ev: Value = serde_json::from_str(data).ok()?;
-    match ev.get("type").and_then(|t| t.as_str())? {
-        "content_block_start" => {
-            if let Some(block) = ev.get("content_block") {
-                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-                    let id = block
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = block
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    tool_bufs.insert(idx, (id, name, String::new()));
-                }
-            }
-            None
-        }
-        "content_block_delta" => {
-            let dt = ev
-                .get("delta")
-                .and_then(|d| d.get("type"))
-                .and_then(|t| t.as_str());
-            if dt == Some("text_delta") {
-                ev.get("delta")
-                    .and_then(|d| d.get("text"))
-                    .and_then(|t| t.as_str())
-                    .map(|t| Message::assistant(t.to_string()))
-            } else if dt == Some("input_json_delta") {
-                let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-                if let Some(partial) = ev
-                    .get("delta")
-                    .and_then(|d| d.get("partial_json"))
-                    .and_then(|p| p.as_str())
-                {
-                    if let Some(slot) = tool_bufs.get_mut(&idx) {
-                        slot.2.push_str(partial);
-                    }
-                }
-                None
-            } else if dt == Some("thinking_delta") {
-                // Stream the reasoning trace chunk-by-chunk so chat renders it
-                // live. The caller reassembles the full reasoning from these
-                // chunks; the signature arrives as a separate signature_delta
-                // and is emitted once, on message_stop, via sig_buf.
-                ev.get("delta")
-                    .and_then(|d| d.get("thinking"))
-                    .and_then(|t| t.as_str())
-                    .map(|t| Message {
-                        role: Role::Assistant,
-                        content: String::new(),
-                        tool_calls: Vec::new(),
-                        tool_call_id: None,
-                        reasoning: Some(t.to_string()),
-                        reasoning_signature: None,
-                    })
-            } else if dt == Some("signature_delta") {
-                if let Some(s) = ev
-                    .get("delta")
-                    .and_then(|d| d.get("signature"))
-                    .and_then(|t| t.as_str())
-                {
-                    sig_buf.push_str(s);
-                }
-                None
-            } else {
-                None
-            }
-        }
-        "message_stop" => {
-            // Carry the turn's accumulated thinking signature out on the
-            // terminal message — even with no tool calls, so a pure
-            // reasoning+answer turn still preserves its signature for the next.
-            let sig = if sig_buf.is_empty() {
-                None
-            } else {
-                Some(sig_buf.clone())
-            };
-            if tool_bufs.is_empty() {
-                return sig.map(|s| Message {
-                    role: Role::Assistant,
-                    content: String::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    reasoning: None,
-                    reasoning_signature: Some(s),
-                });
-            }
-            let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
-            idxs.sort();
-            let tool_calls: Vec<kernel_core::ToolCall> = idxs
-                .into_iter()
-                .filter_map(|idx| tool_bufs.remove(&idx))
-                .map(|(id, name, args)| kernel_core::ToolCall {
-                    id,
-                    call_type: "function".into(),
-                    function: kernel_core::FunctionCall {
-                        name,
-                        arguments: if args.is_empty() {
-                            "{}".to_string()
-                        } else {
-                            args
-                        },
-                    },
-                })
-                .collect();
-            Some(Message {
-                role: Role::Assistant,
-                content: String::new(),
-                tool_calls,
-                tool_call_id: None,
-                reasoning: None,
-                reasoning_signature: sig,
-            })
-        }
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ToolRegistry
@@ -1086,6 +172,10 @@ pub struct SubAgentTool {
     /// unaffected); production injects a bounded handle via
     /// [`SubAgentTool::new_with_concurrency`].
     concurrency: Arc<Semaphore>,
+    /// The provider's tier pair inherited from the parent ReactAgent, so a
+    /// dispatched child can itself run the per-step router + dispatch tiered
+    /// grandchild agents. None = single-model provider (no routing).
+    tier_ctx: Option<TierCtx>,
 }
 
 impl SubAgentTool {
@@ -1108,6 +198,7 @@ impl SubAgentTool {
             max_steps,
             named,
             Arc::new(Semaphore::new(64)),
+            None,
         )
     }
 
@@ -1122,6 +213,7 @@ impl SubAgentTool {
         max_steps: usize,
         named: Vec<crate::kernel_impl::subagent_spec::SubAgentSpec>,
         concurrency: Arc<Semaphore>,
+        tier_ctx: Option<TierCtx>,
     ) -> Self {
         Self {
             model,
@@ -1129,6 +221,7 @@ impl SubAgentTool {
             max_steps,
             named,
             concurrency,
+            tier_ctx,
         }
     }
 
@@ -1232,7 +325,7 @@ impl Tool for SubAgentTool {
         // read-only subset.
         let child_tools = self.child_tool_registry(&tools_allow);
         // C2: fork the model with a per-dispatch counting cost sink when the
-        // model supports it (production GlmChatModel), so this child's LLM cost
+        // model supports it (production AnthropicChatModel), so this child's LLM cost
         // is tallied into an accumulator we read after the run and append to the
         // tool result — the per-dispatch cost visibility the multi-agent board
         // surfaces. Test/ad-hoc models return None and run cost-blind (unchanged).
@@ -1240,31 +333,41 @@ impl Tool for SubAgentTool {
             Some((m, acc)) => (m, Some(acc)),
             None => (Arc::clone(&self.model), None),
         };
-        let child =
-            ReactAgent::new_shared(child_model, child_tools, worker_prompt.as_str())
-                .with_context(ctx.clone())
-                .with_max_steps(self.max_steps);
+        let child = ReactAgent::new_shared(child_model, child_tools, worker_prompt.as_str())
+            .with_context(ctx.clone())
+            .with_max_steps(self.max_steps);
         // "Model half" of sub-agent dispatch — 机器科层制: 贵模型只在裁决节点,
         // 不干杂活。fork_with_counting_cost 只换成本计数器、不改 model id,所以
-        // 此前子 agent 每一轮都克隆父的旗舰模型。这里按任务类型提前分类,给子
-        // agent 挂对应逐轮 router,让劳动轮跑 glm-4-flash:
-        //   CheapOnly(明确杂活:搜索/读取/抽取) → 全程 flash
+        // 此前子 agent 每一轮都克隆父的 strong 模型。这里按任务类型提前分类,给子
+        // agent 挂对应逐轮 router,让劳动轮跑 cheap model:
+        //   CheapOnly(明确杂活:搜索/读取/抽取) → 全程 cheap
         //   Routed(含推理关键词或歧义)         → 挂 route_step(首轮 strong + 回声轮 cheap)
-        // 非 glm-4.6 子 agent(glm-5.2/claude/deepseek)返回 None → 不挂 router,
-        // 子 agent 用自身模型均匀跑,与 executor.rs wire-time 的 is_glm_family 守门
-        // 及 route_step 自身 base guard 对称,规避把 GLM id 灌进异端点的 400
-        // (executor.rs:454-460)。裁决仍在 main:降档错了产出弱结论会被 main 抓回重派。
-        let child = match crate::kernel_impl::model_router::dispatch_tier_for(
-            self.model.model_id(),
-            &task,
-        ) {
-            Some(crate::kernel_impl::model_router::DispatchTier::CheapOnly) => child
-                .with_model_router(Arc::new(
-                    crate::kernel_impl::model_router::force_cheap_router,
-                )),
-            Some(crate::kernel_impl::model_router::DispatchTier::Routed) => child
-                .with_model_router(Arc::new(crate::kernel_impl::model_router::route_step)),
-            None => child,
+        // 子 agent 的 model 不是 provider 的 strong model(或 provider 无 tier pair) →
+        // 不挂 router,子 agent 用自身模型均匀跑,与 executor.rs wire-time 的 tierable
+        // 守门及 route_step 自身 base guard 对称,规避把本 provider 的 id 灌进异端点 → 400。
+        // 裁决仍在 main:降档错了产出弱结论会被 main 抓回重派。
+        let child = if let Some(tier) = self.tier_ctx.clone() {
+            // Inherit the pair so a dispatched child can itself dispatch tiered
+            // grandchild agents using the same provider pair.
+            let child = child.with_tier_ctx(tier.strong.clone(), tier.cheap.clone());
+            let dt = crate::kernel_impl::model_router::dispatch_tier_for(
+                self.model.model_id(),
+                &task,
+                &tier,
+            );
+            match dt {
+                Some(crate::kernel_impl::model_router::DispatchTier::CheapOnly) => child
+                    .with_model_router(Arc::new(move |h, b| {
+                        crate::kernel_impl::model_router::force_cheap_router(h, b, &tier)
+                    })),
+                Some(crate::kernel_impl::model_router::DispatchTier::Routed) => child
+                    .with_model_router(Arc::new(move |h, b| {
+                        crate::kernel_impl::model_router::route_step(h, b, &tier)
+                    })),
+                None => child,
+            }
+        } else {
+            child
         };
         // C2/D3: hold a concurrency permit for the whole child run so a parent
         // that fans out multiple dispatch_subagent calls in one turn is bounded.
@@ -1279,7 +382,9 @@ impl Tool for SubAgentTool {
         match child.run_loop(&task, ModelOptions::default()).await {
             Ok(out) => {
                 let cost_line = format_cost_line(
-                    accumulator.as_deref().map(kernel_core::CostAccumulator::tally),
+                    accumulator
+                        .as_deref()
+                        .map(kernel_core::CostAccumulator::tally),
                 );
                 Ok(format!("[子 agent 结论] {out}{cost_line}"))
             }
@@ -1329,10 +434,8 @@ async fn execute_one_call(
     let mut events: Vec<kernel_core::ToolCallEvent> = Vec::new();
     // Classify once: the before-hook uses it for the veto, and — on a
     // successful write — we re-match it below to emit a per-write FileChanged.
-    let action = crate::kernel_impl::hooks::classify_action(
-        &call.function.name,
-        &call.function.arguments,
-    );
+    let action =
+        crate::kernel_impl::hooks::classify_action(&call.function.name, &call.function.arguments);
     let blocked = if let Some(h) = hooks.as_ref() {
         match h.before(&action).await {
             Err(reason) => {
@@ -1520,6 +623,12 @@ pub struct ReactAgent {
     /// `opts.model`. Same-provider routing (glm-4.6 ↔ glm-4-flash), so
     /// endpoint/key stay constant. None = single fixed model (the old behavior).
     model_router: Option<ModelRouterFn>,
+    /// The provider's strong + cheap model ids (multi-protocol refactor):
+    /// drives sub-agent dispatch tiering (`dispatch_tier_for`) and the child
+    /// router closures, so a dispatched sub-agent's labor turns run on the cheap
+    /// model for ANY provider that declares both tiers — not just Z.AI. None =
+    /// single-model provider (no per-step routing, no dispatch tiering).
+    tier_ctx: Option<TierCtx>,
     /// Cost budget hard-limit check (v1.2 T10). If set, called at the top of
     /// every turn; returning true halts the run gracefully
     /// (`FatalReason::Budget`) before spending another LLM call. None = unlimited.
@@ -1574,6 +683,7 @@ impl ReactAgent {
             max_verify: 0,
             audit_fn: None,
             model_router: None,
+            tier_ctx: None,
             budget_check: None,
             max_context_tokens: None,
             compact_keep_recent: 6,
@@ -1646,6 +756,19 @@ impl ReactAgent {
     /// for low-stakes turns); tests inject a stub.
     pub fn with_model_router(mut self, f: ModelRouterFn) -> Self {
         self.model_router = Some(f);
+        self
+    }
+
+    /// Set the provider's strong + cheap model pair, enabling data-driven
+    /// per-step routing and sub-agent dispatch tiering for this provider
+    /// (multi-protocol refactor: replaces the old hardcoded GLM constants). Both
+    /// ids must belong to the SAME provider (same endpoint/key) — routing swaps
+    /// the model id only, never the endpoint.
+    pub fn with_tier_ctx(mut self, strong: impl Into<String>, cheap: impl Into<String>) -> Self {
+        self.tier_ctx = Some(TierCtx {
+            strong: strong.into(),
+            cheap: cheap.into(),
+        });
         self
     }
 
@@ -1933,7 +1056,12 @@ impl ReactAgent {
                 // tool_result block the model consumes.
                 let banner = findings
                     .iter()
-                    .map(|f| format!("  - [{}] {} (evidence: {})", f.rule, f.explanation, f.evidence))
+                    .map(|f| {
+                        format!(
+                            "  - [{}] {} (evidence: {})",
+                            f.rule, f.explanation, f.evidence
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 log::warn!("[hook] assertion-weakening detected:\n{banner}");
@@ -2041,15 +1169,16 @@ impl kernel_core::Agent for ReactAgent {
             // Fall back to the ChatModel's OWN resolved id (the model the user
             // picked + the provider resolved), NOT a hardcoded flagship. The chat
             // path builds AgentInput{model:None} (the resolved id already lives
-            // inside GlmChatModel), so a blanket STRONG_MODEL fallback routed
-            // every GLM-family turn against glm-4.6 — picking glm-5.2 then sent
-            // glm-4.6 (session 7f51a5d2, 2026-06-21: 401, the user's Z.AI key has
-            // no glm-4.6). A ChatModel that doesn't expose an id (test stubs)
-            // returns "" → keep the legacy STRONG_MODEL fallback there.
+            // inside the ChatModel), so a blanket flagship fallback would route
+            // every turn against one fixed id — picking a different model then sent
+            // the wrong id (session 7f51a5d2, 2026-06-21: 401, the user's key had
+            // no access to the hardcoded flagship). A ChatModel that doesn't expose
+            // an id (test stubs) returns "" → keep a concrete fallback string
+            // there so construction never panics.
             let base_model = model_opt.clone().unwrap_or_else(|| {
                 let mid = model.model_id();
                 if mid.is_empty() {
-                    crate::kernel_impl::model_router::STRONG_MODEL.to_string()
+                    "glm-4.6".to_string()
                 } else {
                     mid.to_string()
                 }
@@ -2108,7 +1237,7 @@ impl kernel_core::Agent for ReactAgent {
                 // C7 tool-call recovery: retry transient LLM send failures
                 // (network/5xx/429) with exponential backoff; fatal errors
                 // (circuit open / quota / auth / 4xx) degrade at once. The
-                // breaker inside GlmChatModel records each attempt, so a run
+                // breaker inside AnthropicChatModel records each attempt, so a run
                 // of retries naturally trips the circuit.
                 let mut attempt = 1u32;
                 let turn_stream = loop {
@@ -2415,7 +1544,16 @@ impl kernel_core::Agent for ReactAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cost::circuit_breaker::CircuitBreaker;
+    use crate::cost::pricing;
+    use crate::kernel_impl::anthropic_chat_model::{
+        AnthropicChatModel, decode_anthropic_message, handle_sse_line, parse_usage,
+        shared_anthropic_circuit, usage_from_response,
+    };
+    use kernel_core::MessageStream;
     use kernel_core::ToolInfo;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn subagent_status_parses_project_prefixes() {
@@ -2442,7 +1580,10 @@ mod tests {
             cache_write_tokens: 0,
             cost_usd: 0.0123,
         }));
-        assert!(line.contains("1234→567 tok"), "token split rendered: {line}");
+        assert!(
+            line.contains("1234→567 tok"),
+            "token split rendered: {line}"
+        );
         assert!(line.contains("$0.0123"), "cost rendered 4dp: {line}");
     }
 
@@ -2532,7 +1673,9 @@ mod tests {
         }
         fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
             // run_loop uses generate, not stream; this model is generate-only.
-            Err(Error::Unsupported("ConcurrentModel is generate-only".into()))
+            Err(Error::Unsupported(
+                "ConcurrentModel is generate-only".into(),
+            ))
         }
         fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
             Ok(Box::new(ConcurrentModel {
@@ -2559,6 +1702,7 @@ mod tests {
             4,
             Vec::new(),
             Arc::new(Semaphore::new(4)),
+            None,
         );
         let mut reg = ToolRegistry::new();
         reg.push(tool);
@@ -2581,7 +1725,10 @@ mod tests {
         assert_eq!(outcomes[2].call_id, calls[2].id);
         // Each dispatched child converged → Completed status on its result.
         for o in &outcomes {
-            assert_eq!(parse_subagent_status(&o.result), Some(SubagentStatus::Completed));
+            assert_eq!(
+                parse_subagent_status(&o.result),
+                Some(SubagentStatus::Completed)
+            );
         }
     }
 
@@ -2602,6 +1749,7 @@ mod tests {
             4,
             Vec::new(),
             Arc::new(Semaphore::new(1)),
+            None,
         );
         let mut reg = ToolRegistry::new();
         reg.push(tool);
@@ -2652,7 +1800,10 @@ mod tests {
         assert_eq!(outcomes[1].call_id, calls[1].id);
         // Each succeeded with one Succeeded event carrying the echoed args.
         assert_eq!(outcomes[0].events.len(), 1);
-        assert_eq!(outcomes[0].events[0].status, kernel_core::ToolCallStatus::Succeeded);
+        assert_eq!(
+            outcomes[0].events[0].status,
+            kernel_core::ToolCallStatus::Succeeded
+        );
     }
 
     #[test]
@@ -2729,8 +1880,8 @@ mod tests {
 
     #[test]
     fn build_body_injects_bound_tools() {
-        let mut model = GlmChatModel::bigmodel("k", "glm-4.6");
-        model.bound_tools = vec![ToolInfo {
+        let mut model = AnthropicChatModel::bigmodel("k", "glm-4.6");
+        model.shared.bound_tools = vec![ToolInfo {
             name: "grep".into(),
             description: "search".into(),
             parameters_schema: json!({"type": "object"}),
@@ -2746,7 +1897,7 @@ mod tests {
 
     #[test]
     fn build_body_omits_tools_when_empty() {
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let body = model.build_body(
             "glm-4.6",
             &[Message::user("hi")],
@@ -2758,7 +1909,7 @@ mod tests {
 
     #[test]
     fn with_tools_returns_bound_clone() {
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let _bound = model
             .with_tools(&[ToolInfo {
                 name: "x".into(),
@@ -2869,7 +2020,9 @@ mod tests {
             Ok(Message::assistant(content))
         }
         fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
-            Err(Error::Unsupported("TwoPhaseModel: drive via generate".into()))
+            Err(Error::Unsupported(
+                "TwoPhaseModel: drive via generate".into(),
+            ))
         }
         fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
             Ok(Box::new(self.clone()))
@@ -2897,7 +2050,10 @@ mod tests {
         let out = agent
             .run_loop("do the thing", ModelOptions::default())
             .await;
-        assert!(out.is_ok(), "run_loop should converge after repair: {out:?}");
+        assert!(
+            out.is_ok(),
+            "run_loop should converge after repair: {out:?}"
+        );
         let calls = probe_calls.lock().unwrap();
         assert_eq!(
             calls.len(),
@@ -3521,7 +2677,7 @@ mod tests {
         use kernel_core::Agent;
         // Regression (session 7f51a5d2, 2026-06-21): the chat path builds
         // AgentInput{model:None} (the resolved id already lives inside
-        // GlmChatModel), so the per-step router's base_model used to fall back
+        // AnthropicChatModel), so the per-step router's base_model used to fall back
         // to the hardcoded STRONG_MODEL (glm-4.6). With a model that resolved
         // to glm-5.2, that meant every GLM-family turn sent glm-4.6 → 401 (the
         // user's Z.AI key has no glm-4.6) — the user picked GLM-5.2 but the wire
@@ -3532,8 +2688,13 @@ mod tests {
         // NEVER glm-4.6.
         let model = RecordingModel::new_with_model_id(Message::assistant("done"), "glm-5.2");
         let seen = model.seen.clone();
-        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys")
-            .with_model_router(Arc::new(crate::kernel_impl::model_router::route_step));
+        let tier = crate::kernel_impl::model_router::TierCtx {
+            strong: "glm-4.6".to_string(),
+            cheap: "glm-4-flash".to_string(),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys").with_model_router(Arc::new(
+            move |h, b| crate::kernel_impl::model_router::route_step(h, b, &tier),
+        ));
         // Neutral prompt: no powerful hint, no short-confirmation keyword, so the
         // ONLY way the wire model becomes glm-5.2 is the base_model fallback
         // (route_step's guard returns a non-STRONG base unchanged). Pre-fix this
@@ -3548,7 +2709,11 @@ mod tests {
         let outcome = collect_outcome(s).await.expect("must emit Done");
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "one stream call on a converging turn: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            1,
+            "one stream call on a converging turn: {seen:?}"
+        );
         assert_eq!(
             seen[0].as_deref(),
             Some("glm-5.2"),
@@ -3993,7 +3158,7 @@ mod tests {
         use kernel_core::Agent;
         // 401 is Fatal::Auth — no retry, graceful Done with the auth message.
         let model = ErrorModel {
-            make: Arc::new(|| Error::Model("GLM failed: 401 unauthorized".into())),
+            make: Arc::new(|| Error::Model("LLM call failed: 401 unauthorized".into())),
         };
         let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
         let s = agent.run(go_input()).unwrap();
@@ -4276,7 +3441,7 @@ mod tests {
         // REAL ReactAgent run loop with a model that emits TWO parallel
         // tool_use calls in one turn, capture the history it hands back on
         // turn 2, then feed that REAL history through the REAL
-        // GlmChatModel::build_body. Spans the full bug chain behind session
+        // AnthropicChatModel::build_body. Spans the full bug chain behind session
         // 34f2c468's 400 — run loop → consecutive Role::Tool Messages →
         // build_body merge — not just the build_body pure function alone.
         use kernel_core::Agent;
@@ -4344,10 +3509,10 @@ mod tests {
         assert_eq!(tail[0].role, Role::Tool, "consecutive Tool messages");
         assert_eq!(tail[0].tool_call_id.as_deref(), Some("call_01"));
 
-        // Feed that REAL turn-2 history through the REAL GlmChatModel
+        // Feed that REAL turn-2 history through the REAL AnthropicChatModel
         // build_body: the two consecutive Tool Messages MUST merge into ONE
         // user message, restoring strict user/assistant alternation.
-        let glm = GlmChatModel::bigmodel("k", "glm-4.6");
+        let glm = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let body = glm.build_body("glm-4.6", turn2, &ModelOptions::default(), false);
         let wire = body["messages"].as_array().unwrap();
         let roles: Vec<&str> = wire.iter().map(|m| m["role"].as_str().unwrap()).collect();
@@ -4424,13 +3589,23 @@ mod tests {
         let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}"#;
         assert_eq!(
             parse_usage(start),
-            Some(pricing::TokenUsage { input: 42, output: 0, cache_read: 0, cache_write: 0 })
+            Some(pricing::TokenUsage {
+                input: 42,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0
+            })
         );
         // Standard Anthropic: message_delta carries only output_tokens.
         let delta = r#"data: {"type":"message_delta","usage":{"output_tokens":128}}"#;
         assert_eq!(
             parse_usage(delta),
-            Some(pricing::TokenUsage { input: 0, output: 128, cache_read: 0, cache_write: 0 })
+            Some(pricing::TokenUsage {
+                input: 0,
+                output: 128,
+                cache_read: 0,
+                cache_write: 0
+            })
         );
         // GLM: message_delta ALSO carries the real input_tokens (message_start's
         // is a 0 placeholder). parse_usage reads both → the caller's
@@ -4440,7 +3615,12 @@ mod tests {
             r#"data: {"type":"message_delta","usage":{"input_tokens":16,"output_tokens":10}}"#;
         assert_eq!(
             parse_usage(glm_delta),
-            Some(pricing::TokenUsage { input: 16, output: 10, cache_read: 0, cache_write: 0 })
+            Some(pricing::TokenUsage {
+                input: 16,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0
+            })
         );
         // Non-usage event types → None.
         assert_eq!(parse_usage(r#"data: {"type":"content_block_delta"}"#), None);
@@ -4471,7 +3651,12 @@ mod tests {
         let v = json!({"usage":{"input_tokens":10,"output_tokens":20}});
         assert_eq!(
             usage_from_response(&v),
-            pricing::TokenUsage { input: 10, output: 20, cache_read: 0, cache_write: 0 }
+            pricing::TokenUsage {
+                input: 10,
+                output: 20,
+                cache_read: 0,
+                cache_write: 0
+            }
         );
         // Missing usage → all-zero TokenUsage, not an error.
         let v2 = json!({"content":[]});
@@ -4494,7 +3679,7 @@ mod tests {
         use crate::cost::circuit_breaker::CircuitBreakerConfig;
         use crate::cost::sink::NullCostSink;
         use std::time::Duration;
-        let m = GlmChatModel::bigmodel("k", "glm-4.6")
+        let m = AnthropicChatModel::bigmodel("k", "glm-4.6")
             .with_circuit(std::sync::Arc::new(CircuitBreaker::new(
                 CircuitBreakerConfig {
                     failure_threshold: 1,
@@ -4503,23 +3688,23 @@ mod tests {
                 },
             )))
             .with_cost_sink(std::sync::Arc::new(NullCostSink));
-        assert!(m.circuit.is_some());
-        assert!(m.cost_sink.is_some());
+        assert!(m.shared.circuit.is_some());
+        assert!(m.shared.cost_sink.is_some());
     }
 
     #[test]
-    fn shared_glm_circuit_returns_same_instance() {
+    fn shared_anthropic_circuit_returns_same_instance() {
         // The breaker must be a process-wide singleton so a trip in one agent
         // is observed by all — two calls must hand back the *same* Arc.
-        let a = shared_glm_circuit();
-        let b = shared_glm_circuit();
+        let a = shared_anthropic_circuit();
+        let b = shared_anthropic_circuit();
         assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]
     fn build_body_enables_thinking_and_replays_preserved_thinking_block() {
         use kernel_core::{Message, ModelOptions, Role, ThinkingConfig};
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         // thinking on: body carries the thinking param, and max_tokens is raised
         // above budget (caller's 1024 < budget 2000 → 2000 + 4096).
         let opts = ModelOptions {
@@ -4617,7 +3802,7 @@ mod tests {
             reasoning_signature: None,
         };
         let history = vec![Message::user("list files"), assistant_turn, tool_a, tool_b];
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let body = model.build_body("glm-4.6", &history, &ModelOptions::default(), false);
         let msgs = body["messages"].as_array().unwrap();
         // Merge: 4 internal non-system messages → 3 wire messages (no back-to-back user).
@@ -4668,7 +3853,7 @@ mod tests {
             reasoning: None,
             reasoning_signature: None,
         };
-        let model = GlmChatModel::bigmodel("k", "glm-4.6");
+        let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let body = model.build_body(
             "glm-4.6",
             &[Message::user("go"), assistant_turn, tool],
@@ -4692,7 +3877,7 @@ mod tests {
     // against GLM's actual wire format: GLM-specific usage fields, '\n' emitted
     // as a standalone text_delta, tool_use content_block accumulation.
     //
-    // Fixtures: tests/fixtures/glm/. To re-record (needs a live key) rerun the
+    // Fixtures: tests/fixtures/anthropic/. To re-record (needs a live key) rerun the
     // curl commands; the fixtures intentionally contain NO credential.
 
     /// Replay an SSE byte stream through the same per-line loop `stream()` runs
@@ -4721,7 +3906,7 @@ mod tests {
         // Real GLM non-stream response carries GLM-specific usage extensions
         // (cache_read_input_tokens / server_tool_use / service_tier). The
         // decoder must extract text and ignore the extras.
-        let raw = include_str!("../../tests/fixtures/glm/nonstream_text.json");
+        let raw = include_str!("../../tests/fixtures/anthropic/nonstream_text.json");
         let v: Value = serde_json::from_str(raw).expect("fixture is valid JSON");
         let msg = decode_anthropic_message(&v).expect("decode succeeds");
         assert_eq!(msg.role, Role::Assistant);
@@ -4735,7 +3920,7 @@ mod tests {
         // GLM usage object has standard input/output_tokens plus extras;
         // usage_from_response reads input/output (and cache tiers if present,
         // which GLM doesn't emit → 0).
-        let raw = include_str!("../../tests/fixtures/glm/nonstream_text.json");
+        let raw = include_str!("../../tests/fixtures/anthropic/nonstream_text.json");
         let v: Value = serde_json::from_str(raw).unwrap();
         let usage = usage_from_response(&v);
         assert_eq!(usage.input, 15);
@@ -4749,7 +3934,7 @@ mod tests {
         // Real GLM streams `count 1..5` and emits '\n' as its OWN text_delta —
         // the per-token fragmentation GLM uses. Deltas must concatenate to
         // "1\n2\n3\n4\n5". (GLM fragmentation is the historically flaky path.)
-        let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
+        let sse = include_str!("../../tests/fixtures/anthropic/stream_text.sse");
         let (msgs, usage) = replay_sse(sse);
         let text: String = msgs
             .iter()
@@ -4769,9 +3954,12 @@ mod tests {
         // message_delta → stays at start_input + 0, no double count.) This was a
         // 0-undercount bug before parse_usage's message_delta branch learned to
         // read input_tokens.
-        let sse = include_str!("../../tests/fixtures/glm/stream_text.sse");
+        let sse = include_str!("../../tests/fixtures/anthropic/stream_text.sse");
         let (_msgs, usage) = replay_sse(sse);
-        assert_eq!(usage.input, 16, "input_tokens accumulated from message_delta");
+        assert_eq!(
+            usage.input, 16,
+            "input_tokens accumulated from message_delta"
+        );
         assert_eq!(usage.output, 10);
     }
 
@@ -4780,7 +3968,7 @@ mod tests {
         // Real GLM tool_use stream: index 0 text block, index 1 tool_use block.
         // GLM sent the whole partial_json in one input_json_delta; message_stop
         // reassembles it into a terminal tool_calls Message (id/name/args).
-        let sse = include_str!("../../tests/fixtures/glm/stream_tool_use.sse");
+        let sse = include_str!("../../tests/fixtures/anthropic/stream_tool_use.sse");
         let (msgs, _usage) = replay_sse(sse);
         let terminal = msgs
             .last()
@@ -4809,7 +3997,7 @@ mod tests {
         // variant fragments {"city":"Beijing"} across 3 input_json_delta events
         // ("{\"ci" / "ty\":\"Be" / "ijing\"}"). GLM fragments long tool args in
         // practice, so the slot.2.push_str accumulation is a must-test path.
-        let sse = include_str!("../../tests/fixtures/glm/stream_tool_use_fragmented.sse");
+        let sse = include_str!("../../tests/fixtures/anthropic/stream_tool_use_fragmented.sse");
         let (msgs, _usage) = replay_sse(sse);
         let terminal = msgs.last().expect("terminal tool_calls");
         assert_eq!(terminal.tool_calls.len(), 1);
@@ -4821,13 +4009,15 @@ mod tests {
 
     // ===== live GLM smoke (#[ignore]: needs GLM_API_KEY, spends tokens) =====
 
-    /// Cost sink that captures the last usage GlmChatModel reported, so the live
+    /// Cost sink that captures the last usage AnthropicChatModel reported, so the live
     /// smoke test can assert input_tokens > 0 after the parse_usage fix.
     struct CapturingSink(std::sync::Mutex<crate::cost::pricing::TokenUsage>);
 
     impl CapturingSink {
         fn new() -> Self {
-            Self(std::sync::Mutex::new(crate::cost::pricing::TokenUsage::default()))
+            Self(std::sync::Mutex::new(
+                crate::cost::pricing::TokenUsage::default(),
+            ))
         }
     }
 
@@ -4855,10 +4045,9 @@ mod tests {
         };
         use futures::StreamExt;
         let sink = std::sync::Arc::new(CapturingSink::new());
-        let model = GlmChatModel::bigmodel(key, "glm-4.6")
-            .with_cost_sink(
-                std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>
-            );
+        let model = AnthropicChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
+            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
+        );
         let stream = model
             .stream(
                 &[Message::user("Reply with exactly one word: HELLO")],
@@ -4906,10 +4095,9 @@ mod tests {
         use futures::StreamExt;
         use kernel_core::{Agent, AgentEvent, AgentInput};
         let sink = std::sync::Arc::new(CapturingSink::new());
-        let model = GlmChatModel::bigmodel(key, "glm-4.6")
-            .with_cost_sink(
-                std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>
-            );
+        let model = AnthropicChatModel::bigmodel(key, "glm-4.6").with_cost_sink(
+            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::cost::sink::CostSink>,
+        );
         let agent = ReactAgent::new(model, ToolRegistry::new(), "You are a concise assistant.");
         let mut stream = agent
             .run(AgentInput {
@@ -5202,7 +4390,7 @@ mod tests {
                 reasoning_signature: None,
             },
         ];
-        let glm = GlmChatModel::bigmodel(&key, "glm-4.6");
+        let glm = AnthropicChatModel::bigmodel(&key, "glm-4.6");
         let body = glm.build_body("glm-4.6", &history, &ModelOptions::default(), false);
         // 本地wire合规(合并+严格交替)——复刻的history经修复后必须满足。
         let wire = body["messages"].as_array().unwrap();
@@ -5322,8 +4510,8 @@ mod tests {
     /// sessions fail 100% of the time (status=Failed blocks=1 in the app log),
     /// yet an external curl/urllib probe of the same request shape returns 200.
     /// This bypasses the run_loop (which swallows the real error into a generic
-    /// "could not be recovered" message) and calls GlmChatModel.stream() with
-    /// the real reqwest client, so the raw Error::Model("GLM stream failed: N")
+    /// "could not be recovered" message) and calls AnthropicChatModel.stream() with
+    /// the real reqwest client, so the raw Error::Model("LLM stream failed: N")
     /// / Error::Network surfaces. The suspect: reqwest's default HTTP/2 ALPN
     /// (vs the probe's HTTP/1.1) breaking DeepSeek's streaming response.
     ///   cargo test --lib -- --ignored diag_deepseek --nocapture
@@ -5339,7 +4527,7 @@ mod tests {
             .and_then(|c| crate::config::providers::resolve_provider(&c, "deepseek-v4-flash"))
             .expect("keyed DeepSeek provider");
         eprintln!("endpoint={} model_in_config={}", r.endpoint, r.model);
-        let model = GlmChatModel::new(&r.endpoint, &r.api_key, &r.model);
+        let model = AnthropicChatModel::new(&r.endpoint, &r.api_key, &r.model);
         let msgs = vec![
             Message::system("You are a helpful assistant."),
             Message::user("为什么信息直接失败"),

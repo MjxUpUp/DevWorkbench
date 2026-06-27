@@ -160,8 +160,18 @@
                 return Promise.resolve([{ name: 'claude', installed: true, path: '/usr/local/bin/claude' }]);
               case 'get_providers_config':
                 return Promise.resolve({
-                  providers: [{ id: 'glm', name: '智谱 GLM', kind: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKeyEnv: 'GLM_API_KEY', models: [{ id: 'glm-4.6', label: 'GLM-4.6', enabled: true }], enabled: true }],
-                  active: 'glm',
+                  providers: [
+                    {
+                      id: 'zai',
+                      name: 'Z.AI',
+                      endpoint: 'https://open.bigmodel.cn/api/anthropic',
+                      apiKey: 'sk-zai-demo',
+                      protocol: 'anthropic',
+                      enabled: true,
+                      models: [{ id: 'glm-4.6', label: 'GLM-4.6', enabled: true, tier: 'strong' }],
+                    },
+                  ],
+                  modelMapping: {},
                 });
               case 'get_git_status':
                 return Promise.resolve({ branch: 'main', isDirty: false, ahead: 0, behind: 0, lastCommitTime: null, insertions: 0, deletions: 0 });

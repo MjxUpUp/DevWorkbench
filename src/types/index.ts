@@ -373,6 +373,17 @@ export interface McpToolListing {
 
 // ---- Provider types ----
 
+/** Wire protocol a provider's endpoint speaks — selects which ChatModel impl
+ *  the backend builds (Anthropic Messages vs OpenAI Chat Completions). Mirrors
+ *  Rust `ProtocolKind` (serde lowercase). Defaults to 'anthropic'. */
+export type ProtocolKind = 'anthropic' | 'openai';
+
+/** A model's routing tier within its provider. `strong` = the capable/expensive
+ *  model for hard reasoning; `cheap` = the fast one for trivial steps (tool
+ *  results, short confirmations). A provider declaring BOTH gets the per-step
+ *  strong/cheap router. Mirrors Rust `ModelTier` (serde lowercase). */
+export type ModelTier = 'strong' | 'cheap';
+
 export interface ModelEntry {
   id: string;
   label: string;
@@ -381,6 +392,11 @@ export interface ModelEntry {
    * (75% of window). Omitted → backend falls back to a conservative 32k
    * default. Mirrors Rust `ModelEntry::context_window` (serde camelCase). */
   contextWindow?: number;
+  /** Routing tier. Omitted/null = this model doesn't participate in per-step
+   *  routing. A provider needs one `strong` AND one `cheap` to activate the
+   *  router (data-driven version of the old `starts_with("glm-")` guard).
+   *  Mirrors Rust `ModelEntry::tier` (serde camelCase). */
+  tier?: ModelTier | null;
 }
 
 export interface ProviderConfig {
@@ -389,6 +405,10 @@ export interface ProviderConfig {
   endpoint: string;
   apiKey: string;
   enabled: boolean;
+  /** Wire protocol of this endpoint. Drives the backend's ChatModel impl
+   *  selection. Mirrors Rust `ProviderConfig::protocol` (serde camelCase,
+   *  defaults to 'anthropic'). */
+  protocol?: ProtocolKind;
   models: ModelEntry[];
 }
 
@@ -525,10 +545,11 @@ export type ChatStreamEvent =
 
 /** One persisted LLM HTTP call (Rust `trace::db::LlmTraceRow`). Mirrors the
  *  Rust serde schema EXACTLY — verbatim snake_case (NO camelCase), because
- *  LlmTraceRow has no #[serde(rename_all)]. One row per GlmChatModel
- *  stream/generate request. This is the observability layer that finally makes
- *  a 0.8s "GLM stream failed: 400" session diagnosable: the real request body
- *  and the provider's error response body are both persisted here. */
+ *  LlmTraceRow has no #[serde(rename_all)]. One row per ChatModel
+ *  stream/generate request (Anthropic or OpenAI protocol). This is the
+ *  observability layer that finally makes a 0.8s "LLM stream failed: 400"
+ *  session diagnosable: the real request body and the provider's error
+ *  response body are both persisted here. */
 export interface LlmTrace {
   id: string;
   session_id: string | null;

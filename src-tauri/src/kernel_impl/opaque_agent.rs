@@ -492,9 +492,10 @@ mod tests {
     /// that this function type-checks proves the trait is object-safe and shared.
     #[allow(dead_code)]
     fn dual_mode_unification_proof() {
-        use crate::kernel_impl::react_agent::{GlmChatModel, ReactAgent, ToolRegistry};
+        use crate::kernel_impl::anthropic_chat_model::AnthropicChatModel;
+        use crate::kernel_impl::react_agent::{ReactAgent, ToolRegistry};
         let transparent: Box<dyn Agent> = Box::new(ReactAgent::new(
-            GlmChatModel::bigmodel("k", "glm-4.6"),
+            AnthropicChatModel::bigmodel("k", "glm-4.6"),
             ToolRegistry::new(),
             "sys",
         ));

@@ -6,12 +6,12 @@ export interface ModelOption {
   provider?: string;
 }
 
-// Default model options — will be populated from providers config when available
+// Bare fallback when ChatView passes no provider-sourced modelOptions. The real
+// list comes from providers.toml (one option per enabled model); this only
+// renders before that load, so it stays a single neutral entry instead of
+// hardcoding one vendor's models.
 const DEFAULT_MODELS: ModelOption[] = [
   { id: 'default', label: '默认模型', provider: '系统' },
-  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'Anthropic' },
-  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'Anthropic' },
-  { id: 'glm-5.1', label: 'GLM-5.1', provider: 'Z.AI' },
 ];
 
 interface ModelSelectorProps {

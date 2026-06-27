@@ -1,4 +1,4 @@
-//! Upstream circuit breaker — protects against cascading failures when the GLM
+//! Upstream circuit breaker — protects against cascading failures when the LLM
 //! endpoint (or any model gateway) starts failing. Ported 1:1 from AgentFare's
 //! `packages/hook/src/failover.ts`, adapted to Rust's thread model: the TS
 //! single-threaded `Map` becomes a `Mutex<HashMap>`, and the admit→record

@@ -2,15 +2,21 @@ import { useState, useEffect, useMemo } from 'react';
 import { useProvidersStore } from '../../stores/providersStore';
 import { useToast } from '../Toast';
 import { Button } from '../ui/Button/Button';
-import type { ProviderConfig, ProvidersConfig, ModelEntry } from '../../types';
+import type { ProviderConfig, ProvidersConfig, ModelEntry, ProtocolKind, ModelTier } from '../../types';
 
 /**
- * The logical model id the transparent kernel agent requests by default.
- * Mirrors executor.rs's `model.unwrap_or("glm-4.6")`. The "默认模型" dropdown
- * writes into modelMapping[DEFAULT_MODEL_ID] to redirect that request to a
- * different model when the user picks one.
+ * The neutral alias the transparent kernel agent requests when no specific model
+ * is passed. Mirrors executor.rs's `model.unwrap_or("__default__")`: the backend
+ * resolve_provider expands this alias — honoring an explicit modelMapping entry
+ * (the user's "默认模型" pick) first, else falling back to the data-driven
+ * default_model_id (first enabled Strong-tier model). The "默认模型" dropdown
+ * writes into modelMapping[DEFAULT_MODEL_ID] to redirect that request.
+ *
+ * This replaces the old 'glm-4.6' alias, which silently broke the moment a
+ * non-GLM provider became the first enabled Strong (the executor used to default
+ * to glm-4.6, so modelMapping['glm-4.6'] only ever fired for GLM-first configs).
  */
-const DEFAULT_MODEL_ID = 'glm-4.6';
+const DEFAULT_MODEL_ID = '__default__';
 
 /** Per-provider probe result, kept in-card so users can compare and revisit
  * connectivity instead of chasing a transient toast. */
@@ -136,6 +142,7 @@ export function ProvidersSection() {
                 endpoint: '',
                 apiKey: '',
                 enabled: true,
+                protocol: 'anthropic',
                 models: [],
               },
             ],
@@ -225,7 +232,7 @@ export function ProvidersSection() {
     }
     setActiveTest(p.id);
     try {
-      const r = await testProvider(p.endpoint, p.apiKey, modelId);
+      const r = await testProvider(p.endpoint, p.apiKey, modelId, p.protocol ?? 'anthropic');
       setTestResults((prev) => ({ ...prev, [p.id]: { ok: r.ok, status: r.status, message: r.message } }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -476,6 +483,25 @@ function ProviderCard({
           </div>
         </div>
 
+        <div className="provider-field">
+          <span className="provider-field-label">协议</span>
+          <div className="provider-field-control">
+            <select
+              className="provider-field-select"
+              aria-label={`协议 - ${p.name}`}
+              value={p.protocol ?? 'anthropic'}
+              onChange={(e) => onPatch({ protocol: e.target.value as ProtocolKind })}
+              disabled={!p.enabled}
+            >
+              <option value="anthropic">Anthropic Messages</option>
+              <option value="openai">OpenAI Chat Completions</option>
+            </select>
+            <span className="provider-field-hint">
+              决定后端构造的请求体（Anthropic /v1/messages vs OpenAI /v1/chat/completions）
+            </span>
+          </div>
+        </div>
+
         <div className="provider-field provider-models-field">
           <span className="provider-field-label">可用模型</span>
           <div className="provider-field-control">
@@ -523,6 +549,21 @@ function ProviderCard({
                       });
                     }}
                   />
+                  <select
+                    className="provider-model-input provider-model-tier"
+                    aria-label={`模型 tier - ${m.label}`}
+                    value={m.tier ?? ''}
+                    onChange={(e) =>
+                      onPatchModel(idx, {
+                        tier: (e.target.value || undefined) as ModelTier | undefined,
+                      })
+                    }
+                    title="路由 tier：strong=主推理模型；cheap=快速步骤(tool 结果/短确认)。同 provider 同时配 strong+cheap 才启用逐 step 强弱路由"
+                  >
+                    <option value="">— 无 tier</option>
+                    <option value="strong">strong</option>
+                    <option value="cheap">cheap</option>
+                  </select>
                   <button
                     className="provider-icon-btn provider-model-remove"
                     aria-label={`删除模型 ${m.label}`}

@@ -122,10 +122,12 @@ pub fn get_trace_settings(conn: &Connection) -> Result<TraceSettings, AppError> 
     conn.query_row(
         "SELECT retention_days, last_vacuum_at FROM trace_settings WHERE id = 1",
         [],
-        |r| Ok(TraceSettings {
-            retention_days: r.get(0)?,
-            last_vacuum_at: r.get(1)?,
-        }),
+        |r| {
+            Ok(TraceSettings {
+                retention_days: r.get(0)?,
+                last_vacuum_at: r.get(1)?,
+            })
+        },
     )
     .map_err(|e| AppError::Internal(format!("trace_settings read failed: {e}")))
 }
@@ -145,16 +147,16 @@ pub fn set_trace_retention(conn: &Connection, days: Option<i64>) -> Result<(), A
 /// `created_at` (written by `DbTraceSink`) is a true time ordering — mixing
 /// timezones here would mis-delete. Backed by `idx_llm_traces_created`. Returns
 /// the row count deleted.
-pub fn prune_old_traces(
-    conn: &Connection,
-    retention_days: Option<i64>,
-) -> Result<usize, AppError> {
+pub fn prune_old_traces(conn: &Connection, retention_days: Option<i64>) -> Result<usize, AppError> {
     let Some(days) = retention_days.filter(|d| *d > 0) else {
         return Ok(0);
     };
     let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
     let cutoff_str = cutoff.to_rfc3339();
-    let deleted = conn.execute("DELETE FROM llm_traces WHERE created_at < ?1", [&cutoff_str])?;
+    let deleted = conn.execute(
+        "DELETE FROM llm_traces WHERE created_at < ?1",
+        [&cutoff_str],
+    )?;
     Ok(deleted)
 }
 
@@ -345,7 +347,10 @@ mod tests {
         insert_llm_trace(&conn, &sample("fresh", "s1", &now)).unwrap();
 
         let deleted = prune_old_traces(&conn, Some(1)).unwrap();
-        assert_eq!(deleted, 1, "the 2-day-old trace is past the 1-day retention");
+        assert_eq!(
+            deleted, 1,
+            "the 2-day-old trace is past the 1-day retention"
+        );
 
         let rows = list_traces_for_session(&conn, "s1").unwrap();
         assert_eq!(rows.len(), 1, "the recent trace is kept");
@@ -389,16 +394,28 @@ mod tests {
     fn maybe_vacuum_runs_when_due_then_throttled_within_window() {
         let conn = test_conn();
         // Force a due state: clear last_vacuum_at (NULL = never vacuumed).
-        conn.execute("UPDATE trace_settings SET last_vacuum_at = NULL WHERE id = 1", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE trace_settings SET last_vacuum_at = NULL WHERE id = 1",
+            [],
+        )
+        .unwrap();
         let due = get_trace_settings(&conn).unwrap();
-        assert!(maybe_vacuum(&conn, &due).unwrap(), "NULL last_vacuum_at → VACUUM runs");
+        assert!(
+            maybe_vacuum(&conn, &due).unwrap(),
+            "NULL last_vacuum_at → VACUUM runs"
+        );
 
         let after = get_trace_settings(&conn).unwrap();
-        assert!(after.last_vacuum_at.is_some(), "last_vacuum_at stamped after VACUUM");
+        assert!(
+            after.last_vacuum_at.is_some(),
+            "last_vacuum_at stamped after VACUUM"
+        );
 
         // Immediately again → throttled (just stamped, well within 7 days).
         let not_due = get_trace_settings(&conn).unwrap();
-        assert!(!maybe_vacuum(&conn, &not_due).unwrap(), "throttled within the 7-day window");
+        assert!(
+            !maybe_vacuum(&conn, &not_due).unwrap(),
+            "throttled within the 7-day window"
+        );
     }
 }

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { ProvidersConfig } from '../types';
+import type { ProvidersConfig, ProtocolKind } from '../types';
 
 /** Result of probing one provider's credentials (mirrors the Rust struct). */
 export interface ProviderTestResult {
@@ -18,6 +18,7 @@ interface ProvidersState {
     endpoint: string,
     apiKey: string,
     model: string,
+    protocol: ProtocolKind,
   ) => Promise<ProviderTestResult>;
 }
 
@@ -48,11 +49,12 @@ export const useProvidersStore = create<ProvidersState>((set) => ({
     set({ config });
   },
 
-  testProvider: async (endpoint, apiKey, model) => {
+  testProvider: async (endpoint, apiKey, model, protocol) => {
     return invoke<ProviderTestResult>('test_provider_connection', {
       endpoint,
       apiKey,
       model,
+      protocol,
     });
   },
 }));

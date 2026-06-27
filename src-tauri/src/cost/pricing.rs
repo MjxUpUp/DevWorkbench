@@ -26,10 +26,13 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    /// GLM-4 family (Zhipu) — the value AgentFare calibrated for the GLM
-    /// family on the Anthropic-compatible endpoint. GLM has no public
-    /// prompt-cache pricing as of 2026-06, so cache tiers are 0.
-    pub const GLM: Self = Self {
+    /// Zhipu GLM-4 family — the value AgentFare calibrated for the GLM family
+    /// on the Anthropic-compatible endpoint. GLM has no public prompt-cache
+    /// pricing as of 2026-06, so cache tiers are 0. Renamed from `GLM` in the
+    /// multi-provider refactor to name the vendor (Zhipu) honestly, since a bare
+    /// `GLM` constant reads as if it priced any "glm-*" string rather than one
+    /// vendor's family.
+    pub const ZHIPU_GLM: Self = Self {
         input_per_million: 1.0,
         output_per_million: 3.2,
         cache_read_per_million: 0.0,
@@ -70,6 +73,26 @@ impl ModelPricing {
         cache_write_per_million: 0.0,
     };
 
+    /// DeepSeek V3/R1 — list price $0.27/$1.10 with a steeply-discounted cache-
+    /// read tier ($0.07, ~75% off). Added in the multi-provider refactor so the
+    /// OpenAI-protocol DeepSeek preset prices honestly. No cache-write tier.
+    pub const DEEPSEEK: Self = Self {
+        input_per_million: 0.27,
+        output_per_million: 1.10,
+        cache_read_per_million: 0.07,
+        cache_write_per_million: 0.0,
+    };
+
+    /// OpenAI GPT-4.1 — $2/$8 list, cached input at $0.5/M (OpenAI's 75%-off
+    /// cache-read tier). Distinct from GPT-4o (different price + a real cache
+    /// tier), so matched before `gpt-4o` in `pricing_for`.
+    pub const GPT_41: Self = Self {
+        input_per_million: 2.0,
+        output_per_million: 8.0,
+        cache_read_per_million: 0.5,
+        cache_write_per_million: 0.0,
+    };
+
     /// Unknown model — zero pricing. The caller can still record token counts;
     /// cost is honestly absent rather than fabricated.
     pub const UNKNOWN: Self = Self {
@@ -87,13 +110,17 @@ impl ModelPricing {
 pub fn pricing_for(model: &str) -> ModelPricing {
     let m = model.to_ascii_lowercase();
     if m.contains("glm") {
-        ModelPricing::GLM
+        ModelPricing::ZHIPU_GLM
+    } else if m.contains("deepseek") {
+        ModelPricing::DEEPSEEK
     } else if m.contains("opus") {
         ModelPricing::CLAUDE_OPUS
     } else if m.contains("haiku") {
         ModelPricing::CLAUDE_HAIKU
     } else if m.contains("sonnet") || m.contains("claude") {
         ModelPricing::CLAUDE_SONNET
+    } else if m.contains("gpt-4.1") {
+        ModelPricing::GPT_41
     } else if m.contains("gpt-4o") {
         ModelPricing::GPT_4O
     } else {
@@ -173,21 +200,23 @@ mod tests {
     #[test]
     fn cost_formula_matches_pricing() {
         // 2M input @ $1 + 1M output @ $3.2 = $2 + $3.2 = $5.2.
-        let c = cost(2_000_000, 1_000_000, ModelPricing::GLM);
+        let c = cost(2_000_000, 1_000_000, ModelPricing::ZHIPU_GLM);
         assert!((c - 5.2).abs() < 1e-9, "{c}");
     }
 
     #[test]
     fn pricing_for_resolves_by_family() {
-        assert_eq!(pricing_for("glm-4.6"), ModelPricing::GLM);
-        assert_eq!(pricing_for("GLM-4.5"), ModelPricing::GLM);
+        assert_eq!(pricing_for("glm-4.6"), ModelPricing::ZHIPU_GLM);
+        assert_eq!(pricing_for("GLM-4.5"), ModelPricing::ZHIPU_GLM);
         assert_eq!(pricing_for("claude-sonnet-4-5-20250929"), ModelPricing::CLAUDE_SONNET);
         assert_eq!(pricing_for("claude-opus-4-1"), ModelPricing::CLAUDE_OPUS);
         assert_eq!(pricing_for("claude-haiku-4-5"), ModelPricing::CLAUDE_HAIKU);
         assert_eq!(pricing_for("gpt-4o-2024-11-20"), ModelPricing::GPT_4O);
         // opus checked before the generic claude fallback (order matters).
         assert_ne!(pricing_for("claude-opus-x"), ModelPricing::CLAUDE_SONNET);
-        assert_eq!(pricing_for("deepseek-v3"), ModelPricing::UNKNOWN);
+        assert_eq!(pricing_for("deepseek-chat"), ModelPricing::DEEPSEEK);
+        assert_eq!(pricing_for("deepseek-v3"), ModelPricing::DEEPSEEK);
+        assert_eq!(pricing_for("gpt-4.1-2025-04-14"), ModelPricing::GPT_41);
         assert_eq!(pricing_for(""), ModelPricing::UNKNOWN);
     }
 
@@ -198,7 +227,7 @@ mod tests {
 
     #[test]
     fn zero_tokens_yield_zero_cost() {
-        assert_eq!(cost(0, 0, ModelPricing::GLM), 0.0);
+        assert_eq!(cost(0, 0, ModelPricing::ZHIPU_GLM), 0.0);
     }
 
     #[test]
@@ -229,7 +258,7 @@ mod tests {
             cache_read: 500_000,
             cache_write: 500_000,
         };
-        let b = cost_breakdown(usage, ModelPricing::GLM);
+        let b = cost_breakdown(usage, ModelPricing::ZHIPU_GLM);
         assert_eq!(b.cache_read_cost, 0.0);
         assert_eq!(b.cache_write_cost, 0.0);
         assert!((b.total() - 1.0).abs() < 1e-9);

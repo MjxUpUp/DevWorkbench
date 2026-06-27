@@ -140,7 +140,7 @@ impl AgentType {
             Self::Copilot => "GitHub Copilot",
             Self::QwenCode => "Qwen Code",
             Self::Pi => "Pi",
-            Self::ReactKernel => "Kernel Agent (GLM)",
+            Self::ReactKernel => "Kernel Agent",
         }
     }
 
@@ -493,7 +493,7 @@ pub struct CostRecord {
     pub output_tokens: i64,
     /// B5 transparent cost: prompt-cache tokens (Anthropic
     /// cache_read_input_tokens / cache_creation_input_tokens). 0 for providers
-    /// (GLM) that don't report cache usage, or for pre-v17 rows. serde(default)
+    /// that don't report cache usage, or for pre-v17 rows. serde(default)
     /// so older serialized records still deserialize.
     #[serde(default)]
     pub cache_read_tokens: i64,

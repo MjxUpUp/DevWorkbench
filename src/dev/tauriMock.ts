@@ -53,12 +53,39 @@ const workflows = [
   { id: 'w1', name: '示例审批流', yaml_content: 'start: prompt_1\nend: gate_1\nnodes:\n  prompt_1:\n    type: prompt\n    text: "demo"\n  gate_1:\n    type: gate\n    gate: forge\nedges:\n  - { from: prompt_1, to: gate_1 }\n', created_at: '2025-06-01T00:00:00.000Z', updated_at: '2025-06-01T00:00:00.000Z' },
 ];
 
+// Wire format mirroring the Rust ProvidersConfig serde schema — the old mock
+// used a stale kind/baseUrl/apiKeyEnv/active shape that no consumer matches, so
+// the providers store (typed ProvidersConfig) silently rendered defaults. This
+// matches what get_providers_config actually returns: ProviderConfig[] with
+// endpoint/apiKey/protocol/enabled/models(object[] with tier) + modelMapping.
 const providers = {
   providers: [
-    { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKeyEnv: 'ANTHROPIC_API_KEY', models: ['claude-sonnet-4-6', 'claude-opus-4-8'], enabled: true },
-    { id: 'glm', name: '智谱 GLM', kind: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKeyEnv: 'GLM_API_KEY', models: ['glm-4.6', 'glm-4.5-air'], enabled: true },
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      endpoint: 'https://api.anthropic.com',
+      apiKey: 'sk-ant-demo',
+      protocol: 'anthropic',
+      enabled: true,
+      models: [
+        { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', enabled: true, tier: 'strong' },
+        { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', enabled: true, tier: 'cheap' },
+      ],
+    },
+    {
+      id: 'zai',
+      name: 'Z.AI',
+      endpoint: 'https://open.bigmodel.cn/api/anthropic',
+      apiKey: 'sk-zai-demo',
+      protocol: 'anthropic',
+      enabled: true,
+      models: [
+        { id: 'glm-4.6', label: 'GLM-4.6', enabled: true, tier: 'strong' },
+        { id: 'glm-4-flash', label: 'GLM-4-Flash', enabled: true, tier: 'cheap' },
+      ],
+    },
   ],
-  active: 'anthropic',
+  modelMapping: {},
 };
 
 export const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
@@ -78,7 +105,7 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   save_settings: () => null,
   get_providers_config: () => providers,
   set_providers_config: () => null,
-  test_provider_connection: () => ({ ok: true, latency_ms: 42 }),
+  test_provider_connection: () => ({ ok: true, status: 200, message: '连接成功 (mock)' }),
   // ToolStatus[] contract — {name, installed, path} per item. The old object
   // shape ({git,node,rust}) matched no consumer (useTools/AgentSection both
   // invoke<ToolStatus[]>), so the dev tool-status list silently rendered empty

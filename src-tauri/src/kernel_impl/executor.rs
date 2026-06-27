@@ -13,18 +13,56 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_compose::graph::{AgentChunk, AgentNodeSpec, Executor, GateNode};
 use kernel_core::{AgentInput, Tool, ToolContext};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::agents::pty::AgentProcesses;
 use crate::db::DbState;
 use crate::error::AppError;
+use crate::kernel_impl::anthropic_chat_model::AnthropicChatModel;
 use crate::kernel_impl::mcp_tool::McpTool;
 use crate::kernel_impl::opaque_agent::OpaqueAgent;
-use crate::kernel_impl::react_agent::{GlmChatModel, ReactAgent, ToolRegistry};
+use crate::kernel_impl::openai_chat_model::OpenAIChatModel;
+use crate::kernel_impl::react_agent::{ReactAgent, ToolRegistry};
 use crate::kernel_impl::skill_tool::SkillTool;
 use crate::mcp::registry::McpRegistry;
 use crate::models::AgentType;
 use crate::quality;
+
+/// Construct the right [`kernel_core::ChatModel`] impl for a resolved provider's
+/// wire `protocol`: Anthropic → [`AnthropicChatModel`]; OpenAI →
+/// [`OpenAIChatModel`]. Each gets its protocol-specific process-wide circuit
+/// breaker (so one protocol's outage doesn't trip the other) plus the shared
+/// cost/trace/timing/session sinks. Extracted as a free function (no ReactAgent
+/// started) so the protocol dispatch is unit-testable in isolation.
+fn build_chat_model(
+    protocol: crate::config::providers::ProtocolKind,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    cost_sink: Arc<dyn crate::cost::sink::CostSink>,
+    trace_sink: Arc<dyn crate::trace::TraceSink>,
+    session_id: Option<String>,
+    timing_checker: Arc<crate::trace::TimingChecker>,
+) -> Arc<dyn kernel_core::ChatModel> {
+    match protocol {
+        crate::config::providers::ProtocolKind::Anthropic => Arc::new(
+            AnthropicChatModel::new(endpoint, api_key, model)
+                .with_circuit(crate::kernel_impl::anthropic_chat_model::shared_anthropic_circuit())
+                .with_cost_sink(cost_sink)
+                .with_trace_sink(trace_sink)
+                .with_session_id(session_id)
+                .with_timing_checker(timing_checker),
+        ),
+        crate::config::providers::ProtocolKind::OpenAI => Arc::new(
+            OpenAIChatModel::new(endpoint, api_key, model)
+                .with_circuit(crate::kernel_impl::openai_chat_model::shared_openai_circuit())
+                .with_cost_sink(cost_sink)
+                .with_trace_sink(trace_sink)
+                .with_session_id(session_id)
+                .with_timing_checker(timing_checker),
+        ),
+    }
+}
 
 /// The host Executor — bridges kernel-compose graph nodes to real subsystems.
 pub struct KernelExecutor {
@@ -78,9 +116,16 @@ impl Executor for KernelExecutor {
             None => {
                 let mcp = self.app.try_state::<McpRegistry>();
                 // B档增强：传递 per-node 配置（skills/mcp_tools/knowledge/mode）
-                let mode = spec.mode.as_deref()
-                    .and_then(|m| serde_json::from_str::<crate::kernel_impl::hooks::PermissionMode>(&format!("\"{}\"", m)).ok())
-                    .unwrap_or(crate::kernel_impl::hooks::PermissionMode::Default);
+                let mode =
+                    spec.mode
+                        .as_deref()
+                        .and_then(|m| {
+                            serde_json::from_str::<crate::kernel_impl::hooks::PermissionMode>(
+                                &format!("\"{}\"", m),
+                            )
+                            .ok()
+                        })
+                        .unwrap_or(crate::kernel_impl::hooks::PermissionMode::Default);
                 Box::new(build_react_agent(
                     spec.model.as_deref(),
                     mcp.as_deref(),
@@ -222,21 +267,35 @@ pub(crate) fn build_react_agent(
     // bounding self-planning recursion at depth 1.
     app: Option<tauri::AppHandle>,
 ) -> Result<ReactAgent, String> {
-    let model_id = model.unwrap_or("glm-4.6").to_string();
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
-    let (endpoint, api_key, resolved_model, context_window) =
-        match crate::config::providers::load_providers_config(&data_dir)
-            .ok()
-            .and_then(|c| crate::config::providers::resolve_provider(&c, &model_id))
-        {
-            Some(r) => (r.endpoint, r.api_key, r.model, r.context_window),
-            None => (
-                "https://open.bigmodel.cn/api/anthropic".to_string(),
-                String::new(),
-                model_id,
-                None,
-            ),
-        };
+    let config = crate::config::providers::load_providers_config(&data_dir).ok();
+    // model=None → request the '__default__' alias; resolve_provider expands it
+    // to the user's configured default (modelMapping['__default__']) or the
+    // data-driven default_model_id. Keeps the executor free of any hardcoded
+    // vendor model id (the old unwrap_or("glm-4.6")).
+    let model_id = model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "__default__".to_string());
+    // Keep the full ResolvedProvider around (not just the 4 wire fields) so the
+    // tier pair + protocol stay available for routing (node C) and protocol
+    // dispatch (node E) without re-resolving.
+    let resolved = config
+        .as_ref()
+        .and_then(|c| crate::config::providers::resolve_provider(c, &model_id));
+    let (endpoint, api_key, resolved_model, context_window) = match &resolved {
+        Some(r) => (
+            r.endpoint.clone(),
+            r.api_key.clone(),
+            r.model.clone(),
+            r.context_window,
+        ),
+        None => (
+            "https://open.bigmodel.cn/api/anthropic".to_string(),
+            String::new(),
+            model_id.clone(),
+            None,
+        ),
+    };
     // T7 experience flywheel: prepend prior quality-failure lessons so the
     // agent avoids repeating them. Computed before `db` moves into the cost
     // sink. Best-effort — a DB read failure just yields the bare prompt.
@@ -292,37 +351,49 @@ pub(crate) fn build_react_agent(
     // must key on session_id or the failed turn's req/resp is unfindable.
     let conversation_id_owned = conversation_id.map(|s| s.to_string());
     let session_id_owned = session_id.map(|s| s.to_string());
-    let trace_sink =
-        crate::trace::sink::optional_shared(db.clone(), conversation_id_owned.clone());
-    // Whether the resolved model is GLM-family — gates the per-step router below
-    // (only GLM same-provider routing is valid; non-GLM providers must NOT get the
-    // router, else run_loop's base_model fallback hardcodes glm-4.6 and overwrites
-    // opts.model with a GLM id → 400 on a non-GLM endpoint). Captured BEFORE
-    // resolved_model is moved into GlmChatModel::new.
-    let is_glm_family = resolved_model.starts_with("glm-");
-    let chat: Arc<dyn kernel_core::ChatModel> = Arc::new(
-        GlmChatModel::new(endpoint, api_key, resolved_model)
-            // P0 model orchestration: a process-wide breaker so a down GLM
-            // endpoint fails fast instead of every session retrying into it,
-            // plus a cost sink that records token usage + derived cost per
-            // request (conversation_id acts as the session_id for attribution).
-            .with_circuit(crate::kernel_impl::react_agent::shared_glm_circuit())
-            .with_cost_sink(crate::cost::sink::optional_shared(
-                db,
-                "react_kernel",
-                conversation_id_owned,
-            ))
-            .with_session_id(session_id_owned)
-            .with_trace_sink(trace_sink)
-            // B3 timing observability: flags slow LLM turns (latency > 60s, or
-            // ttfb > 30s) via a warn log on every agent that reaches the HTTP
-            // boundary. Pure observability (no gating) so a hardcoded default
-            // threshold is honest here — mirrors shared_glm_circuit()'s
-            // process-wide-default pattern; unlike rate-limit/auth middleware it
-            // can't reject or stall a request, so it doesn't need Config wiring.
-            .with_timing_checker(std::sync::Arc::new(
-                crate::trace::TimingChecker::default_threshold(),
-            )),
+    let trace_sink = crate::trace::sink::optional_shared(db.clone(), conversation_id_owned.clone());
+    // Whether the resolved provider declared a Strong+Cheap tier pair — gates
+    // the per-step router below. This is the data-driven replacement for the old
+    // `starts_with("glm-")` family guard: ANY provider that declares both tiers
+    // (Z.AI glm-4.6/flash, or any other pair) gets routing; a single-model
+    // provider doesn't, so no foreign id is ever pushed onto its endpoint.
+    let tierable = resolved
+        .as_ref()
+        .map(|r| r.strong_model.is_some() && r.cheap_model.is_some())
+        .unwrap_or(false);
+    // The provider's tier pair, materialized once for both the per-step router
+    // (wired on the agent below) and the sub-agent dispatcher (inherited by
+    // SubAgentTool so children + grandchildren route within the same pair).
+    let tier_ctx: Option<crate::kernel_impl::model_router::TierCtx> = if tierable {
+        let r = resolved
+            .as_ref()
+            .expect("tierable implies the provider resolved with a tier pair");
+        Some(crate::kernel_impl::model_router::TierCtx {
+            strong: r.strong_model.clone().unwrap(),
+            cheap: r.cheap_model.clone().unwrap(),
+        })
+    } else {
+        None
+    };
+    // Pick the ChatModel impl by the resolved provider's wire protocol
+    // (Anthropic vs OpenAI). A None resolved (no usable provider/key) defaults
+    // to Anthropic against the caller's endpoint so construction never panics —
+    // the call fails at HTTP time instead of crashing the graph run.
+    let protocol = resolved.as_ref().map(|r| r.protocol).unwrap_or_default();
+    let chat: Arc<dyn kernel_core::ChatModel> = build_chat_model(
+        protocol,
+        &endpoint,
+        &api_key,
+        &resolved_model,
+        // P0 model orchestration: cost sink records token usage + derived cost
+        // per request (conversation_id is the attribution key).
+        crate::cost::sink::optional_shared(db, "react_kernel", conversation_id_owned),
+        trace_sink,
+        session_id_owned,
+        // B3 timing observability: flags slow LLM turns (latency > 60s, or ttfb
+        // > 30s) via a warn log. Pure observability (no gating) so a hardcoded
+        // default threshold is honest here.
+        std::sync::Arc::new(crate::trace::TimingChecker::default_threshold()),
     );
 
     // Build the tool registry: skills + MCP tools + the subagent dispatcher.
@@ -372,7 +443,13 @@ pub(crate) fn build_react_agent(
                     for tool in McpTool::from_list_result(&server, &list_json, client) {
                         // Per-node MCP filter: "server/tool" exact or "server/*" wildcard
                         let info = tool.info();
-                        let full_name = format!("{}/{}", server, info.name.strip_prefix(&format!("mcp__{}__", server)).unwrap_or(&info.name));
+                        let full_name = format!(
+                            "{}/{}",
+                            server,
+                            info.name
+                                .strip_prefix(&format!("mcp__{}__", server))
+                                .unwrap_or(&info.name)
+                        );
                         if mcp_filter.map_or(true, |list| {
                             list.iter().any(|pat| {
                                 pat == &full_name
@@ -407,13 +484,16 @@ pub(crate) fn build_react_agent(
     // enough to parallelize a real fan-out, narrow enough not to blow the
     // model rate budget or starve the parent's own turns.
     let subagent_concurrency = Arc::new(tokio::sync::Semaphore::new(4));
-    registry.push(crate::kernel_impl::react_agent::SubAgentTool::new_with_concurrency(
-        Arc::clone(&chat),
-        registry.read_only_subset(),
-        8,
-        subagents.clone(),
-        Arc::clone(&subagent_concurrency),
-    ));
+    registry.push(
+        crate::kernel_impl::react_agent::SubAgentTool::new_with_concurrency(
+            Arc::clone(&chat),
+            registry.read_only_subset(),
+            8,
+            subagents.clone(),
+            Arc::clone(&subagent_concurrency),
+            tier_ctx.clone(),
+        ),
+    );
     // C1 — dispatch_acp_agent: delegate a sub-task to an EXTERNAL ACP-speaking
     // coding agent (codex-acp / claude via ACP) over stdio JSON-RPC. Sibling of
     // dispatch_subagent, but drives a separate agent the kernel can't become.
@@ -454,7 +534,9 @@ pub(crate) fn build_react_agent(
     // session with NO task only warns (never bricks the agent's own file-writing
     // tools, the reason it was previously deferred).
     let mut hooks = crate::kernel_impl::hooks::HookManager::new().with_mode(mode);
-    hooks.register(Box::new(crate::kernel_impl::hooks::CommandGuardHook::default()));
+    hooks.register(Box::new(
+        crate::kernel_impl::hooks::CommandGuardHook::default(),
+    ));
     hooks.register(Box::new(crate::kernel_impl::hooks::AssertionGuardHook));
     hooks.register(Box::new(crate::kernel_impl::hooks::TaskGuardHook::new(
         task_ref.map(|s| s.to_string()),
@@ -477,7 +559,8 @@ pub(crate) fn build_react_agent(
                 UserHookEvent::Stop,
             ] {
                 rows.extend(
-                    crate::user_hooks::registry::load_enabled_by_event(&conn, ev).unwrap_or_default(),
+                    crate::user_hooks::registry::load_enabled_by_event(&conn, ev)
+                        .unwrap_or_default(),
                 );
             }
             for row in rows {
@@ -500,20 +583,25 @@ pub(crate) fn build_react_agent(
         .with_history(history)
         .with_thinking(2048)
         .with_max_verify(1);
-    // T9 per-step routing: rule-based glm-4-flash for low-stakes turns
-    // (tool-result echoes, confirmations), glm-4.6 for planning/reasoning.
-    // Z.AI GLM 同族 only —— route_step 在 glm-4.6 ↔ glm-4-flash 间切,要求 endpoint
-    // 不变(Z.AI)。对非 GLM provider(DeepSeek/claude/…)挂 router 会爆:run_loop 的
-    // base_model 在 model_opt 为 None 时 fallback 到 hardcode STRONG_MODEL(glm-4.6),
-    // route_step 据此返回 glm-4.6 覆盖 opts.model,把 GLM 模型名灌进非 GLM 端点 →
-    // 400 invalid model(session 1ef23cbc:DeepSeek 端点收到 glm-4.6)。wire 时按
-    // resolved_model 守门:非 GLM 不挂 router,opts.model 保持 None → stream 回退到
-    // GlmChatModel.model(resolved_model),正确。route_step 内部 base_model guard
-    // (model_router.rs: non_glm_base_is_returned_unchanged)是第二道防线。
-    let agent = if is_glm_family {
-        agent.with_model_router(Arc::new(
-            crate::kernel_impl::model_router::route_step,
-        ))
+    // T9 per-step routing: the cheap tier for low-stakes turns (tool-result
+    // echoes, confirmations), the strong tier for planning/reasoning. Provider-
+    // agnostic since the multi-protocol refactor — route_step swaps within the
+    // resolved provider's OWN declared tier pair (Z.AI glm-4.6↔flash, or any
+    // other), so endpoint/key stay constant. Wire-time gate: only providers that
+    // declared BOTH tiers (`tierable`) get the router; a single-model provider
+    // keeps opts.model=None and the ChatModel falls back to its resolved id.
+    // route_step's own base guard (base ≠ strong ⇒ returned unchanged) is the
+    // second line of defense against pushing a pair's id onto a foreign endpoint
+    // (session 1ef23cbc: a DeepSeek endpoint must never receive glm-4.6).
+    let agent = if let Some(tier) = tier_ctx.clone() {
+        agent
+            // Carry the pair on the agent first (clones the ids, doesn't move
+            // tier), so dispatched sub-agents inherit it; then move tier into the
+            // router closure.
+            .with_tier_ctx(tier.strong.clone(), tier.cheap.clone())
+            .with_model_router(Arc::new(move |h, b| {
+                crate::kernel_impl::model_router::route_step(h, b, &tier)
+            }))
     } else {
         agent
     };
@@ -636,7 +724,8 @@ fn subagents_appendix(specs: &[crate::kernel_impl::subagent_spec::SubAgentSpec])
     if specs.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\nNamed sub-agents available for dispatch_subagent {subagent: name}:");
+    let mut out =
+        String::from("\n\nNamed sub-agents available for dispatch_subagent {subagent: name}:");
     for s in specs {
         let one_line = s
             .description
@@ -835,11 +924,10 @@ fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> 
     // also steers this run. Project-local takes priority so the token budget
     // spends on the most specific lessons before the generic global ones.
     let global = crate::quality::experience::GLOBAL_PROJECT_HASH;
-    let mut entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
-        .unwrap_or_default();
-    entries.extend(
-        crate::knowledge::store::get_entries_for_project(conn, global).unwrap_or_default(),
-    );
+    let mut entries =
+        crate::knowledge::store::get_entries_for_project(conn, project_hash).unwrap_or_default();
+    entries
+        .extend(crate::knowledge::store::get_entries_for_project(conn, global).unwrap_or_default());
     let project_failures: Vec<_> = entries
         .iter()
         .filter(|e| e.category == "quality_failure" && e.project_hash != global)
@@ -890,8 +978,8 @@ fn memory_prompt_suffix(
     project_hash: &str,
     is_continuation: bool,
 ) -> String {
-    let entries = crate::knowledge::store::get_entries_for_project(conn, project_hash)
-        .unwrap_or_default();
+    let entries =
+        crate::knowledge::store::get_entries_for_project(conn, project_hash).unwrap_or_default();
     let mut mems: Vec<_> = entries
         .iter()
         // quality_failure is experience_prompt_suffix's lane; sub-threshold
@@ -902,8 +990,7 @@ fn memory_prompt_suffix(
         // 续聊会让 agent 误判"我前面做过"——续聊把评测会话的产出当成了自己的三轮
         // 调研历史。续聊有自己的 history；这两类留给新会话首 turn 复用 flywheel。
         .filter(|e| {
-            !is_continuation
-                || !matches!(e.category.as_str(), "react_session" | "react_reflection")
+            !is_continuation || !matches!(e.category.as_str(), "react_session" | "react_reflection")
         })
         .collect();
     mems.sort_by(|a, b| {
@@ -956,23 +1043,19 @@ fn knowledge_prompt_suffix(conn: &rusqlite::Connection, ids: &[String]) -> Strin
         "SELECT title, content FROM knowledge_entries WHERE id IN ({})",
         placeholders
     );
-    let params: Vec<&dyn rusqlite::ToSql> = ids
-        .iter()
-        .map(|id| id as &dyn rusqlite::ToSql)
-        .collect();
-    let rows = conn
-        .prepare(&sql)
-        .and_then(|mut stmt| {
-            stmt.query_map(&params[..], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()
-        });
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let rows = conn.prepare(&sql).and_then(|mut stmt| {
+        stmt.query_map(&params[..], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+    });
     match rows {
         Ok(entries) if !entries.is_empty() => {
             let body = entries
                 .iter()
-            .map(|(title, content)| format!("### {title}\n{content}"))
+                .map(|(title, content)| format!("### {title}\n{content}"))
                 .collect::<Vec<_>>()
                 .join("\n\n");
             format!(
@@ -1038,7 +1121,9 @@ mod tests {
 
     /// Drive `map_agent_to_chunks` with a scripted event list and collect the
     /// emitted chunks (errors dropped — tests only feed Ok events).
-    async fn collect_chunks(events: Vec<Result<AgentEvent, kernel_core::Error>>) -> Vec<AgentChunk> {
+    async fn collect_chunks(
+        events: Vec<Result<AgentEvent, kernel_core::Error>>,
+    ) -> Vec<AgentChunk> {
         let mut s = map_agent_to_chunks(Box::pin(futures::stream::iter(events)));
         let mut out = Vec::new();
         while let Some(c) = s.next().await {
@@ -1074,10 +1159,17 @@ mod tests {
             updated_at: "t".into(),
             access_count: 0,
         };
-        add_entry(&conn, &mk("k1", "quality_failure", "t.Fatal 被降级为 t.Log")).unwrap();
+        add_entry(
+            &conn,
+            &mk("k1", "quality_failure", "t.Fatal 被降级为 t.Log"),
+        )
+        .unwrap();
         add_entry(&conn, &mk("k2", "insight", "用 thiserror")).unwrap();
         let suffix = experience_prompt_suffix(&conn, "h");
-        assert!(suffix.contains("t.Fatal"), "quality_failure must surface: {suffix}");
+        assert!(
+            suffix.contains("t.Fatal"),
+            "quality_failure must surface: {suffix}"
+        );
         assert!(
             !suffix.contains("thiserror"),
             "non-failure category excluded: {suffix}"
@@ -1116,8 +1208,14 @@ mod tests {
         add_entry(&conn, &mk("local", "h", "本项目短板")).unwrap();
         add_entry(&conn, &mk("glob", GLOBAL_PROJECT_HASH, "[通用] testing")).unwrap();
         let suffix = experience_prompt_suffix(&conn, "h");
-        assert!(suffix.contains("本项目短板"), "project-local surfaces: {suffix}");
-        assert!(suffix.contains("[通用] testing"), "global layer surfaces: {suffix}");
+        assert!(
+            suffix.contains("本项目短板"),
+            "project-local surfaces: {suffix}"
+        );
+        assert!(
+            suffix.contains("[通用] testing"),
+            "global layer surfaces: {suffix}"
+        );
     }
 
     #[test]
@@ -1149,7 +1247,10 @@ mod tests {
         add_entry(&conn, &mk("k3", "insight", "噪声条目", 0.4)).unwrap();
         let suffix = memory_prompt_suffix(&conn, "h", false);
         assert!(suffix.contains("项目长期记忆"), "header present: {suffix}");
-        assert!(suffix.contains("thiserror"), "high-conf insight included: {suffix}");
+        assert!(
+            suffix.contains("thiserror"),
+            "high-conf insight included: {suffix}"
+        );
         assert!(
             suffix.contains("<memory-context>") && suffix.contains("</memory-context>"),
             "memory must be fenced against injection: {suffix}"
@@ -1158,7 +1259,10 @@ mod tests {
             !suffix.contains("断言被弱化"),
             "quality_failure excluded: {suffix}"
         );
-        assert!(!suffix.contains("噪声条目"), "low-confidence filtered: {suffix}");
+        assert!(
+            !suffix.contains("噪声条目"),
+            "low-confidence filtered: {suffix}"
+        );
     }
 
     #[test]
@@ -1220,15 +1324,33 @@ mod tests {
 
         // First turn of a NEW conversation: flywheel full strength — all three.
         let first = memory_prompt_suffix(&conn, "h", false);
-        assert!(first.contains("s1-title"), "new turn injects react_session: {first}");
-        assert!(first.contains("r1-title"), "new turn injects react_reflection: {first}");
-        assert!(first.contains("i1-title"), "new turn injects insight: {first}");
+        assert!(
+            first.contains("s1-title"),
+            "new turn injects react_session: {first}"
+        );
+        assert!(
+            first.contains("r1-title"),
+            "new turn injects react_reflection: {first}"
+        );
+        assert!(
+            first.contains("i1-title"),
+            "new turn injects insight: {first}"
+        );
 
         // Continuation turn: drop other sessions' output/reflection, keep insight.
         let cont = memory_prompt_suffix(&conn, "h", true);
-        assert!(!cont.contains("s1-title"), "continuation drops react_session: {cont}");
-        assert!(!cont.contains("r1-title"), "continuation drops react_reflection: {cont}");
-        assert!(cont.contains("i1-title"), "continuation keeps insight: {cont}");
+        assert!(
+            !cont.contains("s1-title"),
+            "continuation drops react_session: {cont}"
+        );
+        assert!(
+            !cont.contains("r1-title"),
+            "continuation drops react_reflection: {cont}"
+        );
+        assert!(
+            cont.contains("i1-title"),
+            "continuation keeps insight: {cont}"
+        );
     }
 
     #[tokio::test]
@@ -1269,7 +1391,10 @@ mod tests {
                 assert_eq!(kind_of(res_v), Some("tool_result"));
                 assert_eq!(res_v["is_error"], false);
             }
-            other => panic!("expected [Delta(tool_use), Delta(tool_result)], got {:?}", other),
+            other => panic!(
+                "expected [Delta(tool_use), Delta(tool_result)], got {:?}",
+                other
+            ),
         }
     }
 
@@ -1308,7 +1433,8 @@ mod tests {
         // path (map_agent_event). Previously this returned empty (dead code, the
         // old `file_changed_and_turn_boundary_emit_nothing` locked that in); now
         // wired end-to-end via react_agent's Succeeded-branch emit.
-        let chunks = collect_chunks(vec![Ok(AgentEvent::FileChanged(PathBuf::from("/x.rs")))]).await;
+        let chunks =
+            collect_chunks(vec![Ok(AgentEvent::FileChanged(PathBuf::from("/x.rs")))]).await;
         assert_eq!(chunks.len(), 1, "got {chunks:?}");
         match &chunks[0] {
             AgentChunk::Delta(v) => {

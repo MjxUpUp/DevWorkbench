@@ -1,13 +1,13 @@
 //! LLM error classification + retry policy for tool-call recovery (C7).
 //!
 //! Ported from deer-flow's `LLMErrorHandlingMiddleware` (the semantics, not the
-//! LangGraph middleware plumbing): the ReactAgent run loop and GlmChatModel
+//! LangGraph middleware plumbing): the ReactAgent run loop and ChatModel
 //! classify a model error into [`Retryable`](LlmErrorKind::Retryable) vs
 //! [`Fatal`](LlmErrorKind::Fatal), retry transient errors with exponential
 //! backoff, and degrade to a graceful Done instead of bubbling the error up to
-//! kill the whole agent — the "GLM rate-limit / provider 400" pain point.
+//! kill the whole agent — the "LLM rate-limit / provider 400" pain point.
 //!
-//! The functions here are pure and unit-tested directly. GlmChatModel wires
+//! The functions here are pure and unit-tested directly. The ChatModel wires
 //! them into the send path (retry transient send failures); the run loop turns
 //! a terminal Fatal into a degraded Done with an honest, specific message.
 
@@ -101,14 +101,17 @@ fn matches_any(lowered: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| lowered.contains(p))
 }
 
-/// Pull the trailing HTTP status out of GlmChatModel's `Model("GLM ... failed:
+/// Pull the trailing HTTP status out of the ChatModel's `Model("LLM ... failed:
 /// <status>")` messages. Returns None for non-status messages (circuit open,
 /// decode errors, etc.). reqwest's `StatusCode` Display starts with the 3-digit
 /// code, so we parse the leading digits of the tail after the last "failed:".
 fn extract_status(msg: &str) -> Option<u16> {
     let tail = msg.rsplit("failed:").next()?.trim();
     let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u16>().ok().filter(|&s| (100..600).contains(&s))
+    digits
+        .parse::<u16>()
+        .ok()
+        .filter(|&s| (100..600).contains(&s))
 }
 
 /// Classify a kernel_core::Error produced by the model layer.
@@ -166,11 +169,21 @@ pub fn should_retry(err: &Error, attempt: u32) -> bool {
 /// puts in the degraded Done's `output_summary`.
 pub fn fatal_user_message(reason: FatalReason) -> &'static str {
     match reason {
-        FatalReason::Circuit => "The model provider is currently unavailable (circuit breaker engaged after repeated failures). Please wait a moment and try again.",
-        FatalReason::Quota => "The model provider rejected the request: account out of quota or billing unavailable. Please check your provider account and retry.",
-        FatalReason::Budget => "Monthly cost budget reached — the agent halted before exceeding the spending cap. Raise the budget in Settings \u{2192} Cost to continue.",
-        FatalReason::Auth => "The model provider rejected the request: authentication failed. Please check your API key in Settings \u{2192} Providers and retry.",
-        FatalReason::Generic => "The model request failed and could not be recovered after retries. Please rephrase or retry.",
+        FatalReason::Circuit => {
+            "The model provider is currently unavailable (circuit breaker engaged after repeated failures). Please wait a moment and try again."
+        }
+        FatalReason::Quota => {
+            "The model provider rejected the request: account out of quota or billing unavailable. Please check your provider account and retry."
+        }
+        FatalReason::Budget => {
+            "Monthly cost budget reached — the agent halted before exceeding the spending cap. Raise the budget in Settings \u{2192} Cost to continue."
+        }
+        FatalReason::Auth => {
+            "The model provider rejected the request: authentication failed. Please check your API key in Settings \u{2192} Providers and retry."
+        }
+        FatalReason::Generic => {
+            "The model request failed and could not be recovered after retries. Please rephrase or retry."
+        }
     }
 }
 
@@ -197,7 +210,9 @@ mod tests {
     #[test]
     fn rate_limit_429_is_retryable() {
         assert_eq!(
-            classify_llm_error(&Error::Model("GLM stream failed: 429 Too Many Requests".into())),
+            classify_llm_error(&Error::Model(
+                "LLM stream failed: 429 Too Many Requests".into()
+            )),
             LlmErrorKind::Retryable
         );
     }
@@ -205,7 +220,7 @@ mod tests {
     #[test]
     fn server_503_is_retryable() {
         assert_eq!(
-            classify_llm_error(&Error::Model("GLM failed: 503".into())),
+            classify_llm_error(&Error::Model("LLM call failed: 503".into())),
             LlmErrorKind::Retryable
         );
     }
@@ -213,7 +228,7 @@ mod tests {
     #[test]
     fn client_400_is_fatal_generic() {
         assert_eq!(
-            classify_llm_error(&Error::Model("GLM failed: 400 Bad Request".into())),
+            classify_llm_error(&Error::Model("LLM call failed: 400 Bad Request".into())),
             LlmErrorKind::Fatal(FatalReason::Generic)
         );
     }
@@ -221,7 +236,7 @@ mod tests {
     #[test]
     fn auth_401_is_fatal_auth() {
         assert_eq!(
-            classify_llm_error(&Error::Model("GLM failed: 401 unauthorized".into())),
+            classify_llm_error(&Error::Model("LLM call failed: 401 unauthorized".into())),
             LlmErrorKind::Fatal(FatalReason::Auth)
         );
     }

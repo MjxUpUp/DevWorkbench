@@ -4,7 +4,7 @@
 //!
 //! The design mirrors the eino Handler "five timing points" model
 //! (before-request → first-byte → stream-chunks → completion → on-error): we
-//! capture the wall-clock points at the GlmChatModel call site and DERIVE two
+//! capture the wall-clock points at the ChatModel call site and DERIVE two
 //! diagnostically meaningful intervals from them:
 //!   - `ttfb_ms`  (time-to-first-byte): request send → first response signal.
 //!     High ttfb = the model is slow to *start* (queueing, auth, cold model) —
@@ -31,7 +31,7 @@ pub struct TimingWarning {
 
 /// Stateless checker for slow LLM turns. Holds only the configured thresholds;
 /// [`TimingChecker::check`] is a pure function of (latency, ttfb). Cloning is
-/// cheap, so one shared instance is held inside GlmChatModel behind an `Arc`.
+/// cheap, so one shared instance is held inside the ChatModel behind an `Arc`.
 #[derive(Debug, Clone, Copy)]
 pub struct TimingChecker {
     /// A turn whose total latency (request → completion) exceeds this is
@@ -48,7 +48,9 @@ impl TimingChecker {
 
     /// Construct with an explicit slow-turn threshold (ms). 0 = disabled.
     pub fn new(slow_turn_threshold_ms: u64) -> Self {
-        Self { slow_turn_threshold_ms }
+        Self {
+            slow_turn_threshold_ms,
+        }
     }
 
     /// Construct with the default 60s threshold.
@@ -142,7 +144,9 @@ mod tests {
     #[test]
     fn latency_over_threshold_flags_slow_turn() {
         let c = TimingChecker::new(60_000);
-        let w = c.check(75_000, Some(1_000)).expect("75s > 60s threshold → slow_turn");
+        let w = c
+            .check(75_000, Some(1_000))
+            .expect("75s > 60s threshold → slow_turn");
         assert_eq!(w.kind, "slow_turn");
         assert_eq!(w.latency_ms, 75_000);
         assert_eq!(w.threshold_ms, 60_000);
@@ -208,7 +212,11 @@ mod tests {
         // Exactly at threshold is NOT slow (> is strict), so the boundary value
         // itself is clean. Pins the off-by-one: `latency_ms > threshold`.
         let c = TimingChecker::new(10_000);
-        assert_eq!(c.check(10_000, None), None, "exactly at threshold is not slow");
+        assert_eq!(
+            c.check(10_000, None),
+            None,
+            "exactly at threshold is not slow"
+        );
         assert!(c.check(10_001, None).is_some(), "one ms over is slow");
     }
 }

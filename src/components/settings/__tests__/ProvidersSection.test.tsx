@@ -35,6 +35,7 @@ const MOCK_CONFIG: ProvidersConfig = {
       endpoint: 'https://open.bigmodel.cn/api/anthropic',
       apiKey: 'sk-test-key',
       enabled: true,
+      protocol: 'anthropic',
       models: [
         { id: 'glm-4.6', label: 'GLM-4.6', enabled: true },
         { id: 'glm-4-plus', label: 'GLM-4-Plus', enabled: true },
@@ -46,6 +47,7 @@ const MOCK_CONFIG: ProvidersConfig = {
       endpoint: 'https://api.anthropic.com',
       apiKey: '',
       enabled: false,
+      protocol: 'anthropic',
       models: [{ id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', enabled: true }],
     },
   ],
@@ -217,6 +219,7 @@ describe('ProvidersSection', () => {
       endpoint: 'https://open.bigmodel.cn/api/anthropic',
       apiKey: 'sk-test-key',
       model: 'glm-4-plus',
+      protocol: 'anthropic',
     });
   });
 
@@ -306,12 +309,12 @@ describe('ProvidersSection', () => {
     render(<ProvidersSection />);
     await zaiCard();
 
-    // Redirect the kernel default (glm-4.6) to glm-4-plus.
+    // Redirect the kernel default alias (__default__) to glm-4-plus.
     await user.selectOptions(screen.getByLabelText('默认模型'), 'glm-4-plus');
     await user.click(screen.getByRole('button', { name: '保存全部更改' }));
 
     await waitFor(() => expect(savedConfig).not.toBeNull());
-    expect(savedConfig!.modelMapping['glm-4.6']).toBe('glm-4-plus');
+    expect(savedConfig!.modelMapping['__default__']).toBe('glm-4-plus');
   });
 
   it('shows the disabled state when the load fails', async () => {

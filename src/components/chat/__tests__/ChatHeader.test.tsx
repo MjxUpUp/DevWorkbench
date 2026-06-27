@@ -39,10 +39,10 @@ describe('ChatHeader — agent selector', () => {
     const select = screen.getByRole('combobox') as HTMLSelectElement;
     expect(select.value).toBe('codex');
     // Gemini is not installed → must not appear as an option. The self-hosted
-    // Kernel Agent (GLM) is always available (no CLI to discover), so it's a
+    // Kernel Agent is always available (no CLI to discover), so it's a
     // hardcoded <option> appended after the installed agents.
     const labels = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(labels).toEqual(['Claude Code', 'Codex', 'Kernel Agent (GLM)']);
+    expect(labels).toEqual(['Claude Code', 'Codex', 'Kernel Agent']);
   });
 
   it('shows the empty placeholder when no agent is installed', () => {

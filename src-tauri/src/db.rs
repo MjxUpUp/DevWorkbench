@@ -375,7 +375,7 @@ CREATE TABLE IF NOT EXISTS cost_records (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     -- B5 transparent cost: prompt-cache token tiers (Anthropic
     -- cache_read_input_tokens / cache_creation_input_tokens). Default 0 so the
-    -- column exists for pre-v17 rows and for providers (GLM) that don't report
+    -- column exists for pre-v17 rows and for providers that don't report
     -- cache usage. Added by migrate_v16_to_v17 on existing DBs; present in
     -- CREATE here for fresh DBs.
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -393,7 +393,7 @@ CREATE TABLE IF NOT EXISTS budget_settings (
     updated_at TEXT NOT NULL
 );
 
--- LLM call traces — one row per GlmChatModel HTTP request. The observability
+-- LLM call traces — one row per ChatModel HTTP request. The observability
 -- layer: persists the request body, HTTP status, and (on error) the response
 -- body so a failed session's root cause is always queryable. Before this,
 -- a non-2xx was compressed to a bare status string and the error body
