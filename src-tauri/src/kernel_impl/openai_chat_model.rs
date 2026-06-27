@@ -78,14 +78,24 @@ impl OpenAIChatModel {
     }
 
     /// Resolve the Chat Completions POST URL from a base URL. Trims a trailing
-    /// `/`; if the base already ends with `/v1` (OpenRouter `…/api/v1`, some
-    /// self-hosted gateways), append `/chat/completions` directly; otherwise
-    /// insert `/v1/chat/completions` (DeepSeek `api.deepseek.com`,
-    /// OpenAI `api.openai.com`). Centralized so the URL rule is unit-testable
+    /// `/`; if the base already ends with a `/v<digits>` version segment
+    /// (`/v1`, `/v4`, …), append `/chat/completions` directly; otherwise insert
+    /// `/v1/chat/completions`. Centralized so the URL rule is unit-testable
     /// and identical for generate + stream.
+    ///
+    /// The version check is `/v<digits>`, not just `/v1`: GLM's coding-paas
+    /// endpoint is `…/paas/v4`, so a `/v1`-only check would wrongly produce
+    /// `…/paas/v4/v1/chat/completions` (HTTP 404). OpenRouter `…/api/v1` and
+    /// bare hosts like DeepSeek `api.deepseek.com` / OpenAI `api.openai.com`
+    /// (which get `/v1` inserted) are unaffected.
     pub fn chat_completions_url(base: &str) -> String {
         let trimmed = base.trim_end_matches('/');
-        if trimmed.ends_with("/v1") {
+        // Last path segment is /v<digits>? GLM uses /v4; previously only /v1 matched.
+        let has_version = trimmed.rsplit_once('/').is_some_and(|(_, last)| {
+            last.strip_prefix('v')
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        });
+        if has_version {
             format!("{trimmed}/chat/completions")
         } else {
             format!("{trimmed}/v1/chat/completions")
@@ -711,6 +721,21 @@ mod tests {
         assert_eq!(
             OpenAIChatModel::chat_completions_url("https://openrouter.ai/api/v1"),
             "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn url_appends_for_non_v1_version_segment() {
+        // GLM's coding-paas endpoint pins /v4 — append /chat/completions
+        // directly, NOT insert another /v1 (would yield /v4/v1/… → HTTP 404).
+        assert_eq!(
+            OpenAIChatModel::chat_completions_url("https://open.bigmodel.cn/api/coding/paas/v4"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
+        // Trailing slash is trimmed before the version check, so /v4/ still works.
+        assert_eq!(
+            OpenAIChatModel::chat_completions_url("https://open.bigmodel.cn/api/coding/paas/v4/"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
         );
     }
 
