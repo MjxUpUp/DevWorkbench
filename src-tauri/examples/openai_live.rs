@@ -6,11 +6,16 @@
 //! not the test harness, so it sidesteps that loader issue and runs the real
 //! HTTP + SSE + tool-call-merge code against a live server.
 //!
-//! No key is ever persisted — pass it via an env var that lives only in the
-//! shell that runs this:
+//! The endpoint is fully parameterized so ANY OpenAI-compatible provider works
+//! — OpenAI, DeepSeek, OpenRouter, minimax, etc. No key is ever persisted;
+//! pass it via env vars that live only in the shell that runs this:
 //!
 //! ```sh
-//! MINIMAX_API_KEY=sk-... cargo run --example openai_live --release
+//! # minimax (the default endpoint)
+//! OPENAI_API_KEY=sk-... cargo run --example openai_live --release
+//! # deepseek (override base + model)
+//! OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com \
+//!   OPENAI_MODEL=deepseek-v4-flash cargo run --example openai_live --release
 //! ```
 //!
 //! Exit 0 = all three paths produced the expected shapes:
@@ -27,17 +32,23 @@ use futures::StreamExt;
 use kernel_core::schema::Message;
 use kernel_core::{ChatModel, ModelOptions, ToolInfo};
 
-const BASE: &str = "https://api.minimaxi.com/v1";
-const MODEL: &str = "minimax-m3";
+const DEFAULT_BASE: &str = "https://api.minimaxi.com/v1";
+const DEFAULT_MODEL: &str = "minimax-m3";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let key = std::env::var("MINIMAX_API_KEY")
-        .map_err(|_| "set MINIMAX_API_KEY (env-only; no key is persisted)")?;
-    let model = OpenAIChatModel::new(BASE, key, MODEL);
+    let key = std::env::var("OPENAI_API_KEY")
+        .or_else(|_| std::env::var("MINIMAX_API_KEY"))
+        .map_err(|_| "set OPENAI_API_KEY (or MINIMAX_API_KEY); env-only, never persisted")?;
+    let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.to_string());
+    let model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    println!("endpoint = {base}\nmodel    = {model_name}");
+    let model = OpenAIChatModel::new(&base, key, &model_name);
 
-    // minimax-m3 inlines <think>…</think> reasoning in `content` before its
-    // visible answer, so max_tokens must budget for both — 64 truncates.
+    // Reasoning models differ in how they surface thought: minimax-m3 inlines
+    // <think>…</think> inside `content`; DeepSeek-V4 puts it in a separate
+    // `reasoning_content` field (which this OpenAI layer ignores — it stays out
+    // of `content`). Either way max_tokens must budget for reasoning + answer.
     let text_opts = ModelOptions {
         max_tokens: Some(256),
         temperature: Some(0.0),
@@ -96,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tool_msgs = vec![Message::user(
         "What is the weather in Beijing right now? You MUST call the get_weather tool.",
     )];
-    // tool_calls arrive alongside inlined reasoning; give the call room.
+    // tool_calls arrive alongside (or after) reasoning; give the call room.
     let tool_opts = ModelOptions {
         max_tokens: Some(512),
         temperature: Some(0.0),
@@ -130,7 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     assert!(looks_like_beijing, "city arg {:?} is not Beijing", city);
 
     println!(
-        "\nALL OK — OpenAI protocol generate + stream + tool_use verified end-to-end against {MODEL}."
+        "\nALL OK — OpenAI protocol generate + stream + tool_use verified end-to-end against {model_name}."
     );
     Ok(())
 }
