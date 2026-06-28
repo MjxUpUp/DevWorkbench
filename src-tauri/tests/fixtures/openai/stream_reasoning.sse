@@ -1,0 +1,13 @@
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The user asks "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"about the capital of China."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"The capital"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is Beijing."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-reasoning","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":16,"total_tokens":24}}
+
+data: [DONE]

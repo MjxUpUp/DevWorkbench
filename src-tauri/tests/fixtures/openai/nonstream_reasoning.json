@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-reasoning",
+  "object": "chat.completion",
+  "model": "deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The capital of China is Beijing.",
+        "reasoning_content": "The user asks about the capital of China. China's capital is Beijing."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 28,
+    "total_tokens": 40
+  }
+}

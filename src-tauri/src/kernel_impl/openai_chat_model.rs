@@ -515,6 +515,17 @@ pub(crate) fn decode_openai_message(v: &Value) -> Result<Message, Error> {
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
+    // DeepSeek/GLM reasoning models surface the thought trace in a SEPARATE
+    // `reasoning_content` field (content stays clean — even empty during a pure
+    // tool_call). Map it to Message.reasoning so chat renders the trace. OpenAI
+    // has no reasoning signature, so reasoning_signature stays None. (minimax-m3
+    // inlines <think>…</think> inside `content` instead — that path keeps it
+    // visible in content and is intentionally NOT stripped here.)
+    let reasoning = msg
+        .get("reasoning_content")
+        .and_then(|r| r.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let mut tool_calls = Vec::new();
     if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in tcs {
@@ -548,7 +559,7 @@ pub(crate) fn decode_openai_message(v: &Value) -> Result<Message, Error> {
         content,
         tool_calls,
         tool_call_id: None,
-        reasoning: None,
+        reasoning,
         reasoning_signature: None,
     })
 }
@@ -626,6 +637,27 @@ pub(crate) fn handle_openai_sse_line(
             return Some(Message::assistant(content.to_string()));
         }
     }
+    // reasoning_content delta (DeepSeek/GLM style: a separate field, NOT inline
+    // <think>) → yield a reasoning-only Message so chat renders the trace live.
+    // Mirrors the Anthropic thinking_delta path. OpenAI has no reasoning
+    // signature, so reasoning_signature stays None. (reasoning_content does not
+    // also carry content in DeepSeek/GLM's documented streaming shape; content
+    // is checked first so a theoretical combined delta still surfaces the answer.)
+    if let Some(reasoning) = delta
+        .and_then(|d| d.get("reasoning_content"))
+        .and_then(|r| r.as_str())
+    {
+        if !reasoning.is_empty() {
+            return Some(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning: Some(reasoning.to_string()),
+                reasoning_signature: None,
+            });
+        }
+    }
     // tool_calls delta: accumulate by index.
     if let Some(tcs) = delta
         .and_then(|d| d.get("tool_calls"))
@@ -670,6 +702,13 @@ mod tests {
     const STREAM_TOOL_USE: &str = include_str!("../../tests/fixtures/openai/stream_tool_use.sse");
     const STREAM_TOOL_USE_FRAG: &str =
         include_str!("../../tests/fixtures/openai/stream_tool_use_fragmented.sse");
+    const NONSTREAM_REASONING: &str =
+        include_str!("../../tests/fixtures/openai/nonstream_reasoning.json");
+    const STREAM_REASONING: &str = include_str!("../../tests/fixtures/openai/stream_reasoning.sse");
+    const NONSTREAM_REASONING_TOOL_USE: &str =
+        include_str!("../../tests/fixtures/openai/nonstream_reasoning_tool_use.json");
+    const STREAM_REASONING_TOOL_USE: &str =
+        include_str!("../../tests/fixtures/openai/stream_reasoning_tool_use.sse");
 
     fn assistant_tool_call(id: &str, name: &str, args: &str) -> Message {
         Message {
@@ -921,6 +960,83 @@ mod tests {
         assert!(matches!(err, Error::Model(_)));
     }
 
+    // ---- reasoning_content (DeepSeek / GLM style) ----
+
+    #[test]
+    fn decode_maps_reasoning_content_to_reasoning() {
+        // DeepSeek/GLM: reasoning in a separate `reasoning_content` field;
+        // content stays clean (not inlined). Previously dropped; now mapped to
+        // Message.reasoning so chat can render the trace.
+        let v: Value = serde_json::from_str(NONSTREAM_REASONING).unwrap();
+        let msg = decode_openai_message(&v).unwrap();
+        assert_eq!(
+            msg.content,
+            "The capital of China is Beijing.",
+            "content must stay clean — reasoning is NOT inlined"
+        );
+        assert_eq!(
+            msg.reasoning.as_deref(),
+            Some("The user asks about the capital of China. China's capital is Beijing.")
+        );
+        assert!(msg.tool_calls.is_empty());
+        assert!(
+            msg.reasoning_signature.is_none(),
+            "OpenAI has no reasoning signature"
+        );
+    }
+
+    #[test]
+    fn decode_without_reasoning_content_is_none() {
+        // A plain (non-reasoning) OpenAI response has no reasoning_content →
+        // reasoning stays None (no regression for the common case).
+        let v: Value = serde_json::from_str(NONSTREAM_TEXT).unwrap();
+        let msg = decode_openai_message(&v).unwrap();
+        assert!(msg.reasoning.is_none());
+    }
+
+    #[test]
+    fn decode_maps_reasoning_alongside_tool_calls() {
+        // DeepSeek reasoner's pure-tool_call turn: content="" but BOTH
+        // reasoning_content AND tool_calls are present. All three must survive —
+        // reasoning must NOT be dropped just because the turn issued tools.
+        // (Core motivation in the commit message; locks it against a future
+        // refactor that wrongly clears reasoning on a tool_call turn.)
+        let v: Value = serde_json::from_str(NONSTREAM_REASONING_TOOL_USE).unwrap();
+        let msg = decode_openai_message(&v).unwrap();
+        assert_eq!(msg.content, "", "content is empty on a pure tool_call turn");
+        assert_eq!(
+            msg.reasoning.as_deref(),
+            Some("The user wants the weather. I should call get_weather with city=Beijing.")
+        );
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.tool_calls[0].function.name, "get_weather");
+        let args: Value = serde_json::from_str(&msg.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args.get("city").and_then(|c| c.as_str()), Some("Beijing"));
+    }
+
+    #[test]
+    fn decode_treats_null_and_empty_reasoning_content_as_none() {
+        // DeepSeek/GLM send `reasoning_content: null` (or "") on non-thinking
+        // turns — distinct from the field being absent. Both must map to None,
+        // not an empty-string reasoning or an error.
+        let null_case = json!({
+            "choices": [{ "index": 0, "message": {
+                "role": "assistant", "content": "hi", "reasoning_content": null
+            }, "finish_reason": "stop" }]
+        });
+        let msg = decode_openai_message(&null_case).unwrap();
+        assert_eq!(msg.content, "hi");
+        assert!(msg.reasoning.is_none(), "null reasoning_content → None");
+
+        let empty_case = json!({
+            "choices": [{ "index": 0, "message": {
+                "role": "assistant", "content": "hi", "reasoning_content": ""
+            }, "finish_reason": "stop" }]
+        });
+        let msg = decode_openai_message(&empty_case).unwrap();
+        assert!(msg.reasoning.is_none(), "empty-string reasoning_content → None");
+    }
+
     // ---- usage ----
 
     #[test]
@@ -1052,5 +1168,51 @@ mod tests {
         assert_eq!(tool_msg.tool_calls[1].function.name, "read");
         let b: Value = serde_json::from_str(&tool_msg.tool_calls[1].function.arguments).unwrap();
         assert_eq!(b.get("path").and_then(|p| p.as_str()), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn stream_reasoning_deltas_yielded_separately_from_content() {
+        // DeepSeek/GLM stream: reasoning_content chunks arrive first (the model
+        // thinks), then content chunks (the answer). Both must yield separately
+        // — reasoning into Message.reasoning, content into Message.content — so
+        // chat renders the live trace AND the answer, with content unchanged.
+        let msgs = parse_sse(STREAM_REASONING);
+        let reasoning: String = msgs
+            .iter()
+            .filter(|m| m.reasoning.is_some())
+            .map(|m| m.reasoning.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(reasoning, "The user asks about the capital of China.");
+        let text: String = msgs
+            .iter()
+            .filter(|m| !m.content.is_empty())
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(text, "The capital is Beijing.");
+    }
+
+    #[test]
+    fn stream_reasoning_then_tool_calls_hand_off_correctly() {
+        // DeepSeek reasoner's tool_call stream: reasoning_content chunks arrive
+        // first, then tool_calls accumulate (split across deltas), then
+        // finish_reason="tool_calls" flushes. Reasoning must yield as its own
+        // Message(s) and the tool_calls reassemble into a separate terminal
+        // Message — neither path disrupts the other.
+        let msgs = parse_sse(STREAM_REASONING_TOOL_USE);
+        let reasoning: String = msgs
+            .iter()
+            .filter(|m| m.reasoning.is_some())
+            .map(|m| m.reasoning.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(reasoning, "Need weather data. Calling get_weather for Beijing.");
+        let tool_msg = msgs
+            .iter()
+            .find(|m| !m.tool_calls.is_empty())
+            .expect("a tool_calls message after reasoning");
+        assert_eq!(tool_msg.tool_calls.len(), 1);
+        assert_eq!(tool_msg.tool_calls[0].id, "call_1");
+        assert_eq!(tool_msg.tool_calls[0].function.name, "get_weather");
+        let args: Value = serde_json::from_str(&tool_msg.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args.get("city").and_then(|c| c.as_str()), Some("Beijing"));
     }
 }

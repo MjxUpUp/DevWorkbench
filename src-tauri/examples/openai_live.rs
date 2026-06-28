@@ -35,6 +35,19 @@ use kernel_core::{ChatModel, ModelOptions, ToolInfo};
 const DEFAULT_BASE: &str = "https://api.minimaxi.com/v1";
 const DEFAULT_MODEL: &str = "minimax-m3";
 
+/// Format an optional reasoning trace for the live log: a head excerpt + char
+/// count, or "None". Keeps the println! sites readable when a reasoning model
+/// (DeepSeek-V4 / GLM) emits a long `reasoning_content`.
+fn fmt_reasoning(r: Option<&str>) -> String {
+    match r {
+        None => "None".to_string(),
+        Some(s) => {
+            let head: String = s.chars().take(80).collect();
+            format!("{head:?} ({} chars)", s.chars().count())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let key = std::env::var("OPENAI_API_KEY")
@@ -46,9 +59,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let model = OpenAIChatModel::new(&base, key, &model_name);
 
     // Reasoning models differ in how they surface thought: minimax-m3 inlines
-    // <think>…</think> inside `content`; DeepSeek-V4 puts it in a separate
-    // `reasoning_content` field (which this OpenAI layer ignores — it stays out
-    // of `content`). Either way max_tokens must budget for reasoning + answer.
+    // <think>…</think> inside `content`; DeepSeek-V4/GLM put it in a separate
+    // `reasoning_content` field, which this layer now maps to Message.reasoning
+    // (rendered live, not dropped). Either way max_tokens must budget for both.
     let text_opts = ModelOptions {
         max_tokens: Some(256),
         temperature: Some(0.0),
@@ -63,6 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("[1/3] generate (non-stream)…");
     let resp = model.generate(&ping, &text_opts).await?;
     println!("    content    = {:?}", resp.content);
+    println!("    reasoning  = {}", fmt_reasoning(resp.reasoning.as_deref()));
     println!("    tool_calls = {}", resp.tool_calls.len());
     assert!(
         !resp.content.trim().is_empty(),
@@ -73,6 +87,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("[2/3] stream (text deltas)…");
     let mut stream = model.stream(&ping, &text_opts)?;
     let mut acc = String::new();
+    let mut reasoning_acc = String::new();
     let mut chunks = 0u32;
     while let Some(delta) = stream.next().await {
         let delta = delta?;
@@ -80,12 +95,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if !delta.content.is_empty() {
             acc.push_str(&delta.content);
         }
+        if let Some(r) = delta.reasoning.as_deref() {
+            reasoning_acc.push_str(r);
+        }
         if !delta.tool_calls.is_empty() {
             println!("    [stream] mid-stream tool_call: {:?}", delta.tool_calls);
         }
     }
-    println!("    chunks = {}", chunks);
-    println!("    acc    = {:?}", acc);
+    println!("    chunks   = {}", chunks);
+    println!("    acc      = {:?}", acc);
+    println!(
+        "    reasoning= {}",
+        fmt_reasoning(if reasoning_acc.is_empty() {
+            None
+        } else {
+            Some(&reasoning_acc)
+        })
+    );
     assert!(chunks >= 1, "stream yielded no deltas");
     assert!(!acc.trim().is_empty(), "stream accumulated empty content");
 
@@ -115,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let tool_resp = tooled.generate(&tool_msgs, &tool_opts).await?;
     println!("    content    = {:?}", tool_resp.content);
+    println!("    reasoning  = {}", fmt_reasoning(tool_resp.reasoning.as_deref()));
     println!("    tool_calls = {:?}", tool_resp.tool_calls);
     assert!(
         !tool_resp.tool_calls.is_empty(),
