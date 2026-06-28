@@ -49,6 +49,29 @@ function cloneConfig(c: ProvidersConfig): ProvidersConfig {
   };
 }
 
+/**
+ * Strip leading/trailing whitespace from user-entered string fields before
+ * persisting. Applied at save (not per-keystroke) so mid-typing states survive
+ * editing, but pasted/typed stray spaces don't corrupt the stored config — a
+ * leading space in a model id (e.g. " intent-model") silently breaks model
+ * resolution and provider matching (Ollama can't find the model → 400). The
+ * modelMapping values are trimmed too so a default-model redirect stays
+ * aligned with the (trimmed) model id it points at.
+ */
+function normalizeProviders(cfg: ProvidersConfig): ProvidersConfig {
+  const providers = cfg.providers.map((p) => ({
+    ...p,
+    name: p.name.trim(),
+    endpoint: p.endpoint.trim(),
+    apiKey: p.apiKey.trim(),
+    models: p.models.map((m) => ({ ...m, id: m.id.trim(), label: m.label.trim() })),
+  }));
+  const modelMapping = Object.fromEntries(
+    Object.entries(cfg.modelMapping).map(([k, v]) => [k, v.trim()]),
+  );
+  return { ...cfg, providers, modelMapping };
+}
+
 export function ProvidersSection() {
   const { config, loading, loadProviders, saveProviders, testProvider } = useProvidersStore();
   const { error, success } = useToast();
@@ -206,7 +229,9 @@ export function ProvidersSection() {
 
   const handleSave = async () => {
     if (!draft) return;
-    const errs = validate(draft);
+    // Trim stray whitespace before validating + persisting (see normalizeProviders).
+    const next = normalizeProviders(draft);
+    const errs = validate(next);
     setErrors(errs);
     if (Object.keys(errs).length > 0) {
       error('请修正标红的字段后再保存');
@@ -214,7 +239,7 @@ export function ProvidersSection() {
     }
     setSaving(true);
     try {
-      await saveProviders(draft);
+      await saveProviders(next);
       setErrors({});
       success('供应商配置已保存');
     } catch (e) {

@@ -349,4 +349,61 @@ describe('ProvidersSection', () => {
     // A model the user left blank stays undefined → backend 32k default.
     expect(savedConfig!.providers[0].models[1].contextWindow).toBeUndefined();
   });
+
+  it('trims leading/trailing whitespace from model id + label on save', async () => {
+    // Regression: a stray leading space in a model id (e.g. " intent-model")
+    // silently breaks model resolution + provider matching. Trimming happens at
+    // save (not per-keystroke) so mid-typing states aren't disrupted.
+    const user = userEvent.setup();
+    let savedConfig: ProvidersConfig | null = null;
+    setupInvoke({
+      set_providers_config: (args) => {
+        savedConfig = (args as { config: ProvidersConfig }).config;
+        return undefined;
+      },
+    });
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    const idInputs = within(zai).getAllByLabelText('模型 ID');
+    await user.clear(idInputs[0]);
+    await user.type(idInputs[0], '  glm-4.6  ');
+
+    const labelInputs = within(zai).getAllByLabelText('模型显示名');
+    await user.clear(labelInputs[0]);
+    await user.type(labelInputs[0], '  GLM-4.6  ');
+
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+
+    await waitFor(() => expect(savedConfig).not.toBeNull());
+    expect(savedConfig!.providers[0].models[0].id).toBe('glm-4.6');
+    expect(savedConfig!.providers[0].models[0].label).toBe('GLM-4.6');
+  });
+
+  it('trims whitespace from provider name + endpoint on save', async () => {
+    const user = userEvent.setup();
+    let savedConfig: ProvidersConfig | null = null;
+    setupInvoke({
+      set_providers_config: (args) => {
+        savedConfig = (args as { config: ProvidersConfig }).config;
+        return undefined;
+      },
+    });
+    render(<ProvidersSection />);
+    const zai = await zaiCard();
+
+    const nameInput = within(zai).getByLabelText('供应商名称');
+    await user.clear(nameInput);
+    await user.type(nameInput, '  Z.AI (GLM)  ');
+
+    const endpointInput = within(zai).getByLabelText('接口地址');
+    await user.clear(endpointInput);
+    await user.type(endpointInput, '  https://open.bigmodel.cn/api/anthropic  ');
+
+    await user.click(screen.getByRole('button', { name: '保存全部更改' }));
+
+    await waitFor(() => expect(savedConfig).not.toBeNull());
+    expect(savedConfig!.providers[0].name).toBe('Z.AI (GLM)');
+    expect(savedConfig!.providers[0].endpoint).toBe('https://open.bigmodel.cn/api/anthropic');
+  });
 });
