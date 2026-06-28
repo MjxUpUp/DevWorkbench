@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 [![Tauri](https://img.shields.io/badge/Tauri-2-orange.svg)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
-[![Version](https://img.shields.io/badge/Version-1.0.5-blue.svg)](https://github.com/MjxUpUp/DevWorkbench/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.6-blue.svg)](https://github.com/MjxUpUp/DevWorkbench/releases)
 
 </div>
 
@@ -141,6 +141,7 @@ src-tauri/src/                # 后端（Rust）
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| v1.0.6 | 2026-06-28 | 去定制化多协议架构（Anthropic/OpenAI 双协议 + tier 数据驱动路由）、OpenAI reasoning_content 解析、费用面板单价换算计算器、provider 配置保存 trim、测试连接错误体脱敏 |
 | v1.0.5 | 2026-06-26 | 跨会话记忆隔离、技能入口统一到设置页、流式 thinking 块落库 |
 | v1.0.4 | 2026-06-25 | Windows Git Bash 检测修复、续聊实时渲染、Workflow 图反序列化修复 |
 | v1.0.0 | 2026-06-16 | Gemini / Qwen Code 结构化流式接入、UTF-8 多字节截断 panic 修复 |
