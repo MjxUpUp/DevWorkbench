@@ -472,6 +472,9 @@ impl ChatModel for AnthropicChatModel {
                     let line = buf[..nl].trim().to_string();
                     buf.drain(..=nl);
                     if let Some(delta) = parse_usage(&line) {
+                        // Additive across message_start + message_delta. See
+                        // parse_usage — this does NOT double-count input on
+                        // Anthropic (its message_delta carries no input field).
                         usage = usage.saturating_add(delta);
                     }
                     if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
@@ -533,9 +536,12 @@ pub fn shared_anthropic_circuit() -> Arc<CircuitBreaker> {
 /// Extract token usage from an Anthropic SSE line. `message_start` carries
 /// `usage.input_tokens` (+ the prompt-cache tier on real Anthropic);
 /// `message_delta` carries the cumulative `usage.output_tokens` AND — on GLM —
-/// the real `usage.input_tokens`. Reading BOTH fields on message_delta + the
-/// caller's `saturating_add` yields the correct input for either provider
-/// without double-counting.
+/// the real `usage.input_tokens`. The caller `saturating_add`s every line, so
+/// one might fear input double-counts — it does NOT on real Anthropic: its
+/// `message_delta` carries no `input_tokens` field, so `read_u32` yields 0 and
+/// the add is a no-op there. GLM's `message_delta` DOES carry input — that's
+/// the design hook this branch exists for; do not drop the input read or GLM
+/// billing under-counts.
 pub(crate) fn parse_usage(line: &str) -> Option<pricing::TokenUsage> {
     let data = line.trim().strip_prefix("data: ")?;
     let ev: Value = serde_json::from_str(data).ok()?;

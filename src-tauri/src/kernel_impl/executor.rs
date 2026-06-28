@@ -233,9 +233,11 @@ graph 结构：{nodes:{id:{type,字段...}}, edges:[{from,to,when?}], start, end
 "#;
 
 /// Build a transparent ReactAgent, resolving credentials from the user's
-/// `providers.toml` (gap-②). The default model is `glm-4.6` — the strongest
-/// tool-calling GLM on the Anthropic-compatible endpoint — overridable via
-/// `spec.model`. Flagship models stay on the opaque path (claude/codex/gemini)
+/// `providers.toml` (gap-②). The default model is data-driven — the first
+/// enabled Strong-tier model in `providers.toml` (the kernel-internal
+/// self-hosted path), falling back to any enabled model and ultimately to
+/// `glm-4.6` as a last-resort literal — overridable via `spec.model`. Flagship
+/// models stay on the opaque path (claude/codex/gemini)
 /// where the user selects them.
 ///
 /// If no enabled+keyed provider serves the requested model (e.g. the user

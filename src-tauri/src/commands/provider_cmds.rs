@@ -104,12 +104,16 @@ pub async fn test_provider_connection(
                 })
             } else {
                 let body_text = r.text().await.unwrap_or_default();
+                // An error body can echo secrets (e.g. a 401 mirroring the key
+                // or Authorization header). Redact before surfacing to the UI —
+                // same helper the chat-model error paths use.
+                let safe = crate::trace::sink::redact_secrets(&body_text);
                 Ok(ProviderTestResult {
                     ok: false,
                     status,
                     message: format!(
                         "HTTP {status}: {}",
-                        body_text.chars().take(200).collect::<String>()
+                        safe.chars().take(200).collect::<String>()
                     ),
                 })
             }
