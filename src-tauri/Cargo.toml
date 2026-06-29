@@ -74,6 +74,10 @@ serde_yaml = "0.9"
 # ACP) over stdio JSON-RPC, mirroring deer-flow's invoke_acp_agent_tool. Default
 # features only (the `unstable_*` gates are spec drafts we don't implement).
 agent-client-protocol = "0.15"
+# B1: API Key 存 OS 钥匙串（macOS Keychain / Windows Credential Manager / Linux
+# Secret Service）。默认 v1 feature 链三平台 native store；keychain 不可用时
+# secrets.rs catch 后 fallback 明文。4.x 把 delete_password 改名 delete_credential。
+keyring = "4"
 
 [dev-dependencies]
 tempfile = "3"

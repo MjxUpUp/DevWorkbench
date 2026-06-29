@@ -1059,6 +1059,186 @@
   color: var(--text-secondary);
 }
 
+/* === ForgeExperienceSection — 待回顾经验回放 === */
+.forge-review-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.forge-review-item:last-child { border-bottom: none; }
+.forge-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.forge-review-task {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  word-break: break-all;
+}
+.forge-grade {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-secondary);
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-2);
+  white-space: nowrap;
+}
+.forge-grade.low { color: var(--danger, #d94646); }
+.forge-low-dims {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.forge-low-dims li {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.forge-low-dims strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.forge-action-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+}
+.forge-result {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* === B3: MCP 运行时管理面板 === */
+.mcp-runtime {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+.mcp-runtime-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.mcp-runtime-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  font-style: italic;
+  margin: 0;
+}
+.mcp-runtime-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.mcp-runtime-item {
+  padding: var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+.mcp-runtime-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.mcp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mcp-status-dot.online { background: var(--gate-pass, #3fb950); }
+.mcp-status-dot.offline { background: var(--gate-skip, #6e7681); }
+.mcp-runtime-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.mcp-runtime-status {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex: 1;
+}
+.mcp-runtime-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.mcp-tools {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.mcp-tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.mcp-tool-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.mcp-tool-desc {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mcp-tool-call {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: 4px;
+}
+.mcp-tool-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 8px;
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+.mcp-tool-input:focus { outline: none; border-color: var(--accent); }
+.mcp-tool-result {
+  margin-top: 4px;
+  padding: var(--space-2);
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* === TraceSection — 最近统计预览 === */
 .trace-stats-preview {
   display: grid;

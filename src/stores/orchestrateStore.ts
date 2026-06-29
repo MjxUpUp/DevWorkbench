@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { ChatStreamEvent, WorkflowProgressEvent } from '../types';
+import type { ChatStreamEvent, Workflow, WorkflowProgressEvent } from '../types';
 
 /** Per-node status surfaced from workflow:progress events. */
 export type NodeState = {
@@ -27,6 +27,16 @@ interface OrchestrateState {
   error: string | null;
   /** Approval prompts awaiting a decision (Human nodes). */
   pendingApproval: { node: string; prompt: string; resumeToken: string } | null;
+
+  /** 已保存的 workflow id（null = 未保存/新建草稿）。非 null 时"保存"走
+   *  update_workflow 覆盖；null 时走 create_workflow 新建。让用户编排好的
+   *  工作流可保存复用（B4：CRUD 接通前刷新即丢）。 */
+  currentWorkflowId: string | null;
+  /** 已保存的 workflow 列表（历史 tab 渲染），由 list_workflows 灌入。 */
+  savedWorkflows: Workflow[];
+
+  setCurrentWorkflowId: (id: string | null) => void;
+  setSavedWorkflows: (wfs: Workflow[]) => void;
 
   setYaml: (yaml: string) => void;
   /** Apply one progress event to the node map. */
@@ -64,6 +74,11 @@ export const useOrchestrateStore = create<OrchestrateState>((set, get) => ({
   output: null,
   error: null,
   pendingApproval: null,
+  currentWorkflowId: null,
+  savedWorkflows: [],
+
+  setCurrentWorkflowId: (id) => set({ currentWorkflowId: id }),
+  setSavedWorkflows: (wfs) => set({ savedWorkflows: wfs }),
 
   setYaml: (yaml) => set({ yaml }),
 

@@ -3,7 +3,10 @@ use std::collections::HashMap;
 
 /// Current providers.toml schema version. Bumped when a migration is added;
 /// `load_providers_config` backfills + re-persists any config below this.
-const PROVIDERS_CONFIG_VERSION: u32 = 2;
+///
+/// v3 (B1): API Key 迁移到 OS 钥匙串（keyring）——`providers.toml` 里 key 字段换
+/// 哨兵 `<keychain>`，真实 key 进 keychain。详见 `config/secrets.rs`。
+const PROVIDERS_CONFIG_VERSION: u32 = 3;
 
 /// The wire protocol a provider's endpoint speaks. Drives which `ChatModel`
 /// impl the executor constructs — Anthropic Messages API or OpenAI Chat
@@ -109,18 +112,38 @@ pub fn load_providers_config(
     let mut config: ProvidersConfig = toml::from_str(&content)
         .map_err(|e| crate::error::AppError::Config(format!("解析 providers 配置失败: {}", e)))?;
 
-    // v1→v2: backfill ModelTier on the preset providers' known models so
+    // v0/v1 → v2: backfill ModelTier on the preset providers' known models so
     // existing Z.AI/Anthropic users keep per-step strong/cheap routing —
     // previously hardcoded via `starts_with("glm-")`, now data-driven via
     // ModelTier. Only touches known preset model ids with no tier set;
-    // user-customized tiers/models are left alone.
-    if config.version < PROVIDERS_CONFIG_VERSION {
-        let changed = migrate_legacy_tiers(&mut config);
-        config.version = PROVIDERS_CONFIG_VERSION;
-        if changed {
-            // Best-effort persist of the migrated config; a write failure must
-            // not block loading (the in-memory config is already migrated).
-            let _ = save_providers_config(data_dir, &config);
+    // user-customized tiers/models are left alone. (In-memory here; persisted
+    // together with the v3 keychain migration below if it runs.)
+    if config.version < 2 {
+        migrate_legacy_tiers(&mut config);
+        config.version = 2;
+    }
+
+    // B1 hydrate: 盘上哨兵 → OS 钥匙串真实 key（注入内存）。明文 / 空保持。哨兵
+    // 绝不留内存——否则 resolve_provider 的 is_empty() 会把哨兵当"有 key"误判。
+    crate::config::secrets::hydrate_active(&mut config);
+
+    // v2 → v3: 把明文 key 迁移到 OS 钥匙串。redact 产生"要写盘的"版本：keychain
+    // 可用 → 盘上换哨兵 + version 升 3；不可用 → 明文 fallback，version 停 2（下次
+    // load 还会重试迁移）。tier 的内存改动若 keychain 此时不可用则不落盘——可接受
+    // 降级（tier 是路由优化，丢失只降级非故障），且仅 v1 老配置 + keychain 不可用
+    // 这一罕见组合下发生。
+    if config.version < 3 {
+        let mut disk = crate::config::secrets::redact_active(&config);
+        if disk
+            .providers
+            .iter()
+            .any(|p| p.api_key == crate::config::secrets::KEYCHAIN_SENTINEL)
+        {
+            disk.version = 3;
+            config.version = 3;
+            // Best-effort persist; a write failure must not block loading (the
+            // in-memory config is already migrated + hydrated).
+            let _ = write_raw(data_dir, &disk);
         }
     }
 
@@ -151,7 +174,23 @@ fn migrate_legacy_tiers(config: &mut ProvidersConfig) -> bool {
 }
 
 /// Save providers config to the app data directory.
+///
+/// B1: API Key 不落明文——`redact_active` 把每个 provider 的 key 存入 OS 钥匙串
+/// 并把盘上字段换成哨兵；keychain 不可用时该 provider 字段保持明文（fallback）。
 pub fn save_providers_config(
+    data_dir: &std::path::Path,
+    config: &ProvidersConfig,
+) -> Result<(), crate::error::AppError> {
+    let mut disk = crate::config::secrets::redact_active(config);
+    disk.version = PROVIDERS_CONFIG_VERSION; // 保存即标记最新 schema
+    write_raw(data_dir, &disk)
+}
+
+/// Serialize + write config to providers.toml (no keychain logic). Shared by
+/// `save_providers_config` and the load-time v3 migration so the migration can
+/// persist without recursing through `save_providers_config` (which would re-run
+/// redact on an already-redacted config).
+fn write_raw(
     data_dir: &std::path::Path,
     config: &ProvidersConfig,
 ) -> Result<(), crate::error::AppError> {
@@ -376,6 +415,7 @@ fn default_providers_config() -> ProvidersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::secrets::{self, MemoryStore, SecretStore, KEYCHAIN_SENTINEL};
     use tempfile::TempDir;
 
     #[test]
@@ -579,5 +619,108 @@ mod tests {
         // id, which no provider serves → None (construction-safe, fails at call).
         let config = default_providers_config(); // all empty key
         assert!(resolve_provider(&config, "__default__").is_none());
+    }
+
+    // ---- B1: API Key 钥匙串存储（config/secrets.rs 纯逻辑）----
+    // app_lib 测试 exe 本机 0xc0000139 加载失败跑不了 → 这些单测靠 cargo check
+    // 验证编译 + 逻辑；真 keyring 往返走 examples/secrets_smoke.rs（绕过 loader）。
+
+    fn b1_provider(id: &str, key: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: id.into(),
+            name: id.into(),
+            endpoint: "https://x".into(),
+            api_key: key.into(),
+            enabled: true,
+            protocol: ProtocolKind::Anthropic,
+            models: vec![],
+        }
+    }
+
+    #[test]
+    fn b1_redact_moves_key_to_keychain_and_marks_sentinel() {
+        let store = MemoryStore::default();
+        let config = ProvidersConfig {
+            version: 3,
+            providers: vec![b1_provider("p-redact", "sk-real")],
+            model_mapping: HashMap::new(),
+        };
+        let disk = secrets::redact(&config, &store);
+        // 盘上字段换哨兵，明文不再落盘
+        assert_eq!(disk.providers[0].api_key, KEYCHAIN_SENTINEL);
+        // 真实 key 进了钥匙串
+        assert_eq!(store.load("p-redact").unwrap(), Some("sk-real".to_string()));
+    }
+
+    #[test]
+    fn b1_hydrate_replaces_sentinel_with_keychain_key() {
+        let store = MemoryStore::default();
+        store.store("p-hydrate", "sk-back").unwrap();
+        let mut config = ProvidersConfig {
+            version: 3,
+            providers: vec![b1_provider("p-hydrate", KEYCHAIN_SENTINEL)],
+            model_mapping: HashMap::new(),
+        };
+        secrets::hydrate(&mut config, &store);
+        // 哨兵被真实 key 替换——绝不留在内存
+        assert_eq!(config.providers[0].api_key, "sk-back");
+    }
+
+    #[test]
+    fn b1_hydrate_leaves_plaintext_untouched() {
+        let store = MemoryStore::default();
+        let mut config = ProvidersConfig {
+            version: 3,
+            providers: vec![b1_provider("p-plain", "sk-plain")],
+            model_mapping: HashMap::new(),
+        };
+        secrets::hydrate(&mut config, &store);
+        // 明文（fallback 模式或待迁移老配置）原样
+        assert_eq!(config.providers[0].api_key, "sk-plain");
+    }
+
+    #[test]
+    fn b1_redact_deletes_keychain_entry_when_key_cleared() {
+        let store = MemoryStore::default();
+        store.store("p-clear", "sk-old").unwrap();
+        let config = ProvidersConfig {
+            version: 3,
+            providers: vec![b1_provider("p-clear", "")],
+            model_mapping: HashMap::new(),
+        };
+        let disk = secrets::redact(&config, &store);
+        // 空 key → 清掉钥匙串残留 + 盘上保持空
+        assert_eq!(disk.providers[0].api_key, "");
+        assert_eq!(store.load("p-clear").unwrap(), None);
+    }
+
+    #[test]
+    fn b1_hydrate_then_resolve_proves_sentinel_not_leaked() {
+        // 盘上哨兵态若直接 resolve 会被当"有 key"误判；hydrate 注入真实 key 后
+        // resolve 正常——证明哨兵不会泄漏到 resolve_provider 的判断。
+        let store = MemoryStore::default();
+        store.store("p-svc", "sk-real").unwrap();
+        let mut config = ProvidersConfig {
+            version: 3,
+            providers: vec![ProviderConfig {
+                id: "p-svc".into(),
+                name: "P".into(),
+                endpoint: "https://x".into(),
+                api_key: KEYCHAIN_SENTINEL.into(),
+                enabled: true,
+                protocol: ProtocolKind::Anthropic,
+                models: vec![ModelEntry {
+                    id: "m1".into(),
+                    label: "M1".into(),
+                    enabled: true,
+                    context_window: None,
+                    tier: Some(ModelTier::Strong),
+                }],
+            }],
+            model_mapping: HashMap::new(),
+        };
+        secrets::hydrate(&mut config, &store);
+        let r = resolve_provider(&config, "m1").expect("hydrated key resolves");
+        assert_eq!(r.api_key, "sk-real");
     }
 }

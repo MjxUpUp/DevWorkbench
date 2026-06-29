@@ -12,4 +12,4 @@
 export type SettingsSection =
   | 'agent-tools' | 'providers' | 'capability'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
-  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';
+  | 'memory' | 'output-style' | 'usage-stats' | 'trace' | 'quality-experience' | 'onboarding';

@@ -154,3 +154,118 @@ describe('OrchestrateView — 加载统一 agent/模型管理(打通节点下拉
     });
   });
 });
+
+describe('OrchestrateView — B4 workflow 持久化 CRUD 接通', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useNavigationStore.setState({
+      activeProject: project,
+      activeView: 'orchestrate',
+      sidebarOpen: true,
+      selectedConversationId: null,
+    });
+    useOrchestrateStore.setState({
+      yaml: 'nodes: []',
+      nodes: {},
+      runId: null,
+      output: null,
+      error: null,
+      pendingApproval: null,
+      currentWorkflowId: null,
+      savedWorkflows: [],
+    } as Partial<ReturnType<typeof useOrchestrateStore.getState>> as never);
+  });
+
+  it('首次保存走 create_workflow，落库后 currentWorkflowId 置位', async () => {
+    const created = { id: 'wf-1', name: '我的流程', yamlContent: 'nodes: []', createdAt: 't', updatedAt: 't' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'create_workflow') {
+        // yamlContent 经 WorkflowBuilder 双向绑定规范化，不断言精确值；只验 name
+        expect((args as { name: string }).name).toBe('我的流程');
+        return created as never;
+      }
+      if (cmd === 'list_workflows') return [created] as never;
+      if (cmd === 'list_workflow_templates') return [] as never;
+      if (cmd === 'discover_agents_cmd') return [] as never;
+      if (cmd === 'get_providers_config') return { providers: [] } as never;
+      return null as never;
+    });
+    render(<OrchestrateView />);
+
+    // currentWorkflowId === null → 按钮文案「保存为…」，点击打开对话框
+    fireEvent.click(screen.getByRole('button', { name: '保存为…' }));
+    const input = await screen.findByPlaceholderText('工作流名称');
+    fireEvent.change(input, { target: { value: '我的流程' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认保存' }));
+
+    await waitFor(() => {
+      expect(useOrchestrateStore.getState().currentWorkflowId).toBe('wf-1');
+    });
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      'create_workflow',
+      expect.objectContaining({ name: '我的流程' }),
+    );
+  });
+
+  it('已存工作流（currentWorkflowId 非空）保存走 update_workflow 覆盖', async () => {
+    useOrchestrateStore.setState({
+      currentWorkflowId: 'wf-1',
+      savedWorkflows: [{ id: 'wf-1', name: '旧名', yamlContent: 'x', createdAt: 't', updatedAt: 't' }],
+    } as never);
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'update_workflow') {
+        expect((args as { id: string }).id).toBe('wf-1');
+        return { id: 'wf-1', name: '旧名', yamlContent: 'x', createdAt: 't', updatedAt: 't2' } as never;
+      }
+      if (cmd === 'list_workflows') return [] as never;
+      if (cmd === 'list_workflow_templates') return [] as never;
+      if (cmd === 'discover_agents_cmd') return [] as never;
+      if (cmd === 'get_providers_config') return { providers: [] } as never;
+      return null as never;
+    });
+    render(<OrchestrateView />);
+
+    // currentWorkflowId 非空 → 按钮文案「保存」，直接 update（无对话框）
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+        'update_workflow',
+        expect.objectContaining({ id: 'wf-1', name: '旧名' }),
+      ),
+    );
+  });
+
+  it('历史 tab 渲染已保存列表并支持载入/删除', async () => {
+    const wf = { id: 'wf-1', name: '已存流程', yamlContent: 'start: a', createdAt: 't', updatedAt: '2026-06-29T00:00:00Z' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_workflows') return [wf] as never;
+      if (cmd === 'delete_workflow') {
+        expect((args as { id: string }).id).toBe('wf-1');
+        return null as never;
+      }
+      if (cmd === 'list_workflow_templates') return [] as never;
+      if (cmd === 'discover_agents_cmd') return [] as never;
+      if (cmd === 'get_providers_config') return { providers: [] } as never;
+      return null as never;
+    });
+    render(<OrchestrateView />);
+
+    // 切到历史 tab → 触发 list_workflows
+    fireEvent.click(screen.getByRole('button', { name: '历史' }));
+    expect(await screen.findByText('已存流程')).toBeInTheDocument();
+
+    // 载入 → currentWorkflowId 置位；yaml 经 WorkflowBuilder 规范化但以载入的
+    // start 节点开头，证明 wf.yamlContent 被注入编辑器
+    fireEvent.click(screen.getByRole('button', { name: '载入' }));
+    await waitFor(() => {
+      expect(useOrchestrateStore.getState().yaml).toContain('start: a');
+      expect(useOrchestrateStore.getState().currentWorkflowId).toBe('wf-1');
+    });
+
+    // 删除 → delete_workflow
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('delete_workflow', { id: 'wf-1' }),
+    );
+  });
+});

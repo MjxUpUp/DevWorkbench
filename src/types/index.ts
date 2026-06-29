@@ -347,6 +347,38 @@ export interface QualityReport {
   createdAt: string;
 }
 
+/** One low-scoring quality dimension surfaced by a Forge experience review.
+ *  Mirrors Rust `quality::experience::LowDimension` (serde camelCase). */
+export interface LowDimension {
+  dimension: string;
+  score: number;
+  detail: string;
+}
+
+/** A Forge experience review for a task — Forge creates a `mandatory` pending
+ *  review when a task scores below threshold. `list_pending_forge_reviews`
+ *  returns the pending+mandatory subset. Mirrors Rust
+ *  `quality::experience::ForgeExperienceReview` (serde camelCase). */
+export interface ForgeExperienceReview {
+  taskRef: string;
+  score: number;
+  grade: string;
+  lowDimensions: LowDimension[];
+  mandatory: boolean;
+  status: string;
+  createdAt: string;
+}
+
+/** Result of `invoke('replay_forge_experience', { projectPath })` — how many
+ *  low-dimension lessons were replayed into the knowledge base (project-local
+ *  + promoted global). Mirrors Rust `quality::experience::ReplayResult`
+ *  (serde camelCase). */
+export interface ReplayResult {
+  replayed: number;
+  skipped: number;
+  promotedGlobal: number;
+}
+
 // ---- Config types ----
 
 export interface McpServerConfig {

@@ -14,7 +14,7 @@ import {
 // import { BlocksView } from '../chat/BlocksView';
 import { WorkflowBuilder } from './WorkflowBuilder';
 import type { BuilderNode } from './workflowSchema';
-import type { ChatStreamEvent, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
+import type { ChatStreamEvent, Workflow, WorkflowProgressPayload, WorkflowRunResult, WorkflowTemplate } from '../../types';
 
 const STATUS_COLOR: Record<NodeState['status'], string> = {
   pending: 'var(--gate-skip)',
@@ -49,6 +49,10 @@ export function OrchestrateView() {
   const approve = useOrchestrateStore((s) => s.approve);
   const startRun = useOrchestrateStore((s) => s.startRun);
   const reset = useOrchestrateStore((s) => s.reset);
+  const currentWorkflowId = useOrchestrateStore((s) => s.currentWorkflowId);
+  const setCurrentWorkflowId = useOrchestrateStore((s) => s.setCurrentWorkflowId);
+  const savedWorkflows = useOrchestrateStore((s) => s.savedWorkflows);
+  const setSavedWorkflows = useOrchestrateStore((s) => s.setSavedWorkflows);
   // Agent/model dropdowns in the WorkflowBuilder node inspector read these
   // global stores. ChatView/Settings load them; load here too so the orchestrate
   // page works standalone (entering it directly left both empty → no options).
@@ -63,6 +67,12 @@ export function OrchestrateView() {
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [wfSelectedId, setWfSelectedId] = useState<string | null>(null);
   const [wfSelectedNode, setWfSelectedNode] = useState<BuilderNode | null>(null);
+  // Save dialog state — 保存/另存为 共用：saveMode 决定确认时走 update 还是 create
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveMode, setSaveMode] = useState<'save' | 'saveAs'>('save');
+  const [saveName, setSaveName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<WorkflowTemplate[]>('list_workflow_templates')
@@ -117,6 +127,91 @@ export function OrchestrateView() {
     }
   };
 
+  // 拉取已保存的 workflow 列表（历史 tab 用）。切换到历史 tab 时触发。
+  const refreshSaved = async () => {
+    try {
+      const list = await invoke<Workflow[]>('list_workflows');
+      setSavedWorkflows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setSavedWorkflows([]);
+      console.error('list_workflows failed', e);
+    }
+  };
+
+  // "保存"：已存（currentWorkflowId 非空）→ 直接 update_workflow 覆盖；
+  // 否则打开对话框让用户命名后 create_workflow。
+  const handleSave = () => {
+    if (currentWorkflowId) {
+      const current = savedWorkflows.find((w) => w.id === currentWorkflowId);
+      void doSave('save', current?.name ?? 'workflow');
+    } else {
+      setSaveMode('save');
+      setSaveName('');
+      setSaveError(null);
+      setSaveDialogOpen(true);
+    }
+  };
+
+  // "另存为"：始终新建（即便当前已存），打开对话框。
+  const handleSaveAs = () => {
+    setSaveMode('saveAs');
+    setSaveName('');
+    setSaveError(null);
+    setSaveDialogOpen(true);
+  };
+
+  // 实际落库：save 且 currentWorkflowId 存在 → update；否则 create（saveAs 或首次 save）。
+  const doSave = async (mode: 'save' | 'saveAs', name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setSaveError('请输入工作流名称');
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const isUpdate = mode === 'save' && currentWorkflowId;
+      if (isUpdate) {
+        const wf = await invoke<Workflow>('update_workflow', {
+          id: currentWorkflowId,
+          name: trimmed,
+          yamlContent: yaml,
+        });
+        setCurrentWorkflowId(wf.id);
+      } else {
+        const wf = await invoke<Workflow>('create_workflow', {
+          name: trimmed,
+          yamlContent: yaml,
+        });
+        setCurrentWorkflowId(wf.id);
+      }
+      setSaveDialogOpen(false);
+      await refreshSaved();
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 从历史列表载入一个已存 workflow 到编辑器。
+  const handleLoad = async (wf: Workflow) => {
+    setYaml(wf.yamlContent);
+    setCurrentWorkflowId(wf.id);
+    setSaveName(wf.name);
+  };
+
+  // 删除一个已存 workflow（若删的是当前，回到新建草稿态）。
+  const handleDeleteSaved = async (id: string) => {
+    try {
+      await invoke('delete_workflow', { id });
+      if (currentWorkflowId === id) setCurrentWorkflowId(null);
+      await refreshSaved();
+    } catch (e) {
+      console.error('delete_workflow failed', e);
+    }
+  };
+
   return (
     <div className="orchestrate-view">
       {/* Header */}
@@ -141,9 +236,39 @@ export function OrchestrateView() {
           <Button variant="primary" onClick={handleRun} disabled={running || !activeProject}>
             {running ? '运行中…' : '▶ 运行'}
           </Button>
+          <Button variant="secondary" onClick={handleSave} disabled={running}>
+            {currentWorkflowId ? '保存' : '保存为…'}
+          </Button>
+          <Button variant="secondary" onClick={handleSaveAs} disabled={running}>另存为</Button>
           <Button variant="secondary" onClick={reset} disabled={running}>重置</Button>
         </div>
       </header>
+
+      {/* 保存对话框：命名后 create（首次 save / 另存为） */}
+      {saveDialogOpen && (
+        <div className="orch-save-dialog">
+          <span className="orch-save-label">
+            {saveMode === 'saveAs' ? '另存为新工作流' : '保存为新工作流'}
+          </span>
+          <input
+            className="orch-save-input"
+            type="text"
+            placeholder="工作流名称"
+            value={saveName}
+            autoFocus
+            onChange={(e) => setSaveName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void doSave(saveMode, saveName);
+              if (e.key === 'Escape') setSaveDialogOpen(false);
+            }}
+          />
+          <Button variant="primary" size="sm" isLoading={saving} onClick={() => doSave(saveMode, saveName)}>
+            确认保存
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => setSaveDialogOpen(false)}>取消</Button>
+          {saveError && <span className="orch-save-error">{saveError}</span>}
+        </div>
+      )}
 
       {/* Body: main area + collapsible sidebar */}
       <div className="orch-body">
@@ -208,7 +333,7 @@ export function OrchestrateView() {
           <div className="sb-tabs">
             <button type="button" className={`sb-tab ${sidebarTab === 'inspector' ? 'active' : ''}`} onClick={() => { setSidebarTab('inspector'); setSidebarCollapsed(false); }}>属性</button>
             <button type="button" className={`sb-tab ${sidebarTab === 'palette' ? 'active' : ''}`} onClick={() => { setSidebarTab('palette'); setSidebarCollapsed(false); }}>节点</button>
-            <button type="button" className={`sb-tab ${sidebarTab === 'history' ? 'active' : ''}`} onClick={() => { setSidebarTab('history'); setSidebarCollapsed(false); }}>历史</button>
+            <button type="button" className={`sb-tab ${sidebarTab === 'history' ? 'active' : ''}`} onClick={() => { setSidebarTab('history'); setSidebarCollapsed(false); void refreshSaved(); }}>历史</button>
             <button type="button" className="sb-collapse" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="折叠/展开">◀</button>
           </div>
           <div className="sb-content">
@@ -308,8 +433,14 @@ export function OrchestrateView() {
             )}
             {sidebarTab === 'history' && (
               <div className="sb-section">
-                <p className="muted">版本历史（即将上线）</p>
-                {runId && <p className="muted">当前运行: {runId.slice(0, 8)}</p>}
+                <HistoryList
+                  workflows={savedWorkflows}
+                  currentId={currentWorkflowId}
+                  onLoad={handleLoad}
+                  onDelete={handleDeleteSaved}
+                  onRefresh={refreshSaved}
+                />
+                {runId && <p className="muted" style={{ marginTop: 'var(--space-2)' }}>当前运行: {runId.slice(0, 8)}</p>}
               </div>
             )}
           </div>
@@ -351,6 +482,56 @@ export function OrchestrateView() {
       </div>
     </div>
   );
+}
+
+/** 历史 tab：已保存 workflow 列表，载入到编辑器或删除。 */
+function HistoryList({
+  workflows,
+  currentId,
+  onLoad,
+  onDelete,
+  onRefresh,
+}: {
+  workflows: Workflow[];
+  currentId: string | null;
+  onLoad: (wf: Workflow) => void;
+  onDelete: (id: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <>
+      <div className="yaml-templates">
+        <span className="yaml-templates-label">已保存的工作流：</span>
+        <Button variant="secondary" size="sm" onClick={onRefresh}>↻ 刷新</Button>
+      </div>
+      {workflows.length === 0 ? (
+        <p className="muted">暂无已保存工作流 — 点击「保存为…」保存当前编排</p>
+      ) : (
+        <ul className="wf-history-list">
+          {workflows.map((wf) => (
+            <li key={wf.id} className={`wf-history-item${wf.id === currentId ? ' current' : ''}`}>
+              <div className="wf-history-head">
+                <span className="wf-history-name" title={wf.name}>{wf.name}</span>
+                <span className="wf-history-time">{formatWfTime(wf.updatedAt)}</span>
+              </div>
+              <div className="wf-history-actions">
+                <Button variant="secondary" size="sm" onClick={() => onLoad(wf)}>载入</Button>
+                <Button variant="dangerGhost" size="sm" onClick={() => onDelete(wf.id)}>删除</Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function formatWfTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
 }
 
 function formatEvent(event: WorkflowProgressPayload['event']): string {

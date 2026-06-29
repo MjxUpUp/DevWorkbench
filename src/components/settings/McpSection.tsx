@@ -5,6 +5,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { Button } from '../ui/Button/Button';
 import { McpServerList, ALL_AGENTS } from '../McpServerList';
+import { McpRuntimePanel } from './McpRuntimePanel';
 import type { McpServerConfig, AgentType } from '../../types';
 
 const EMPTY_SERVER: Omit<McpServerConfig, 'name'> = {
@@ -198,6 +199,9 @@ export function McpSection() {
           </ul>
         </div>
       )}
+
+      {/* B3: 运行时管理（即时连接/断开/工具试跑） */}
+      <McpRuntimePanel servers={servers} />
 
       {/* Installed agents info */}
       {installedAgents.length > 0 && (

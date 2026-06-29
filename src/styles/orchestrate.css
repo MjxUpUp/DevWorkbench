@@ -763,6 +763,68 @@
   .sidebar, .orch-sidebar { width: 200px; }
 }
 
+/* === B4: 保存对话框 + 历史 tab（workflow 持久化） === */
+.orch-save-dialog {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-0);
+  border-bottom: 1px solid var(--border-default);
+  flex-wrap: wrap;
+}
+.orch-save-label { font-size: var(--text-sm); color: var(--text-secondary); }
+.orch-save-input {
+  flex: 1;
+  min-width: 160px;
+  padding: 4px 8px;
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+.orch-save-input:focus { outline: none; border-color: var(--accent); }
+.orch-save-error { color: var(--danger, #d94646); font-size: var(--text-xs); width: 100%; }
+
+.wf-history-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.wf-history-item {
+  padding: var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+.wf-history-item.current { border-color: var(--accent); }
+.wf-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+.wf-history-name {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-history-time {
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.wf-history-actions { display: flex; gap: var(--space-1); }
+
 @media (max-width: 900px) {
   .body, .orch-body { flex-direction: column; }
   .sidebar, .orch-sidebar {

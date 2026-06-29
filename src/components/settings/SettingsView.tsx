@@ -12,13 +12,14 @@ import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
+import { ForgeExperienceSection } from './ForgeExperienceSection';
 import type { SettingsSection } from './types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconInbox,
   IconUser, IconPlay, IconEdit, IconStar,
-  IconDashboard, IconCode, IconChat, IconX,
+  IconDashboard, IconCode, IconChat, IconShield, IconX,
 } from '../Icons';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -63,6 +64,7 @@ const SECTIONS: SectionDef[] = [
   // 数据与诊断
   { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection, group: '数据与诊断' },
   { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection, group: '数据与诊断' },
+  { id: 'quality-experience', label: '质量经验', Icon: IconShield, Component: ForgeExperienceSection, group: '数据与诊断' },
   // 入门
   { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' }, group: '入门' },
 ];
