@@ -39,4 +39,18 @@ describe('L2ToolPill', () => {
     render(<L2ToolPill name="x" desc="y" meta="340ms · ckpt 2.1" />);
     expect(screen.getByText(/340ms/)).toBeInTheDocument();
   });
+
+  it('forwards nameTestId / headTestId to the name span and head button', () => {
+    // BlocksView 的 ToolUsePill / ToolResultPill 透传这俩钩子，让 capstone E2E
+    // 能定位 tool_use 的工具名单元格 (chat-block-tool-name) 与 tool_result 的
+    // 展开按钮 (chat-block-toolresult-head)。验证透传落到正确元素且不被根 div
+    // 的 ...props 吞掉。
+    const { container } = render(
+      <L2ToolPill name="read_file" desc="d" nameTestId="chat-block-tool-name" headTestId="chat-block-toolresult-head">
+        detail
+      </L2ToolPill>,
+    );
+    expect(container.querySelector('[data-testid="chat-block-tool-name"]')?.textContent).toBe('read_file');
+    expect(container.querySelector('[data-testid="chat-block-toolresult-head"]')).not.toBeNull();
+  });
 });

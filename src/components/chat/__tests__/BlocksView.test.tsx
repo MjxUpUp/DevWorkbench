@@ -35,9 +35,14 @@ describe('BlocksView', () => {
     const resultCard = screen.getByTestId('chat-block-result');
     expect(resultCard).toHaveTextContent('完成');
     expect(resultCard).toHaveTextContent('12s');
-    // 4 个 block 卡（text/tool_use/tool_result/result），各带 data-testid
-    const blocks = container.querySelectorAll('[data-testid^="chat-block-"]');
-    expect(blocks.length).toBe(4);
+    // 4 个顶层 block 卡（text/tool_use/tool_result/result），各带 data-testid。
+    // 精确到顶层卡 testid：内嵌钩子（chat-block-tool-name / -toolresult-head）
+    // 也以 chat-block- 开头，前缀计数会把它们也算进来抬高到 6，故按具体顶层
+    // testid 断言。验证意图不变——4 种 block 各渲染一张卡。
+    const topCards = container.querySelectorAll(
+      '[data-testid="chat-block-text"], [data-testid="chat-block-tool"], [data-testid="chat-block-toolresult"], [data-testid="chat-block-result"]',
+    );
+    expect(topCards.length).toBe(4);
     // 非运行无流式光标
     expect(screen.queryByTestId('chat-streaming-cursor')).toBeNull();
   });

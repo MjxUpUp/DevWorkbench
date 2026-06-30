@@ -126,6 +126,7 @@ function ToolUsePill({ name, input }: { name: string; input: unknown }) {
       desc={deriveToolDesc(name, input)}
       status="running"
       meta="调用中"
+      nameTestId="chat-block-tool-name"
       data-testid="chat-block-tool"
     >
       <pre className={styles.toolInput} data-testid="chat-block-tool-input">{inputStr}</pre>
@@ -141,6 +142,7 @@ function ToolResultPill({ content, isError }: { content: string; isError: boolea
       desc={truncate(content, 60)}
       status={isError ? 'error' : 'success'}
       meta={isError ? '失败' : '完成'}
+      headTestId="chat-block-toolresult-head"
       data-testid="chat-block-toolresult"
     >
       <pre className={styles.toolResultContent} data-testid="chat-block-toolresult-content">{content}</pre>

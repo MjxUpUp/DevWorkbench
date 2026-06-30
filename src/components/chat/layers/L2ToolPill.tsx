@@ -35,6 +35,12 @@ export interface L2ToolPillProps {
   /** 默认展开态。默认 false。 */
   defaultExpanded?: boolean;
   className?: string;
+  /** name span 的 data-testid（供 E2E 定位工具名，如 chat-block-tool-name）。
+   *  L2ToolPill 是通用层，不硬编码业务 testid；由父组件（BlocksView 的
+   *  ToolUsePill）透传，让 capstone E2E 能锁定 tool_use 的工具名单元格。 */
+  nameTestId?: string;
+  /** 展开 button 的 data-testid（供 E2E 定位 head，如 chat-block-toolresult-head）。 */
+  headTestId?: string;
 }
 
 const ICON: Record<ToolStatus, string> = {
@@ -51,6 +57,8 @@ export function L2ToolPill({
   children,
   defaultExpanded = false,
   className,
+  nameTestId,
+  headTestId,
   ...props
 }: L2ToolPillProps & HTMLAttributes<HTMLDivElement>) {
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -68,13 +76,14 @@ export function L2ToolPill({
     <div className={wrapClasses} {...props}>
       <button
         type="button"
+        data-testid={headTestId}
         className={pillClasses}
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
         aria-label={`${name} 工具调用${expanded ? '（折叠详情）' : '（展开详情）'}`}
       >
         <span className={`${styles.icon} ${styles[status]}`} aria-hidden="true">{ICON[status]}</span>
-        <span className={styles.name}>{name}</span>
+        <span className={styles.name} data-testid={nameTestId}>{name}</span>
         <span className={styles.desc}>{desc}</span>
         {meta && <span className={styles.meta}>{meta}</span>}
         {children && <span className={styles.chev} aria-hidden="true">›</span>}

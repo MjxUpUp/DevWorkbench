@@ -86,8 +86,8 @@ test.describe('Full App interaction E2E', () => {
     // varies per run).
     await expect(page.getByTestId('chat-block-text')).toContainText('dev-workbench');
     await expect(page.getByTestId('chat-block-tool-name')).toHaveText('read_file');
-    await expect(page.getByTestId('chat-block-thinking').first()).toContainText('思考过程');
-    await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
+    await expect(page.getByTestId('chat-block-thinking').first()).toContainText('THINKING');
+    await expect(page.getByTestId('chat-block-toolresult')).toContainText('tool_result');
     await expect(page.getByTestId('chat-block-result')).toContainText('完成');
 
     // 4. Simulate completion the way the backend would: persist the same wire
@@ -110,7 +110,7 @@ test.describe('Full App interaction E2E', () => {
     // still render (this is the bug class where a finished turn goes blank).
     await expect(page.getByTestId('chat-block-text')).toContainText('dev-workbench');
     await expect(page.getByTestId('chat-block-tool-name')).toHaveText('read_file');
-    await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
+    await expect(page.getByTestId('chat-block-toolresult')).toContainText('tool_result');
 
     // Decision Chain reflects the completed status the listener wrote.
     await expect(page.getByTestId('agent-message').first()).toContainText('已完成');

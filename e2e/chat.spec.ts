@@ -28,8 +28,13 @@ test('BlocksView renders real GLM wire across all block types', async ({ page })
   // the tool call (a trace before AND after read_file), so normalize yields
   // multiple thinking blocks — assert at least one, not a fixed count (the live
   // trace shape varies per run).
-  await expect(page.getByTestId('chat-block-thinking').first()).toContainText('思考过程');
-  await expect(page.getByTestId('chat-block-toolresult')).toContainText('工具结果');
+  // v3 同步：L1Thinking 折叠态 label 是 'THINKING'（不再是 v2 的中文「思考过程」——
+  // BlocksView.test.tsx:81 + L1Thinking.test.tsx:38 锁定 THINKING 为契约）。这里验证
+  // thinking block 渲染了其类型 label，与原断言同等严格。
+  await expect(page.getByTestId('chat-block-thinking').first()).toContainText('THINKING');
+  // v3 同步：tool_result pill 的 name 字段是 'tool_result'（BlocksView.test.tsx:20 注释
+  // 「tool_result 不再有『工具错误』字样」锁定去中文）。验证 toolresult pill 渲染了类型 name。
+  await expect(page.getByTestId('chat-block-toolresult')).toContainText('tool_result');
   await expect(page.getByTestId('chat-block-result')).toContainText('完成');
 
   // Expand the tool_result card — the REAL Cargo.toml bytes GLM received must
