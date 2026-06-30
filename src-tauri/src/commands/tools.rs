@@ -40,22 +40,29 @@ pub(crate) fn which_expanded(name: &str) -> Option<std::path::PathBuf> {
 /// 在 Windows 上定位 git-bash 的 `bash.exe`。优先级：
 ///   1. 环境变量 DEVWORKBENCH_BASH_PATH
 ///   2. custom 参数（预留：未来从 settings DB 列读；当前调用方传 None）
-///   3. %ProgramFiles%\Git\bin\bash.exe
-///   4. %ProgramFiles(x86)%\Git\bin\bash.exe
-///   5. PATH 上首个非 WSL 的 bash.exe（which_all 遍历，跳过 System32\bash.exe）
+///   3. 从 PATH 上 git.exe 反推 <install>\bin\bash.exe（最稳健：git-bash 装
+///      在非 C 盘/D 盘/便携位时，固定位探测全落空，git.exe 默认在 PATH 而
+///      bash.exe 不一定，反推是唯一可靠定位；见 git_bash_from_git_exe）
+///   4. %ProgramFiles%\Git\bin\bash.exe
+///   5. %ProgramFiles(x86)%\Git\bin\bash.exe
+///   6. PATH 上首个非 WSL 的 bash.exe（遍历，跳过 System32 + WindowsApps 入口）
 ///
 /// 每步用 `.exists()` 校验；全部失败返回 None。**不降级到 cmd**——由调用方
 /// 决定 None 的处理（BashTool 返回 Err 带安装指引，终端启动器报错）。
 /// 之前 BashTool 用 cmd /C 导致 agent 发的 Unix 命令（ls/find）失败、盲切
 /// 语法死循环烧光步数预算（回归 70e762f7），锁 git-bash 从源头消除该问题。
-/// 兜底（第 5 步）会跳过 WSL 的 bash.exe——它在路径风格/用户态上与 git-bash
-/// 不一致，静默采用会让 agent 的 bash 工具跑进 WSL（见 looks_like_wsl_bash）。
+/// 兜底（第 6 步）会跳过 WSL 的 bash.exe（System32 + WindowsApps 两个入口）——
+/// 它们在路径风格/用户态上与 git-bash 不一致，静默采用会让 agent 的 bash
+/// 工具跑进 WSL（见 looks_like_wsl_bash）。第 3 步反推是 da2975fe 修复的核心：
+/// 该机器 git-bash 装在 D:\Program Files\Git，C 盘固定位不存在、bin 不在 PATH，
+/// 旧实现兜底遍历误中 WindowsApps 的 WSL bash。
 #[cfg(target_os = "windows")]
 pub fn resolve_git_bash(custom: Option<&str>) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let candidates: Vec<PathBuf> = [
         std::env::var_os("DEVWORKBENCH_BASH_PATH").map(PathBuf::from),
         custom.map(PathBuf::from),
+        git_bash_from_git_exe(),
         std::env::var_os("ProgramFiles")
             .map(|pf| PathBuf::from(pf).join("Git").join("bin").join("bash.exe")),
         std::env::var_os("ProgramFiles(x86)")
@@ -88,22 +95,59 @@ pub fn resolve_git_bash(custom: Option<&str>) -> Option<std::path::PathBuf> {
     None
 }
 
-/// 判断 bash.exe 路径是否为 WSL 安装入口（而非 MINGW git-bash）。WSL 在
-/// <SystemRoot>\System32\bash.exe 放入口；git-bash 永不落此。优先精确比对
-/// SystemRoot 环境变量，再退到路径启发式（小写 + 斜杠统一），兜住非标准
-/// SystemRoot 的 WSL 安装。
+/// 判断 bash.exe 路径是否为 WSL 安装入口（而非 MINGW git-bash）。WSL 有两个
+/// Windows 端入口，git-bash 永不落在任何之一：
+///   1. <SystemRoot>\System32\bash.exe（系统内置 LXSS 子系统入口）
+///   2. <LocalAppData>\Microsoft\WindowsApps\bash.exe（Microsoft Store / appx
+///      分发的 WSL 入口——与 System32 入口同效，都把 shell 跑进 WSL Linux
+///      用户态；装了 WSL 的机器两者常并存于 PATH）。
+/// 优先精确比对 SystemRoot，再退到路径启发式（小写 + 斜杠统一）兜住非标准
+/// 安装。WindowsApps 入口是会话 da2975fe 的泄漏点——旧实现只检 system32
+/// 后缀，PATH 兜底遍历时跳过 System32 却命中 WindowsApps，把 Store 版 WSL
+/// bash 当 git-bash 返回，agent bash 跑进 WSL。
 #[cfg(target_os = "windows")]
 fn looks_like_wsl_bash(path: &std::path::Path) -> bool {
     let norm = |p: &std::path::Path| p.to_string_lossy().replace('/', r"\").to_ascii_lowercase();
+    let n = norm(path);
     if let Some(sr) = std::env::var_os("SystemRoot") {
         let wsl = std::path::PathBuf::from(sr)
             .join("System32")
             .join("bash.exe");
-        if norm(path) == norm(&wsl) {
+        if n == norm(&wsl) {
             return true;
         }
     }
-    norm(path).ends_with(r"\system32\bash.exe")
+    // 两种 WSL 入口的后缀启发（git-bash 永不落 system32 或 WindowsApps）。
+    n.ends_with(r"\system32\bash.exe") || n.ends_with(r"\windowsapps\bash.exe")
+}
+
+/// 从一个 git.exe 路径向上（最多 3 层）找 git 安装根下的 `bin\bash.exe`。抽成
+/// 纯函数（不依赖 PATH/which）以便单元测试。Git for Windows 里 git.exe 有两
+/// 种布局：`<install>\cmd\git.exe`（系统 PATH 默认加的位）和
+/// `<install>\mingw64\bin\git.exe`（mingw 内部委派位）。向上 3 层覆盖两者：
+/// cmd→install（2 层）、mingw64\bin→install（3 层）。
+#[cfg(target_os = "windows")]
+fn find_bash_near(git_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = git_exe.parent();
+    for _ in 0..3 {
+        let dir = cur?;
+        let bash = dir.join("bin").join("bash.exe");
+        if bash.exists() && !looks_like_wsl_bash(&bash) {
+            return Some(bash);
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// 从 PATH 上的 git.exe 反推 git-bash。git.exe 几乎总在系统 PATH（Git for
+/// Windows 安装默认把 `<install>\cmd` 加进 PATH），而 bash.exe 不一定在——当
+/// git-bash 装在非 `C:\Program Files\Git`（D 盘、便携位）时，固定路径探测全
+/// 落空，从 git.exe 反推是唯一可靠的定位方式（见会话 da2975fe：git-bash 装在
+/// D:\Program Files\Git，C 盘固定位不存在，PATH 兜底误中 WSL）。
+#[cfg(target_os = "windows")]
+fn git_bash_from_git_exe() -> Option<std::path::PathBuf> {
+    find_bash_near(&which_expanded("git")?)
 }
 
 /// Unix 永远用原生 sh（见 BashTool / terminal.rs 的非 Windows 分支），此函数
@@ -270,5 +314,60 @@ mod tests {
         assert!(!looks_like_wsl_bash(std::path::Path::new(
             r"D:\tools\PortableGit\bin\bash.exe"
         )));
+    }
+
+    #[test]
+    fn looks_like_wsl_bash_detects_windowsapps_entry() {
+        // Microsoft Store / appx 分发的 WSL 入口（System32 之外的第二入口）。
+        // 旧实现只检 system32 后缀，漏了这条 → PATH 兜底误把它当 git-bash
+        // 返回（会话 da2975fe 的泄漏点）。
+        assert!(looks_like_wsl_bash(std::path::Path::new(
+            r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe"
+        )));
+        // 正反斜杠 + 大小写变体都要命中（norm 统一了）。
+        assert!(looks_like_wsl_bash(std::path::Path::new(
+            r"c:/users/me/appdata/local/microsoft/windowsapps/bash.exe"
+        )));
+    }
+
+    #[test]
+    fn find_bash_near_finds_cmd_layout() {
+        // <install>\cmd\git.exe → 向上到 install root，bin\bash.exe 命中。
+        // 模拟会话 da2975fe 的 D:\Program Files\Git 布局（cmd 在 PATH，bin 不在）。
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        std::fs::create_dir_all(install.join("cmd")).unwrap();
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        let git = install.join("cmd").join("git.exe");
+        let bash = install.join("bin").join("bash.exe");
+        std::fs::write(&git, b"").unwrap();
+        std::fs::write(&bash, b"").unwrap();
+        assert_eq!(find_bash_near(&git), Some(bash));
+    }
+
+    #[test]
+    fn find_bash_near_finds_mingw64_layout() {
+        // <install>\mingw64\bin\git.exe → 向上 3 层到 install root，bin\bash.exe。
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        std::fs::create_dir_all(install.join("mingw64").join("bin")).unwrap();
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        let git = install.join("mingw64").join("bin").join("git.exe");
+        let bash = install.join("bin").join("bash.exe");
+        std::fs::write(&git, b"").unwrap();
+        std::fs::write(&bash, b"").unwrap();
+        assert_eq!(find_bash_near(&git), Some(bash));
+    }
+
+    #[test]
+    fn find_bash_near_returns_none_when_no_bash() {
+        // git.exe 存在但安装根下没有 bin\bash.exe（不是 Git for Windows，或
+        // 被裁剪的安装）→ 不能瞎返回，调用方应继续试下一位/兜底。
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        std::fs::create_dir_all(install.join("cmd")).unwrap();
+        let git = install.join("cmd").join("git.exe");
+        std::fs::write(&git, b"").unwrap();
+        assert_eq!(find_bash_near(&git), None);
     }
 }
