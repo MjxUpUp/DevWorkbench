@@ -49,7 +49,19 @@ jobs:
 
       - name: Run Rust tests
         working-directory: src-tauri
-        run: cargo test -- --nocapture
+        shell: bash
+        run: |
+          # dev-workbench (app_lib) 是 Tauri app crate，其 test 二进制静态链 wry/webview2
+          # native 栈 → windows 加载即 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND（Tauri 固有，
+          # mac/linux 不复现；mock runtime 是运行时 trait 替换，解不了 load-time 链接）。
+          # windows 只跑不链 GUI 的 core crate（kernel-compose/kernel-core，已实测绿）。
+          # 诚实代价：windows 完全不跑 dev-workbench 的 #[test] 单测 + tests/ 下 6 个集成
+          # 测试（都链 app_lib → 链 webview2 → 同样 0xc0000139），由 mac/linux 全量兜底。
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cargo test --workspace --exclude dev-workbench -- --nocapture
+          else
+            cargo test -- --nocapture
+          fi
 
       - name: Check Rust compilation
         working-directory: src-tauri
