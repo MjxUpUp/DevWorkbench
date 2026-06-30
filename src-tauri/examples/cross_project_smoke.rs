@@ -25,7 +25,7 @@ use std::error::Error;
 use app_lib::activity::hash_project_path;
 use app_lib::db;
 use app_lib::knowledge::injector::inject_for_agent;
-use app_lib::knowledge::store::{add_entry, get_entries_for_project};
+use app_lib::knowledge::store::{add_entry, get_entries_for_project, search_entries};
 use app_lib::models::{AgentType, KnowledgeEntry};
 
 fn make_entry(id: &str, project_hash: &str, title: &str, content: &str) -> KnowledgeEntry {
@@ -121,6 +121,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "PASS (Fix 1 机制): 同 content 去重→{same_count} 条；distinct content→{distinct_count} 条全留"
     );
+
+    // === Fix 3: search_entries 多词查询 OR 语义（v07 集成测试修复）===
+    // v07 的 test_knowledge_add_search_delete_flow 搜 "tokio async"，但 entry
+    // content 只有 "tokio"（"async" 在 title）；旧 sanitize 把整体包成 FTS5 短语
+    // 要求连续 → 0 结果。OR 语义下 "tokio" OR "async" 命中 content 的 "tokio"。
+    let tmp4 = tempfile::TempDir::new()?;
+    let conn4 = db::init_db(&tmp4.path().join("search.db"))?;
+    add_entry(
+        &conn4,
+        &make_entry(
+            "k-tokio",
+            "proj_x",
+            "Rust async patterns with tokio",
+            "Use tokio::spawn for concurrent tasks and join_all to collect results",
+        ),
+    )?;
+    add_entry(
+        &conn4,
+        &make_entry(
+            "k-err",
+            "proj_x",
+            "Error handling",
+            "Replaced unwrap with proper error handling; use thiserror for custom types",
+        ),
+    )?;
+    let tokio_results = search_entries(&conn4, "tokio async", 10)?;
+    if tokio_results.len() != 1 || tokio_results[0].id != "k-tokio" {
+        return Err(format!(
+            "FAIL (Fix 3): search_entries(\"tokio async\") 应仅命中 k-tokio，实际 {:?}",
+            tokio_results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+        )
+        .into());
+    }
+    let err_results = search_entries(&conn4, "error handling thiserror", 10)?;
+    if err_results.is_empty() {
+        return Err(
+            "FAIL (Fix 3): search_entries(\"error handling thiserror\") 不应为空（OR 应命中 k-err）".into(),
+        );
+    }
+    println!("PASS (Fix 3): search_entries 多词 OR — \"tokio async\"→k-tokio，\"error handling thiserror\"→非空");
 
     println!("\nCI 修复验证全部通过 ✅");
     Ok(())

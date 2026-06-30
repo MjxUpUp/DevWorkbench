@@ -142,14 +142,46 @@ pub fn build_session_reflection_entry(
     }
 }
 
-/// Wrap a raw user query as an FTS5 phrase so bare `"`, `*`, `(`, `)`, `OR`,
-/// `NOT` aren't parsed as operators — they'd raise `fts5: syntax error` and
-/// fail the whole knowledge search (F8). Doubling internal `"` is the phrase
-/// escape. Phrase match is slightly less flexible than a tokenized OR query,
-/// but never crashes on odd input.
+/// Build a safe FTS5 query from raw user input with BROAD RECALL: split into
+/// alphanumeric terms, double-quote each, OR-join. A multi-word search like
+/// "tokio async" then matches any document containing either token — the
+/// recall a search box needs.
+///
+/// The previous implementation wrapped the WHOLE input as one FTS5 phrase,
+/// which required every token to appear CONSECUTIVELY. Normal multi-word
+/// queries ("tokio async", "error handling thiserror") matched nothing and
+/// search_entries silently returned empty — the v07 integration regressions.
+///
+/// Safety (F8) is preserved: each term is alphanumeric-only and quoted, so
+/// bare special chars (`"`/`*`/`(`/`)`) and operator words (`OR`/`NOT`) in the
+/// input can't raise `fts5: syntax error` or inject operators.
 fn sanitize_fts_query(query: &str) -> String {
-    let escaped = query.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+    let mut terms: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in query.chars() {
+        if ch.is_alphanumeric() {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            terms.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        terms.push(cur);
+    }
+    // Case-insensitive dedup: "Rust rust RUST" → one term (FTS5 unicode61
+    // lowercases anyway; dedup avoids a redundant 3x OR of the same token).
+    let mut seen = std::collections::HashSet::new();
+    let quoted: Vec<String> = terms
+        .into_iter()
+        .filter(|t| seen.insert(t.to_lowercase()))
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if quoted.is_empty() {
+        // Empty / all-special-chars input — a phrase that matches nothing,
+        // never an FTS syntax error.
+        return "\"\"".to_string();
+    }
+    quoted.join(" OR ")
 }
 
 /// Search knowledge entries using FTS5 full-text search.
@@ -392,15 +424,23 @@ mod tests {
     use crate::models::AgentType;
 
     #[test]
-    fn sanitize_fts_query_wraps_as_phrase_and_escapes_quotes() {
+    fn sanitize_fts_query_or_joins_terms_and_neutralizes_special_chars() {
         // F8: bare special chars (`"`/`*`/`(`/`)`/`OR`/`NOT`) would raise
-        // `fts5: syntax error` and fail the whole knowledge search. Phrase
-        // wrapping neutralizes operators; internal `"` is doubled per FTS5's
-        // phrase escape rule.
-        assert_eq!(sanitize_fts_query("rust async"), "\"rust async\"");
-        assert_eq!(sanitize_fts_query("c++ (templates)"), "\"c++ (templates)\"");
-        assert_eq!(sanitize_fts_query("a \"b\" c"), "\"a \"\"b\"\" c\"");
+        // `fts5: syntax error` and fail the whole knowledge search. Splitting
+        // into alphanumeric-only terms and quoting each neutralizes operators;
+        // OR-joining gives multi-word searches the recall they need (any term
+        // matches), replacing the old whole-string phrase wrap that required
+        // consecutive tokens and returned empty for "tokio async" etc.
+        assert_eq!(sanitize_fts_query("rust async"), "\"rust\" OR \"async\"");
+        // Special chars are term separators, not operators: "c++" → "c".
+        assert_eq!(sanitize_fts_query("c++ (templates)"), "\"c\" OR \"templates\"");
+        // Internal quotes drop out (alphanumeric-only terms).
+        assert_eq!(sanitize_fts_query("a \"b\" c"), "\"a\" OR \"b\" OR \"c\"");
+        // Case-insensitive dedup (FTS5 unicode61 lowercases anyway).
+        assert_eq!(sanitize_fts_query("Rust rust RUST"), "\"Rust\"");
+        // Empty / all-special input → matches nothing, never a syntax error.
         assert_eq!(sanitize_fts_query(""), "\"\"");
+        assert_eq!(sanitize_fts_query("+++"), "\"\"");
     }
 
     struct TempDb {
