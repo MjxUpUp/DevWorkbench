@@ -67,6 +67,11 @@ export interface BuilderNode {
   body?: unknown;
   // interrupt: halt reason (+ optional gate condition).
   message?: string;
+  // Fields the backend accepts but this builder doesn't render in the inspector
+  // (e.g. agent.on_failure as a Retry struct, or future backend additions).
+  // Passed through verbatim below so canvas ↔ YAML round-trip never silently
+  // drops a field the user hand-wrote in YAML.
+  extra?: Record<string, unknown>;
 }
 
 export interface BuilderEdge {
@@ -238,6 +243,9 @@ export function graphToYaml(g: BuilderGraph): string {
     }
     // transform: emit the nested op object verbatim.
     if (n.type === 'transform' && n.op) obj.op = n.op;
+    // Pass through backend-only fields the inspector doesn't edit so the
+    // canvas round-trip preserves them instead of silently stripping them.
+    if (n.extra) Object.assign(obj, n.extra);
     nodes[n.id] = obj;
   }
 
@@ -251,9 +259,11 @@ export function graphToYaml(g: BuilderGraph): string {
     edges: g.edges.map((e) => {
       const src = g.nodes.find((n) => n.id === e.source);
       const edge: Record<string, unknown> = { from: e.source, to: e.target };
-      // The backend derives routing from the source node type; mark branch
-      // edges explicitly so the runner knows to evaluate `when`.
-      if (src?.type === 'branch') edge.kind = 'branch';
+      // The backend routes selectively off the source node type: both Branch
+      // and Selector emit a value their successor edges must match via `when`,
+      // so both need kind: branch (runner.rs:235-251) — a Normal edge would
+      // fire unconditionally and defeat the routing.
+      if (src?.type === 'branch' || src?.type === 'selector') edge.kind = 'branch';
       if (e.when) edge.when = e.when;
       return edge;
     }),
@@ -288,10 +298,16 @@ export function yamlToGraph(raw: string): BuilderGraph {
       const type = body.type as NodeType | undefined;
       if (!type || !(type in NODE_META)) continue;
       const n: BuilderNode = { id, type };
-      for (const f of NODE_META[type].fields) {
-        if (body[f.key] !== undefined) (n as unknown as Record<string, unknown>)[f.key] = body[f.key];
+      const known = new Set<string>(NODE_META[type].fields.map((f) => f.key));
+      known.add('op');
+      const extra: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(body)) {
+        if (k === 'type') continue;
+        if (known.has(k)) (n as unknown as Record<string, unknown>)[k] = v;
+        else extra[k] = v;
       }
       if (type === 'transform' && body.op) n.op = body.op as TransformOp;
+      if (Object.keys(extra).length > 0) n.extra = extra;
       nodes.push(n);
     }
   }

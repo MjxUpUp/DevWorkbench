@@ -137,7 +137,7 @@ impl McpRegistry {
 
     /// Connect every enabled server from a parsed `mcp-servers.toml` config
     /// that isn't already connected. Used at project-open to reconnect servers
-    /// the user previously installed (`mcp_install_preset` persists them), so
+    /// the user previously configured (persisted in `mcp-servers.toml`), so
     /// the catalog survives a restart. Returns the count newly connected.
     /// Already-connected names are skipped (no duplicate handshake); a
     /// per-server failure is logged and skipped — one broken/unreachable

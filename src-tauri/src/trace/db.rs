@@ -25,11 +25,11 @@ pub struct LlmTraceRow {
     /// B3: request-send → first response signal (time-to-first-byte). NULL when
     /// the call never reached a first byte (pure network failure) or for
     /// pre-v18 rows. Drives the "slow to start" diagnosis.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ttfb_ms: Option<i64>,
     /// B3: first-byte → completion (output/stream duration). NULL when there
     /// was no streaming phase (e.g. a headers-only non_2xx) or pre-v18 rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub stream_ms: Option<i64>,
     pub created_at: String,
 }

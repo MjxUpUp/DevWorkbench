@@ -179,8 +179,6 @@ export interface Session {
    *  check: writes inside the task's working_dir pass, outside are blocked;
    *  a taskless session only warns, never blocks). null for unbound sessions. */
   taskRef?: string | null;
-  tokenUsage?: number;
-  estimatedCost?: number;
 }
 
 /** A `/`-command prompt template. `name` has no leading slash. The kernel
@@ -282,7 +280,10 @@ export interface ActivityEvent {
   filesChanged: string[] | null;
   sessionId: string | null;
   timestamp: string;
-  metadata: unknown;
+  /** Free-form JSON (Rust `Option<serde_json::Value>` — serializes as `null`
+   *  when absent, NOT omitted). `unknown` forces callers to narrow before
+   *  reading; the `| null` reflects that the backend may send JSON null. */
+  metadata: unknown | null;
 }
 
 // ---- Knowledge types ----
@@ -450,6 +451,10 @@ export interface ProviderConfig {
 export interface ProvidersConfig {
   providers: ProviderConfig[];
   modelMapping: Record<string, string>;
+  /** Schema version (Rust `version: u32` with #[serde(default)]). Optional on read
+   *  (older persisted configs omit it); preserved on write by spreading the
+   *  loaded object rather than reconstructing it field-by-field. */
+  version?: number;
 }
 
 // ---- File listing types ----
@@ -549,11 +554,13 @@ export interface WorkflowRunResult {
 /** GraphEvent kinds emitted as `workflow:progress` payload.runId === run_id. */
 export type WorkflowProgressEvent =
   | { kind: 'node_start'; node: string }
-  | { kind: 'node_end'; node: string; status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval'; error?: string }
+  | { kind: 'node_end'; node: string; status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval' | 'interrupted' | 'retried'; error?: string }
   | { kind: 'approval_required'; node: string; prompt: string; resume_token: string }
   | { kind: 'node_output'; node: string; chunk: unknown }
+  | { kind: 'node_retried'; node: string; attempt: number; error: string }
   | { kind: 'graph_done'; output: unknown }
-  | { kind: 'graph_failed'; error: string };
+  | { kind: 'graph_failed'; error: string }
+  | { kind: 'graph_interrupted'; reason: string };
 
 /** The full `workflow:progress` Tauri event payload. */
 export interface WorkflowProgressPayload {

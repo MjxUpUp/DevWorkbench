@@ -239,6 +239,18 @@
   font-family: var(--mono);
 }
 .dag-node-stream { width: 100%; margin-top: var(--space-1); }
+/* Per-node agent output (text/tool_use/tool_result blocks accumulated in
+   NodeState.blocks). Scroll-clamped so a long agent run doesn't blow the
+   sidebar height; the run that produced them lives one click away on the
+   canvas. */
+.dag-node-output {
+  width: 100%;
+  margin-top: var(--space-2);
+  max-height: 320px;
+  overflow: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-default);
+}
 
 /* === YAML editor === */
 .yaml-editor {
@@ -698,6 +710,22 @@
   transition: box-shadow var(--duration-micro) var(--ease-micro);
 }
 .wf-node--selected { box-shadow: 0 0 0 2px var(--accent), var(--shadow-md); }
+/* Runtime status overrides the type-colored border as the graph executes.
+   Without a status (design-time), the node keeps its type color (set inline);
+   once a run reports a status, these take over the border + add a pulse for the
+   active node so the user can see execution progressing across the canvas. */
+.wf-node--status-pending { border-color: var(--gate-skip); }
+.wf-node--status-running { border-color: var(--status-running); animation: wf-node-pulse 1.4s var(--ease-micro) infinite; }
+.wf-node--status-done { border-color: var(--gate-pass); }
+.wf-node--status-failed { border-color: var(--gate-fail); }
+.wf-node--status-skipped { border-color: var(--gate-skip); opacity: 0.6; }
+.wf-node--status-waiting_approval { border-color: var(--gate-warn); }
+.wf-node--status-interrupted { border-color: var(--gate-warn); }
+.wf-node--status-retried { border-color: var(--status-running); }
+@keyframes wf-node-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-running) 50%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-running) 0%, transparent); }
+}
 
 .wf-node-head {
   display: flex;

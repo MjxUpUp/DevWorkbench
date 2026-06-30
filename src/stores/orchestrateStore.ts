@@ -4,7 +4,7 @@ import type { ChatStreamEvent, Workflow, WorkflowProgressEvent } from '../types'
 
 /** Per-node status surfaced from workflow:progress events. */
 export type NodeState = {
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval';
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval' | 'interrupted' | 'retried';
   error?: string;
   /** Structured agent output accumulated from `node_output` chunks, each a
    * ChatStreamEvent (text/tool_use/tool_result) — the SAME schema single-agent
@@ -148,6 +148,25 @@ export const useOrchestrateStore = create<OrchestrateState>((set, get) => ({
           return { output: event.output, runId: null, pendingApproval: null };
         case 'graph_failed':
           return { error: event.error, runId: null, pendingApproval: null };
+        case 'node_retried':
+          // A failed attempt is being retried (transient state, not final).
+          // Mark the node 'retried' + surface the error so the canvas shows
+          // WHY it's retrying, not just that it's running again.
+          return {
+            nodes: {
+              ...state.nodes,
+              [event.node]: {
+                ...(state.nodes[event.node] ?? { status: 'running' as const }),
+                status: 'retried',
+                error: event.error,
+              },
+            },
+          };
+        case 'graph_interrupted':
+          // User-intended halt (Interrupt node firing) — distinct from
+          // graph_failed. Clears the run + pending approval; the reason is
+          // surfaced as `error` so the UI shows the interrupt message.
+          return { error: event.reason, runId: null, pendingApproval: null };
         default:
           return state;
       }

@@ -90,7 +90,6 @@ const providers = {
 
 export const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   load_projects: () => projects,
-  get_sessions_for_project: () => sessions,
   load_sessions: () => sessions,
   list_conversations: (args) => {
     const projectPath = String(args.projectPath ?? '');
@@ -118,13 +117,11 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
     { name: 'git', installed: true, path: '/usr/bin/git' },
   ],
   get_git_status: () => ({ branch: 'feature/kernel-refactor', ahead: 0, behind: 0, modified: ['src/App.tsx'], staged: [], untracked: [] }),
-  batch_get_git_status: () => projects.map((p) => ({ path: p.path, branch: 'main', ahead: 0, behind: 0, modified: [], staged: [], untracked: [] })),
   get_recent_activity: () => [],
   get_project_activity: () => [],
   get_cost_summary: () => ({ total_usd: 1.23, by_agent: {}, by_day: [] }),
   get_cost_trend: () => [],
   load_budget: () => ({ monthly_usd: 50 }),
-  check_budget_alert: () => null,
   load_mcp_config: () => ({ servers: [] }),
   discover_agents_cmd: () => [
     // Full AgentInfo contract (commandName/path/supportsResume) — missing

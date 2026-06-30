@@ -116,6 +116,29 @@ describe('workflowSchema serialize/parse', () => {
     expect(reparsed.edges[1].kind).toBeUndefined();
   });
 
+  it('marks edges leaving a selector node with kind: branch too', () => {
+    // Selector emits a label its successor edges must match via `when`; the
+    // backend routes them as branch edges (runner.rs:235-251). Missing
+    // kind: branch would make them fire unconditionally and break routing.
+    const g: BuilderGraph = {
+      startId: 'sel',
+      endId: 'end',
+      nodes: [
+        { id: 'sel', type: 'selector', cases: [{ when: 'contains:a', label: 'a_path' }] },
+        { id: 'a_path', type: 'prompt', text: 'a' },
+        { id: 'end', type: 'merge', strategy: 'concat' },
+      ],
+      edges: [
+        { id: 'e1', source: 'sel', target: 'a_path', when: 'a_path' },
+        { id: 'e2', source: 'a_path', target: 'end' },
+      ],
+    };
+    const out = graphToYaml(g);
+    const reparsed = yaml.load(out) as { edges: Array<{ from: string; to: string; kind?: string; when?: string }> };
+    expect(reparsed.edges[0]).toMatchObject({ from: 'sel', to: 'a_path', kind: 'branch' });
+    expect(reparsed.edges[1].kind).toBeUndefined();
+  });
+
   it('round-trips the transform op (extract/wrap/truncate)', () => {
     const g: BuilderGraph = {
       startId: 't',
@@ -218,5 +241,34 @@ describe('workflowSchema serialize/parse', () => {
     const back = roundTrip(g);
     expect(back.nodes[0].message).toBe('stop here');
     expect(back.nodes[0].condition).toBe('status==done');
+  });
+
+  it('round-trip preserves backend-only fields the inspector does not edit', () => {
+    // The inspector edits only NODE_META.fields; any other field the backend
+    // accepts (agent.on_failure as a Retry struct, future additions) must
+    // survive a canvas round-trip via `extra` instead of being silently
+    // stripped — otherwise hand-edited YAML loses on_failure the moment the
+    // user touches the canvas.
+    const yamlText = [
+      'start: a', 'end: a',
+      'nodes:',
+      '  a:',
+      '    type: agent',
+      '    agent: claude_code',
+      '    on_failure:',
+      '      retry: { max_attempts: 3, backoff_secs: 5, continue_on_exhausted: false }',
+      '    custom_note: hi',
+    ].join('\n');
+    const g = yamlToGraph(yamlText);
+    const a = g.nodes.find((n) => n.id === 'a')!;
+    expect(a.agent).toBe('claude_code');
+    expect(a.extra).toMatchObject({
+      on_failure: { retry: { max_attempts: 3, backoff_secs: 5, continue_on_exhausted: false } },
+      custom_note: 'hi',
+    });
+    const emitted = yaml.load(graphToYaml(g)) as { nodes: { a: Record<string, unknown> } };
+    expect(emitted.nodes.a.on_failure).toEqual({ retry: { max_attempts: 3, backoff_secs: 5, continue_on_exhausted: false } });
+    expect(emitted.nodes.a.custom_note).toBe('hi');
+    expect(emitted.nodes.a.agent).toBe('claude_code');
   });
 });

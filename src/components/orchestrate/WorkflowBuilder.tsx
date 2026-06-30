@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStore } from '../../stores/agentStore';
 import { useProvidersStore } from '../../stores/providersStore';
+import { useOrchestrateStore, type NodeState } from '../../stores/orchestrateStore';
 import {
   ReactFlow,
   Background,
@@ -50,6 +51,7 @@ type WorkflowNodeData = {
   node: BuilderNode;
   isStart: boolean;
   isEnd: boolean;
+  status?: NodeState['status'];
 };
 
 const GRID_X = 260;
@@ -80,8 +82,8 @@ function WorkflowNodeView({ data, selected }: NodeProps) {
   const preview = previewParam(d.node);
   return (
     <div
-      className={`wf-node wf-node--${d.node.type}${selected ? ' wf-node--selected' : ''}`}
-      style={{ borderColor: meta.color }}
+      className={`wf-node wf-node--${d.node.type}${d.status ? ` wf-node--status-${d.status}` : ''}${selected ? ' wf-node--selected' : ''}`}
+      style={{ borderColor: d.status ? undefined : meta.color }}
       title={meta.hint}
     >
       <Handle type="target" position={Position.Left} />
@@ -143,6 +145,10 @@ export function WorkflowBuilder({
   onSelectedChange,
   onSelectedNodeChange,
 }: WorkflowBuilderProps) {
+  // Runtime node states (status/error) from the orchestrate store — drives
+  // canvas coloring as the graph executes. Absent until a run starts, so the
+  // design-time type color shows when nothing is running.
+  const nodes = useOrchestrateStore((s) => s.nodes);
   // Local canvas state, kept in sync with the bound YAML. We track positions
   // separately so drag doesn't fight the YAML round-trip (positions aren't in
   // the schema).
@@ -309,6 +315,7 @@ export function WorkflowBuilder({
           node: n,
           isStart: graph.startId === n.id,
           isEnd: graph.endId === n.id,
+          status: nodes[n.id]?.status,
         },
         selected: n.id === selectedId,
       })),
@@ -322,7 +329,7 @@ export function WorkflowBuilder({
         animated: graph.nodes.find((n) => n.id === e.source)?.type === 'branch',
       })),
     );
-  }, [graph, positions, selectedId]);
+  }, [graph, positions, selectedId, nodes]);
 
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     // 先让 ReactFlow 更新内部 nodes state（包括 select/remove/dimensions）

@@ -51,25 +51,6 @@ pub async fn create_workflow(
 }
 
 #[tauri::command]
-pub async fn get_workflow(db: State<'_, DbState>, id: String) -> Result<Workflow, AppError> {
-    let conn = db.get().map_err(|e| AppError::NotFound(format!("Lock error: {}", e)))?;
-    conn.query_row(
-        "SELECT id, name, yaml_content, created_at, updated_at FROM workflows WHERE id = ?1",
-        [&id],
-        |row| {
-            Ok(Workflow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                yaml_content: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        },
-    )
-    .map_err(|e| AppError::NotFound(format!("Workflow not found: {}", e)))
-}
-
-#[tauri::command]
 pub async fn update_workflow(
     db: State<'_, DbState>,
     id: String,

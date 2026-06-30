@@ -27,15 +27,6 @@ pub async fn mcp_disconnect(registry: State<'_, McpRegistry>, name: String) -> R
     Ok(())
 }
 
-/// List all tools from all connected servers.
-/// Returns `(server_name, tools_json)` pairs.
-#[tauri::command]
-pub async fn mcp_list_tools(
-    registry: State<'_, McpRegistry>,
-) -> Result<Vec<(String, serde_json::Value)>, AppError> {
-    registry.get_tools()
-}
-
 /// Invoke a tool on a specific connected MCP server.
 #[tauri::command]
 pub async fn mcp_call_tool(
@@ -91,43 +82,6 @@ pub async fn mcp_catalog(
 #[tauri::command]
 pub async fn mcp_servers(registry: State<'_, McpRegistry>) -> Result<Vec<String>, AppError> {
     Ok(registry.server_names())
-}
-
-/// Install an MCP server preset: connect it now AND persist its config to the
-/// project's mcp-servers.toml so it's reconnected on restart. The config layer
-/// (config/adapters) then distributes it into each agent's native format.
-#[tauri::command]
-pub async fn mcp_install_preset(
-    registry: State<'_, McpRegistry>,
-    project_path: String,
-    name: String,
-    command: String,
-    args: Vec<String>,
-    env: Option<Vec<(String, String)>>,
-) -> Result<(), AppError> {
-    // 1. Connect now (handshake) — fail fast if the server doesn't start.
-    let env_vec = env.clone().unwrap_or_default();
-    registry.connect(&name, &command, &args, &env_vec)?;
-
-    // 2. Persist to mcp-servers.toml in the project dir.
-    let config_path = std::path::Path::new(&project_path).join("mcp-servers.toml");
-    let mut config = if config_path.is_file() {
-        crate::config::mcp::load_mcp_config(&config_path)?
-    } else {
-        crate::models::McpConfigFile { servers: Vec::new() }
-    };
-    // Replace if a server with the same name already exists.
-    config.servers.retain(|s| s.name != name);
-    config.servers.push(crate::models::McpServerConfig {
-        name: name.clone(),
-        command,
-        args,
-        env: env_vec.into_iter().collect(),
-        enabled: true,
-        target_agents: Vec::new(),
-    });
-    crate::config::mcp::save_mcp_config(&config, &config_path)?;
-    Ok(())
 }
 
 /// Toggle a server's `enabled` flag in `mcp-servers.toml` AND sync the live
@@ -225,8 +179,9 @@ pub async fn mcp_delete_server(
 }
 
 /// Reconnect every enabled server from the project's `mcp-servers.toml`. Call
-/// this when a project opens so servers the user previously installed
-/// (`mcp_install_preset`) are live again without re-adding them. Returns the
+/// this when a project opens so servers the user previously configured
+/// (saved to `mcp-servers.toml` via the MCP settings UI) are live again
+/// without re-adding them. Returns the
 /// count newly connected. Per-server failures are logged, never fatal.
 #[tauri::command]
 pub async fn mcp_load_enabled(
