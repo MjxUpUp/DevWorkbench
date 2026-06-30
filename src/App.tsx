@@ -1,9 +1,10 @@
-import { useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
+import { useState, useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
 import { AddProject } from './components/AddProject';
 import { Sidebar } from './components/Sidebar';
 import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { SettingsView } from './components/settings/SettingsView';
+import { OnboardingWizard } from './components/onboarding/OnboardingWizard';
 import { TitleBar } from './components/layout/TitleBar';
 import { StatusBar } from './components/layout/StatusBar';
 import { ToastProvider } from './components/Toast';
@@ -46,11 +47,24 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 function App() {
   const { error: toolsError } = useTools();
 
+  // Wait for loadSettings to resolve before deciding whether to show the
+  // first-run onboarding overlay — otherwise the default (onboarding_completed
+  // === false) flashes the wizard for one frame even on an already-onboarded install.
+  const [onboardingChecked, setOnboardingChecked] = useState(false);
+
   // Zustand stores — select only needed fields to avoid re-renders on unrelated state changes
   const addProjectOpen = useNavigationStore((s) => s.addProjectOpen);
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
+  const onboardingOpen = useNavigationStore((s) => s.onboardingOpen);
+  const setOnboardingOpen = useNavigationStore((s) => s.setOnboardingOpen);
   const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
   const activeView = useNavigationStore((s) => s.activeView);
+
+  // Onboarding overlay trigger: auto-show once on a fresh install
+  // (onboarding_completed === false) after settings resolve, OR whenever the
+  // user re-opens it from Settings → 引导 (onboardingOpen === true).
+  const onboardingCompleted = useSettingsStore((s) => s.settings.onboarding_completed);
+  const saveSettings = useSettingsStore((s) => s.saveSettings);
 
   // Project store — load projects on mount
   const projects = useProjectStore((s) => s.projects);
@@ -66,7 +80,9 @@ function App() {
   useEffect(() => {
     // Apply a sane default immediately; loadSettings will refine it once persisted.
     applyTheme('auto');
-    loadSettings();
+    // .then flips onboardingChecked so the wizard overlay doesn't flash on by
+    // default for one frame before the persisted onboarding_completed arrives.
+    loadSettings().then(() => setOnboardingChecked(true));
   }, [loadSettings]);
 
   // Initialize agent store event listeners once (use getState to avoid re-render)
@@ -177,6 +193,17 @@ function App() {
       <MainStage />
       <CommandPalette />
       {activeView === 'settings' && <SettingsView />}
+
+      {onboardingChecked && (!onboardingCompleted || onboardingOpen) && (
+        <OnboardingWizard
+          closable={onboardingCompleted}
+          onClose={() => setOnboardingOpen(false)}
+          onDone={() => {
+            void saveSettings({ onboarding_completed: true });
+            setOnboardingOpen(false);
+          }}
+        />
+      )}
 
       {(projectError || toolsError) && <div className="error-banner" style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',zIndex:300}}>{projectError || toolsError}</div>}
 

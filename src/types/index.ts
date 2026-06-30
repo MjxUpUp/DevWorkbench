@@ -29,6 +29,9 @@ export interface AppSettings {
   palette: 'pi' | 'ink' | 'moss';
   preferred_terminal: string;
   cli_flags: Record<string, string>;
+  /** Whether the user finished the first-run onboarding wizard. false on a fresh
+ *  install → the wizard overlay shows; flipped true on completion. */
+  onboarding_completed: boolean;
 }
 
 export interface TerminalInfo {

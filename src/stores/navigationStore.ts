@@ -19,6 +19,11 @@ interface NavigationState {
   commandPaletteOpen: boolean;
   /** Add project modal open */
   addProjectOpen: boolean;
+  /** Onboarding wizard overlay open (relaunch from Settings). The first-run
+   *  trigger is `settings.onboarding_completed === false`, not this flag; this
+   *  only re-opens an already-completed wizard when the user clicks the relaunch
+   *  button in Settings → 引导. */
+  onboardingOpen: boolean;
   /** Sidebar width (user draggable) */
   sidebarWidth: number;
   /** Left column visible — zcode-style single-column toggle (replaces per-view auto-hide) */
@@ -40,6 +45,7 @@ interface NavigationState {
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setAddProjectOpen: (open: boolean) => void;
+  setOnboardingOpen: (open: boolean) => void;
   setSidebarWidth: (width: number) => void;
   toggleSidebar: () => void;
   /** Jump to the trace view scoped to one session (a turn). The trace view then
@@ -55,6 +61,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   expandedProjectId: null,
   commandPaletteOpen: false,
   addProjectOpen: false,
+  onboardingOpen: false,
   sidebarWidth: 240,
   sidebarOpen: true,
   traceSessionId: null,
@@ -75,6 +82,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
+  setOnboardingOpen: (open) => set({ onboardingOpen: open }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setTrace: (sessionId) => set({ traceSessionId: sessionId, activeView: 'trace' }),

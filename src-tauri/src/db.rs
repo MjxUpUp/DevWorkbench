@@ -286,7 +286,8 @@ CREATE TABLE IF NOT EXISTS settings (
     theme TEXT NOT NULL DEFAULT 'auto',
     palette TEXT NOT NULL DEFAULT 'pi',
     preferred_terminal TEXT NOT NULL DEFAULT '',
-    cli_flags TEXT NOT NULL DEFAULT '{}'
+    cli_flags TEXT NOT NULL DEFAULT '{}',
+    onboarding_completed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS workflows (

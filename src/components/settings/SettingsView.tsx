@@ -13,6 +13,7 @@ import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
 import { ForgeExperienceSection } from './ForgeExperienceSection';
+import { OnboardingRelaunchSection } from '../onboarding/OnboardingWizard';
 import type { SettingsSection } from './types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
@@ -66,7 +67,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection, group: '数据与诊断' },
   { id: 'quality-experience', label: '质量经验', Icon: IconShield, Component: ForgeExperienceSection, group: '数据与诊断' },
   // 入门
-  { id: 'onboarding', label: '引导', Icon: IconChat, placeholder: { title: '引导', desc: '新手引导与帮助文档', hint: '引导功能正在开发中，敬请期待' }, group: '入门' },
+  { id: 'onboarding', label: '引导', Icon: IconChat, Component: OnboardingRelaunchSection, group: '入门' },
 ];
 
 const GROUP_ORDER: SectionDef['group'][] = ['智能体', '能力扩展', '记忆与输出', '数据与诊断', '入门'];

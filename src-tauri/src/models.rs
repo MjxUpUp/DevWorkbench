@@ -46,6 +46,15 @@ pub struct AppSettings {
     pub preferred_terminal: String,
     #[serde(default)]
     pub cli_flags: std::collections::HashMap<String, String>,
+    /// Whether the user has completed the first-run onboarding wizard.
+    /// false on a fresh install → the wizard overlay shows; flipped to true
+    /// when the user finishes it (or relaunches it from Settings). serde(default)
+    /// so a legacy JSON blob missing the key doesn't block startup. Persisted in
+    /// the columnar `settings` table via load_settings_from_db /
+    /// save_settings_to_db — those read/write the column explicitly (added by
+    /// migrate_v19_to_v20), so this default only fires on JSON deserialization.
+    #[serde(default)]
+    pub onboarding_completed: bool,
 }
 
 fn default_theme() -> String {
@@ -598,6 +607,7 @@ mod tests {
             palette: "moss".into(),
             preferred_terminal: String::new(),
             cli_flags: std::collections::HashMap::new(),
+            onboarding_completed: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let back: AppSettings = serde_json::from_str(&json).expect("deserialize");

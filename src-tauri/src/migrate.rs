@@ -789,6 +789,47 @@ pub fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v19→v20: add `settings.onboarding_completed INTEGER` so the first-run
+/// wizard's completion flag survives a save → restart round-trip. Same idempotent
+/// shape as v18→v19: probe the column (fresh DBs already have it from the static
+/// SCHEMA), ALTER only if missing, then bump the version. No DEFAULT on the
+/// ALTER (a constant DEFAULT rewrites every row on SQLite); existing rows get
+/// NULL, which load_settings_from_db coerces to false — so pre-v20 users still
+/// see the wizard once, as if they'd just installed.
+pub fn migrate_v19_to_v20(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 20 {
+        return Ok(());
+    }
+
+    // rusqlite has no ADD COLUMN IF NOT EXISTS; probe by preparing a statement
+    // that references the column (same idiom as v18→v19's palette probe). A
+    // fresh DB already has `onboarding_completed` from the static SCHEMA and
+    // skips the ALTER.
+    let col_exists = conn
+        .prepare("SELECT onboarding_completed FROM settings LIMIT 0")
+        .is_ok();
+    if !col_exists {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN onboarding_completed INTEGER",
+            [],
+        )?;
+        log::info!("Migrated schema v19→v20: added settings.onboarding_completed column");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (20, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1612,6 +1653,29 @@ mod tests {
         conn
     }
 
+    /// Build a legacy v19 settings table WITHOUT the onboarding_completed
+    /// column (palette arrived in v19; onboarding_completed arrives in v20).
+    /// schema_version pinned to 19 so migrate_v19_to_v20 actually does work.
+    fn legacy_v20_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (19, '2026-06-01T00:00:00Z');
+             CREATE TABLE settings (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 scan_directories TEXT NOT NULL DEFAULT '[]',
+                 tool_paths TEXT NOT NULL DEFAULT '{}',
+                 theme TEXT NOT NULL DEFAULT 'auto',
+                 palette TEXT,
+                 preferred_terminal TEXT NOT NULL DEFAULT '',
+                 cli_flags TEXT NOT NULL DEFAULT '{}'
+             );
+             INSERT INTO settings (id) VALUES (1);",
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
     fn migrate_v18_to_v19_adds_palette_column_to_pre_v19_db() {
         let conn = legacy_v19_conn();
@@ -1685,10 +1749,94 @@ mod tests {
             palette: "moss".into(),
             preferred_terminal: String::new(),
             cli_flags: std::collections::HashMap::new(),
+            onboarding_completed: false,
         };
         crate::commands::projects::save_settings_to_db(&g.conn, &custom).unwrap();
         let back = crate::commands::projects::load_settings_from_db(&g.conn).unwrap();
         assert_eq!(back.palette, "moss", "palette must survive save→load");
         assert_eq!(back.theme, "dark");
+    }
+
+    // ── v19 → v20: settings.onboarding_completed ──
+
+    #[test]
+    fn migrate_v19_to_v20_adds_onboarding_completed_column_to_pre_v20_db() {
+        let conn = legacy_v20_conn();
+        assert_eq!(col_count(&conn, "settings", "onboarding_completed"), 0);
+
+        migrate_v19_to_v20(&conn).expect("pre-v20 migration must add onboarding_completed column");
+
+        assert_eq!(col_count(&conn, "settings", "onboarding_completed"), 1);
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 20, "version bumped to 20");
+    }
+
+    #[test]
+    fn migrate_v19_to_v20_is_idempotent() {
+        let conn = legacy_v20_conn();
+        migrate_v19_to_v20(&conn).expect("first run");
+        // Second run must not error on the now-present column (version-gated
+        // early-return makes it a no-op).
+        migrate_v19_to_v20(&conn).expect("second run (idempotent)");
+        assert_eq!(col_count(&conn, "settings", "onboarding_completed"), 1);
+    }
+
+    #[test]
+    fn migrate_v19_to_v20_is_a_noop_on_fresh_db() {
+        // A fresh DB (init_db ran the static SCHEMA with onboarding_completed
+        // already present) must migrate cleanly: probe finds the column (skips
+        // ALTER), then writes version=20.
+        let g = TempDb::new();
+        migrate_v19_to_v20(&g.conn).expect("fresh DB v20 migration must be a no-op");
+        assert_eq!(col_count(&g.conn, "settings", "onboarding_completed"), 1);
+    }
+
+    /// End-to-end pin: after v19→v20 on a legacy DB, the onboarding_completed
+    /// column on the pre-existing row is NULL (ALTER without DEFAULT), and
+    /// load_settings_from_db must coerce NULL → false so a pre-v20 user still
+    /// sees the first-run wizard exactly once.
+    #[test]
+    fn migrate_v19_to_v20_legacy_row_null_loads_as_false_default() {
+        let conn = legacy_v20_conn();
+        migrate_v19_to_v20(&conn).unwrap();
+        let raw: Option<i64> = conn
+            .query_row("SELECT onboarding_completed FROM settings WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert!(raw.is_none(), "ALTER without DEFAULT leaves NULL");
+
+        let loaded = crate::commands::projects::load_settings_from_db(&conn).unwrap();
+        assert_eq!(
+            loaded.onboarding_completed, false,
+            "NULL onboarding_completed must load as false, not panic"
+        );
+    }
+
+    /// Round-trip pin: save_settings_to_db then load_settings_from_db must
+    /// preserve onboarding_completed (true → true). Completing the wizard must
+    /// stick across restarts — this is the actual user-facing contract.
+    #[test]
+    fn save_then_load_settings_roundtrips_onboarding_completed() {
+        let g = TempDb::new();
+        let completed = crate::models::AppSettings {
+            scan_directories: vec![],
+            tool_paths: std::collections::HashMap::new(),
+            theme: "auto".into(),
+            palette: "pi".into(),
+            preferred_terminal: String::new(),
+            cli_flags: std::collections::HashMap::new(),
+            onboarding_completed: true,
+        };
+        crate::commands::projects::save_settings_to_db(&g.conn, &completed).unwrap();
+        let back = crate::commands::projects::load_settings_from_db(&g.conn).unwrap();
+        assert_eq!(
+            back.onboarding_completed, true,
+            "onboarding_completed must survive save→load"
+        );
     }
 }

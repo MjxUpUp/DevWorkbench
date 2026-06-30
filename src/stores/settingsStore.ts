@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   palette: 'pi',
   preferred_terminal: '',
   cli_flags: {},
+  onboarding_completed: false,
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({

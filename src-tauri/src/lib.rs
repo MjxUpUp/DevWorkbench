@@ -185,6 +185,10 @@ pub fn run() {
                     "v18→v19 settings.palette column migration",
                     migrate::migrate_v18_to_v19(&conn)
                 );
+                run_migrate!(
+                    "v19→v20 settings.onboarding_completed column migration",
+                    migrate::migrate_v19_to_v20(&conn)
+                );
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
