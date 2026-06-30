@@ -196,9 +196,14 @@ pub fn search_entries_for_project(
          LIMIT ?4",
     )?;
 
-    let safe = sanitize_fts_query(fts_query);
+    // fts_query is ALREADY a pre-formatted FTS5 query: extract_keywords
+    // emits safely double-quoted terms joined by OR (`"fix" OR "rust"`).
+    // Re-running sanitize_fts_query here would wrap that whole OR expression
+    // in one outer phrase → the literal sequence never matches anything, so
+    // cross-project injection silently returned empty. sanitize_fts_query is
+    // only for RAW user input (the search_entries path below).
     let entries = stmt.query_map(
-        params![&safe, project_hash, confidence_min, limit as i64],
+        params![fts_query, project_hash, confidence_min, limit as i64],
         row_to_entry,
     )?;
     let mut result = Vec::new();
@@ -227,10 +232,11 @@ pub fn search_entries_cross_project(
          LIMIT ?4",
     )?;
 
-    let safe = sanitize_fts_query(fts_query);
+    // fts_query is a pre-formatted FTS5 OR query from extract_keywords — do
+    // NOT sanitize_fts_query here (see search_entries_for_project above).
     let entries = stmt.query_map(
         params![
-            &safe,
+            fts_query,
             exclude_project_hash,
             confidence_min,
             limit as i64

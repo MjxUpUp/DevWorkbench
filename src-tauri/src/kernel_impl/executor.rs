@@ -1309,7 +1309,12 @@ mod tests {
             project_hash: "h".into(),
             category: cat.into(),
             title: format!("{id}-title"),
-            content: "内容".into(),
+            // DISTINCT content per entry: add_entry dedups on (project_hash,
+            // first 200 chars of content). Identical content + same
+            // project_hash "h" collapsed all 3 into 1 — only the first-added
+            // survived, so the assertion against r1/i1 panicked on entries
+            // never actually stored.
+            content: format!("{id}-content"),
             source_agent: AgentType::ClaudeCode,
             source_session_id: Some("other-session".into()),
             source_type: "react".into(),
