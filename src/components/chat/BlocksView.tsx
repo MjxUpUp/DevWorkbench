@@ -123,6 +123,27 @@ function BlockCard({ event, running, sessionId }: { event: ChatStreamEvent; runn
       );
     case 'compact':
       return <CompactCard event={event} sessionId={sessionId} />;
+    case 'approval_required':
+      // agentStore 短路 approval_required → ApprovalModal 弹窗（ApprovalModal.tsx:8），
+      // 该块不进 blocks 数组，正常不可达。保留 case 仅为 switch 类型穷尽。
+      return null;
+    default: {
+      // 穷尽检查：未来新增 ChatStreamEvent kind 时 TS 在此编译报错，强制显式
+      // 处理，修现状「新事件种类静默丢」脆弱性（groundup-refactor-direction:36）。
+      // 对齐 OrchestrateView.formatEvent 的 never default 模式。运行时兜底只在
+      // 后端发了前端未声明的 kind（类型撒谎）时到达——渲染可见占位，不静默丢。
+      const kindStr = (event as { kind: string }).kind;
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return (
+        <div
+          style={{ padding: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--warning, var(--text-tertiary))' }}
+          data-testid="chat-block-unknown"
+        >
+          未识别事件：{kindStr}
+        </div>
+      );
+    }
   }
 }
 
