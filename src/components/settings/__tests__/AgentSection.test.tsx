@@ -28,6 +28,7 @@ describe('AgentSection crash defense', () => {
         palette: 'pi' as const,
         preferred_terminal: '',
         cli_flags: {},
+        onboarding_completed: true,
       },
       error: null,
     });

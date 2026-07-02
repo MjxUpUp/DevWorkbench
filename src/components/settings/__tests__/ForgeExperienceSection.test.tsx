@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { ForgeExperienceSection } from '../ForgeExperienceSection';
 import { useNavigationStore } from '../../../stores/navigationStore';
-import type { ForgeExperienceReview } from '../../../types';
+import type { ForgeExperienceReview, Project } from '../../../types';
 
 /**
  * ForgeExperienceSection 补的是 B5 断点：后端 list_pending_forge_reviews /
@@ -26,7 +26,20 @@ function makeReview(taskRef: string, score = 60): ForgeExperienceReview {
   };
 }
 
-const PROJECT = { id: 'p1', name: 'demo', path: '/proj/demo' } as const;
+const PROJECT: Project = {
+  id: 'p1',
+  name: 'demo',
+  description: '',
+  path: '/proj/demo',
+  tags: [],
+  cover_image: null,
+  open_count: 0,
+  last_opened_at: null,
+  starred: false,
+  created_at: '2026-06-29T00:00:00Z',
+  last_opened_tools: [],
+  workspace_tools: [],
+};
 
 describe('ForgeExperienceSection', () => {
   beforeEach(() => {
