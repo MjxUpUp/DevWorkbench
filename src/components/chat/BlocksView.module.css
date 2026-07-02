@@ -1,7 +1,64 @@
 /* BlocksView — chat block 流容器。
- * v3：用 L1Thinking/L2ToolPill/Frame 组合，落地三段折叠范式。 */
+ * v3：用 L1Thinking/L2ToolPill/Frame 组合，落地三段折叠范式。
+ * 块3：按 tool_use 切分 plan 步骤，每步一个 StepGroup（步骤头 + 左边框状态色）。 */
 
 .blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 步骤分组——plan 可见性（启示1）。左边框按状态着色，步骤头标步骤号/tool/status。
+ * 默认全展开（保留 E2E chat-block-* 可见）；head 纯展示 div 不可折叠——避免 button
+ * 嵌套 button（步骤内 tool_result L2ToolPill head 是 button）+ a11y 红线。 */
+.stepGroup {
+  border-left: 2px solid var(--border-subtle);
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stepGroup[data-status='running'] {
+  border-left-color: var(--accent);
+}
+.stepGroup[data-status='error'] {
+  border-left-color: var(--color-error);
+}
+.stepGroup[data-kind='tool'][data-status='done'] {
+  border-left-color: var(--color-success);
+}
+.stepHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+}
+.stepIdx {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.stepTool {
+  color: var(--accent);
+}
+.stepLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.stepStatus {
+  margin-left: auto;
+}
+.stepStatus[data-s='running'] {
+  color: var(--accent);
+}
+.stepStatus[data-s='error'] {
+  color: var(--color-error);
+}
+.stepStatus[data-s='done'] {
+  color: var(--color-success);
+}
+.stepBody {
   display: flex;
   flex-direction: column;
   gap: 8px;

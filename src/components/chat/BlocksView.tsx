@@ -40,16 +40,88 @@ function normalizeEvents(events: ChatStreamEvent[]): ChatStreamEvent[] {
   return out;
 }
 
-/** Renders an agent's structured output as a stack of block cards — the
- *  chat-blocks UI for claude (and later ReactAgent). Each `agent:event` becomes
- *  one card: text (Markdown), tool_use (collapsible input), tool_result
- *  (collapsible output, red on error), result (final status line).
+/** 一个 plan 步骤——块3（启示1「让 plan 可见」）。ReactKernel 的 ReactAgent 无显式
+ *  plan 对象（plan 在 LLM context），故以 tool_use 为步骤锚点：前导 text/thinking 归
+ *  入"开场"或当前步骤的思路，tool_result 标记步骤完成度，result/compact 独立收尾。 */
+type StepKind = 'opening' | 'tool' | 'closing';
+type StepStatus = 'running' | 'done' | 'error';
+interface Step {
+  key: string;
+  kind: StepKind;
+  /** tool 步骤的连续序号（1-based，仅 tool 步骤计数） */
+  toolIdx?: number;
+  toolName?: string;
+  status: StepStatus;
+  events: ChatStreamEvent[];
+}
+
+/** 把合并后的时序事件按 tool_use 切分成 plan 步骤。
+ *  - 首个 tool_use 前的 text/thinking/file_changed → opening（开场说明）
+ *  - 每个 tool_use 起一步，后续到下个 tool_use 前的非收尾事件归入该步
+ *  - tool_result 落到最近 tool 步骤并标记完成度（done/error）
+ *  - result/compact → 独立 closing 步骤（整个 turn 的收尾/压缩，不属任何 tool） */
+function groupByStep(events: ChatStreamEvent[]): Step[] {
+  const steps: Step[] = [];
+  const opening: ChatStreamEvent[] = [];
+  let currentTool: Step | null = null;
+  let toolCounter = 0;
+  let idx = 0;
+
+  for (const ev of events) {
+    if (ev.kind === 'result' || ev.kind === 'compact') {
+      currentTool = null;
+      steps.push({
+        key: `close-${idx++}`,
+        kind: 'closing',
+        status: ev.kind === 'result' && ev.is_error ? 'error' : 'done',
+        events: [ev],
+      });
+    } else if (ev.kind === 'tool_use') {
+      currentTool = {
+        key: `tool-${idx++}`,
+        kind: 'tool',
+        toolIdx: ++toolCounter,
+        toolName: ev.name,
+        status: 'running',
+        events: [ev],
+      };
+      steps.push(currentTool);
+    } else if (ev.kind === 'tool_result') {
+      if (currentTool) {
+        currentTool.events.push(ev);
+        currentTool.status = ev.is_error ? 'error' : 'done';
+      } else {
+        // 孤儿 result（无前置 tool_use）——独立收尾展示
+        steps.push({
+          key: `orphan-${idx++}`,
+          kind: 'closing',
+          status: ev.is_error ? 'error' : 'done',
+          events: [ev],
+        });
+      }
+    } else {
+      // text/thinking/file_changed：归当前 tool 步骤，否则攒到 opening
+      if (currentTool) currentTool.events.push(ev);
+      else opening.push(ev);
+    }
+  }
+  if (opening.length) {
+    steps.unshift({ key: `opening-${idx++}`, kind: 'opening', status: 'done', events: opening });
+  }
+  return steps;
+}
+
+/** Renders an agent's structured output as a stack of plan-step-grouped block
+ *  cards — the chat-blocks UI for claude (and later ReactAgent).
  *
- * v3 重构：用 L1Thinking / L2ToolPill 替换原 ThinkingCard / ToolUseCard+
- * ToolResultCard，落地 Cursor 3.0 / Codex app 三段折叠范式。 */
+ * 块3（启示1）：事件流按 tool_use 切分成 plan 步骤，每步一个 StepGroup（步骤头标
+ * 步骤号/tool/status + 左边框状态色），步骤内仍是 BlockCard。默认全展开——保留
+ * E2E 的 chat-block-* 可见性，步骤头提供 plan 结构可见性（不再纯时序压扁）。
+ * 步骤头为纯展示 div（不可折叠）——避免 button 嵌套 button 违反 HTML（步骤内的
+ * tool_result L2ToolPill head 本身是 button）+ a11y 红线（design-refactor-complete）。 */
 export function BlocksView({ events, running, sessionId }: BlocksViewProps) {
   const waiting = running && events.length === 0;
-  const merged = useMemo(() => normalizeEvents(events), [events]);
+  const steps = useMemo(() => groupByStep(normalizeEvents(events)), [events]);
   return (
     <div className={styles.blocks} data-testid="chat-blocks">
       {waiting ? (
@@ -59,12 +131,41 @@ export function BlocksView({ events, running, sessionId }: BlocksViewProps) {
         </div>
       ) : (
         <>
-          {merged.map((ev, i) => (
-            <BlockCard key={i} event={ev} running={running} sessionId={sessionId} />
+          {steps.map((step) => (
+            <StepGroup key={step.key} step={step} running={running} sessionId={sessionId} />
           ))}
           {running && <span className={styles.cursor} data-testid="chat-streaming-cursor" aria-hidden="true" />}
         </>
       )}
+    </div>
+  );
+}
+
+const STATUS_ZH: Record<StepStatus, string> = {
+  running: '运行中',
+  done: '完成',
+  error: '失败',
+};
+
+function StepGroup({ step, running, sessionId }: { step: Step; running: boolean; sessionId?: string }) {
+  const label = step.kind === 'opening' ? '开场' : step.kind === 'closing' ? '收尾' : null;
+  return (
+    <div className={styles.stepGroup} data-status={step.status} data-kind={step.kind} data-testid="chat-step">
+      <div className={styles.stepHead}>
+        {step.kind === 'tool' ? (
+          <>
+            <span className={styles.stepIdx}>步骤 #{step.toolIdx}</span>
+            <span className={styles.stepStatus} data-s={step.status}>{STATUS_ZH[step.status]}</span>
+          </>
+        ) : (
+          <span className={styles.stepLabel}>{label}</span>
+        )}
+      </div>
+      <div className={styles.stepBody}>
+        {step.events.map((ev, i) => (
+          <BlockCard key={i} event={ev} running={running} sessionId={sessionId} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -309,6 +410,3 @@ function safeStringify(v: unknown): string {
     return String(v);
   }
 }
-
-// 兼容旧测试：保留默认导出的 useState 引用避免 tree-shake 警告（实际已不用）
-void useState;
