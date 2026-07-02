@@ -7,6 +7,10 @@ import {
   type EvalCaseRow,
   type ReplayVerdict,
   type ToolStep,
+  type FullTrajectory,
+  type Span,
+  type RubricScore,
+  type MechanismVerdict,
   type Matcher,
   type CreateCaseInput,
 } from '../../utils/evalApi';
@@ -117,6 +121,21 @@ function parseSteps(json: string | null): ToolStep[] {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+/// Strict JSON-array check for P2 save validation. expected_steps_json +
+/// negative_json are machine-consumed by score_eval_rubric's parse_names (which
+/// expects a JSON array); a non-array value there would silently score wrong.
+/// null/empty = "no constraint" (valid). Block the save with a real error
+/// instead of letting a malformed contract through (反刷分: the contract must
+/// be well-formed or it can't anchor a replay).
+function isArrayJson(s: string | null): boolean {
+  if (!s) return true;
+  try {
+    return Array.isArray(JSON.parse(s));
+  } catch {
+    return false;
   }
 }
 
@@ -347,6 +366,15 @@ function CaseDetail({
 
   async function save() {
     if (!draft) return;
+    // 校验门：预期步骤 / 反例必须是 JSON 数组（score_eval_rubric 的 parse_names
+    // 按数组消费；非数组会静默打错分）。坏契约直接拦下，不静默保存。
+    const errs: string[] = [];
+    if (!isArrayJson(draft.expected_steps_json)) errs.push('预期步骤须为 JSON 数组');
+    if (!isArrayJson(draft.negative_json)) errs.push('反例须为 JSON 数组');
+    if (errs.length > 0) {
+      setMsg(`校验失败：${errs.join('；')}`);
+      return;
+    }
     setSaving(true);
     setMsg(null);
     try {
@@ -459,7 +487,7 @@ function SessionToCase({
   const finished = sessions.filter((s) => s.status === 'completed' || s.status === 'failed');
 
   const [sessionId, setSessionId] = useState('');
-  const [steps, setSteps] = useState<ToolStep[] | null>(null);
+  const [traj, setTraj] = useState<FullTrajectory | null>(null);
   const [loading, setLoading] = useState(false);
   const [name, setName] = useState('');
   const [observables, setObservables] = useState('');
@@ -473,11 +501,11 @@ function SessionToCase({
   async function preview() {
     if (!sessionId) return;
     setLoading(true);
-    setSteps(null);
+    setTraj(null);
     setMsg(null);
     try {
-      const s = await evalApi.previewTrajectory(sessionId);
-      setSteps(s);
+      const t = await evalApi.previewTrajectory(sessionId);
+      setTraj(t);
       if (!name) {
         const sess = finished.find((x) => x.id === sessionId);
         if (sess) setName(sess.prompt.slice(0, 40) || '新 case');
@@ -490,7 +518,7 @@ function SessionToCase({
   }
 
   async function save(draft: boolean) {
-    if (!sessionId || !steps) return;
+    if (!sessionId || !traj) return;
     setMsg(null);
     try {
       const sess = finished.find((x) => x.id === sessionId);
@@ -498,7 +526,9 @@ function SessionToCase({
         name: name || '未命名 case',
         category: 'agent',
         inputPrompt: sess?.prompt ?? '(无提示词)',
-        expectedStepsJson: JSON.stringify(steps),
+        // Freeze the OBJECTIVE extracted steps — what a future replay scores
+        // against (反刷分 #1: contract from trace data, not the agent's say-so).
+        expectedStepsJson: JSON.stringify(traj.steps),
         expectedObservablesJson: observables || undefined,
         negativeJson: negative || undefined,
         sourceSessionId: sessionId,
@@ -512,6 +542,8 @@ function SessionToCase({
       setMsg(`入库失败：${e}`);
     }
   }
+
+  const failedN = traj ? traj.steps.filter((s) => s.status === 'error').length : 0;
 
   return (
     <div className="eval-card">
@@ -529,14 +561,21 @@ function SessionToCase({
       <Button variant="ghost" onClick={preview} disabled={loading || !sessionId}>
         {loading ? '提取中…' : '提取轨迹'}
       </Button>
-      {steps && (
+      {traj && (
         <div className="eval-steps-box">
-          <div className="eval-hint mono">提取到 {steps.length} 步轨迹</div>
+          {/* Rich summary: steps / files / tokens / cost — all derived from the
+              same trace rows + the session's recorded file diff, no LLM. */}
+          <div className="eval-hint mono">
+            提取到 {traj.steps.length} 步轨迹
+            {failedN > 0 && <span className="eval-hint-err"> · ⚠ {failedN} 步失败</span>} · {traj.files_changed.length} 文件 ·{' '}
+            {traj.input_tokens}+{traj.output_tokens} tokens · ≈ {traj.cost_cents.toFixed(3)}¢（估算）·{' '}
+            {traj.span_tree.roots.length} LLM span
+          </div>
           <div className="eval-step-list">
-            {steps.length === 0 ? (
+            {traj.steps.length === 0 ? (
               <span className="eval-empty">该会话无工具调用（纯文本轮）</span>
             ) : (
-              steps.map((s, i) => (
+              traj.steps.map((s, i) => (
                 <div key={i} className="eval-step">
                   <span className="eval-step-idx">{i + 1}</span>
                   <span className={`eval-tool-tag ${s.status === 'error' ? 'fail' : ''}`}>{s.name}</span>
@@ -544,6 +583,18 @@ function SessionToCase({
               ))
             )}
           </div>
+          {traj.files_changed.length > 0 && (
+            <div className="eval-files-box">
+              <div className="eval-section-label">文件变更（git diff 快照 + per-write）</div>
+              <div className="eval-file-list mono">
+                {traj.files_changed.map((f) => (
+                  <span key={f} className="eval-file-tag">
+                    {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -565,10 +616,10 @@ function SessionToCase({
       />
 
       <div className="eval-actions">
-        <Button variant="primary" onClick={() => save(false)} disabled={!steps}>
+        <Button variant="primary" onClick={() => save(false)} disabled={!traj}>
           入库为 ready
         </Button>
-        <Button variant="ghost" onClick={() => save(true)} disabled={!steps}>
+        <Button variant="ghost" onClick={() => save(true)} disabled={!traj}>
           存为 probe
         </Button>
         {msg && <span className="eval-hint">{msg}</span>}
@@ -579,6 +630,24 @@ function SessionToCase({
 
 // ── P4 评测任务配置（4 类评测对象）──
 type EvalObject = 'agent' | 'platform-mechanism' | 'platform-e2e' | 'platform-enablement';
+const OBJ_LABEL: Record<EvalObject, string> = {
+  agent: 'Agent',
+  'platform-mechanism': '平台-机制',
+  'platform-e2e': '平台-e2e',
+  'platform-enablement': '平台-加持',
+};
+
+/// P4 平台-机制 eval 的默认 DAG 样例（linear：prompt → agent → gate）。改
+/// YAML / 期望即可复测引擎的 routing / gate / fail 行为。
+const SAMPLE_MECHANISM_YAML = `start: prompt_1
+end: gate_1
+nodes:
+  prompt_1: { type: prompt, text: "refactor auth" }
+  agent_1:  { type: agent,  agent: stub, prompt: "do work" }
+  gate_1:   { type: gate,   gate: forge }
+edges:
+  - { from: prompt_1, to: agent_1 }
+  - { from: agent_1,  to: gate_1 }`;
 
 function ReplayLaunch({
   cases,
@@ -609,8 +678,6 @@ function ReplayLaunch({
   useEffect(() => {
     setWorkingDir(workingFallback);
   }, [workingFallback]);
-
-  const platformReady = obj === 'agent';
 
   async function run() {
     if (!caseId || !workingDir) return;
@@ -647,69 +714,168 @@ function ReplayLaunch({
           </label>
         ))}
       </div>
-      {!platformReady && (
+      {obj === 'platform-mechanism' && <PlatformMechanismRunner />}
+      {(obj === 'platform-e2e' || obj === 'platform-enablement') && (
         <div className="eval-gap-note">
-          ⚠「{obj}」需平台评测驱动（L3 扩展 / 复用 playwright harness），当前未接入。下方回放仅 Agent 类可用。
+          ⚠「{OBJ_LABEL[obj]}」需平台评测驱动（
+          {obj === 'platform-e2e'
+            ? '复用 playwright harness 跑真前端 + IPC + 数据流全栈'
+            : '成对开/关 DW 功能比对 agent 增量'}
+          ），当前未接入——按反刷分原则不造假判决。
         </div>
       )}
 
-      <div className="eval-section-label">② Case（已审核）</div>
-      <div className="eval-case-list">
-        {readyCases.length === 0 ? (
-          <span className="eval-empty">无已审核 case。先在 P2 审核。</span>
-        ) : (
-          readyCases.map((c) => (
-            <button
-              key={c.id}
-              className={`eval-case-row ${caseId === c.id ? 'selected' : ''}`}
-              onClick={() => setCaseId(c.id)}
-            >
-              <span className="eval-badge eval-badge-clear">ready</span>
-              <span className="eval-case-title">{c.name}</span>
-              <span className="eval-hint mono">{c.category}</span>
-            </button>
-          ))
-        )}
+      {obj === 'agent' && (
+        <>
+          <div className="eval-section-label">② Case（已审核）</div>
+          <div className="eval-case-list">
+            {readyCases.length === 0 ? (
+              <span className="eval-empty">无已审核 case。先在 P2 审核。</span>
+            ) : (
+              readyCases.map((c) => (
+                <button
+                  key={c.id}
+                  className={`eval-case-row ${caseId === c.id ? 'selected' : ''}`}
+                  onClick={() => setCaseId(c.id)}
+                >
+                  <span className="eval-badge eval-badge-clear">ready</span>
+                  <span className="eval-case-title">{c.name}</span>
+                  <span className="eval-hint mono">{c.category}</span>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="eval-section-label">③ 工作区 / 匹配器</div>
+          <div className="eval-row2">
+            <input className="eval-input" value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="工作区路径（只读沙箱）" />
+            <select className="eval-input" value={matcher} onChange={(e) => setMatcher(e.target.value as Matcher)}>
+              {MATCHERS.map((m) => (
+                <option key={m} value={m}>
+                  {MATCHER_LABEL[m]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="eval-hint">
+            Plan 沙箱：agent 只能 Read/Glob/Grep，Bash/Write 在 hook 层被拦。轨迹是工具选择，非执行副作用。
+          </div>
+
+          <div className="eval-actions">
+            <Button variant="primary" onClick={run} disabled={running || !caseId || !workingDir}>
+              {running ? '回放中…' : '▶ 运行回放'}
+            </Button>
+            {result && (
+              <span className="eval-replay-result">
+                <VerdictBadge verdict={result.verdict} />
+                <span className="mono">
+                  {' '}
+                  {result.score.toFixed(2)} · {result.negative_violated ? '⚠ 反例命中' : '无反例'}
+                </span>
+              </span>
+            )}
+            {err && <span className="eval-hint eval-hint-err">{err}</span>}
+          </div>
+          {result && (
+            <div className="eval-locked mono">
+              {result.reason}
+              <br />
+              查看完整 verdict →{' '}
+              <button className="eval-link" onClick={() => pickCase(caseId)}>
+                P2 / V1
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── P4 平台-机制 eval 运行器（真驱动，无 LLM：判决=引擎 GraphEvent 序的客观事实）──
+function PlatformMechanismRunner() {
+  const [yaml, setYaml] = useState(SAMPLE_MECHANISM_YAML);
+  const [orderText, setOrderText] = useState('prompt_1, agent_1, gate_1');
+  const [terminal, setTerminal] = useState('done');
+  const [running, setRunning] = useState(false);
+  const [verdict, setVerdict] = useState<MechanismVerdict | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function run() {
+    setRunning(true);
+    setErr(null);
+    setVerdict(null);
+    try {
+      const expect_order = orderText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const v = await evalApi.runPlatformMechanism(
+        yaml,
+        { seed: 'mechanism-eval' },
+        { expect_order, expect_terminal: terminal },
+      );
+      setVerdict(v);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="eval-mechanism">
+      <div className="eval-section-label">机制契约（kernel-compose DAG YAML）</div>
+      <textarea
+        className="eval-yaml mono"
+        value={yaml}
+        onChange={(e) => setYaml(e.target.value)}
+        rows={10}
+        spellCheck={false}
+      />
+      <div className="eval-hint">
+        stub executor：agent 节点回显 prompt 大写、gate 全过——判决只反映引擎的节点序 + 终态（反刷分 #1：客观事实，无 LLM）。
       </div>
 
-      <div className="eval-section-label">③ 工作区 / 匹配器</div>
+      <div className="eval-section-label">期望（确定性契约）</div>
       <div className="eval-row2">
-        <input className="eval-input" value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="工作区路径（只读沙箱）" />
-        <select className="eval-input" value={matcher} onChange={(e) => setMatcher(e.target.value as Matcher)}>
-          {MATCHERS.map((m) => (
-            <option key={m} value={m}>
-              {MATCHER_LABEL[m]}
-            </option>
-          ))}
+        <input
+          className="eval-input"
+          value={orderText}
+          onChange={(e) => setOrderText(e.target.value)}
+          placeholder="期望节点序（逗号分隔；留空=不查）"
+        />
+        <select className="eval-input" value={terminal} onChange={(e) => setTerminal(e.target.value)}>
+          <option value="">不查终态</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+          <option value="interrupted">interrupted</option>
         </select>
       </div>
       <div className="eval-hint">
-        Plan 沙箱：agent 只能 Read/Glob/Grep，Bash/Write 在 hook 层被拦。轨迹是工具选择，非执行副作用。
+        ⚠ 波式并行：同波独立节点可能交错，expect_order 仅对 linear/branch/selector 图确定性；并行图留空只查终态。
       </div>
 
       <div className="eval-actions">
-        <Button variant="primary" onClick={run} disabled={running || !caseId || !workingDir || !platformReady}>
-          {running ? '回放中…' : '▶ 运行回放'}
+        <Button variant="primary" onClick={run} disabled={running}>
+          {running ? '驱动引擎…' : '▶ 运行机制评测'}
         </Button>
-        {result && (
+        {verdict && (
           <span className="eval-replay-result">
-            <VerdictBadge verdict={result.verdict} />
+            <VerdictBadge verdict={verdict.pass ? 'PASS' : 'FAIL'} />
             <span className="mono">
               {' '}
-              {result.score.toFixed(2)} · {result.negative_violated ? '⚠ 反例命中' : '无反例'}
+              终态 {verdict.actual_terminal} · 序 {verdict.actual_order.join(' → ') || '∅'}
             </span>
           </span>
         )}
         {err && <span className="eval-hint eval-hint-err">{err}</span>}
       </div>
-      {result && (
+      {verdict && !verdict.pass && (
         <div className="eval-locked mono">
-          {result.reason}
-          <br />
-          查看完整 verdict →{' '}
-          <button className="eval-link" onClick={() => pickCase(caseId)}>
-            P2 / V1
-          </button>
+          {verdict.mismatches.map((m, i) => (
+            <div key={i}>✗ {m}</div>
+          ))}
         </div>
       )}
     </div>
@@ -753,8 +919,18 @@ function PairedCompare({
         </p>
       ) : (
         <div className="eval-compare">
-          <CompareCol title={`旧 · ${fmtTime(oldV.created_at)}`} v={oldV} kind="old" />
-          <CompareCol title={`新 · ${fmtTime(newV.created_at)}`} v={newV} kind={newScore(oldV, newV)} />
+          <CompareCol
+            title={`旧 · ${fmtTime(oldV.created_at)}`}
+            v={oldV}
+            kind="old"
+            otherSteps={stepsOf(newV)}
+          />
+          <CompareCol
+            title={`新 · ${fmtTime(newV.created_at)}`}
+            v={newV}
+            kind={newScore(oldV, newV)}
+            otherSteps={stepsOf(oldV)}
+          />
           <div className="eval-compare-summary">
             {netVerdict(oldV, newV) === 'improve' ? (
               <span className="eval-badge eval-badge-clear">净提升 · 可准入</span>
@@ -774,12 +950,29 @@ function PairedCompare({
   );
 }
 
-function scoreOf(v: VerdictRow): number {
+export function scoreOf(v: VerdictRow): number {
   try {
     const r = JSON.parse(v.report ?? '{}') as { score?: number };
-    return typeof r.score === 'number' ? r.score : v.verdict === 'PASS' ? 1 : 0;
+    if (typeof r.score === 'number') return r.score;
+    // VerdictBadge treats a leading-digit verdict ("0.85") as a pass — mirror
+    // that here so a numeric-verdict row scores as its value, not 0. Without
+    // this, a "0.85" verdict would badge green but score 0 in PairedCompare,
+    // silently flipping a CLEAR/BRAKE (反刷分: mis-scored verdict).
+    if (/^\d/.test(v.verdict)) return parseFloat(v.verdict) || 0;
+    return v.verdict === 'PASS' ? 1 : 0;
   } catch {
     return 0;
+  }
+}
+
+/// The actual tool-step names a verdict's replay ran (from its report). Empty
+/// when the report carries none. P5's paired compare diffs old vs new on this.
+function stepsOf(v: VerdictRow): string[] {
+  try {
+    const r = JSON.parse(v.report ?? '{}') as { actual_steps?: string[] };
+    return r.actual_steps ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -794,15 +987,23 @@ function netVerdict(oldV: VerdictRow, newV: VerdictRow): 'improve' | 'regress' |
   return newScore(oldV, newV);
 }
 
-function CompareCol({ title, v, kind }: { title: string; v: VerdictRow; kind: string }) {
-  const steps: string[] = (() => {
-    try {
-      const r = JSON.parse(v.report ?? '{}') as { actual_steps?: string[] };
-      return r.actual_steps ?? [];
-    } catch {
-      return [];
-    }
-  })();
+function CompareCol({
+  title,
+  v,
+  kind,
+  otherSteps,
+}: {
+  title: string;
+  v: VerdictRow;
+  kind: string;
+  otherSteps: string[];
+}) {
+  const steps = stepsOf(v);
+  // Diff highlight: a step UNIQUE to this side (absent from the paired other
+  // side, case-insensitive) is what the strategy change added/removed — the
+  // anti-gaming signal in 配对回放. Tag it so the eye lands on the delta, not
+  // the shared prefix.
+  const other = new Set(otherSteps.map((s) => s.toLowerCase()));
   return (
     <div className={`eval-compare-col ${kind === 'regress' ? 'regress' : kind === 'improve' ? 'improve' : ''}`}>
       <div className="eval-col-head">
@@ -813,12 +1014,15 @@ function CompareCol({ title, v, kind }: { title: string; v: VerdictRow; kind: st
         {steps.length === 0 ? (
           <span className="eval-hint mono">（无轨迹步骤）</span>
         ) : (
-          steps.map((s, i) => (
-            <div key={i} className="eval-step">
-              <span className="eval-step-idx">{i + 1}</span>
-              <span className="eval-tool-tag">{s}</span>
-            </div>
-          ))
+          steps.map((s, i) => {
+            const unique = !other.has(s.toLowerCase());
+            return (
+              <div key={i} className="eval-step">
+                <span className="eval-step-idx">{i + 1}</span>
+                <span className={`eval-tool-tag ${unique ? 'diff' : ''}`}>{s}</span>
+              </div>
+            );
+          })
         )}
       </div>
       <AttributionBadge value={v.attribution} />
@@ -826,7 +1030,7 @@ function CompareCol({ title, v, kind }: { title: string; v: VerdictRow; kind: st
   );
 }
 
-// ── P6 rubric ──
+// ── P6 rubric（8 维 AgentX 可靠性）──
 function RubricCard({
   verdicts,
   caseName,
@@ -837,42 +1041,90 @@ function RubricCard({
   const evalVs = verdicts.filter((v) => v.gate === 'eval');
   const latest = evalVs[0];
 
+  const [score, setScore] = useState<RubricScore | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Fetch the rubric for the latest eval verdict's session×case. The verdict
+  // carries the replay's session_id (run_eval_replay mints a fresh one) +
+  // case_id — exactly what score_eval_rubric assembles RubricInput from.
+  useEffect(() => {
+    if (!latest?.session_id || !latest?.case_id) {
+      setScore(null);
+      setErr(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setErr(null);
+    evalApi
+      .scoreRubric(latest.session_id!, latest.case_id!)
+      .then((s) => {
+        if (!cancelled) setScore(s);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [latest?.session_id, latest?.case_id]);
+
+  if (!latest) {
+    return <p className="eval-empty">尚无 eval verdict。先在 P4 跑一次回放。</p>;
+  }
+  if (!latest.session_id || !latest.case_id) {
+    return (
+      <div className="eval-card">
+        <div className="eval-hint mono">
+          最近 eval verdict · {verdictTarget(latest, caseName)} · {fmtTime(latest.created_at)}
+        </div>
+        <div className="eval-gap-note">
+          ⚠ 该 verdict 缺 session_id / case_id（Executor gate 跨 crate trait 无 session 上下文，verdict
+          先存 None）。8 维 rubric 需 session×case 才能装配 —— 去 P4 跑一次回放（run_eval_replay 自带
+          session_id）即可在此看到。
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="eval-card">
-      {latest ? (
+      <div className="eval-hint mono">
+        最近 eval verdict · {verdictTarget(latest, caseName)} · {fmtTime(latest.created_at)} · session #
+        {latest.session_id.slice(0, 8)}
+      </div>
+
+      {loading && <p className="eval-empty">计算 8 维 rubric…</p>}
+      {err && <p className="eval-empty">计算失败：{err}</p>}
+
+      {score && (
         <>
-          <div className="eval-hint mono">
-            最近一次 eval verdict · {verdictTarget(latest, caseName)} · {fmtTime(latest.created_at)}
+          <div className="eval-rubric-q">
+            <span className="eval-rubric-q-label">Q_code（加权可靠性）</span>
+            <span className={`eval-rubric-q-val ${score.q_code > 0.7 ? 'good' : score.q_code > 0.4 ? 'warn' : 'bad'}`}>
+              {score.q_code.toFixed(3)}
+            </span>
+            {score.hard_gate_triggered && (
+              <span className="eval-badge eval-badge-brake">⚠ 硬门触发 · Q=0</span>
+            )}
           </div>
           <div className="eval-rubric">
-            <RubricRow name="工具选择准确率" pct={scoreOf(latest) * 100} val={scoreOf(latest).toFixed(2)} />
-            <RubricRow
-              name="反例命中（硬门）"
-              pct={isNegViolated(latest) ? 0 : 100}
-              val={isNegViolated(latest) ? '=0 命中' : '无'}
-              hard
-            />
-            <RubricRow name="attribution（因果归因）" pct={latest.attribution === 'CLEAR' ? 100 : 30} val={latest.attribution ?? '—'} />
+            {score.dims.map((d) => (
+              <RubricRow key={d.key} name={d.label} pct={d.score * 100} val={d.val} hard={d.hard} />
+            ))}
           </div>
-          <div className="eval-gap-note">
-            ⚠ AgentX 8 维（attribute hallucination / correctness-loop / harness-pattern / DSL / dryrun
-            等）需 scoring.rs 扩展，当前后端仅 3 态 grade + 反例硬门。已展示可计算维度。
+          <div className="eval-hint">
+            8 维全部确定性派生自 trace/文件/契约（反刷分 #1：LLM 不给自己的可靠性打分）。manual
+            intervention 是硬门：任何人工干预→Q 归零。replay 跑 Plan 只读沙箱，本无人工干预。
           </div>
         </>
-      ) : (
-        <p className="eval-empty">尚无 eval verdict。先在 P4 跑一次回放。</p>
       )}
     </div>
   );
-}
-
-function isNegViolated(v: VerdictRow): boolean {
-  try {
-    const r = JSON.parse(v.report ?? '{}') as { negative_violated?: boolean };
-    return r.negative_violated === true;
-  } catch {
-    return false;
-  }
 }
 
 function RubricRow({ name, pct, val, hard }: { name: string; pct: number; val: string; hard?: boolean }) {
@@ -1056,6 +1308,17 @@ function RegressionCurve({ trend }: { trend: TrendPoint[] }) {
   if (trend.length === 0) {
     return <p className="eval-empty">暂无评估数据。回放（P4）或对会话打分即生成首条轨迹评分。</p>;
   }
+  if (trend.length < 2) {
+    // 单点画不出趋势线 —— 诚实标注数据不足，不渲染一根伪趋势。
+    return (
+      <div className="eval-card">
+        <p className="eval-empty">
+          仅 {trend.length} 天数据（{trend[0].date} · 均分 {trend[0].avg_score.toFixed(2)} · {trend[0].count} 次）。
+          回归曲线需 ≥2 天才能看趋势 —— 再回放几次（P4）补点。
+        </p>
+      </div>
+    );
+  }
   const data = {
     labels: trend.map((p) => p.date),
     datasets: [
@@ -1132,15 +1395,92 @@ function Flywheel({
   );
 }
 
-// ── A1 OTel（诚实空壳）──
+// ── A1 配对 Trace 树（span forest）──
 function OtelTraces() {
+  const sessions = useAgentStore((s) => s.sessions);
+  const finished = sessions.filter((s) => s.status === 'completed' || s.status === 'failed');
+
+  const [sessionId, setSessionId] = useState('');
+  const [traj, setTraj] = useState<FullTrajectory | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionId && finished.length > 0) setSessionId(finished[0].id);
+  }, [finished, sessionId]);
+
+  async function load() {
+    if (!sessionId) return;
+    setLoading(true);
+    setErr(null);
+    try {
+      setTraj(await evalApi.previewTrajectory(sessionId));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (sessionId) void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const rootCount = traj?.span_tree.roots.length ?? 0;
+  const toolSpanCount =
+    traj?.span_tree.roots.reduce((n, r) => n + (r.children?.length ?? 0), 0) ?? 0;
+
   return (
     <div className="eval-card">
-      <div className="eval-gap-note">
-        A1 OTel 数据层未接入（零起步）。现状：trace/ 是自定义 HTTP 日志，无 span 树 / OTLP。
-        计划：LLM 调用=父 span，tool 调用=子 span，tid 串联左右配对会话，给 L4 paired 提供对齐底座。
-      </div>
-      <p className="eval-empty">配对 Trace 树视图依赖 A1 接入后渲染。</p>
+      <div className="eval-section-label">选会话（渲染其 span 森林）</div>
+      <select className="eval-input" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
+        {finished.length === 0 && <option value="">暂无已完成会话</option>}
+        {finished.map((s) => (
+          <option key={s.id} value={s.id}>
+            #{s.id.slice(0, 8)} · {s.prompt.slice(0, 40) || '(无提示词)'}
+          </option>
+        ))}
+      </select>
+
+      {loading && <p className="eval-empty">提取 span 树…</p>}
+      {err && <p className="eval-empty">提取失败：{err}</p>}
+
+      {traj && (
+        <>
+          <div className="eval-hint mono">
+            {rootCount} 个 LLM 父 span · {toolSpanCount} 个 tool 子 span · 配对对齐底座（LLM=父，tool=子，
+            tid 串联给 L4 paired 用）
+          </div>
+          <div className="eval-span-forest">
+            {rootCount === 0 ? (
+              <span className="eval-empty">该会话无 trace span（纯文本轮 / 未记录）</span>
+            ) : (
+              traj.span_tree.roots.map((r, i) => <SpanNode key={i} span={r} depth={0} />)
+            )}
+          </div>
+          <div className="eval-hint">
+            现状：span 树从已记录的 HTTP trace 派生（非 OTLP）。左右配对会话的 tid 串联对齐是 L4 paired
+            的下一步。
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SpanNode({ span, depth }: { span: Span; depth: number }) {
+  const isLlm = span.kind === 'llm';
+  const failed = span.status === 'error';
+  return (
+    <div className={`eval-span ${isLlm ? 'llm' : 'tool'} ${failed ? 'fail' : ''}`} style={{ marginLeft: depth * 16 }}>
+      <span className="eval-span-kind">{isLlm ? '◐ LLM' : '└ tool'}</span>
+      <span className="eval-span-name mono">{span.name}</span>
+      {span.latency_ms != null && <span className="eval-hint mono">{span.latency_ms}ms</span>}
+      {failed && <span className="eval-badge eval-badge-brake">error</span>}
+      {(span.children ?? []).map((c, i) => (
+        <SpanNode key={i} span={c} depth={depth + 1} />
+      ))}
     </div>
   );
 }

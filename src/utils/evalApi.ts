@@ -40,6 +40,64 @@ export interface ToolStep {
   status: string | null;
 }
 
+/** A1 span 树的一个节点。kind="llm" 是父 LLM 调用 span（每条 trace 一个），
+ *  kind="tool" 是挂在它下面的工具调用子 span。latency/status 直接取自 trace 行。 */
+export interface Span {
+  kind: string;
+  name: string;
+  latency_ms?: number;
+  status?: string;
+  children?: Span[];
+}
+
+/** P3 富轨迹：工具步 + 文件变更 + token 用量 + 估算成本 + span 树。
+ *  preview_session_trajectory 返回。cost_cents 是 ESTIMATE_RATE_PER_M_TOKENS
+ *  的粗估（token 才是真信号；真实计价在 cost 模块按 provider 算）。 */
+export interface FullTrajectory {
+  steps: ToolStep[];
+  files_changed: string[];
+  input_tokens: number;
+  output_tokens: number;
+  /** 粗估成本（USD¢），标注「估算」。 */
+  cost_cents: number;
+  span_tree: { roots: Span[] };
+}
+
+/** P6 八维 rubric 的一维。score∈[0,1]；val 是原始读数（"2 次"/"3/4"/"=0 命中"）；
+ *  hard 标硬门维度（失败直接把 Q_code 归零）。 */
+export interface RubricDim {
+  key: string;
+  label: string;
+  score: number;
+  val: string;
+  hard?: boolean;
+}
+
+/** P6 八维可靠性判决。q_code 是加权汇总（任一硬门触发→0）；hard_gate_triggered
+ *  标是否触发了 manual-intervention 硬门。 */
+export interface RubricScore {
+  dims: RubricDim[];
+  q_code: number;
+  hard_gate_triggered: boolean;
+}
+
+/** P4 平台-机制 eval 的确定性契约：期望的节点执行序 + 终态。任一字段空=不查。 */
+export interface MechanismExpect {
+  expect_order: string[];
+  /** "done" | "failed" | "interrupted"；空=不查。 */
+  expect_terminal: string;
+}
+
+/** P4 平台-机制 eval 的判决。pass=所有非空期望都命中引擎实际行为。 */
+export interface MechanismVerdict {
+  pass: boolean;
+  actual_order: string[];
+  actual_terminal: string;
+  expected_order: string[];
+  expected_terminal: string;
+  mismatches: string[];
+}
+
 /** L2 eval case —— 回放/配对跑的确定性契约。 */
 export interface EvalCaseRow {
   id: string;
@@ -172,7 +230,24 @@ export const evalApi = {
     invoke<ReplayVerdict>('run_eval_replay', { caseId, workingDir, matcher, model }),
 
   // ----- P3 会话→Case 预览 -----
-  /** 预览一个会话重建的工具轨迹（不落库）。P3 向导展示，让用户在存草稿前 curate。 */
+  /** 预览一个会话重建的富轨迹（不落库）：步 + 文件 + token + 成本 + span 树。
+   *  P3 向导展示，让用户在存草稿前 curate；A1 也用它渲染 span 树。 */
   previewTrajectory: (sessionId: string) =>
-    invoke<ToolStep[]>('preview_session_trajectory', { sessionId }),
+    invoke<FullTrajectory>('preview_session_trajectory', { sessionId }),
+
+  // ----- P6 八维 rubric -----
+  /** 对一个 session×case 算 8 维 AgentX 可靠性 rubric（纯函数，无 LLM 自评）。
+   *  装配 RubricInput 全部来自已记录事实（trace 步/失败、activity 文件、case 契约）。 */
+  scoreRubric: (sessionId: string, caseId: string, matcher: Matcher = 'exact_match') =>
+    invoke<RubricScore>('score_eval_rubric', { sessionId, caseId, matcher }),
+
+  // ----- P4 平台-机制 eval -----
+  /** 跑一个平台-机制 case：编译 YAML 工作流，stub executor 驱动，对比节点序+终态。
+   *  无 LLM——判决是引擎 GraphEvent 序的客观事实（反刷分 #1）。 */
+  runPlatformMechanism: (
+    graphYaml: string,
+    inputJson: unknown,
+    expect: MechanismExpect,
+  ) =>
+    invoke<MechanismVerdict>('eval_platform_mechanism', { graphYaml, inputJson, expect }),
 };

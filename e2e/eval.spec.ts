@@ -61,12 +61,36 @@ test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, 
   await expect(page.getByText('净提升 · 可准入')).toBeVisible();
   await expect(page.getByText('回归 · 拦')).toHaveCount(0);
 
-  // ── 4 evaluation objects + honest gap-note for the 3 platform types (P4). ──
+  // ── 4 evaluation objects (P4). 平台-机制 is a REAL driver now (stub executor
+  //    → DAG engine → node-order + terminal verdict, no LLM); only e2e /
+  //    enablement stay honest gap-notes. ──
   await page.getByTestId('eval-nav-P4').click();
   await expect(page.getByText('平台-机制')).toBeVisible();
   await expect(page.getByText('平台-e2e')).toBeVisible();
   await expect(page.getByText('平台-加持')).toBeVisible();
-  // Selecting a platform object surfaces the honest gap-note — no fake driver.
+  // 平台-机制 → real runner: the 运行机制评测 button is live (not a gap-note).
   await page.locator('label', { hasText: '平台-机制' }).click();
+  await expect(page.getByRole('button', { name: /运行机制评测/ })).toBeVisible();
+  await expect(page.getByText(/需平台评测驱动/)).toHaveCount(0);
+  // Drive it → the verdict renders (PASS · 终态 done).
+  await page.getByRole('button', { name: /运行机制评测/ }).click();
+  await expect(page.getByText('PASS')).toBeVisible();
+  // 平台-e2e + 平台-加持 still carry the honest gap-note — no fake driver.
+  await page.locator('label', { hasText: '平台-e2e' }).click();
   await expect(page.getByText(/需平台评测驱动/)).toBeVisible();
+  await page.locator('label', { hasText: '平台-加持' }).click();
+  await expect(page.getByText(/需平台评测驱动/)).toBeVisible();
+
+  // ── P6: the 8-dim AgentX reliability rubric + weighted Q_code render. The
+  //    newest eval verdict (v-eval-new) carries session_id + case_id, so
+  //    RubricCard assembles the rubric via score_eval_rubric. Locks the gap
+  //    closure: a prior version showed a 3-row fake rubric + "needs scoring.rs
+  //    extension" note; the backend now computes all 8 dims. ──
+  await page.getByTestId('eval-nav-P6').click();
+  await expect(page.getByText(/Q_code/)).toBeVisible();
+  // All 8 dimension labels render (S-tier hallucination + hard-gate manual).
+  await expect(page.getByText('attribute hallucination')).toBeVisible();
+  await expect(page.getByText('manual intervention ⚠硬门')).toBeVisible();
+  await expect(page.getByText('harness-pattern')).toBeVisible();
+  await expect(page.getByText('dryrun pass')).toBeVisible();
 });

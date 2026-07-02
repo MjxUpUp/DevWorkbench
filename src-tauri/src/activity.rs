@@ -166,6 +166,39 @@ pub fn get_recent_events(
     Ok(result)
 }
 
+/// Union of every `files_changed` recorded across a session's activity events
+/// — the P3 trajectory preview (FullTrajectory.files_changed) and the P6
+/// rubric's `file_change` dimension both need the set of paths a run actually
+/// touched. Aggregates both the per-write `FileChanged` rows and the run-end
+/// git-diff snapshot (whichever an event carried), de-duplicated + sorted for a
+/// stable wire order. Empty for a session with no recorded file events.
+pub fn files_changed_for_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT files_changed FROM activity_events
+         WHERE session_id = ?1 AND files_changed IS NOT NULL",
+    )?;
+    let mut seen = std::collections::HashSet::new();
+    let rows = stmt.query_map(params![session_id], |row| {
+        let s: Option<String> = row.get(0)?;
+        Ok(s)
+    })?;
+    for r in rows {
+        if let Some(s) = r? {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(&s) {
+                for f in v {
+                    seen.insert(f);
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = seen.into_iter().collect();
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +252,33 @@ mod tests {
 
         let recent = get_recent_events(&db.conn, 10).unwrap();
         assert_eq!(recent.len(), 3);
+    }
+
+    #[test]
+    fn files_changed_for_session_unions_across_events() {
+        let db = TempDb::new();
+        // Two events for s1 carrying different file sets (a per-write row +
+        // the run-end aggregated snapshot), plus an unrelated session.
+        let mut e1 = make_event("e1", "/proj", "file_changed", "edit a");
+        e1.session_id = Some("s1".into());
+        e1.files_changed = Some(vec!["src/a.ts".into(), "src/b.ts".into()]);
+        let mut e2 = make_event("e2", "/proj", "session_completed", "done");
+        e2.session_id = Some("s1".into());
+        e2.files_changed = Some(vec!["src/b.ts".into(), "src/c.rs".into()]);
+        let mut e3 = make_event("e3", "/proj", "session_completed", "other");
+        e3.session_id = Some("s2".into());
+        e3.files_changed = Some(vec!["src/x.go".into()]);
+        record_event(&db.conn, &e1).unwrap();
+        record_event(&db.conn, &e2).unwrap();
+        record_event(&db.conn, &e3).unwrap();
+
+        // s1 → union {a,b} ∪ {b,c} = {a,b,c}, de-duplicated + sorted.
+        let files = files_changed_for_session(&db.conn, "s1").unwrap();
+        assert_eq!(files, vec!["src/a.ts", "src/b.ts", "src/c.rs"]);
+        // s2 isolated.
+        assert_eq!(files_changed_for_session(&db.conn, "s2").unwrap(), vec!["src/x.go"]);
+        // Unknown session → empty (not an error).
+        assert!(files_changed_for_session(&db.conn, "nope").unwrap().is_empty());
     }
 
     #[test]

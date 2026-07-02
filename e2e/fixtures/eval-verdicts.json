@@ -1,7 +1,7 @@
 [
   {
     "id": "v-eval-new",
-    "session_id": null,
+    "session_id": "sess-replay-new",
     "case_id": "c-ready",
     "gate": "eval",
     "verdict": "PASS",
@@ -12,7 +12,7 @@
   },
   {
     "id": "v-eval-old",
-    "session_id": null,
+    "session_id": "sess-replay-old",
     "case_id": "c-ready",
     "gate": "eval",
     "verdict": "FAIL",

@@ -15,16 +15,29 @@ vi.mock('../../utils/evalApi', () => ({
     updateCase: vi.fn(),
     runReplay: vi.fn(),
     previewTrajectory: vi.fn(),
+    scoreRubric: vi.fn(),
     runSession: vi.fn(),
     listRuns: vi.fn(),
+    runPlatformMechanism: vi.fn(),
   },
 }));
 
 import { evalApi } from '../../utils/evalApi';
 import { useAgentStore } from '../../stores/agentStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { EvalPanel } from '../dashboard/EvalPanel';
+import { EvalPanel, scoreOf } from '../dashboard/EvalPanel';
 import type { EvalCaseRow, VerdictRow } from '../../utils/evalApi';
+
+// A finished session the P3/A1 wizards can pick from.
+function finishedSession(over: Partial<{ id: string; status: string; prompt: string; projectPath: string }> = {}) {
+  return {
+    id: 'sess-finished-1',
+    status: 'completed',
+    prompt: '修复 BlocksView 切分',
+    projectPath: '/repo',
+    ...over,
+  } as never;
+}
 
 function case_(over: Partial<EvalCaseRow> = {}): EvalCaseRow {
   return {
@@ -67,7 +80,35 @@ function mockAll(p: { cases?: EvalCaseRow[]; verdicts?: VerdictRow[]; trend?: un
   vi.mocked(evalApi.updateCase).mockResolvedValue(1);
   vi.mocked(evalApi.approveCase).mockResolvedValue(1);
   vi.mocked(evalApi.createCase).mockResolvedValue('new-id');
-  vi.mocked(evalApi.previewTrajectory).mockResolvedValue([]);
+  // previewTrajectory returns the rich FullTrajectory shape now (steps + files
+  // + tokens + cost + span tree) — P3 renders the summary line off it.
+  vi.mocked(evalApi.previewTrajectory).mockResolvedValue({
+    steps: [{ name: 'Read', status: null }, { name: 'Edit', status: null }],
+    files_changed: ['src/a.ts'],
+    input_tokens: 100,
+    output_tokens: 20,
+    cost_cents: 0.0072,
+    span_tree: { roots: [{ kind: 'llm', name: 'glm-4.6', children: [{ kind: 'tool', name: 'Read' }] }] },
+  });
+  // P6 scoreRubric returns a clean 8-dim rubric (Q≈1, no hard gate).
+  vi.mocked(evalApi.scoreRubric).mockResolvedValue({
+    dims: [
+      { key: 'tool_choice', label: '工具选择准确率', score: 1, val: '1.00' },
+      { key: 'manual_intervention', label: 'manual intervention ⚠硬门', score: 1, val: '无', hard: true },
+    ],
+    q_code: 1,
+    hard_gate_triggered: false,
+  });
+  // P4 platform-mechanism: the linear sample graph runs in order + reaches
+  // done — a clean PASS verdict.
+  vi.mocked(evalApi.runPlatformMechanism).mockResolvedValue({
+    pass: true,
+    actual_order: ['prompt_1', 'agent_1', 'gate_1'],
+    actual_terminal: 'done',
+    expected_order: ['prompt_1', 'agent_1', 'gate_1'],
+    expected_terminal: 'done',
+    mismatches: [],
+  });
 }
 
 describe('EvalPanel', () => {
@@ -213,5 +254,144 @@ describe('EvalPanel', () => {
     await waitFor(() => {
       expect(screen.getByText(/加载失败/)).toBeInTheDocument();
     });
+  });
+
+  it('P3 renders the rich trajectory summary (steps/files/tokens/cost) from previewTrajectory', async () => {
+    useAgentStore.setState({ sessions: [finishedSession()] });
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-P3'));
+    // Click 提取轨迹 → previewTrajectory fires → the rich summary line renders.
+    fireEvent.click(screen.getByRole('button', { name: '提取轨迹' }));
+    await waitFor(() => {
+      expect(evalApi.previewTrajectory).toHaveBeenCalledWith('sess-finished-1');
+    });
+    // The mock returns 2 steps, 1 file, 100+20 tokens. The summary surfaces all.
+    await waitFor(() => {
+      expect(screen.getByText(/2 步轨迹/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/1 文件/)).toBeInTheDocument();
+    expect(screen.getByText(/100\+20 tokens/)).toBeInTheDocument();
+    expect(screen.getByText(/src\/a\.ts/)).toBeInTheDocument();
+  });
+
+  it('P6 renders the 8-dim rubric + Q_code from scoreRubric (locks the wiring)', async () => {
+    // The latest eval verdict carries session_id + case_id → RubricCard can
+    // assemble the rubric. A prior version showed a 3-row fake rubric with a
+    // "needs scoring.rs extension" gap-note; the backend now computes 8 dims.
+    mockAll({
+      cases: [case_()],
+      verdicts: [
+        verdict({
+          id: 'v-rubric',
+          session_id: 'sess-replay-1',
+          case_id: 'c1',
+          gate: 'eval',
+          verdict: 'PASS',
+          attribution: 'CLEAR',
+        }),
+      ],
+    });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-P6'));
+    await waitFor(() => {
+      // matcher defaults to exact_match inside the evalApi wrapper — the
+      // component only passes session + case.
+      expect(evalApi.scoreRubric).toHaveBeenCalledWith('sess-replay-1', 'c1');
+    });
+    // Q_code headline + the manual-intervention hard-gate row render.
+    await waitFor(() => {
+      expect(screen.getByText(/Q_code/)).toBeInTheDocument();
+    });
+    expect(screen.getByText('manual intervention ⚠硬门')).toBeInTheDocument();
+  });
+
+  it('A1 renders the span forest (LLM parent + tool child) from previewTrajectory', async () => {
+    useAgentStore.setState({ sessions: [finishedSession()] });
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-A1'));
+    // A1 auto-loads on session select; the mock's span tree has 1 LLM root
+    // (glm-4.6) with a Read tool child. Both render — replaces the old empty
+    // "A1 未接入" shell with a real span-tree view.
+    await waitFor(() => {
+      expect(screen.getByText(/1 个 LLM 父 span/)).toBeInTheDocument();
+    });
+    expect(screen.getByText('glm-4.6')).toBeInTheDocument();
+    expect(screen.getByText('Read')).toBeInTheDocument();
+  });
+
+  it('P2 blocks save on malformed expected_steps_json (contract must be well-formed)', async () => {
+    const c = case_();
+    mockAll({ cases: [c] });
+    render(<EvalPanel />);
+    await waitFor(() => expect(screen.getByText('修复 BlocksView tool_use')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('修复 BlocksView tool_use'));
+    await waitFor(() =>
+      expect(screen.getByTestId('eval-feature-title')).toHaveTextContent('Case 详情 / 编辑'),
+    );
+    // Corrupt the expected-steps contract (non-JSON) → save must block, not
+    // persist a malformed contract that score_eval_rubric would silently
+    // mis-score. updateCase must NOT fire.
+    const stepsBox = screen.getByDisplayValue('[{"name":"Read"}]') as HTMLTextAreaElement;
+    fireEvent.change(stepsBox, { target: { value: 'not-json{' } });
+    fireEvent.click(screen.getByText('保存契约'));
+    await waitFor(() => {
+      expect(screen.getByText(/校验失败：预期步骤须为 JSON 数组/)).toBeInTheDocument();
+    });
+    expect(evalApi.updateCase).not.toHaveBeenCalled();
+  });
+
+  it('F1 surfaces an honest insufficient-data state for a single trend point', async () => {
+    mockAll({
+      cases: [case_()],
+      trend: [{ date: '2026-07-02', avg_score: 0.8, count: 1 } as never],
+    });
+    render(<EvalPanel />);
+    await waitFor(() => expect(evalApi.trend).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('eval-nav-F1'));
+    // A single point can't draw a regression line — the panel says so instead
+    // of rendering a fake one-point "trend". (waitFor: trend loads async; at
+    // click time it may still be [], which would show the 0-data branch.)
+    await waitFor(() => {
+      expect(screen.getByText(/仅 1 天数据/)).toBeInTheDocument();
+    });
+  });
+
+  it('P4 runs the platform-mechanism eval (no LLM) and renders the verdict', async () => {
+    // Selecting 平台-机制 used to show a gap-note ("需平台评测驱动，未接入").
+    // Now it renders a real runner wired to eval_platform_mechanism — the only
+    // platform object closed end-to-end; e2e/enablement stay gap-noted.
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-P4'));
+    fireEvent.click(screen.getByText('平台-机制'));
+    fireEvent.click(screen.getByRole('button', { name: /运行机制评测/ }));
+    await waitFor(() => {
+      expect(evalApi.runPlatformMechanism).toHaveBeenCalledWith(
+        expect.stringContaining('prompt_1'),
+        { seed: 'mechanism-eval' },
+        { expect_order: ['prompt_1', 'agent_1', 'gate_1'], expect_terminal: 'done' },
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText('PASS')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/终态 done/)).toBeInTheDocument();
+  });
+
+  it('scoreOf reads a numeric verdict string as its value (aligns with VerdictBadge)', () => {
+    // VerdictBadge greens a leading-digit verdict ("0.85"); scoreOf used to
+    // return 0 for the same row (verdict !== 'PASS'), so PairedCompare would
+    // mis-score it and silently flip a CLEAR/BRAKE. Report score still wins.
+    expect(scoreOf(verdict({ verdict: '0.85', report: null }))).toBeCloseTo(0.85);
+    // Report's numeric score takes priority over the verdict string.
+    expect(
+      scoreOf(verdict({ verdict: '0.85', report: '{"score":0.9}' })),
+    ).toBeCloseTo(0.9);
+    // Non-numeric, non-PASS → 0 (FAIL/BRAKE).
+    expect(scoreOf(verdict({ verdict: 'FAIL', report: null }))).toBe(0);
+    // PASS with no report → 1.
+    expect(scoreOf(verdict({ verdict: 'PASS', report: null }))).toBe(1);
   });
 });

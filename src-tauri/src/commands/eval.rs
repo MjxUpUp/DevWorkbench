@@ -4,11 +4,12 @@
 
 use tauri::State;
 
+use crate::activity;
 use crate::db::DbState;
 use crate::error::AppError;
 use crate::eval::db as eval_db;
 use crate::eval::extract;
-use crate::eval::scoring::{self, Grade, Matcher};
+use crate::eval::scoring::{self, Grade, Matcher, RubricInput};
 use crate::trace::db::list_traces_for_session;
 
 use crate::eval::cases as eval_cases;
@@ -302,16 +303,130 @@ pub async fn run_eval_replay(
 
 /// Preview a session's reconstructed tool-call trajectory WITHOUT persisting —
 /// the P3 "会话 → Case" wizard shows this so the user can curate the expected
-/// steps before saving a draft case. Deterministic extraction
-/// (`extract_trajectory` over real LLM traces), no LLM, no write — so what the
-/// user sees is exactly what a future replay would score against (反刷分 #1:
-/// the contract is frozen from objective trace data, not the agent's say-so).
+/// steps before saving a draft case, and A1 renders the span tree from it.
+/// Deterministic extraction (`extract_full` over real LLM traces + the
+/// session's recorded file diff), no LLM, no write — so what the user sees is
+/// exactly what a future replay would score against (反刷分 #1: the contract is
+/// frozen from objective trace data, not the agent's say-so). Returns the rich
+/// trajectory: steps + files changed + token usage + estimated cost + the span
+/// tree (LLM call = parent, tool calls = children).
 #[tauri::command]
 pub async fn preview_session_trajectory(
     db: State<'_, DbState>,
     session_id: String,
-) -> Result<Vec<extract::ToolStep>, AppError> {
+) -> Result<extract::FullTrajectory, AppError> {
     let conn = db.get().map_err(|e| AppError::Internal(format!("db lock: {e}")))?;
     let traces = list_traces_for_session(&conn, &session_id)?;
-    Ok(extract::extract_trajectory(&traces))
+    let files = activity::files_changed_for_session(&conn, &session_id)?;
+    Ok(extract::extract_full(&traces, &files))
+}
+
+/// Score a session against its case contract on the 8-dimension AgentX
+/// reliability rubric (P6). Assembles [`RubricInput`] entirely from
+/// already-recorded facts: LLM traces → actual tool sequence + failed-step
+/// count, the activity log → files the run touched, the case contract →
+/// expected steps / negative (forbidden tools) / expected observables (file
+/// subset). Returns the weighted `Q_code` + per-dimension breakdown. Pure +
+/// deterministic (反刷分 #1: no LLM judges its own reliability here).
+///
+/// `had_human_intervention` is always false on this path: Human-Gate approvals
+/// live only in memory (`AgentApprovalState`, cleared on session end) so a past
+/// run's interventions aren't reconstructable, and an eval replay runs in a
+/// read-only Plan sandbox with no human gate at all — the hard gate is still
+/// wired so a future persisted signal drops straight in. Honest gap noted in
+/// the panel; until then the manual-intervention dim reads 无 / 1.0 for replays.
+#[tauri::command]
+pub async fn score_eval_rubric(
+    db: State<'_, DbState>,
+    session_id: String,
+    case_id: String,
+    matcher: Matcher,
+) -> Result<scoring::RubricScore, AppError> {
+    let conn = db.get().map_err(|e| AppError::Internal(format!("db lock: {e}")))?;
+    let case = eval_cases::get_eval_case(&conn, &case_id)?
+        .ok_or_else(|| AppError::NotFound(format!("eval case not found: {case_id}")))?;
+    let traces = list_traces_for_session(&conn, &session_id)?;
+    let steps = extract::extract_trajectory(&traces);
+    let actual: Vec<&str> = extract::ToolStep::name_refs(&steps);
+
+    let actual_files = activity::files_changed_for_session(&conn, &session_id)?;
+    let actual_files_refs: Vec<&str> = actual_files.iter().map(String::as_str).collect();
+
+    // expected_steps_json / negative_json are persisted as [{"name":"Read"}]
+    // (ToolStep-shaped) by the P3 wizard, but a hand-authored ["Read"] is also
+    // valid — parse_names takes both. expected_observables_json may carry file
+    // paths as a string array; prose (non-JSON) → empty → file_change dim is
+    // vacuously 1.0 (no file contract to check), the honest "unconstrained".
+    let expected = parse_names(case.expected_steps_json.as_deref());
+    let expected_refs: Option<Vec<&str>> = if expected.is_empty() {
+        None
+    } else {
+        Some(expected.iter().map(String::as_str).collect())
+    };
+    let negative = parse_names(case.negative_json.as_deref());
+    let negative_refs: Vec<&str> = negative.iter().map(String::as_str).collect();
+    let expected_files = parse_names(case.expected_observables_json.as_deref());
+    let expected_files_refs: Vec<&str> = expected_files.iter().map(String::as_str).collect();
+
+    let failed_steps = steps
+        .iter()
+        .filter(|s| s.status.as_deref() == Some("error"))
+        .count();
+
+    let input = RubricInput {
+        actual: &actual,
+        expected: expected_refs.as_deref(),
+        matcher,
+        negative: &negative_refs,
+        expected_files: &expected_files_refs,
+        actual_files: &actual_files_refs,
+        failed_steps,
+        had_human_intervention: false,
+    };
+    Ok(scoring::score_rubric(input))
+}
+
+/// Parse a JSON array of names that may be either `["read"]` (strings) or
+/// `[{"name":"read"}]` (ToolStep-shaped objects). Non-array / unparseable /
+/// null → empty. Used for expected_steps / negative / observables, which
+/// hand-authoring and the P3 wizard emit in different shapes.
+fn parse_names(json: Option<&str>) -> Vec<String> {
+    let Some(s) = json else {
+        return Vec::new();
+    };
+    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) else {
+        return Vec::new();
+    };
+    arr.into_iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else {
+                v.get("name").and_then(|n| n.as_str()).map(String::from)
+            }
+        })
+        .collect()
+}
+
+// ===========================================================================
+// P4 platform-mechanism eval — exercise the kernel-compose DAG engine itself
+// (routing / gate / skip / fail behavior) with a deterministic stub executor.
+// No LLM: the verdict is a fact about the engine's GraphEvent sequence.
+// ===========================================================================
+
+/// Run a platform-mechanism case: compile the YAML workflow, drive it with a
+/// stub executor (agent echoes input / gate passes), and compare the observed
+/// node-start order + terminal outcome against `expect`. The P4 "平台-机制"
+/// object calls this — closing the gap where the 3 platform objects were
+/// gap-noted. Returns the verdict (also surfaced in the panel; a persisted
+/// verdict variant is a follow-on).
+#[tauri::command]
+pub async fn eval_platform_mechanism(
+    graph_yaml: String,
+    input_json: serde_json::Value,
+    expect: crate::eval::platform::MechanismExpect,
+) -> Result<crate::eval::platform::MechanismVerdict, AppError> {
+    crate::eval::platform::run_platform_mechanism(&graph_yaml, input_json, expect)
+        .await
+        .map_err(AppError::Internal)
 }

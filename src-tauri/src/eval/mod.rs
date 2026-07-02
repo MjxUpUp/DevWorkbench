@@ -15,6 +15,7 @@ pub mod cases;
 pub mod db;
 pub mod extract;
 pub mod paired;
+pub mod platform;
 pub mod replay;
 pub mod scoring;
 pub mod verdicts;
