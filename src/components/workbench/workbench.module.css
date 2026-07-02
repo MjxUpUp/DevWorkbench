@@ -107,6 +107,11 @@
   opacity: 0.55;
   line-height: 1.5;
 }
+.railStat {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
 .railGitWrap {
   flex: 1;
   min-height: 0;

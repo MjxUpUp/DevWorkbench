@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { PlanBar } from '../PlanBar';
 import { GateBar } from '../GateBar';
+import { MemoryRail } from '../MemoryRail';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
 import { useOrchestrateStore } from '../../../stores/orchestrateStore';
@@ -194,5 +195,46 @@ describe('GateBar — 成本门控/熔断（块4，启示3）', () => {
     render(<GateBar />);
     expect(screen.queryByTestId('gate-budget')).toBeNull();
     expect(screen.getByTestId('gate-bar')).toHaveTextContent('累计 $2.50');
+  });
+});
+
+describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
+  beforeEach(() => {
+    // orchestrate 视图避开 GitPanel(其调 git invoke)；记忆统计与视图无关
+    useNavigationStore.setState({
+      activeView: 'orchestrate',
+      activeProject: null,
+      selectedConversationId: null,
+    });
+    useAgentStore.setState({ sessions: [] });
+  });
+
+  it('compact events → 压缩次数 + 归档消息数', () => {
+    useNavigationStore.setState({ selectedConversationId: 'c1' });
+    useAgentStore.setState({
+      sessions: [
+        mkSession('completed', {
+          conversationId: 'c1',
+          blocks: [
+            { kind: 'compact', summary: 's1', archived_at: '2026-01-01T00:00:00Z', dropped_count: 5, is_error: false },
+            { kind: 'compact', summary: 's2', archived_at: '2026-01-01T00:00:00Z', dropped_count: 3, is_error: false },
+          ],
+        }),
+      ],
+    });
+    render(<MemoryRail />);
+    expect(screen.getByTestId('memory-compaction-stat')).toHaveTextContent('压缩 2 次 · 归档 8 条消息');
+  });
+
+  it('无 compact events → 占位', () => {
+    useNavigationStore.setState({ selectedConversationId: 'c1' });
+    useAgentStore.setState({
+      sessions: [
+        mkSession('completed', { conversationId: 'c1', blocks: [{ kind: 'text', content: 'x' }] }),
+      ],
+    });
+    render(<MemoryRail />);
+    expect(screen.queryByTestId('memory-compaction-stat')).toBeNull();
+    expect(screen.getByTestId('memory-rail')).toHaveTextContent('无压缩记录');
   });
 });
