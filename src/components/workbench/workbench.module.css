@@ -148,3 +148,42 @@
 .gatePlaceholder {
   opacity: 0.55;
 }
+/* 成本门控（块4，启示3 成本前置门控） */
+.gateCost {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gateBudget {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.gateBudgetText {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.gateBudgetBar {
+  display: inline-block;
+  width: 80px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+  vertical-align: middle;
+}
+.gateBudgetFill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+.gateBudget[data-over='true'] .gateBudgetFill {
+  background: var(--color-error);
+}
+.gateBreaker {
+  color: var(--color-error);
+  font-weight: 600;
+}

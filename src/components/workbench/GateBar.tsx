@@ -1,26 +1,42 @@
+import { useEffect } from 'react';
 import { useAgentStore } from '../../stores/agentStore';
+import { useDashboardStore } from '../../stores/dashboardStore';
 import styles from './workbench.module.css';
 
 /**
- * GateBar — 门控层（起底重构 块1 骨架）。
+ * GateBar — 门控层（起底重构 块1 骨架 / 块4 成本门控）。
  *
- * 常驻底栏，承载分层失败检测 + 成本治理（前置门控，非事后 trace）。骨架阶段仅显示
- * 实时运行态（agentStore 中 status==='running' 的会话数），其余门控占位。
+ * 常驻底栏，承载分层失败检测 + 成本治理（前置门控，非事后 trace）。
  *
- * 调研启示 2/3（分层检测 + 成本前置门控）：
- *  - pre-action：破坏性操作 human-gate（已落 CatastropheGuard，保留）
- *  - during-action：任意时刻 interrupt/resume 控制流原语（架构级，非仅按钮）
- *  - multi-step：预算/迭代上限熔断 + step-repetition 检测（直击 MAST 17.14% 最大失败）
- * 块4 填实三层状态可视化 + 预算条 + 熔断指示。
+ * 块4 填实（调研启示 3 成本前置门控）：
+ *  - 累计成本 + 月度预算进度条（dashboardStore.budget/costSummary，全局聚合——
+ *    per-session cost 不可得故用全局，与 PlanBar 分工：PlanBar=plan 可见 / GateBar=成本门控）
+ *  - 超预算熔断警告（percentage>=100 → 红色 + ⚠），让成本失控前置可见
+ *  - 挂载即 fetchDashboard：门控层常驻，成本必须实时可见而非等用户开 Dashboard
  *
- * 反例（启示 2）：不把每个微操作都弹审批（automation bias/skill fade 反而降低干预
- * 有效性）；不把人审当唯一安全网（结构性不可扩展，PAI claim3/4）。
+ * 未做（留块4b/后端）：
+ *  - during-action interrupt：ChatView 已有 stopAgent 按钮（stop_agent_session IPC），
+ *    GateBar 不重复造；与成本熔断联动的硬停止属后端 cost breaker，前端先做软警告
+ *  - multi-step step-repetition 硬熔断：直击 MAST 17.14% 最大失败，需后端检测
+ *
+ * 反例（启示 2）：不把每个微操作都弹审批（automation bias/skill fade）；不把人审当
+ * 唯一安全网（结构性不可扩展，PAI claim3/4）。
  */
 export function GateBar() {
-  // 选 sessions 数组（不是单个字段）以在状态变化时重渲染；运行计数由此派生。
+  // 选 sessions 数组以在状态变化时重渲染；运行计数由此派生。
   const sessions = useAgentStore((s) => s.sessions);
+  const fetchDashboard = useDashboardStore((s) => s.fetchDashboard);
+  const budget = useDashboardStore((s) => s.budget);
+  const costSummary = useDashboardStore((s) => s.costSummary);
+
   const runningCount = sessions.filter((s) => s.status === 'running').length;
   const isRunning = runningCount > 0;
+  const overBudget = budget.total > 0 && budget.percentage >= 100;
+
+  // 门控层常驻——挂载即拉预算/成本，让成本前置可见（启示3：非事后 trace）。
+  useEffect(() => {
+    void fetchDashboard();
+  }, [fetchDashboard]);
 
   return (
     <footer className={styles.gateBar} data-testid="gate-bar">
@@ -28,10 +44,27 @@ export function GateBar() {
         <span className={styles.gateDot} aria-hidden="true" />
         {isRunning ? `${runningCount} 个 agent 运行中` : 'idle'}
       </span>
-      {/* 块4 填实：审批队列 · interrupt/resume · 预算条 + 熔断（启示 2/3） */}
-      <span className={styles.gatePlaceholder}>
-        分层检测 · 预算条 — 块4
-      </span>
+      {costSummary && (
+        <span className={styles.gateCost} data-testid="gate-cost">
+          累计 ${costSummary.totalCost.toFixed(2)}
+        </span>
+      )}
+      {budget.total > 0 && (
+        <span className={styles.gateBudget} data-over={overBudget} data-testid="gate-budget">
+          <span className={styles.gateBudgetText}>
+            预算 ${budget.spent.toFixed(2)} / ${budget.total.toFixed(2)}
+          </span>
+          <span className={styles.gateBudgetBar} data-testid="gate-budget-bar">
+            <span
+              className={styles.gateBudgetFill}
+              style={{ width: `${Math.min(100, budget.percentage)}%` }}
+            />
+          </span>
+          {overBudget && <span className={styles.gateBreaker}>⚠ 超预算</span>}
+        </span>
+      )}
+      {/* 块4b/后端：during-action interrupt 与 step-repetition 硬熔断（需后端 cost breaker） */}
+      <span className={styles.gatePlaceholder}>interrupt · step-重复熔断 — 块4b</span>
     </footer>
   );
 }

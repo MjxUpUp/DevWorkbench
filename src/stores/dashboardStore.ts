@@ -57,6 +57,14 @@ export const useDashboardStore = create<DashboardState>((set) => ({
         invoke<QualityReport[]>('get_quality_reports'),
       ]);
 
+      // null 防御：get_cost_summary 等在无数据/E2E shim 场景可能返回 null，原代码
+      // 直接解引用 summary.totalInputTokens 会抛（latent bug——GateBar 块4 挂载
+      // fetchDashboard 暴露之）。任一为 null 时早返回保留空默认，不冒泡为 console.error。
+      if (!summary || !trend || !budgetSettings || !reports) {
+        set({ loading: false });
+        return;
+      }
+
       // Map CostSummary + cost_trend → DashboardStats. cost_trend is
       // `ORDER BY date` ASC, so the last point is today / most-recent day.
       const totalTokens = summary.totalInputTokens + summary.totalOutputTokens;

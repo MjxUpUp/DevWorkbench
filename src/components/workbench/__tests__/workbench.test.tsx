@@ -1,25 +1,26 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { PlanBar } from '../PlanBar';
 import { GateBar } from '../GateBar';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
 import { useOrchestrateStore } from '../../../stores/orchestrateStore';
-import type { Session, SessionStatus } from '../../../types';
+import { useDashboardStore } from '../../../stores/dashboardStore';
+import type { Session, SessionStatus, CostSummary } from '../../../types';
+
+// GateBar useEffect 调 fetchDashboard → invoke；mock 成 reject 让 fetchDashboard
+// catch（不覆盖下方 setState 的 budget/costSummary），隔离测渲染派生。
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(() => Promise.reject(new Error('test: no backend'))),
+}));
 
 /**
- * 起底重构 块1 骨架 + 块2 PlanBar 进度派生 契约测试。
- *
- * 4 区结构与 Stage 视图路由的正确性由 E2E 覆盖（app.spec → chat 路径，
- * orchestrate.spec → orchestrate 路径，均 7/7 绿）。此处单测三条纯派生逻辑：
- *  - PlanBar：activeView → 运行模式（轴线A 位置可见）
- *  - PlanBar：sessions/nodes → plan 进度（轴线A 执行可见，块2）
- *  - GateBar：sessions → 运行计数（门控层实时态）
- * 派生函数越纯越该单测；带副作用/渲染的集成留给 E2E。
+ * 起底重构 块1-4 契约测试。
+ *  4 区结构 + Stage 路由 + Chat 步骤分组的正确性由 E2E 覆盖（7/7）。此处单测纯派生：
+ *  - PlanBar：activeView → 模式（轴线A 位置）+ sessions/nodes → plan 进度（执行）
+ *  - GateBar：sessions → 运行计数 + budget → 成本门控/熔断（块4）
  */
 
-// 最小合法 Session——其余字段对所测逻辑无关，但仍按接口填全避免未来字段收紧时
-// 静默漏配。第二参 partial 覆盖（块2 进度测试要 conversationId/blocks/startedAt）。
 const mkSession = (status: SessionStatus, over: Partial<Session> = {}): Session => ({
   id: 's-1',
   projectPath: '/p',
@@ -39,6 +40,7 @@ const mkSession = (status: SessionStatus, over: Partial<Session> = {}): Session 
 });
 
 const toolUse = (name: string) => ({ kind: 'tool_use' as const, name, input: {} });
+const mkCost = (totalCost: number) => ({ totalCost }) as unknown as CostSummary;
 
 describe('PlanBar — 视图→运行模式派生（轴线A·位置可见）', () => {
   beforeEach(() => {
@@ -128,6 +130,10 @@ describe('PlanBar — plan 进度派生（轴线A·执行可见，块2）', () =
 describe('GateBar — 运行态派生（门控层）', () => {
   beforeEach(() => {
     useAgentStore.setState({ sessions: [] });
+    useDashboardStore.setState({
+      budget: { spent: 0, total: 0, percentage: 0 },
+      costSummary: null,
+    });
   });
 
   it('无 running 会话 → idle', () => {
@@ -141,14 +147,52 @@ describe('GateBar — 运行态派生（门控层）', () => {
 
   it('有 running 会话 → 计数显示且 data-running=true', () => {
     useAgentStore.setState({
-      sessions: [
-        mkSession('running'),
-        mkSession('running'),
-        mkSession('completed'),
-      ],
+      sessions: [mkSession('running'), mkSession('running'), mkSession('completed')],
     });
     render(<GateBar />);
     expect(screen.getByTestId('gate-bar')).toHaveTextContent(/2 个 agent 运行中/);
     expect(screen.getByTestId('gate-bar').querySelector('[data-running="true"]')).not.toBeNull();
+  });
+});
+
+describe('GateBar — 成本门控/熔断（块4，启示3）', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ sessions: [] });
+    useDashboardStore.setState({
+      budget: { spent: 0, total: 0, percentage: 0 },
+      costSummary: null,
+    });
+  });
+
+  it('超预算 → 熔断警告 + data-over=true', () => {
+    useDashboardStore.setState({
+      budget: { spent: 5, total: 4, percentage: 125 },
+      costSummary: mkCost(5),
+    });
+    render(<GateBar />);
+    expect(screen.getByTestId('gate-budget').getAttribute('data-over')).toBe('true');
+    expect(screen.getByTestId('gate-bar')).toHaveTextContent('超预算');
+    expect(screen.getByTestId('gate-bar')).toHaveTextContent('累计 $5.00');
+  });
+
+  it('预算内 → 进度条渲染但不熔断', () => {
+    useDashboardStore.setState({
+      budget: { spent: 1, total: 4, percentage: 25 },
+      costSummary: mkCost(1),
+    });
+    render(<GateBar />);
+    expect(screen.getByTestId('gate-budget').getAttribute('data-over')).toBe('false');
+    expect(screen.getByTestId('gate-bar')).not.toHaveTextContent('超预算');
+    expect(screen.getByTestId('gate-budget-bar')).toBeInTheDocument();
+  });
+
+  it('未设预算(total=0) → 不渲染预算条，仅累计成本', () => {
+    useDashboardStore.setState({
+      budget: { spent: 0, total: 0, percentage: 0 },
+      costSummary: mkCost(2.5),
+    });
+    render(<GateBar />);
+    expect(screen.queryByTestId('gate-budget')).toBeNull();
+    expect(screen.getByTestId('gate-bar')).toHaveTextContent('累计 $2.50');
   });
 });
