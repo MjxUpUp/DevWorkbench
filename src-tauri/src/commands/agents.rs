@@ -37,9 +37,20 @@ impl AgentApprovalState {
 /// `approval_required` event the frontend received. A token that already timed
 /// out (auto-Reject after 300s) or whose session was aborted returns NotFound —
 /// the UI treats that as "no longer relevant".
+///
+/// Each resolution is persisted to the L1 verdict ledger as a `gate =
+/// "human-gate"` row (verdict APPROVE/REJECT/RETRY) tied to the session, so the
+/// P6 reliability rubric's `manual_intervention` hard gate can be scored from
+/// fact rather than hardcoded — a run that needed a human nudge reliably reads
+/// `had_human_intervention = true` even after the in-memory approval map is
+/// cleared on session end. Best-effort: a DB write failure is logged, never
+/// blocks the resolution. The session id is recovered from the resume token
+/// (`approve__{sid}__{seq}`); a malformed token skips the write but still
+/// resolves.
 #[tauri::command]
 pub async fn resolve_human_gate_cmd(
     approval_state: State<'_, AgentApprovalState>,
+    db: State<'_, DbState>,
     resume_token: String,
     action: String,
     feedback: Option<String>,
@@ -58,10 +69,51 @@ pub async fn resolve_human_gate_cmd(
         }
     };
     match resolve_approval(&approval_state.0, &resume_token, decision) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Persist the intervention so the rubric hard-gate is scoreable from
+            // fact. `had_human_intervention` counts ANY decision (approve/reject/
+            // retry) — each is a human nudge the run needed.
+            if let Some(sid) = session_of_resume_token(&resume_token) {
+                let row = crate::eval::verdicts::NewVerdict {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: Some(sid.to_string()),
+                    case_id: None,
+                    gate: "human-gate".to_string(),
+                    verdict: action.to_uppercase(),
+                    // A human nudge is a recorded fact, not a gain to attribute.
+                    attribution: None,
+                    report: serde_json::to_string(&serde_json::json!({
+                        "action": action,
+                        "resume_token": resume_token,
+                    }))
+                    .ok(),
+                    commit_sha: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Ok(conn) = db.get() {
+                    if let Err(e) = crate::eval::verdicts::insert_verdict(&conn, &row) {
+                        log::warn!("[human-gate] verdict persist failed for {sid}: {e}");
+                    }
+                }
+            }
+            Ok(())
+        }
         Err(_) => Err(AppError::NotFound(format!(
             "no active approval for {resume_token} (timed out or session ended?)"
         ))),
+    }
+}
+
+/// Recover the session id from a Human-Gate resume token
+/// (`approve__{session_id}__{seq}`). None if the token isn't that shape — a
+/// malformed token simply skips the ledger write, it doesn't fail the resolve.
+fn session_of_resume_token(token: &str) -> Option<&str> {
+    let rest = token.strip_prefix("approve__")?;
+    let (sid, _seq) = rest.rsplit_once("__")?;
+    if sid.is_empty() {
+        None
+    } else {
+        Some(sid)
     }
 }
 
@@ -815,4 +867,33 @@ pub fn get_quality_report_for_session(
 ) -> Result<Option<crate::models::QualityReport>, AppError> {
     let conn = db.get()?;
     crate::quality::report::get_report_for_session(&conn, &session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The resume token embeds the session id as `approve__{sid}__{seq}` — the
+    /// human-gate ledger write recovers the session from it. Pin the shape so
+    /// the rubric's `had_human_intervention` query keys on the right id.
+    #[test]
+    fn session_of_resume_token_parses_sid() {
+        assert_eq!(
+            session_of_resume_token("approve__sess-abc__0"),
+            Some("sess-abc")
+        );
+        assert_eq!(
+            session_of_resume_token("approve__550e8400-e29b__12"),
+            Some("550e8400-e29b")
+        );
+    }
+
+    #[test]
+    fn session_of_resume_token_rejects_malformed() {
+        // Wrong prefix / missing seq / empty sid → None (write skipped, resolve
+        // still succeeds — best-effort persistence).
+        assert_eq!(session_of_resume_token("approve__sess-abc"), None);
+        assert_eq!(session_of_resume_token("other__sess__0"), None);
+        assert_eq!(session_of_resume_token("approve____0"), None);
+    }
 }

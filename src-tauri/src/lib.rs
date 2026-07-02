@@ -338,6 +338,8 @@ pub fn run() {
             commands::eval::preview_session_trajectory,
             commands::eval::score_eval_rubric,
             commands::eval::eval_platform_mechanism,
+            commands::eval::eval_platform_e2e,
+            commands::eval::run_eval_enablement,
             commands::agents::stop_agent_session,
             commands::agents::load_sessions,
             commands::agents::read_session_output_cmd,

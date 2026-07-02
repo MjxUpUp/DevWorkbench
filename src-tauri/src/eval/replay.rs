@@ -145,6 +145,18 @@ pub struct ReplayInput {
     pub working_dir: String,
     /// Model id to run under (None = the user's configured default).
     pub model: Option<String>,
+    /// Whether installed skills are admitted for this run. The platform-
+    /// enablement eval toggles this OFF vs ON and diffs the trajectories; a
+    /// plain agent replay leaves it `true` (the default — skills available).
+    pub enable_skills: bool,
+    /// Which gate label to persist the verdict under, or `None` to skip the
+    /// verdict write entirely. A normal replay run uses `Some("eval")` so the
+    /// verdict lands in the case's eval history. The platform-enablement driver
+    /// passes `None` for both its OFF/ON runs — those are experimental probes,
+    /// not the case's formal eval; only the single汇总 `enablement` verdict it
+    /// writes itself should land in the ledger (反刷分 ledger hygiene: don't let
+    /// a baseline-probe FAIL pollute the case's real eval PASS/FAIL signal).
+    pub verdict_gate: Option<String>,
 }
 
 /// Drive one replay turn end-to-end:
@@ -173,9 +185,16 @@ pub async fn run_replay(
     use kernel_core::Agent;
 
     // 1. Plan-mode agent — the workspace is fenced, the agent can't alter it.
-    //    No MCP / no WorkflowTool / no skills filter: replay isolates the agent
-    //    down to its built-in read tools so the trajectory is deterministic
-    //    w.r.t. the install, not whatever servers happened to be enabled.
+    //    No MCP / no WorkflowTool: replay isolates the agent down to its built-in
+    //    read tools + (optionally) skills so the trajectory is deterministic
+    //    w.r.t. the install, not whatever servers happened to be enabled. The
+    //    platform-enablement eval flips `enable_skills` to measure the skill
+    //    feature's effect on the trajectory.
+    let skill_filter: Option<&[String]> = if input.enable_skills {
+        None // all installed skills admitted
+    } else {
+        Some(&[]) // empty allow-list → no skills registered
+    };
     let agent = crate::kernel_impl::executor::build_react_agent(
         input.model.as_deref(),
         None,                       // mcp — isolated for determinism
@@ -186,9 +205,9 @@ pub async fn run_replay(
         crate::kernel_impl::hooks::PermissionMode::Plan,
         None,                       // task_ref
         Some(input.session_id.as_str()),
-        None,
-        None,
-        None,                       // skill / mcp / knowledge filters
+        skill_filter,               // skill_filter — toggled by enable_skills
+        None,                       // mcp_filter
+        None,                       // knowledge_ids
         None,                       // app — no WorkflowTool (single-agent)
         None,                       // compaction_blocks
         None,                       // approval
@@ -218,30 +237,35 @@ pub async fn run_replay(
     let verdict = score_replay(&actual, Some(&expected), matcher, &negative);
 
     // 5. Persist an `eval` verdict tied to the case. Best-effort — a DB write
-    //    failure is logged, never blocks returning the verdict.
-    let report = serde_json::json!({
-        "score": verdict.score,
-        "grade": format!("{:?}", verdict.grade),
-        "reason": verdict.reason,
-        "negative_violated": verdict.negative_violated,
-        "matcher": format!("{:?}", matcher),
-        "actual_steps": actual.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-    });
-    let row = crate::eval::verdicts::NewVerdict {
-        id: uuid::Uuid::new_v4().to_string(),
-        session_id: Some(input.session_id.clone()),
-        case_id: Some(case.id.clone()),
-        gate: "eval".to_string(),
-        verdict: verdict.verdict.clone(),
-        attribution: verdict.attribution.clone(),
-        report: serde_json::to_string(&report).ok(),
-        // Anchor to the case's version (the contract under test), not the
-        // replay run's incidental HEAD.
-        commit_sha: case.commit_sha.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    if let Err(e) = crate::eval::verdicts::insert_verdict(&conn, &row) {
-        log::warn!("[replay] verdict persist failed for case {}: {e}", case.id);
+    //    failure is logged, never blocks returning the verdict. Skipped entirely
+    //    when `verdict_gate` is None (platform-enablement's OFF/ON probes — those
+    //    are not the case's formal eval run, so they must NOT land in its eval
+    //    history; the enablement driver writes its own single汇总 verdict).
+    if let Some(gate) = &input.verdict_gate {
+        let report = serde_json::json!({
+            "score": verdict.score,
+            "grade": format!("{:?}", verdict.grade),
+            "reason": verdict.reason,
+            "negative_violated": verdict.negative_violated,
+            "matcher": format!("{:?}", matcher),
+            "actual_steps": actual.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        });
+        let row = crate::eval::verdicts::NewVerdict {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: Some(input.session_id.clone()),
+            case_id: Some(case.id.clone()),
+            gate: gate.clone(),
+            verdict: verdict.verdict.clone(),
+            attribution: verdict.attribution.clone(),
+            report: serde_json::to_string(&report).ok(),
+            // Anchor to the case's version (the contract under test), not the
+            // replay run's incidental HEAD.
+            commit_sha: case.commit_sha.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = crate::eval::verdicts::insert_verdict(&conn, &row) {
+            log::warn!("[replay] verdict persist failed for case {}: {e}", case.id);
+        }
     }
 
     Ok(verdict)

@@ -16,6 +16,8 @@ pub mod db;
 pub mod extract;
 pub mod paired;
 pub mod platform;
+pub mod platform_e2e;
+pub mod platform_enablement;
 pub mod replay;
 pub mod scoring;
 pub mod verdicts;

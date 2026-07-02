@@ -11,6 +11,10 @@ import {
   type Span,
   type RubricScore,
   type MechanismVerdict,
+  type E2ESeed,
+  type E2EExpect,
+  type E2EVerdict,
+  type EnablementVerdict,
   type Matcher,
   type CreateCaseInput,
 } from '../../utils/evalApi';
@@ -630,12 +634,6 @@ function SessionToCase({
 
 // ── P4 评测任务配置（4 类评测对象）──
 type EvalObject = 'agent' | 'platform-mechanism' | 'platform-e2e' | 'platform-enablement';
-const OBJ_LABEL: Record<EvalObject, string> = {
-  agent: 'Agent',
-  'platform-mechanism': '平台-机制',
-  'platform-e2e': '平台-e2e',
-  'platform-enablement': '平台-加持',
-};
 
 /// P4 平台-机制 eval 的默认 DAG 样例（linear：prompt → agent → gate）。改
 /// YAML / 期望即可复测引擎的 routing / gate / fail 行为。
@@ -715,15 +713,8 @@ function ReplayLaunch({
         ))}
       </div>
       {obj === 'platform-mechanism' && <PlatformMechanismRunner />}
-      {(obj === 'platform-e2e' || obj === 'platform-enablement') && (
-        <div className="eval-gap-note">
-          ⚠「{OBJ_LABEL[obj]}」需平台评测驱动（
-          {obj === 'platform-e2e'
-            ? '复用 playwright harness 跑真前端 + IPC + 数据流全栈'
-            : '成对开/关 DW 功能比对 agent 增量'}
-          ），当前未接入——按反刷分原则不造假判决。
-        </div>
-      )}
+      {obj === 'platform-e2e' && <PlatformE2eRunner />}
+      {obj === 'platform-enablement' && <PlatformEnablementRunner cases={cases} />}
 
       {obj === 'agent' && (
         <>
@@ -878,6 +869,178 @@ function PlatformMechanismRunner() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── P4 平台-e2e eval 运行器（数据平面：临时内存库 + 真 schema + 真逻辑）──
+const SAMPLE_E2E_SEED = `{
+  "cases": [
+    { "id": "c1", "name": "demo", "category": "agent", "input_prompt": "do",
+      "expected_steps_json": "[{\\"name\\":\\"read\\"},{\\"name\\":\\"edit\\"}]",
+      "negative_json": "[{\\"name\\":\\"bash\\"}]", "draft": false },
+    { "id": "c2", "name": "draft-demo", "category": "agent", "input_prompt": "x", "draft": true }
+  ],
+  "verdicts": [
+    { "gate": "eval", "verdict": "PASS", "case_id": "c1" }
+  ]
+}`;
+const SAMPLE_E2E_EXPECT = `{
+  "approved_case_count": 1,
+  "total_case_count": 2,
+  "verdict_count_for_gate": ["eval", 1],
+  "replay": { "case_id": "c1", "actual_steps": ["read", "edit"], "expected_grade": "optimal" }
+}`;
+
+function PlatformE2eRunner() {
+  const [seedText, setSeedText] = useState(SAMPLE_E2E_SEED);
+  const [expectText, setExpectText] = useState(SAMPLE_E2E_EXPECT);
+  const [running, setRunning] = useState(false);
+  const [verdict, setVerdict] = useState<E2EVerdict | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function run() {
+    setRunning(true);
+    setErr(null);
+    setVerdict(null);
+    try {
+      const seed = JSON.parse(seedText) as E2ESeed;
+      const expect = JSON.parse(expectText) as E2EExpect;
+      const v = await evalApi.runPlatformE2e(seed, expect);
+      setVerdict(v);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="eval-mechanism">
+      <div className="eval-section-label">Seed（灌入临时库的 cases + verdicts）</div>
+      <textarea
+        className="eval-yaml mono"
+        value={seedText}
+        onChange={(e) => setSeedText(e.target.value)}
+        rows={8}
+        spellCheck={false}
+      />
+      <div className="eval-section-label">期望（确定性契约）</div>
+      <textarea
+        className="eval-yaml mono"
+        value={expectText}
+        onChange={(e) => setExpectText(e.target.value)}
+        rows={8}
+        spellCheck={false}
+      />
+      <div className="eval-hint">
+        临时内存库（真 schema）→ seed → 对真 list_eval_cases / score_replay / list_verdicts 断言。
+        无 LLM/无浏览器，判决=数据契约客观事实；渲染层由 playwright eval.spec.ts 守护。
+      </div>
+      <div className="eval-actions">
+        <Button variant="primary" onClick={run} disabled={running}>
+          {running ? '驱动数据平面…' : '▶ 运行 e2e 评测'}
+        </Button>
+        {verdict && (
+          <span className="eval-replay-result">
+            <VerdictBadge verdict={verdict.pass ? 'PASS' : 'FAIL'} />
+            <span className="mono"> {verdict.checks.length} 项检查</span>
+          </span>
+        )}
+        {err && <span className="eval-hint eval-hint-err">{err}</span>}
+      </div>
+      {verdict && (
+        <div className="eval-locked mono">
+          {verdict.checks.map((c, i) => (
+            <div key={i}>
+              {c.pass ? '✓' : '✗'} {c.name} — {c.detail}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── P4 平台-加持 eval 运行器（开/关 skills → 配对 diff，需 live key）──
+function PlatformEnablementRunner({ cases }: { cases: EvalCaseRow[] }) {
+  const activeProject = useNavigationStore((s) => s.activeProject);
+  const sessions = useAgentStore((s) => s.sessions);
+  const workingFallback = activeProject?.path ?? sessions[0]?.projectPath ?? '';
+  const readyCases = cases.filter((c) => !c.draft);
+  const [caseId, setCaseId] = useState('');
+  const [workingDir, setWorkingDir] = useState(workingFallback);
+  const [running, setRunning] = useState(false);
+  const [verdict, setVerdict] = useState<EnablementVerdict | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!caseId && readyCases.length > 0) setCaseId(readyCases[0].id);
+  }, [readyCases, caseId]);
+  useEffect(() => {
+    setWorkingDir(workingFallback);
+  }, [workingFallback]);
+
+  async function run() {
+    if (!caseId || !workingDir) return;
+    setRunning(true);
+    setErr(null);
+    setVerdict(null);
+    try {
+      const v = await evalApi.runEnablement(caseId, workingDir, 'exact_match');
+      setVerdict(v);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="eval-mechanism">
+      <div className="eval-section-label">被测 case + 工作区</div>
+      <div className="eval-case-list">
+        {readyCases.length === 0 ? (
+          <span className="eval-empty">无已审核 case。先在 P2 审核。</span>
+        ) : (
+          readyCases.map((c) => (
+            <button
+              key={c.id}
+              className={`eval-case-row ${caseId === c.id ? 'selected' : ''}`}
+              onClick={() => setCaseId(c.id)}
+            >
+              <span className="eval-badge eval-badge-clear">ready</span>
+              <span className="eval-case-title">{c.name}</span>
+            </button>
+          ))
+        )}
+      </div>
+      <input
+        className="eval-input"
+        value={workingDir}
+        onChange={(e) => setWorkingDir(e.target.value)}
+        placeholder="工作区路径（只读沙箱）"
+      />
+      <div className="eval-hint">
+        skills 关→开两次真 agent 回放（Plan 沙箱），compare_paired diff 轨迹。
+        <b>需 live provider key。</b>反刷分：增益须闭合到 expected 缺口才算 CLEAR，否则 BRAKE；无 delta 则 NoChange。
+      </div>
+      <div className="eval-actions">
+        <Button variant="primary" onClick={run} disabled={running || !caseId || !workingDir}>
+          {running ? '两次回放 diff…' : '▶ 运行加持评测'}
+        </Button>
+        {verdict && (
+          <span className="eval-replay-result">
+            {verdict.attribution && <VerdictBadge verdict={verdict.attribution} />}
+            <span className="mono">
+              {' '}
+              {verdict.outcome} · off {verdict.off_score.toFixed(2)} → on {verdict.on_score.toFixed(2)}
+            </span>
+          </span>
+        )}
+        {err && <span className="eval-hint eval-hint-err">{err}</span>}
+      </div>
+      {verdict && <div className="eval-locked mono">{verdict.reason}</div>}
     </div>
   );
 }

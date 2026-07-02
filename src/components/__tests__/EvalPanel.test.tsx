@@ -19,6 +19,8 @@ vi.mock('../../utils/evalApi', () => ({
     runSession: vi.fn(),
     listRuns: vi.fn(),
     runPlatformMechanism: vi.fn(),
+    runPlatformE2e: vi.fn(),
+    runEnablement: vi.fn(),
   },
 }));
 
@@ -108,6 +110,25 @@ function mockAll(p: { cases?: EvalCaseRow[]; verdicts?: VerdictRow[]; trend?: un
     expected_order: ['prompt_1', 'agent_1', 'gate_1'],
     expected_terminal: 'done',
     mismatches: [],
+  });
+  // P4 平台-e2e: clean data-plane verdict — all set expectations hit (1 approved
+  // case, 2 total, 1 eval-gate verdict, replay grade optimal).
+  vi.mocked(evalApi.runPlatformE2e).mockResolvedValue({
+    pass: true,
+    checks: [
+      { name: 'approved_case_count', pass: true, detail: '1' },
+      { name: 'replay', pass: true, detail: 'optimal' },
+    ],
+    mismatches: [],
+  });
+  // P4 平台-加持: skills OFF→ON closed the expected gap (CLEAR improvement).
+  vi.mocked(evalApi.runEnablement).mockResolvedValue({
+    feature: 'skills',
+    outcome: 'improvement',
+    attribution: 'CLEAR',
+    off_score: 0.4,
+    on_score: 0.9,
+    reason: 'ON 闭合了到 expected 的缺口',
   });
 }
 
@@ -378,6 +399,57 @@ describe('EvalPanel', () => {
       expect(screen.getByText('PASS')).toBeInTheDocument();
     });
     expect(screen.getByText(/终态 done/)).toBeInTheDocument();
+  });
+
+  it('P4 runs the platform-e2e eval (data plane, no LLM) and renders the checks', async () => {
+    // 平台-e2e was a gap-note; now a real runner drives the in-memory DB +
+    // real logic functions and shows per-check pass/fail.
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-P4'));
+    fireEvent.click(screen.getByText('平台-e2e'));
+    // The default seed/expect textareas are pre-filled — just run.
+    fireEvent.click(screen.getByRole('button', { name: /运行 e2e 评测/ }));
+    await waitFor(() => {
+      expect(evalApi.runPlatformE2e).toHaveBeenCalledWith(
+        expect.objectContaining({ cases: expect.any(Array) }),
+        expect.objectContaining({ approved_case_count: 1, total_case_count: 2 }),
+      );
+    });
+    // The verdict is a clean PASS with the per-check list rendered.
+    await waitFor(() => {
+      expect(screen.getByText('PASS')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/项检查/)).toBeInTheDocument();
+    // The check rows render with a ✓ marker (scoped via getAllByText so the
+    // pre-filled expect textarea, which also names approved_case_count, doesn't
+    // collide with the rendered check).
+    expect(screen.getAllByText(/approved_case_count/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('P4 runs the platform-enablement eval (skills OFF→ON paired, CLEAR improvement)', async () => {
+    // 平台-加持 was a gap-note; now a real runner fires runEnablement. Needs a
+    // working dir (from sessions[0].projectPath) + a ready case to enable the
+    // button (it stays disabled when workingDir/caseId are empty).
+    useAgentStore.setState({ sessions: [finishedSession()] });
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    // Wait for cases to load on the default P1 view before switching — the
+    // enablement runner's case picker (readyCases) is empty until listCases
+    // resolves, leaving the button disabled.
+    await screen.findByText('修复 BlocksView tool_use');
+    fireEvent.click(screen.getByTestId('eval-nav-P4'));
+    fireEvent.click(screen.getByText('平台-加持'));
+    fireEvent.click(screen.getByRole('button', { name: /运行加持评测/ }));
+    await waitFor(() => {
+      expect(evalApi.runEnablement).toHaveBeenCalledWith('c1', '/repo', 'exact_match');
+    });
+    // The verdict surfaces CLEAR + improvement + the off→on score delta.
+    await waitFor(() => {
+      expect(screen.getByText('CLEAR')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/improvement/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.40.*0\.90/)).toBeInTheDocument();
   });
 
   it('scoreOf reads a numeric verdict string as its value (aligns with VerdictBadge)', () => {

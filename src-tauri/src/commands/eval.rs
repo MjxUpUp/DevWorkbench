@@ -295,6 +295,12 @@ pub async fn run_eval_replay(
         session_id,
         working_dir,
         model,
+        // A plain agent replay admits installed skills (the default). The
+        // platform-enablement eval toggles this off for its baseline run.
+        enable_skills: true,
+        // Persist the verdict under the `eval` gate so it lands in the case's
+        // formal eval history (the default; enablement probes pass None).
+        verdict_gate: Some("eval".to_string()),
     };
     crate::eval::replay::run_replay(input, &case, matcher, db.inner())
         .await
@@ -326,15 +332,15 @@ pub async fn preview_session_trajectory(
 /// already-recorded facts: LLM traces → actual tool sequence + failed-step
 /// count, the activity log → files the run touched, the case contract →
 /// expected steps / negative (forbidden tools) / expected observables (file
-/// subset). Returns the weighted `Q_code` + per-dimension breakdown. Pure +
-/// deterministic (反刷分 #1: no LLM judges its own reliability here).
+/// subset), the verdict ledger → whether any human-gate approval fired. Returns
+/// the weighted `Q_code` + per-dimension breakdown. Pure + deterministic
+/// (反刷分 #1: no LLM judges its own reliability here).
 ///
-/// `had_human_intervention` is always false on this path: Human-Gate approvals
-/// live only in memory (`AgentApprovalState`, cleared on session end) so a past
-/// run's interventions aren't reconstructable, and an eval replay runs in a
-/// read-only Plan sandbox with no human gate at all — the hard gate is still
-/// wired so a future persisted signal drops straight in. Honest gap noted in
-/// the panel; until then the manual-intervention dim reads 无 / 1.0 for replays.
+/// `had_human_intervention` is read from the L1 ledger: any `gate =
+/// "human-gate"` verdict (approve/reject/retry, persisted by
+/// `resolve_human_gate_cmd`) for the session counts as an intervention and
+/// trips the hard gate. A replay run (Plan sandbox, no human gate) has none, so
+/// it scores `false` there — the honest "no human helped".
 #[tauri::command]
 pub async fn score_eval_rubric(
     db: State<'_, DbState>,
@@ -373,6 +379,20 @@ pub async fn score_eval_rubric(
         .filter(|s| s.status.as_deref() == Some("error"))
         .count();
 
+    // manual_intervention hard gate, scored from FACT: any human-gate verdict
+    // (approve/reject/retry) persisted for this session counts as an
+    // intervention — the run needed a human nudge. A replay (Plan sandbox, no
+    // human gate) has none, so it stays false there; a real interactive session
+    // in HumanGate mode records each decision via resolve_human_gate_cmd.
+    let had_human_intervention = !verdicts_db::list_verdicts(
+        &conn,
+        Some(&session_id),
+        Some("human-gate"),
+        None,
+        1,
+    )?
+    .is_empty();
+
     let input = RubricInput {
         actual: &actual,
         expected: expected_refs.as_deref(),
@@ -381,7 +401,7 @@ pub async fn score_eval_rubric(
         expected_files: &expected_files_refs,
         actual_files: &actual_files_refs,
         failed_steps,
-        had_human_intervention: false,
+        had_human_intervention,
     };
     Ok(scoring::score_rubric(input))
 }
@@ -429,4 +449,58 @@ pub async fn eval_platform_mechanism(
     crate::eval::platform::run_platform_mechanism(&graph_yaml, input_json, expect)
         .await
         .map_err(AppError::Internal)
+}
+
+// ===========================================================================
+// P4 platform-e2e eval — exercise the full eval data-plane (persistence logic →
+// in-memory DB → return shape) against a seeded database. No LLM, no browser:
+// the verdict is a fact about the data contracts the frontend consumes. The
+// browser-render layer is guarded by the playwright eval.spec.ts suite.
+// ===========================================================================
+
+/// Run a platform-e2e case: stand up an in-memory DB with the real eval schema,
+/// seed it, and assert each set expectation (draft filtering, replay grade,
+// verdict gate-count) against the real persistence/logic functions. Deterministic
+/// — no LLM, no provider, no browser. The P4 "平台-e2e" object calls this.
+#[tauri::command]
+pub async fn eval_platform_e2e(
+    seed: crate::eval::platform_e2e::E2ESeed,
+    expect: crate::eval::platform_e2e::E2EExpect,
+) -> Result<crate::eval::platform_e2e::E2EVerdict, AppError> {
+    crate::eval::platform_e2e::run_platform_e2e(seed, expect)
+        .map_err(AppError::Internal)
+}
+
+// ===========================================================================
+// P4 platform-enablement eval — does enabling a DW feature (skills) actually
+// improve the agent's tool-choice? Runs the case twice (feature OFF vs ON) and
+// diffs the trajectories via L4 compare_paired. Needs a live provider key (two
+// real agent runs); the verdict core is compare_paired (unit-tested). 反刷分:
+// a gain that doesn't close the gap to expected is BRAKE, not CLEAR.
+// ===========================================================================
+
+/// Drive one platform-enablement run: replay with skills OFF, replay with skills
+/// ON, diff via compare_paired, persist a `gate = "enablement"` verdict. Needs a
+/// live provider key (the agent really runs twice). The P4 "平台-加持" object.
+#[tauri::command]
+pub async fn run_eval_enablement(
+    db: State<'_, DbState>,
+    case_id: String,
+    working_dir: String,
+    model: Option<String>,
+    matcher: Matcher,
+) -> Result<crate::eval::platform_enablement::EnablementVerdict, AppError> {
+    let conn = db.get().map_err(|e| AppError::Internal(format!("db lock: {e}")))?;
+    let case = eval_cases::get_eval_case(&conn, &case_id)?
+        .ok_or_else(|| AppError::NotFound(format!("eval case not found: {case_id}")))?;
+    drop(conn);
+    crate::eval::platform_enablement::run_eval_enablement(
+        db.inner(),
+        &case,
+        working_dir,
+        model,
+        matcher,
+    )
+    .await
+    .map_err(AppError::Internal)
 }

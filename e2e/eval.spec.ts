@@ -20,7 +20,7 @@ import { test, expect } from '@playwright/test';
  *    regression guard for the oldV/newV label-swap bug that inverted the
  *    brake/admit verdict.
  */
-test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, object gap-note', async ({
+test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, 4 real eval drivers', async ({
   page,
 }) => {
   await page.goto('/eval.html');
@@ -61,25 +61,35 @@ test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, 
   await expect(page.getByText('净提升 · 可准入')).toBeVisible();
   await expect(page.getByText('回归 · 拦')).toHaveCount(0);
 
-  // ── 4 evaluation objects (P4). 平台-机制 is a REAL driver now (stub executor
-  //    → DAG engine → node-order + terminal verdict, no LLM); only e2e /
-  //    enablement stay honest gap-notes. ──
+  // ── 4 evaluation objects (P4). All three platform objects are REAL drivers
+  //    now: 机制 (DAG engine, no LLM) / e2e (in-memory DB + real logic, no LLM)
+  //    / 加持 (skills OFF→ON paired, live key in prod — shim-served here). ──
   await page.getByTestId('eval-nav-P4').click();
   await expect(page.getByText('平台-机制')).toBeVisible();
   await expect(page.getByText('平台-e2e')).toBeVisible();
   await expect(page.getByText('平台-加持')).toBeVisible();
-  // 平台-机制 → real runner: the 运行机制评测 button is live (not a gap-note).
+  // 平台-机制 → real runner: 运行机制评测 button is live → PASS · 终态 done.
   await page.locator('label', { hasText: '平台-机制' }).click();
   await expect(page.getByRole('button', { name: /运行机制评测/ })).toBeVisible();
   await expect(page.getByText(/需平台评测驱动/)).toHaveCount(0);
-  // Drive it → the verdict renders (PASS · 终态 done).
   await page.getByRole('button', { name: /运行机制评测/ }).click();
   await expect(page.getByText('PASS')).toBeVisible();
-  // 平台-e2e + 平台-加持 still carry the honest gap-note — no fake driver.
+  // 平台-e2e → real runner (data plane, no LLM): 运行 e2e 评测 → PASS + checks.
   await page.locator('label', { hasText: '平台-e2e' }).click();
-  await expect(page.getByText(/需平台评测驱动/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /运行 e2e 评测/ })).toBeVisible();
+  await expect(page.getByText(/需平台评测驱动/)).toHaveCount(0);
+  await page.getByRole('button', { name: /运行 e2e 评测/ }).click();
+  await expect(page.getByText(/项检查/)).toBeVisible();
+  // 平台-加持 → real runner (skills OFF→ON paired): 运行加持评测 → CLEAR +
+  // improvement + off→on score delta. (Working dir comes from activeProject.path
+  // set in eval-main; run_eval_enablement is shim-served — the real driver needs
+  // a provider key for its two live agents.)
   await page.locator('label', { hasText: '平台-加持' }).click();
-  await expect(page.getByText(/需平台评测驱动/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /运行加持评测/ })).toBeVisible();
+  await expect(page.getByText(/需平台评测驱动/)).toHaveCount(0);
+  await page.getByRole('button', { name: /运行加持评测/ }).click();
+  await expect(page.getByText('CLEAR', { exact: true })).toBeVisible();
+  await expect(page.getByText('improvement')).toBeVisible();
 
   // ── P6: the 8-dim AgentX reliability rubric + weighted Q_code render. The
   //    newest eval verdict (v-eval-new) carries session_id + case_id, so

@@ -17,10 +17,13 @@ import trend from './fixtures/eval-trend.json';
 // 客观事实 (locked prompt in P2) / 因果归因 (CLEAR+BRAKE badges in V1) /
 // 配对回放 (P5 net-improve when the new run beats the old).
 
-// P4 falls back to activeProject.path for the working dir; null is fine — the
-// E2E does not drive a replay (replay needs a live LLM provider). It only
-// checks the 4 evaluation-object radios render + the honest gap-note.
-useNavigationStore.setState({ activeProject: null } as never);
+// P4 platform-enablement needs a working dir (activeProject.path) for its
+// button to be live — the runner stays disabled until caseId + workingDir are
+// both set. The real driver runs two live agents (needs a provider key); here
+// run_eval_enablement is served from the IPC shim so the spec can click 运行加持评测
+// and assert the verdict renders without a key. The other replay (agent obj)
+// still needs a live LLM and is not driven here.
+useNavigationStore.setState({ activeProject: { path: '/repo' } } as never);
 useAgentStore.setState({ sessions: [] } as never);
 
 // Serve the fixtures through the IPC shim — real invoke(cmd, args) contract,
@@ -76,9 +79,7 @@ useAgentStore.setState({ sessions: [] } as never);
     },
   }),
   // P4 platform-mechanism: the default linear sample graph (prompt → agent →
-  // gate) runs in order + reaches done — a clean PASS. Lets the spec click
-  // 运行机制评测 and assert the verdict renders (the only platform object
-  // closed end-to-end; e2e/enablement stay gap-noted).
+  // gate) runs in order + reaches done — a clean PASS.
   eval_platform_mechanism: () => ({
     pass: true,
     actual_order: ['prompt_1', 'agent_1', 'gate_1'],
@@ -86,6 +87,32 @@ useAgentStore.setState({ sessions: [] } as never);
     expected_order: ['prompt_1', 'agent_1', 'gate_1'],
     expected_terminal: 'done',
     mismatches: [],
+  }),
+  // P4 platform-e2e: the default seed (1 approved + 1 draft case, 1 eval-gate
+  // verdict) drives the in-memory DB + real logic functions to a clean PASS —
+  // all set expectations hit. Lets the spec click 运行 e2e 评测 and assert the
+  // per-check verdict renders.
+  eval_platform_e2e: () => ({
+    pass: true,
+    checks: [
+      { name: 'approved_case_count', pass: true, detail: '1' },
+      { name: 'total_case_count', pass: true, detail: '2' },
+      { name: 'verdict_count_for_gate', pass: true, detail: 'eval=1' },
+      { name: 'replay', pass: true, detail: 'optimal' },
+    ],
+    mismatches: [],
+  }),
+  // P4 platform-enablement: skills OFF→ON closed the expected gap (CLEAR
+  // improvement). The real driver runs two live agents (needs a provider key);
+  // here it is served from the IPC shim so the spec can assert the runner wires
+  // run_eval_enablement and renders the verdict without a key.
+  run_eval_enablement: () => ({
+    feature: 'skills',
+    outcome: 'improvement',
+    attribution: 'CLEAR',
+    off_score: 0.4,
+    on_score: 0.9,
+    reason: 'ON 闭合了到 expected 的缺口',
   }),
 };
 

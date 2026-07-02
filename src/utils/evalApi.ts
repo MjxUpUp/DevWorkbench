@@ -98,6 +98,76 @@ export interface MechanismVerdict {
   mismatches: string[];
 }
 
+// ── P4 平台-e2e eval（数据平面：persistence → DB → 返回形状）──
+/** 一个要 seed 进 eval_cases 的 case 行。 */
+export interface E2ESeedCase {
+  id: string;
+  name: string;
+  category: string;
+  input_prompt: string;
+  expected_steps_json?: string | null;
+  negative_json?: string | null;
+  /** draft=true → 未审核，应被 approved 列表排除、include_drafts 含。 */
+  draft?: boolean;
+}
+/** 一个要 seed 进 verdicts 账本的 verdict 行。 */
+export interface E2ESeedVerdict {
+  gate: string;
+  verdict: string;
+  session_id?: string | null;
+  case_id?: string | null;
+}
+/** seed：跑断言前灌进临时库的数据。 */
+export interface E2ESeed {
+  cases?: E2ESeedCase[];
+  verdicts?: E2ESeedVerdict[];
+}
+/** 一次回放打分断言：载入 case 契约，对 stub 轨迹打分，要求该 grade。 */
+export interface E2EReplayExpect {
+  case_id: string;
+  actual_steps: string[];
+  matcher?: Matcher;
+  expected_grade: 'optimal' | 'suboptimal' | 'incorrect';
+}
+/** 平台-e2e 的确定性契约。每个 Option=null 表示「不查」该维度。 */
+export interface E2EExpect {
+  approved_case_count?: number | null;
+  total_case_count?: number | null;
+  verdict_count_for_gate?: [string, number] | null;
+  replay?: E2EReplayExpect | null;
+}
+/** 单条断言结果（UI 展示哪个维度过/挂）。 */
+export interface E2ECheck {
+  name: string;
+  pass: boolean;
+  detail: string;
+}
+/** 平台-e2e 判决。pass=所有 set 的期望都命中数据平面行为。 */
+export interface E2EVerdict {
+  pass: boolean;
+  checks: E2ECheck[];
+  mismatches: string[];
+}
+
+// ── P4 平台-加持 eval（开/关 DW 功能 → agent 轨迹增量）──
+/** enablement 跑的 off→on 结果（镜像 L4 PairedOutcome）。 */
+export type EnablementOutcome = 'improvement' | 'regression' | 'no_change';
+/** enablement 切换的 DW 功能。当前仅 skills。 */
+export type EnablementFeature = 'skills';
+/**
+ * 开/关一个 DW 功能是否真改善了 agent。attribution: CLEAR=可归因增益
+ * （ON 闭合了到 expected 的缺口）/ BRAKE=无因果链的增益 / null=无增益可归因。
+ * 需 live provider key（两次真 agent 跑）。
+ */
+export interface EnablementVerdict {
+  feature: EnablementFeature;
+  outcome: EnablementOutcome;
+  attribution: Attribution | null;
+  off_score: number;
+  on_score: number;
+  reason: string;
+}
+
 /** L2 eval case —— 回放/配对跑的确定性契约。 */
 export interface EvalCaseRow {
   id: string;
@@ -250,4 +320,17 @@ export const evalApi = {
     expect: MechanismExpect,
   ) =>
     invoke<MechanismVerdict>('eval_platform_mechanism', { graphYaml, inputJson, expect }),
+
+  // ----- P4 平台-e2e eval（数据平面）-----
+  /** 跑一个平台-e2e case：临时内存库（真 schema）→ seed → 对真持久化/逻辑函数
+   *  断言（draft 过滤/回放打分/gate 计数）。无 LLM/无浏览器，判决=数据契约的
+   *  客观事实；浏览器渲染层由 playwright eval.spec.ts 守护。 */
+  runPlatformE2e: (seed: E2ESeed, expect: E2EExpect) =>
+    invoke<E2EVerdict>('eval_platform_e2e', { seed, expect }),
+
+  // ----- P4 平台-加持 eval -----
+  /** 跑一个平台-加持 case：skills 关→开两次真 agent 回放，compare_paired diff。
+   *  增益须闭合到 expected 缺口才算 CLEAR，否则 BRAKE。需 live provider key。 */
+  runEnablement: (caseId: string, workingDir: string, matcher: Matcher, model?: string) =>
+    invoke<EnablementVerdict>('run_eval_enablement', { caseId, workingDir, matcher, model }),
 };
