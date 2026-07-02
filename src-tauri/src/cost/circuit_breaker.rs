@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 /// Per-host circuit state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
@@ -27,6 +29,71 @@ pub enum CircuitState {
     /// Cooldown elapsed; a bounded number of probe requests are allowed to
     /// test whether the upstream has recovered.
     HalfOpen,
+}
+
+/// A circuit state transition emitted for the verdict ledger (L1). The breaker
+/// stays db-agnostic — it just emits; a consumer task (wired at app setup) drains
+/// these and persists each as a `circuit-breaker` gate row. Until
+/// `set_event_sender` is called, emit is a no-op (keeps the breaker's own unit
+/// tests hermetic — no tokio runtime, no global state side-effects).
+#[derive(Debug, Clone)]
+pub struct CircuitEvent {
+    pub host: String,
+    pub kind: CircuitEventKind,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitEventKind {
+    Tripped,
+    Reset,
+}
+impl CircuitEvent {
+    pub fn tripped(host: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            kind: CircuitEventKind::Tripped,
+        }
+    }
+    pub fn reset(host: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            kind: CircuitEventKind::Reset,
+        }
+    }
+}
+
+/// Global sink for circuit transitions. `Mutex<Option<_>>` (not `OnceLock`) so a
+/// test can `clear_event_sender` to stay hermetic under cargo's parallel test
+/// runner — a one-shot `OnceLock` would leak events across tests. Emit fires on
+/// the trip/reset path only (low frequency), so the per-emit lock is negligible.
+static CIRCUIT_TX: Mutex<Option<UnboundedSender<CircuitEvent>>> = Mutex::new(None);
+
+/// Install the circuit-event sink. Called once at app setup (after the db pool
+/// is up); the consumer task drains events and persists each to the verdict
+/// ledger as a `circuit-breaker` gate row (TRIPPED / RESET, no attribution — a
+/// host going down is not "your work").
+pub fn set_event_sender(tx: UnboundedSender<CircuitEvent>) {
+    if let Ok(mut slot) = CIRCUIT_TX.lock() {
+        *slot = Some(tx);
+    }
+}
+
+/// Test-only: drop the installed sink so parallel tests don't cross-pollinate
+/// via the global static. Production never calls this.
+#[cfg(test)]
+fn clear_event_sender() {
+    if let Ok(mut slot) = CIRCUIT_TX.lock() {
+        *slot = None;
+    }
+}
+
+fn emit_circuit_event(evt: CircuitEvent) {
+    if let Ok(slot) = CIRCUIT_TX.lock() {
+        if let Some(tx) = slot.as_ref() {
+            // UnboundedSender::send is synchronous + never blocks; a dropped
+            // consumer just discards — emit must never jam the request path.
+            let _ = tx.send(evt);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,38 +206,60 @@ impl CircuitBreaker {
 
     /// Record a successful request: any state collapses back to `Closed`,
     /// clearing failures and inflight probes. A HalfOpen probe succeeding is
-    /// the signal that the upstream has recovered.
+    /// the signal that the upstream has recovered. A transition OUT of a
+    /// non-Closed state emits a `Reset` circuit event (L1 verdict ledger).
     pub fn record_success(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(c) = hosts.get_mut(host) {
-            c.state = CircuitState::Closed;
-            c.failures = 0;
-            c.half_open_inflight = 0;
+        let reset = {
+            let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(c) = hosts.get_mut(host) {
+                let was_open = c.state != CircuitState::Closed;
+                c.state = CircuitState::Closed;
+                c.failures = 0;
+                c.half_open_inflight = 0;
+                was_open
+            } else {
+                false
+            }
+        };
+        if reset {
+            emit_circuit_event(CircuitEvent::reset(host));
         }
     }
 
     /// Record a failed request. HalfOpen probe failure reopens immediately
     /// (refreshing the cooldown clock); Closed failure increments and trips at
-    /// the threshold; Open stays Open (clock untouched).
+    /// the threshold; Open stays Open (clock untouched). Each transition INTO
+    /// `Open` emits a `Tripped` circuit event (L1 verdict ledger) — emitted
+    /// AFTER the lock is released so a slow consumer can never block the
+    /// request path.
     pub fn record_failure(&self, host: &str) {
-        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
-        let c = hosts
-            .entry(host.to_string())
-            .or_insert_with(HostCircuit::fresh);
-        match c.state {
-            CircuitState::HalfOpen => {
-                c.state = CircuitState::Open;
-                c.opened_at = Instant::now();
-                c.half_open_inflight = 0;
-            }
-            CircuitState::Closed => {
-                c.failures += 1;
-                if c.failures >= self.config.failure_threshold {
+        let tripped = {
+            let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+            let c = hosts
+                .entry(host.to_string())
+                .or_insert_with(HostCircuit::fresh);
+            match c.state {
+                CircuitState::HalfOpen => {
                     c.state = CircuitState::Open;
                     c.opened_at = Instant::now();
+                    c.half_open_inflight = 0;
+                    true
                 }
+                CircuitState::Closed => {
+                    c.failures += 1;
+                    if c.failures >= self.config.failure_threshold {
+                        c.state = CircuitState::Open;
+                        c.opened_at = Instant::now();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                CircuitState::Open => false,
             }
-            CircuitState::Open => {}
+        };
+        if tripped {
+            emit_circuit_event(CircuitEvent::tripped(host));
         }
     }
 
@@ -224,6 +313,30 @@ mod tests {
             cooldown: Duration::from_secs(60),
             half_open_max: 1,
         }
+    }
+
+    #[test]
+    fn circuit_event_constructors_set_kind_and_host() {
+        let t = CircuitEvent::tripped("api.foo.com");
+        assert_eq!(t.kind, CircuitEventKind::Tripped);
+        assert_eq!(t.host, "api.foo.com");
+        let r = CircuitEvent::reset("api.foo.com");
+        assert_eq!(r.kind, CircuitEventKind::Reset);
+    }
+
+    #[test]
+    fn emit_is_noop_and_never_panics_when_sink_unset() {
+        // The breaker must run fine in contexts that never wire a sink (CLI,
+        // unit tests). record_failure/success with no sink installed must not
+        // panic and must not emit. Defensive clear in case a parallel test set
+        // one — we don't drain/ assert events here (the global static makes
+        // drain-assertions unreliable under cargo's parallel runner); the
+        // emit→persist wiring is covered by the app-setup integration.
+        clear_event_sender();
+        let cb = CircuitBreaker::new(fast(1));
+        cb.record_failure("h"); // trips, no sink → no-op emit
+        cb.record_success("h"); // resets, no sink → no-op emit
+        assert_eq!(cb.state("h"), CircuitState::Closed);
     }
 
     #[test]

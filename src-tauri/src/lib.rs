@@ -189,6 +189,14 @@ pub fn run() {
                     "v19→v20 settings.onboarding_completed column migration",
                     migrate::migrate_v19_to_v20(&conn)
                 );
+                run_migrate!(
+                    "v20→v21 verdicts ledger migration",
+                    migrate::migrate_v20_to_v21(&conn)
+                );
+                run_migrate!(
+                    "v21→v22 eval_cases migration",
+                    migrate::migrate_v21_to_v22(&conn)
+                );
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {
@@ -222,6 +230,52 @@ pub fn run() {
 
             // Store the pool as managed state
             app.manage(db_state.clone());
+
+            // L1 verdict ledger — drain circuit-breaker transitions (TRIPPED /
+            // RESET) into the verdicts table. The breaker emits to a global
+            // channel (cost/ stays db-agnostic); this consumer is the only thing
+            // that touches the db for circuit events. Best-effort: a failed
+            // insert is logged, never blocks the breaker or the request path.
+            {
+                let (tx, mut rx) =
+                    tokio::sync::mpsc::unbounded_channel::<cost::circuit_breaker::CircuitEvent>();
+                cost::circuit_breaker::set_event_sender(tx);
+                let db_for_circuit = db_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    while let Some(evt) = rx.recv().await {
+                        let verdict = match evt.kind {
+                            cost::circuit_breaker::CircuitEventKind::Tripped => "TRIPPED",
+                            cost::circuit_breaker::CircuitEventKind::Reset => "RESET",
+                        };
+                        let row = eval::verdicts::NewVerdict {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            session_id: None,
+                            case_id: None,
+                            gate: "circuit-breaker".to_string(),
+                            verdict: verdict.to_string(),
+                            // A host outage/recovery is not "your work" — no
+                            // anti-gaming attribution on circuit events.
+                            attribution: None,
+                            report: Some(
+                                serde_json::to_string(&serde_json::json!({"host": evt.host}))
+                                    .unwrap_or_else(|_| "{}".into()),
+                            ),
+                            commit_sha: None,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        let db = db_for_circuit.clone();
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            if let Ok(conn) = db.get() {
+                                if let Err(e) = eval::verdicts::insert_verdict(&conn, &row) {
+                                    log::warn!("[verdict-ledger] circuit event persist failed: {e}");
+                                }
+                            }
+                        })
+                        .await;
+                    }
+                });
+                log::info!("Circuit-breaker verdict consumer started");
+            }
 
             // Start knowledge file watchers (background thread, shares the pool)
             match knowledge::watchers::start_knowledge_watchers(db_state.clone()) {

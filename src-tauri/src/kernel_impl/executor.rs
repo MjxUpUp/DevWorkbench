@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::agents::pty::AgentProcesses;
 use crate::db::DbState;
 use crate::error::AppError;
+use crate::eval::verdicts::{insert_verdict, NewVerdict};
 use crate::kernel_impl::anthropic_chat_model::AnthropicChatModel;
 use crate::kernel_impl::mcp_tool::McpTool;
 use crate::kernel_impl::opaque_agent::OpaqueAgent;
@@ -223,7 +224,7 @@ impl Executor for KernelExecutor {
         let project = working_dir.unwrap_or_else(|| ".".into());
         let path = std::path::Path::new(&project);
 
-        match gate.gate.as_str() {
+        let value = match gate.gate.as_str() {
             "forge" => {
                 let path_clone = path.to_path_buf();
                 let result = tokio::task::spawn_blocking(move || {
@@ -278,7 +279,121 @@ impl Executor for KernelExecutor {
                 verify_via_review(chat.as_ref(), &claim, &prompt).await
             }
             other => Err(format!("unknown gate '{other}'")),
+        }?;
+
+        // L1 verdict ledger — record the gate outcome with anti-gaming
+        // attribution (反刷分三原则). Best-effort: persist errors are logged,
+        // not propagated — the verdict is a side-record, never blocking the
+        // gate's own result. `session_id` is None: Executor::run_gate is a
+        // cross-crate trait whose signature carries no session context; the
+        // association is threaded when L2 eval (replay against a stored case)
+        // drives a run.
+        let _ = persist_gate_verdict(&self.db, gate.gate.as_str(), &value, path).await;
+
+        Ok(value)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L1 verdict ledger — gate-outcome persistence helpers
+// ---------------------------------------------------------------------------
+
+/// Map a gate's returned `Value` to a coarse verdict token for the ledger.
+/// Field sources verified against each gate's actual return shape:
+///   forge   — QualityReport serde'd `overall_status`, OR `{"status":"skipped"}`
+///             on the forge-not-installed graceful-skip path.
+///   honesty — `{"status": "passed"|"failed"}` from honesty::audit_project.
+///   verify  — `{"passed": bool}` from kernel_compose::gates::verify_via_review.
+fn gate_verdict_token(gate: &str, v: &Value) -> &'static str {
+    match gate {
+        "forge" => {
+            if v.get("status").and_then(|s| s.as_str()) == Some("skipped") {
+                "SKIPPED"
+            } else {
+                match v.get("overall_status").and_then(|s| s.as_str()) {
+                    Some("passed") => "PASS",
+                    Some("failed") => "FAIL",
+                    _ => "UNKNOWN",
+                }
+            }
         }
+        "honesty" => match v.get("status").and_then(|s| s.as_str()) {
+            Some("passed") => "PASS",
+            Some("failed") => "FAIL",
+            _ => "UNKNOWN",
+        },
+        "verify" => match v.get("passed").and_then(|b| b.as_bool()) {
+            Some(true) => "PASS",
+            Some(false) => "FAIL",
+            None => "UNKNOWN",
+        },
+        _ => "UNKNOWN",
+    }
+}
+
+/// Anti-gaming attribution (反刷分三原则). v1 stance: a PASS carries the gate's
+/// own verifiable evidence (forge deterministic checks / honesty zero Errors /
+/// verify adversarial review) → CLEAR. FAIL/SKIPPED/UNKNOWN leave attribution
+/// NULL — FAIL is itself the brake signal, not a gain needing attribution; and
+/// BRAKE (an unattributed gain) is reserved for L4 paired-replay, where a new
+/// version's win over the old is checked for a verifiable causal chain.
+fn gate_attribution_token(verdict: &str) -> Option<&'static str> {
+    match verdict {
+        "PASS" => Some("CLEAR"),
+        _ => None,
+    }
+}
+
+/// `git rev-parse HEAD` for the project — ties a verdict to the platform
+/// version under test. None on any failure (non-repo, git missing); treated as
+/// "no version to attribute", not an error. CREATE_NO_WINDOW on Windows so no
+/// console flashes (same idiom as honesty's git-diff).
+fn git_head_sha(project: &Path) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("rev-parse").arg("HEAD").current_dir(project);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Persist a gate verdict to the L1 ledger. Best-effort — a DB write failure is
+/// logged, never propagated (the verdict is a side-record; the gate's own
+/// result has already been computed). Runs in spawn_blocking (rusqlite is
+/// synchronous; the gate path is async).
+async fn persist_gate_verdict(db: &DbState, gate: &str, value: &Value, project: &Path) {
+    let verdict = gate_verdict_token(gate, value);
+    let attribution = gate_attribution_token(verdict);
+    let row = NewVerdict {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: None,
+        case_id: None,
+        gate: gate.to_string(),
+        verdict: verdict.to_string(),
+        attribution: attribution.map(|s| s.to_string()),
+        report: serde_json::to_string(value).ok(),
+        commit_sha: git_head_sha(project),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let db_clone = db.clone();
+    let join = tokio::task::spawn_blocking(move || -> Result<(), AppError> {
+        let conn = db_clone
+            .get()
+            .map_err(|e| AppError::Internal(format!("db lock: {e}")))?;
+        insert_verdict(&conn, &row)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("[verdict-ledger] persist failed (gate={gate}): {e}"),
+        Err(e) => log::warn!("[verdict-ledger] persist join (gate={gate}): {e}"),
     }
 }
 
@@ -1240,6 +1355,50 @@ fn outcome_to_value(o: kernel_core::AgentOutcome) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_verdict_token_forge_maps_overall_status() {
+        assert_eq!(gate_verdict_token("forge", &json!({"overall_status": "passed"})), "PASS");
+        assert_eq!(gate_verdict_token("forge", &json!({"overall_status": "failed"})), "FAIL");
+        assert_eq!(gate_verdict_token("forge", &json!({"overall_status": "unknown"})), "UNKNOWN");
+    }
+
+    #[test]
+    fn gate_verdict_token_forge_skipped_when_status_skipped() {
+        // forge-not-installed graceful-skip path emits {"status":"skipped"}
+        // (no overall_status) — must read SKIPPED, not UNKNOWN.
+        assert_eq!(gate_verdict_token("forge", &json!({"status": "skipped"})), "SKIPPED");
+    }
+
+    #[test]
+    fn gate_verdict_token_honesty_maps_status() {
+        assert_eq!(gate_verdict_token("honesty", &json!({"status": "passed"})), "PASS");
+        assert_eq!(gate_verdict_token("honesty", &json!({"status": "failed"})), "FAIL");
+        assert_eq!(gate_verdict_token("honesty", &json!({"status": "weird"})), "UNKNOWN");
+    }
+
+    #[test]
+    fn gate_verdict_token_verify_maps_passed_bool() {
+        assert_eq!(gate_verdict_token("verify", &json!({"passed": true})), "PASS");
+        assert_eq!(gate_verdict_token("verify", &json!({"passed": false})), "FAIL");
+        assert_eq!(gate_verdict_token("verify", &json!({})), "UNKNOWN");
+    }
+
+    #[test]
+    fn gate_verdict_token_unknown_gate_is_unknown() {
+        assert_eq!(gate_verdict_token("custom", &json!({})), "UNKNOWN");
+    }
+
+    #[test]
+    fn gate_attribution_token_only_pass_is_clear() {
+        // 反刷分 v1: only a PASS carries attributable evidence (CLEAR); every
+        // other verdict leaves attribution NULL — FAIL is the brake signal
+        // itself, BRAKE is reserved for L4 paired-replay (unattributed gain).
+        assert_eq!(gate_attribution_token("PASS"), Some("CLEAR"));
+        assert_eq!(gate_attribution_token("FAIL"), None);
+        assert_eq!(gate_attribution_token("SKIPPED"), None);
+        assert_eq!(gate_attribution_token("UNKNOWN"), None);
+    }
     use futures::StreamExt;
     use kernel_core::{AgentEvent, AgentOutcome, AgentRunStatus, ToolCallEvent, ToolCallStatus};
     use std::path::PathBuf;

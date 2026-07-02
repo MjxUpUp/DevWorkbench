@@ -830,6 +830,91 @@ pub fn migrate_v19_to_v20(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v20→v21: create the `verdicts` table — the L1 verdict ledger (gate/circuit
+/// verdicts + the anti-gaming attribution state). Idempotent —
+/// `CREATE TABLE IF NOT EXISTS`; fresh DBs already have the table from the
+/// static SCHEMA, so this only runs for pre-v21 DBs.
+pub fn migrate_v20_to_v21(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 21 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS verdicts (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            case_id TEXT,
+            gate TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            attribution TEXT,
+            report TEXT,
+            commit_sha TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_verdicts_session ON verdicts(session_id);
+        CREATE INDEX IF NOT EXISTS idx_verdicts_gate ON verdicts(gate);
+        CREATE INDEX IF NOT EXISTS idx_verdicts_created ON verdicts(created_at);",
+    )?;
+    log::info!("Migrated schema v20→v21: created verdicts (L1 verdict ledger)");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (21, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// v21→v22: create the `eval_cases` table — the L2 deterministic contract that
+/// replay (L3) and paired comparison (L4) run against. Idempotent
+/// (`CREATE TABLE IF NOT EXISTS`); fresh DBs already have the table from the
+/// static SCHEMA, so this only runs for pre-v22 DBs.
+pub fn migrate_v21_to_v22(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 22 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS eval_cases (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            input_prompt TEXT NOT NULL,
+            expected_steps_json TEXT,
+            expected_output TEXT,
+            expected_observables_json TEXT,
+            negative_json TEXT,
+            source_session_id TEXT,
+            commit_sha TEXT,
+            draft INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_cases_category ON eval_cases(category);
+        CREATE INDEX IF NOT EXISTS idx_eval_cases_draft ON eval_cases(draft);
+        CREATE INDEX IF NOT EXISTS idx_eval_cases_created ON eval_cases(created_at);",
+    )?;
+    log::info!("Migrated schema v21→v22: created eval_cases (L2 deterministic eval cases)");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (22, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

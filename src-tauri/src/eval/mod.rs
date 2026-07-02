@@ -11,6 +11,10 @@
 //! - [`db`] — the `eval_runs` table: one row per scored session, plus a
 //!   daily-bucketed trend query for the regression curve.
 
+pub mod cases;
 pub mod db;
 pub mod extract;
+pub mod paired;
+pub mod replay;
 pub mod scoring;
+pub mod verdicts;

@@ -459,6 +459,62 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_eval_runs_session ON eval_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
+
+-- L1 verdict ledger — one row per gate/circuit verdict emitted during an agent
+-- run or a platform eval. `gate` ∈ {verify, honesty, forge, circuit-breaker,
+-- eval}; `verdict` ∈ {PASS, FAIL, TRIPPED, RESET, SKIPPED, ...}. `attribution`
+-- encodes the anti-gaming stance (反刷分三原则): a gain with no verifiable
+-- causal chain lands as BRAKE (unattributed = brake), not as a win — so a
+-- passing run that cannot show its work is still flagged. `report` holds the
+-- gate's detail JSON (honesty findings / forge score / verify rubric verdict /
+-- circuit host+thresholds). `commit_sha` ties a verdict to the platform
+-- version under test (platform-eval + paired-replay). `case_id` is populated
+-- only by L2 eval runs (replay against a stored case); ad-hoc gate verdicts
+-- leave it NULL.
+CREATE TABLE IF NOT EXISTS verdicts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    case_id TEXT,
+    gate TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    attribution TEXT,
+    report TEXT,
+    commit_sha TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_verdicts_session ON verdicts(session_id);
+CREATE INDEX IF NOT EXISTS idx_verdicts_gate ON verdicts(gate);
+CREATE INDEX IF NOT EXISTS idx_verdicts_created ON verdicts(created_at);
+
+-- L2 eval cases — the deterministic contract a replay (L3) or paired comparison
+-- (L4) runs against. `category` ∈ {agent, platform-mechanism, platform-e2e,
+-- platform-boost} (the four eval targets, P4). 反刷分三原则 #1 (客观事实代码判):
+-- the expected_* fields are deterministic facts extracted from a real past run,
+-- not LLM-generated; an LLM is used only to judge `expected_output`, never to
+-- invent the target. `draft` = 1 marks a case auto-built straight off a
+-- trajectory (expected_steps frozen from extract_trajectory) but NOT yet
+-- independently reviewed — a draft cannot anchor a paired replay, so an agent
+-- can't self-certify whatever-it-did as the answer. `source_session_id` ties a
+-- draft back to the real run it was frozen from (traceability, anti-drift).
+-- `negative_json` holds counter-examples (steps/output that must NOT happen) —
+-- the anti-gaming guard against right-steps-wrong-outcome刷分.
+CREATE TABLE IF NOT EXISTS eval_cases (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    input_prompt TEXT NOT NULL,
+    expected_steps_json TEXT,
+    expected_output TEXT,
+    expected_observables_json TEXT,
+    negative_json TEXT,
+    source_session_id TEXT,
+    commit_sha TEXT,
+    draft INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_category ON eval_cases(category);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_draft ON eval_cases(draft);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_created ON eval_cases(created_at);
 ";
 
 /// Open (or create) the SQLite database at `db_path`, create all tables.
