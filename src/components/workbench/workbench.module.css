@@ -61,12 +61,12 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
-.planPlaceholder {
-  color: var(--text-tertiary);
+.planProgress {
+  color: var(--text-secondary);
   font-size: var(--text-xs);
-  opacity: 0.55;
   white-space: nowrap;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 /* === 轴线 B：Stage === */

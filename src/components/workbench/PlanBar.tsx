@@ -1,17 +1,27 @@
 import { useNavigationStore, type ViewId } from '../../stores/navigationStore';
+import { useAgentStore } from '../../stores/agentStore';
+import { useOrchestrateStore } from '../../stores/orchestrateStore';
+import type { SessionStatus } from '../../types';
 import styles from './workbench.module.css';
 
 /**
- * PlanBar — 轴线 A「谁持有 plan」（起底重构 块1 骨架）。
+ * PlanBar — 轴线 A「谁持有 plan」（起底重构 块1 骨架 / 块2 进度可见）。
  *
  * 调研启示 1/5/7/8：把"谁持有 plan / 编排在何处 / 中间结果落在何处"做成 UI 一等
- * 轴线。骨架阶段：按当前视图派生运行模式（Chat Agent / DAG Script / 观测），并标注
- * 该模式下 plan 与中间结果的物理落点（context window vs 脚本变量 vs 节点输出）。
- * 块2 填实：plan 大纲展开 + per-run 预算/迭代 transparency。
+ * 轴线。骨架阶段（块1）：按当前视图派生运行模式 + plan/结果物理落点。块2：补 plan
+ * 执行进度可见性——让用户一眼看到 plan 走到哪了，而不必翻对话流。
  *
- * 借鉴：Claude Code "who holds the plan" 设计轴（调研 claim18，3-0 验证）+
- * Anthropic workflow-vs-agent 二分（claim11）。反例：不默认所有任务走 chat agent
- * loop（4-15x 成本膨胀，claim2）。
+ * 借鉴：Claude Code "who holds the plan" 设计轴（claim18，3-0 验证）+ Anthropic
+ * workflow-vs-agent 二分（claim11）。反例：不默认所有任务走 chat agent loop
+ * （4-15x 成本膨胀，claim2）。
+ *
+ * 进度数据源（块2 关键决策）：
+ *  - Chat 模式：plan ∈ LLM context（隐式），无显式 plan 对象 → 以「已执行 tool 步骤数 +
+ *    session 状态」作为 plan 推进度的代理信号。取选中 conversation 里最新 turn
+ *    （running 优先，否则 startedAt 最新；sessions 顺序不保证故显式排序）。
+ *  - DAG 模式：plan ∈ 脚本变量（显式 GraphDef）→ orchestrateStore.nodes 即 plan 节点，
+ *    done/total 直接得。
+ *  - 成本预算不在本栏：per-session cost 不可得（Session 无字段）→ 归属 GateBar（块4）。
  */
 type ModeInfo = {
   label: string;
@@ -44,10 +54,45 @@ function modeForView(view: ViewId): ModeInfo {
   return MODE_BY_VIEW[view] ?? MODE_BY_VIEW.task;
 }
 
+const STATUS_ZH: Record<SessionStatus, string> = {
+  running: '运行中',
+  completed: '完成',
+  failed: '失败',
+  cancelled: '取消',
+};
+
 export function PlanBar() {
   const activeView = useNavigationStore((s) => s.activeView);
   const project = useNavigationStore((s) => s.activeProject);
+  const conversationId = useNavigationStore((s) => s.selectedConversationId);
+  const sessions = useAgentStore((s) => s.sessions);
+  const nodes = useOrchestrateStore((s) => s.nodes);
   const mode = modeForView(activeView);
+
+  // plan 进度派生（轴线A 的「执行可见」补充「位置可见」）。
+  let progress: string;
+  if (activeView === 'task') {
+    const convTurns = conversationId
+      ? sessions.filter((s) => s.conversationId === conversationId)
+      : [];
+    // running 优先（正在跑的 turn 即当前 plan）；否则取 startedAt 最新。
+    const current =
+      convTurns.find((s) => s.status === 'running') ??
+      [...convTurns].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))[0];
+    const steps = current?.blocks?.filter((b) => b.kind === 'tool_use').length ?? 0;
+    progress = current
+      ? `步骤 ${steps} · ${STATUS_ZH[current.status]}`
+      : '无活跃会话';
+  } else if (activeView === 'orchestrate') {
+    const vals = Object.values(nodes);
+    progress =
+      vals.length === 0
+        ? '未加载工作流'
+        : `节点 ${vals.filter((n) => n.status === 'done').length}/${vals.length}` +
+          (vals.some((n) => n.status === 'running') ? ' · 运行中' : '');
+  } else {
+    progress = '—';
+  }
 
   return (
     <header className={styles.planBar} data-testid="plan-bar">
@@ -58,11 +103,12 @@ export function PlanBar() {
         <span className={styles.planMeta}>
           {mode.planLoc} · {mode.resultsLoc}
         </span>
+        <span className={styles.planProgress} data-testid="plan-progress">
+          {progress}
+        </span>
         <span className={styles.planProject}>
           {project ? project.name : '未选项目'}
         </span>
-        {/* 块2 填实：plan 大纲 + 预算/迭代 transparency（启示 3/7） */}
-        <span className={styles.planPlaceholder}>plan · 预算 · 迭代 — 块2</span>
       </div>
     </header>
   );
