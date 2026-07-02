@@ -18,6 +18,7 @@
 //! plus `Branch` edges for conditional routing.
 
 pub mod events;
+pub mod gates;
 pub mod graph;
 pub mod runner;
 pub mod yaml;

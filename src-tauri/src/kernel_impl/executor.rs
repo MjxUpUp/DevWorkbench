@@ -12,7 +12,8 @@ use tauri::Manager;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel_compose::graph::{AgentChunk, AgentNodeSpec, Executor, GateNode};
-use kernel_core::{AgentInput, Tool, ToolContext};
+use kernel_compose::gates::verify_via_review;
+use kernel_core::{AgentInput, ChatModel, Tool, ToolContext};
 use serde_json::{Value, json};
 
 use crate::agents::pty::AgentProcesses;
@@ -63,6 +64,60 @@ fn build_chat_model(
         ),
     }
 }
+
+/// Build a tool-less one-shot `ChatModel` from the user's `providers.toml`.
+///
+/// For read-only gates — specifically the `"verify"` gate's adversarial reviewer
+/// — that need a single `generate()` call, not a full ReactAgent tool loop.
+/// Shares `build_react_agent`'s provider resolution so model-id/key resolution is
+/// identical (same `__default__` alias, same fallback). No skills, no tools, no
+/// session row: the reviewer CANNOT mutate the project, only judge it. Cost +
+/// trace are attributed to `"gate-verify"` so reviewer LLM spend is visible on
+/// the cost board but doesn't masquerade as a worker agent's run.
+fn build_one_shot_chat(
+    model: Option<&str>,
+    db: &DbState,
+    working_dir: &str,
+) -> Result<Arc<dyn ChatModel>, String> {
+    let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
+    let config = crate::config::providers::load_providers_config(&data_dir).ok();
+    // model=None → the '__default__' alias (resolve_provider expands it), same
+    // contract as build_react_agent. Lets the verify gate inherit the user's
+    // configured default rather than a hardcoded vendor id.
+    let model_id = model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "__default__".to_string());
+    let resolved = config
+        .as_ref()
+        .and_then(|c| crate::config::providers::resolve_provider(c, &model_id));
+    let (endpoint, api_key, resolved_model) = match &resolved {
+        Some(r) => (r.endpoint.clone(), r.api_key.clone(), r.model.clone()),
+        None => (
+            "https://open.bigmodel.cn/api/anthropic".to_string(),
+            String::new(),
+            model_id.clone(),
+        ),
+    };
+    // Distinct conversation_id so gate-verify cost rows are filterable from
+    // worker agent runs on the cost board.
+    let conv = format!("gate-verify:{working_dir}");
+    Ok(build_chat_model(
+        resolved.as_ref().map(|r| r.protocol).unwrap_or_default(),
+        &endpoint,
+        &api_key,
+        &resolved_model,
+        crate::cost::sink::optional_shared(Some(db.clone()), "gate-verify", Some(conv.clone())),
+        crate::trace::sink::optional_shared(Some(db.clone()), Some(conv)),
+        None,
+        Arc::new(crate::trace::TimingChecker::default_threshold()),
+    ))
+}
+
+/// Read-only adversarial review lives in the crate layer
+/// (`kernel_compose::gates::verify_via_review`) so it is unit-testable with a
+/// stub `ChatModel` independent of the app's provider/db wiring. The host gate
+/// branch below builds the real provider-backed model via [`build_one_shot_chat`]
+/// and hands it to that pure function.
 
 /// The host Executor — bridges kernel-compose graph nodes to real subsystems.
 pub struct KernelExecutor {
@@ -201,6 +256,27 @@ impl Executor for KernelExecutor {
                 .map_err(|e| format!("honesty join: {e}"))?;
                 Ok(result)
             }
+            "verify" => {
+                // Adversarial LLM cross-review (Anthropic evaluator-optimizer):
+                // an independent ChatModel reviews the upstream node's output
+                // (`input`) against a configurable rubric. Orthogonal to
+                // "honesty"/"forge" (static rule scans) — this is semantic
+                // cross-verification the deterministic gates cannot do. The
+                // reviewer has NO tools (a single generate()), so it cannot
+                // mutate the project — it only judges. Optional config:
+                //   reviewer_prompt — the rubric/criteria (default generic)
+                //   reviewer_model  — override model id for the reviewer
+                let claim = input.as_str().unwrap_or("").to_string();
+                let prompt = gate
+                    .config
+                    .get("reviewer_prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Verify the work product is correct, complete, and free of defects.")
+                    .to_string();
+                let model_id = gate.config.get("reviewer_model").and_then(|v| v.as_str());
+                let chat = build_one_shot_chat(model_id, &self.db, &project)?;
+                verify_via_review(chat.as_ref(), &claim, &prompt).await
+            }
             other => Err(format!("unknown gate '{other}'")),
         }
     }
@@ -234,6 +310,8 @@ const WORKFLOW_PLANNING_GUIDE: &str = r#"
 - 不插手：worker 失败靠 on_failure（retry/continue）让引擎处理，绝不把 worker 中间状态拉回自己分析。
 - on_failure：偶发失败（限流/超时）配 {"retry":{"max_attempts":3}}；关键 worker 用 "fail"；部分失败可接受用 "continue"。
 - 动态 arity：plan 出 N 个子任务就建 N 个 worker，数量运行时定。
+
+gate 值（gate 必需 gate 字段，可选 config）：forge（跑质量门禁，缺 forge 跳过）/ honesty（对未提交 diff 做断言弱化+编译环境静态审计，input=claim 文本）/ verify（独立 LLM 对抗评审——evaluator-optimizer，input=上一步产出，config.reviewer_prompt=评审标准/config.reviewer_model=可选换模型；只读 generate 无工具，不能改项目，只下 VERDICT: PASS|FAIL 裁决；reviewer 偶发失败(限流/网络)会让 gate 返 Err 触发图 fail-fast，故 verify 节点配 on_failure={"retry":{"max_attempts":3}} 容忍 reviewer 抖动）。静态规则用 forge/honesty，语义交叉验证（worker 是否真做对、有无遗漏）用 verify。
 
 graph 结构：{nodes:{id:{type,字段...}}, edges:[{from,to,when?}], start, end}。每种 type 都有【必需字段】，缺一个 graph 反序列化就失败（务必给全）：prompt 必需 text；agent 必需 agent（标识：claude_code/codex/gemini_cli/qwen_code/copilot/pi 走 CLI worker，react_kernel 等其他串走自研内核 worker），建议带 prompt（给 worker 的指令）；gate 必需 gate；transform 必需 op；branch 必需 condition；loop 必需 body。完整字段表 + 最小 fan-out 示例见 run_workflow_graph 工具描述——照抄示例里的字段名即可，别自己编字段名。
 "#;
