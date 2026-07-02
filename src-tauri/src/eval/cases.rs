@@ -153,6 +153,46 @@ pub fn approve_draft(conn: &Connection, id: &str) -> Result<usize, AppError> {
     .map_err(AppError::from)
 }
 
+/// Editable subset of a case — the contract fields an independent reviewer
+/// curates. `input_prompt` is intentionally ABSENT: C1 hard constraint locks
+/// the对话记录 read-only; you can tune the contract, never the recorded prompt.
+/// `draft` is also absent (only [`approve_draft`] flips it) so an edit never
+/// silently self-ratifies a case.
+#[derive(Debug, Clone)]
+pub struct CaseUpdate {
+    pub name: String,
+    pub category: String,
+    pub expected_steps_json: Option<String>,
+    pub expected_output: Option<String>,
+    pub expected_observables_json: Option<String>,
+    pub negative_json: Option<String>,
+}
+
+/// Update a case's editable contract fields by id. Returns rows touched
+/// (0 = no such case). `input_prompt` and `draft` are never touched here.
+pub fn update_eval_case(
+    conn: &Connection,
+    id: &str,
+    update: &CaseUpdate,
+) -> Result<usize, AppError> {
+    conn.execute(
+        "UPDATE eval_cases SET
+            name = ?2, category = ?3, expected_steps_json = ?4, expected_output = ?5,
+            expected_observables_json = ?6, negative_json = ?7
+         WHERE id = ?1",
+        rusqlite::params![
+            id,
+            update.name,
+            update.category,
+            update.expected_steps_json,
+            update.expected_output,
+            update.expected_observables_json,
+            update.negative_json,
+        ],
+    )
+    .map_err(AppError::from)
+}
+
 /// Build a DRAFT case from a real session's trajectory. The deterministic
 /// `expected_steps` are frozen verbatim from [`extract_trajectory`] (客观事实 —
 /// the tools the agent actually called, in order); the LLM-judged target fields
@@ -314,6 +354,36 @@ mod tests {
         assert!(!get_eval_case(&conn, "c").unwrap().unwrap().draft);
         // Re-approving an already-approved case is a no-op (0 rows), not an error.
         assert_eq!(approve_draft(&conn, "c").unwrap(), 0);
+    }
+
+    #[test]
+    fn update_eval_case_edits_contract_fields_only_locks_prompt_and_draft() {
+        // C1 hard constraint: the对话记录 (input_prompt) is read-only. An edit
+        // can tune the contract (steps / observables / output / negatives /
+        // name / category) but must NOT touch input_prompt or draft.
+        let conn = test_conn();
+        insert_eval_case(&conn, &new_case("c", "n", "agent", true, "2026-07-02T00:00:00Z")).unwrap();
+        let update = CaseUpdate {
+            name: "renamed".into(),
+            category: "platform-mechanism".into(),
+            expected_steps_json: Some(r#"[{"name":"grep"}]"#.into()),
+            expected_output: Some("ok".into()),
+            expected_observables_json: None,
+            negative_json: Some(r#"[{"name":"bash"}]"#.into()),
+        };
+        assert_eq!(update_eval_case(&conn, "c", &update).unwrap(), 1);
+        let row = get_eval_case(&conn, "c").unwrap().unwrap();
+        assert_eq!(row.name, "renamed");
+        assert_eq!(row.category, "platform-mechanism");
+        assert_eq!(row.expected_steps_json.as_deref(), Some(r#"[{"name":"grep"}]"#));
+        assert_eq!(row.negative_json.as_deref(), Some(r#"[{"name":"bash"}]"#));
+        // input_prompt LOCKED — untouched by the update.
+        assert_eq!(row.input_prompt, "do the thing");
+        // draft NOT flipped by update (only approve_draft flips it) — an edit
+        // can't silently self-ratify a case.
+        assert!(row.draft, "draft survives an edit unchanged");
+        // Unknown id → 0 rows, no error.
+        assert_eq!(update_eval_case(&conn, "nope", &update).unwrap(), 0);
     }
 
     #[test]

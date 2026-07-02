@@ -67,31 +67,46 @@ pub fn insert_verdict(conn: &Connection, row: &NewVerdict) -> Result<(), AppErro
     Ok(())
 }
 
-/// List verdicts, newest-first. Scope to a session when `session_id` is Some.
+/// List verdicts, newest-first. Any of `session_id` / `gate` / `case_id` may
+/// scope the query (AND-combined); all-None lists across everything. The panel
+/// uses `gate` to slice by gate kind (verify / honesty / forge / circuit-breaker
+/// / eval) and `case_id` to pull a replay run's verdicts.
 pub fn list_verdicts(
     conn: &Connection,
     session_id: Option<&str>,
+    gate: Option<&str>,
+    case_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<VerdictRow>, AppError> {
-    let mut out = Vec::new();
+    let mut sql = String::from(
+        "SELECT id, session_id, case_id, gate, verdict, attribution, report, commit_sha, created_at
+         FROM verdicts",
+    );
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(sid) = session_id {
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, case_id, gate, verdict, attribution, report, commit_sha, created_at
-             FROM verdicts WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![sid, limit], map_row)?;
-        for r in rows {
-            out.push(r?);
-        }
-    } else {
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, case_id, gate, verdict, attribution, report, commit_sha, created_at
-             FROM verdicts ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![limit], map_row)?;
-        for r in rows {
-            out.push(r?);
-        }
+        clauses.push("session_id = ?");
+        params.push(Box::new(sid.to_string()));
+    }
+    if let Some(g) = gate {
+        clauses.push("gate = ?");
+        params.push(Box::new(g.to_string()));
+    }
+    if let Some(c) = case_id {
+        clauses.push("case_id = ?");
+        params.push(Box::new(c.to_string()));
+    }
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    params.push(Box::new(limit));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), map_row)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
     }
     Ok(out)
 }
@@ -178,7 +193,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let rows = list_verdicts(&conn, Some("s1"), 10).unwrap();
+        let rows = list_verdicts(&conn, Some("s1"), None, None, 10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "v2", "newest first");
         assert_eq!(rows[0].gate, "honesty");
@@ -200,8 +215,8 @@ mod tests {
             &new_verdict("b", "s2", "verify", "FAIL", None, "2026-07-02T00:00:01Z"),
         )
         .unwrap();
-        assert_eq!(list_verdicts(&conn, Some("s1"), 10).unwrap().len(), 1);
-        assert_eq!(list_verdicts(&conn, None, 10).unwrap().len(), 2);
+        assert_eq!(list_verdicts(&conn, Some("s1"), None, None, 10).unwrap().len(), 1);
+        assert_eq!(list_verdicts(&conn, None, None, None, 10).unwrap().len(), 2);
     }
 
     #[test]
@@ -222,7 +237,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let rows = list_verdicts(&conn, Some("s1"), 10).unwrap();
+        let rows = list_verdicts(&conn, Some("s1"), None, None, 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(
             rows[0].attribution.is_none(),
@@ -250,7 +265,37 @@ mod tests {
             ),
         )
         .unwrap();
-        let rows = list_verdicts(&conn, Some("s1"), 10).unwrap();
+        let rows = list_verdicts(&conn, Some("s1"), None, None, 10).unwrap();
         assert_eq!(rows[0].attribution.as_deref(), Some("BRAKE"));
+    }
+
+    #[test]
+    fn list_filters_by_gate_and_case() {
+        // The panel slices the ledger by gate kind and by case_id (a replay
+        // run's verdicts). Both filters AND-combine with session_id.
+        let conn = test_conn();
+        insert_verdict(
+            &conn,
+            &new_verdict("v1", "s1", "forge", "PASS", Some("CLEAR"), "2026-07-02T00:00:00Z"),
+        )
+        .unwrap();
+        insert_verdict(
+            &conn,
+            &new_verdict("v2", "s1", "verify", "FAIL", None, "2026-07-02T00:00:01Z"),
+        )
+        .unwrap();
+        // gate filter: only the verify verdict.
+        let verify_only = list_verdicts(&conn, None, Some("verify"), None, 10).unwrap();
+        assert_eq!(verify_only.len(), 1);
+        assert_eq!(verify_only[0].gate, "verify");
+        // gate filter with no match → empty.
+        assert!(list_verdicts(&conn, None, Some("honesty"), None, 10)
+            .unwrap()
+            .is_empty());
+        // case_id filter: no verdict here carries a case_id (new_verdict sets
+        // None) → empty, proving the case filter is applied, not ignored.
+        assert!(list_verdicts(&conn, None, None, Some("case-99"), 10)
+            .unwrap()
+            .is_empty());
     }
 }

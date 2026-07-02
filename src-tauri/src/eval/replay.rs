@@ -147,6 +147,106 @@ pub struct ReplayInput {
     pub model: Option<String>,
 }
 
+/// Drive one replay turn end-to-end:
+/// 1. build a Plan-mode ReactAgent (read-only sandbox — Bash/Write blocked at
+///    the hook layer, Read/Glob/Grep allowed),
+/// 2. run it one turn against the case's `input_prompt`,
+/// 3. pull the session's LLM traces → reconstruct the trajectory (客观事实,
+///    rebuilt from real response bodies, not the agent's self-report),
+/// 4. [`score_replay`] against the case's frozen contract,
+/// 5. persist an `eval` verdict tied to `case.id`.
+///
+/// Needs a live LLM (the agent really runs) + a tokio runtime, so it is NOT
+/// unit-testable in-process (the app_lib test binary hits 0xc0000139; the react
+/// loop needs a real provider key). The deterministic core — [`score_replay`] —
+/// IS unit-tested; this driver is verified via an example bin / CI mac-linux,
+/// the same pattern as `build_react_agent`'s live-wiring smoke test.
+pub async fn run_replay(
+    input: ReplayInput,
+    case: &crate::eval::cases::EvalCaseRow,
+    matcher: crate::eval::scoring::Matcher,
+    db: &crate::db::DbState,
+) -> Result<ReplayVerdict, String> {
+    use futures::StreamExt;
+    // `agent.run` is the `kernel_core::Agent` trait method — needs the trait
+    // in scope (ReactAgent impls it, but the method isn't inherent).
+    use kernel_core::Agent;
+
+    // 1. Plan-mode agent — the workspace is fenced, the agent can't alter it.
+    //    No MCP / no WorkflowTool / no skills filter: replay isolates the agent
+    //    down to its built-in read tools so the trajectory is deterministic
+    //    w.r.t. the install, not whatever servers happened to be enabled.
+    let agent = crate::kernel_impl::executor::build_react_agent(
+        input.model.as_deref(),
+        None,                       // mcp — isolated for determinism
+        &input.working_dir,
+        None,                       // conversation_id — ad-hoc replay turn
+        Vec::new(),                 // history — fresh single turn
+        Some(db.clone()),
+        crate::kernel_impl::hooks::PermissionMode::Plan,
+        None,                       // task_ref
+        Some(input.session_id.as_str()),
+        None,
+        None,
+        None,                       // skill / mcp / knowledge filters
+        None,                       // app — no WorkflowTool (single-agent)
+        None,                       // compaction_blocks
+        None,                       // approval
+    )?;
+
+    // 2. Run one turn against the case's frozen input prompt.
+    let agent_input = kernel_core::AgentInput {
+        prompt: case.input_prompt.clone(),
+        working_dir: Some(input.working_dir.clone()),
+        model: None,
+        resume_from: None,
+    };
+    let mut stream = agent.run(agent_input).map_err(|e| format!("{e}"))?;
+    // Drain to completion — events are discarded; we only need the run to FINISH
+    // so its LLM calls land in llm_traces under session_id for step 3.
+    while let Some(_ev) = stream.next().await {}
+
+    // 3. Reconstruct the trajectory from the session's real response bodies.
+    let conn = db.get().map_err(|e| format!("db lock: {e}"))?;
+    let traces = crate::trace::db::list_traces_for_session(&conn, &input.session_id)
+        .map_err(|e| format!("list traces: {e}"))?;
+    let actual = crate::eval::extract::extract_trajectory(&traces);
+
+    // 4. Score against the case's deterministic contract (反刷分 #1).
+    let expected = parse_steps(case.expected_steps_json.as_deref());
+    let negative = parse_steps(case.negative_json.as_deref());
+    let verdict = score_replay(&actual, Some(&expected), matcher, &negative);
+
+    // 5. Persist an `eval` verdict tied to the case. Best-effort — a DB write
+    //    failure is logged, never blocks returning the verdict.
+    let report = serde_json::json!({
+        "score": verdict.score,
+        "grade": format!("{:?}", verdict.grade),
+        "reason": verdict.reason,
+        "negative_violated": verdict.negative_violated,
+        "matcher": format!("{:?}", matcher),
+        "actual_steps": actual.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+    });
+    let row = crate::eval::verdicts::NewVerdict {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: Some(input.session_id.clone()),
+        case_id: Some(case.id.clone()),
+        gate: "eval".to_string(),
+        verdict: verdict.verdict.clone(),
+        attribution: verdict.attribution.clone(),
+        report: serde_json::to_string(&report).ok(),
+        // Anchor to the case's version (the contract under test), not the
+        // replay run's incidental HEAD.
+        commit_sha: case.commit_sha.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = crate::eval::verdicts::insert_verdict(&conn, &row) {
+        log::warn!("[replay] verdict persist failed for case {}: {e}", case.id);
+    }
+
+    Ok(verdict)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
