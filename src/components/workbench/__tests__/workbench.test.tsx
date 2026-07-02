@@ -7,6 +7,7 @@ import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
 import { useOrchestrateStore } from '../../../stores/orchestrateStore';
 import { useDashboardStore } from '../../../stores/dashboardStore';
+import { useKnowledgeStore } from '../../../stores/knowledgeStore';
 import type { Session, SessionStatus, CostSummary } from '../../../types';
 
 // GateBar useEffect 调 fetchDashboard → invoke；mock 成 reject 让 fetchDashboard
@@ -207,6 +208,7 @@ describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
       selectedConversationId: null,
     });
     useAgentStore.setState({ sessions: [] });
+    useKnowledgeStore.setState({ entries: [], searchResults: [] });
   });
 
   it('compact events → 压缩次数 + 归档消息数', () => {
@@ -236,5 +238,67 @@ describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
     render(<MemoryRail />);
     expect(screen.queryByTestId('memory-compaction-stat')).toBeNull();
     expect(screen.getByTestId('memory-rail')).toHaveTextContent('无压缩记录');
+    // 无 activeProject → 反射占位提示选项目
+    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择项目后展示反射笔记');
+  });
+
+  it('react_reflection 条目 → 反射列表（仅反射类目，按 createdAt 倒序）', () => {
+    // 块5b：复用既有 get_knowledge_for_project IPC + react_reflection category
+    // （后端 persist_completion_memory 已写）。此处直接注入 store 绕过 invoke。
+    useKnowledgeStore.setState({
+      entries: [
+        {
+          id: 'r-new',
+          projectHash: 'h',
+          category: 'react_reflection',
+          title: '修了 cargo 错',
+          content: '...',
+          sourceAgent: 'react_kernel',
+          sourceSessionId: null,
+          sourceType: 'session',
+          confidence: 0.9,
+          createdAt: '2026-07-02T10:00:00Z',
+          updatedAt: '2026-07-02T10:00:00Z',
+          accessCount: 0,
+        },
+        {
+          id: 'r-old',
+          projectHash: 'h',
+          category: 'react_reflection',
+          title: '老反思',
+          content: '...',
+          sourceAgent: 'react_kernel',
+          sourceSessionId: null,
+          sourceType: 'session',
+          confidence: 0.5,
+          createdAt: '2026-07-01T10:00:00Z',
+          updatedAt: '2026-07-01T10:00:00Z',
+          accessCount: 0,
+        },
+        {
+          id: 'x',
+          projectHash: 'h',
+          category: 'react_session',
+          title: '不该显示',
+          content: '...',
+          sourceAgent: 'react_kernel',
+          sourceSessionId: null,
+          sourceType: 'session',
+          confidence: 0.8,
+          createdAt: '2026-07-03T10:00:00Z',
+          updatedAt: '2026-07-03T10:00:00Z',
+          accessCount: 0,
+        },
+      ],
+      searchResults: [],
+    });
+    render(<MemoryRail />);
+    const list = screen.getByTestId('reflection-list');
+    expect(list).toHaveTextContent('修了 cargo 错');
+    expect(list).toHaveTextContent('老反思');
+    expect(list).not.toHaveTextContent('不该显示'); // 仅 react_reflection，排除 react_session
+    // 倒序：r-new(07-02) 排在 r-old(07-01) 之前
+    const txt = list.textContent ?? '';
+    expect(txt.indexOf('修了 cargo 错')).toBeLessThan(txt.indexOf('老反思'));
   });
 });

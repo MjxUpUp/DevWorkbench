@@ -112,6 +112,34 @@
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
+/* 反射笔记列表（块5b，轴线C 活记忆可见） */
+.railReflectionList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.railReflectionItem {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+.railReflectionTitle {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.railReflectionConfidence {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
 .railGitWrap {
   flex: 1;
   min-height: 0;

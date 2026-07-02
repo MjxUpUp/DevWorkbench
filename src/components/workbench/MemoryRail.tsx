@@ -1,32 +1,40 @@
+import { useEffect } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { GitPanel } from '../git/GitPanel';
 import styles from './workbench.module.css';
 
 /**
- * MemoryRail — 轴线 C「中间结果落在何处」（起底重构 块1 骨架 / 块5 记忆可见）。
+ * MemoryRail — 轴线 C「中间结果落在何处」（起底重构 块1 骨架 / 块5-5b 记忆可见）。
  *
- * 常驻右栏，承载「结果落点」相关的所有副信息。块5 把占位换成真实记忆可见性：
- *  - 记忆概览：当前会话的压缩次数 + 归档消息数（从 session.blocks 的 compact events
- *    统计——死档归档已有，compaction-archive-complete）。这是「记忆已被压缩多少」的
- *    常驻信号，让用户感知 context 压力，而不必进对话流翻 CompactCard。
- *  - 反射笔记（占位）：Reflexion 式活记忆——agent 失败/纠错时的 verbal 反思，可被
- *    下次试验读回（启示4）。需后端 reflection buffer（存储 + read IPC + ReactAgent
- *    读回注入），留后端阶段；前端先立占位标注依赖。
+ * 常驻右栏，承载「结果落点」相关的所有副信息：
+ *
+ *  - 记忆概览（块5）：当前会话的压缩次数 + 归档消息数（从 session.blocks 的 compact
+ *    events 统计——死档归档已有，compaction-archive-complete）。常驻信号让用户感知
+ *    context 压力，不必进对话流翻 CompactCard。
+ *
+ *  - 反射笔记（块5b）：项目级 knowledge_entries 里 category=react_reflection 的条目。
+ *    后端 persist_completion_memory 已落地（session_reflection.rs + knowledge/store.rs）：
+ *    agent 完成会话时内核把结构化反思（工具用量/改动文件/失败数）写入；executor
+ *    memory_prompt_suffix 下次注入 system prompt。此处只读回展示——Reflexion 闭环的
+ *    「可见窗口」，让用户感知 agent 学到了什么、是否误学（误学去 settings/MemorySection 删）。
+ *    后端无需新增，纯前端读既有 get_knowledge_for_project IPC。
+ *
  *  - task 模式挂 GitPanel（文件变更 = 已落地的中间结果）
  *
  * 调研启示 4：记忆 = 反射缓冲（活，Reflexion）+ 分层归档（死，已有 compaction）双轨。
- * 适合桌面工作台：本地可持久化大体积原文归档（web 受限）。反例：不把记忆等同于全文
- * 压缩（那是死档不是可推理的反射）。
  */
 export function MemoryRail() {
   const activeView = useNavigationStore((s) => s.activeView);
   const activeProject = useNavigationStore((s) => s.activeProject);
   const conversationId = useNavigationStore((s) => s.selectedConversationId);
   const sessions = useAgentStore((s) => s.sessions);
+  const entries = useKnowledgeStore((s) => s.entries);
+  const loadForProject = useKnowledgeStore((s) => s.loadForProject);
   const isTask = activeView === 'task';
 
-  // 记忆概览：当前会话所有 turn 的 compact events 汇总（压缩次数 + 归档消息数）。
+  // 记忆概览（块5）：当前会话所有 turn 的 compact events 汇总。
   const convSessions = conversationId
     ? sessions.filter((s) => s.conversationId === conversationId)
     : [];
@@ -35,6 +43,17 @@ export function MemoryRail() {
   );
   const compactCount = compactEvents.length;
   const droppedTotal = compactEvents.reduce((sum, e) => sum + e.dropped_count, 0);
+
+  // 反射笔记（块5b）：项目切换时拉 knowledge，过滤 react_reflection 最近 5 条。
+  useEffect(() => {
+    if (activeProject) void loadForProject(activeProject.path);
+  }, [activeProject, loadForProject]);
+
+  const reflections = entries
+    .filter((e) => e.category === 'react_reflection')
+    .slice()
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .slice(0, 5);
 
   return (
     <aside className={styles.memoryRail} data-testid="memory-rail">
@@ -49,12 +68,23 @@ export function MemoryRail() {
         )}
       </div>
       <div className={styles.railSection}>
-        <h4 className={styles.railTitle}>反射笔记</h4>
-        {/* 启示4 Reflexion：活记忆，需后端 reflection buffer（write 失败反思 + read
-            注入下次试验）。前端先立占位，后端实现后此处列反思条目。 */}
-        <div className={styles.railPlaceholder} data-testid="reflection-placeholder">
-          反射笔记 — 待后端 reflection buffer
-        </div>
+        <h4 className={styles.railTitle}>反射笔记 · 最近</h4>
+        {reflections.length > 0 ? (
+          <ul className={styles.railReflectionList} data-testid="reflection-list">
+            {reflections.map((r) => (
+              <li key={r.id} className={styles.railReflectionItem}>
+                <span className={styles.railReflectionTitle}>{r.title || '(无标题)'}</span>
+                <span className={styles.railReflectionConfidence} title="置信度，越高越可能被注入">
+                  {(r.confidence * 100).toFixed(0)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className={styles.railPlaceholder} data-testid="reflection-placeholder">
+            {activeProject ? '无反射记录——完成任务后内核自动积累' : '选择项目后展示反射笔记'}
+          </div>
+        )}
       </div>
       {isTask && (
         <div className={styles.railGitWrap}>

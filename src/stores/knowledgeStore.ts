@@ -44,7 +44,9 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => {
     try {
       const entries = await invoke<KnowledgeEntry[]>('get_knowledge_for_project', { projectPath });
       if (myId !== loadSeq) return;
-      set({ entries });
+      // null 防御：E2E shim / 无数据场景 invoke 可能返回 undefined（同 dashboardStore
+      // latent bug）。不加则 entries=undefined → 下游 filter/sort 崩。
+      set({ entries: entries ?? [] });
     } catch (e) {
       console.error('Load knowledge failed:', e);
     } finally {
