@@ -32,8 +32,9 @@ use crate::kernel_impl::llm_recovery::{
     FatalReason, LlmErrorKind, MAX_ATTEMPTS, classify_llm_error, fatal_user_message, retry_delay,
     should_retry,
 };
-use crate::kernel_impl::model_router::TierCtx;
 use crate::kernel_impl::context_compact::{self, ArchivedChunk};
+use crate::kernel_impl::human_gate::{HumanGateCtx, HumanGateOutcome};
+use crate::kernel_impl::model_router::TierCtx;
 
 /// Injectable audit callback signature (project audit: cargo check + assertion
 /// weakening scan). Shared by the config field, the builder, and test stubs.
@@ -432,6 +433,7 @@ async fn execute_one_call(
     call: &kernel_core::ToolCall,
     ctx: &ToolContext,
     hooks: &Option<Arc<HookManager>>,
+    human_gate: Option<&HumanGateCtx>,
 ) -> CallOutcome {
     let mut events: Vec<kernel_core::ToolCallEvent> = Vec::new();
     // Classify once: the before-hook uses it for the veto, and — on a
@@ -455,37 +457,79 @@ async fn execute_one_call(
     } else {
         None
     };
+    // Human Gate (Clutch #3): the hooks vetoed nothing, so before the tool
+    // lands we let an interactive approval gate SUSPEND a destructive action.
+    // Approve → fall through to the normal invoke; Reject/Retry → synthesize a
+    // tool result (the agent adapts / gets feedback) WITHOUT invoking. Skipped
+    // entirely when no gate is wired (the default), so non-gate callers pay zero
+    // cost. Resolve relative write paths against the project working dir.
+    let gate_override = if blocked.is_none() {
+        if let Some(gate) = human_gate {
+            let workdir = ctx
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or_else(|| std::path::Path::new("."));
+            match gate
+                .check(&action, &call.function.name, &call.function.arguments, workdir)
+                .await
+            {
+                HumanGateOutcome::Allow => None,
+                HumanGateOutcome::Reject => Some("[blocked: 用户拒绝该破坏性操作]".to_string()),
+                HumanGateOutcome::Retry(feedback) => {
+                    Some(format!("[retry: {feedback}]"))
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let (result, file_changed) = match blocked {
         Some(b) => (b, None),
-        None => match tools.find(&call.function.name) {
-            Some(t) => match t.invoke(&call.function.arguments, ctx).await {
-                Ok(out) => {
-                    events.push(kernel_core::ToolCallEvent {
-                        tool: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        status: kernel_core::ToolCallStatus::Succeeded,
-                        result: Some(out.clone()),
-                    });
-                    let fc = match &action {
-                        crate::kernel_impl::hooks::Action::WriteFile { path, .. } => {
-                            Some(std::path::PathBuf::from(path))
-                        }
-                        _ => None,
-                    };
-                    (out, fc)
-                }
-                Err(e) => {
-                    let err = format!("[tool error: {e}]");
-                    events.push(kernel_core::ToolCallEvent {
-                        tool: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        status: kernel_core::ToolCallStatus::Failed,
-                        result: Some(err.clone()),
-                    });
-                    (err, None)
-                }
+        None => match gate_override {
+            // Human Gate rejected / asked retry → synthesize the result without
+            // invoking the tool. Recorded as Failed so the run UI flags it.
+            Some(g) => {
+                events.push(kernel_core::ToolCallEvent {
+                    tool: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                    status: kernel_core::ToolCallStatus::Failed,
+                    result: Some(g.clone()),
+                });
+                (g, None)
+            }
+            None => match tools.find(&call.function.name) {
+                Some(t) => match t.invoke(&call.function.arguments, ctx).await {
+                    Ok(out) => {
+                        events.push(kernel_core::ToolCallEvent {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            status: kernel_core::ToolCallStatus::Succeeded,
+                            result: Some(out.clone()),
+                        });
+                        let fc = match &action {
+                            crate::kernel_impl::hooks::Action::WriteFile { path, .. } => {
+                                Some(std::path::PathBuf::from(path))
+                            }
+                            _ => None,
+                        };
+                        (out, fc)
+                    }
+                    Err(e) => {
+                        let err = format!("[tool error: {e}]");
+                        events.push(kernel_core::ToolCallEvent {
+                            tool: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            status: kernel_core::ToolCallStatus::Failed,
+                            result: Some(err.clone()),
+                        });
+                        (err, None)
+                    }
+                },
+                None => (format!("[unknown tool: {}]", call.function.name), None),
             },
-            None => (format!("[unknown tool: {}]", call.function.name), None),
         },
     };
     CallOutcome {
@@ -508,6 +552,7 @@ async fn execute_call_set(
     calls: &[kernel_core::ToolCall],
     ctx: &ToolContext,
     hooks: &Option<Arc<HookManager>>,
+    human_gate: Option<&HumanGateCtx>,
 ) -> Vec<CallOutcome> {
     let dispatch_positions: Vec<usize> = calls
         .iter()
@@ -525,7 +570,7 @@ async fn execute_call_set(
             .map(|&i| (i, calls[i].clone()))
             .collect();
         let futs = dispatch_calls.iter().map(|(i, c)| async move {
-            let o = execute_one_call(tools, c, ctx, hooks).await;
+            let o = execute_one_call(tools, c, ctx, hooks, human_gate).await;
             (*i, o)
         });
         for (i, o) in futures::future::join_all(futs).await {
@@ -535,12 +580,12 @@ async fn execute_call_set(
         // AssertionGuard sees a clean pre/post git-diff window per write.
         for (i, call) in calls.iter().enumerate() {
             if outcomes[i].is_none() {
-                outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks).await);
+                outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks, human_gate).await);
             }
         }
     } else {
         for (i, call) in calls.iter().enumerate() {
-            outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks).await);
+            outcomes[i] = Some(execute_one_call(tools, call, ctx, hooks, human_gate).await);
         }
     }
     outcomes
@@ -674,6 +719,15 @@ pub struct ReactAgent {
     /// the agent) both see the same Vec. None = sink doesn't persist into this
     /// buffer (workflow/test path).
     compaction_blocks: Option<Arc<Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>>,
+    /// Approval registry for the Human Gate (Clutch #3). When set, every
+    /// destructive tool call in this run suspends for interactive approval before
+    /// landing; the user resolves it via `resolve_human_gate_cmd`. None = Human
+    /// Gate off (default; workflows/tests/ACP leave it unset). Shares the same
+    /// `ApprovalMap` instance as `commands::agents::AgentApprovalState` so the
+    /// resolve command delivers to this run's suspended call. Reuses `app` /
+    /// `session_id` set via [`with_compaction_archive`]; if either is None the
+    /// gate stays a no-op (fail-open Allow).
+    approval: Option<crate::kernel_impl::human_gate::ApprovalMap>,
 }
 
 impl ReactAgent {
@@ -713,6 +767,7 @@ impl ReactAgent {
             session_id: None,
             app: None,
             compaction_blocks: None,
+            approval: None,
         }
     }
 
@@ -833,6 +888,21 @@ impl ReactAgent {
         self
     }
 
+    /// Wire the Human Gate (Clutch #3). When set, destructive tool calls in
+    /// this run suspend for interactive approval before landing. `approvals` is
+    /// the same shared map held by `commands::agents::AgentApprovalState`, so
+    /// `resolve_human_gate_cmd` delivers the user's decision to the suspended
+    /// call. Reuses `app` + `session_id` set via [`with_compaction_archive`]; if
+    /// those are unset the gate is a silent no-op (fail-open Allow), so a
+    /// workflow/test agent that never sets them stays ungated. v2 Human Gate.
+    pub fn with_human_gate(
+        mut self,
+        approvals: crate::kernel_impl::human_gate::ApprovalMap,
+    ) -> Self {
+        self.approval = Some(approvals);
+        self
+    }
+
     pub async fn run_loop(&self, task: &str, opts: ModelOptions) -> Result<String, Error> {
         let infos = self.tools.infos();
         let model: Arc<dyn ChatModel> = if infos.is_empty() {
@@ -882,6 +952,16 @@ impl ReactAgent {
             }
         }
         history.push(Message::user(&full_task));
+        // Human Gate context (Clutch #3): built once per run_loop so the seq
+        // counter yields distinct resume tokens across turns. No-op when app /
+        // session_id / approval aren't all set (sub-agent dispatch from a
+        // workflow, or tests) — fail-open Allow, matching the run() path.
+        let hg = match (&self.app, &self.session_id, &self.approval) {
+            (Some(app), Some(sid), Some(ap)) => {
+                Some(HumanGateCtx::new(app.clone(), sid.clone(), ap.clone()))
+            }
+            _ => None,
+        };
         let result: Result<String, Error> = async {
             for _step in 0..self.max_steps {
                 let mut resp = model.generate(&history, &opts).await?;
@@ -911,7 +991,9 @@ impl ReactAgent {
                     return Ok(resp.content);
                 }
                 for call in &resp.tool_calls {
-                    let result = self.execute_tool_call(call, &self.ctx).await;
+                    let result = self
+                        .execute_tool_call(call, &self.ctx, hg.as_ref())
+                        .await;
                     history.push(Message {
                         role: Role::Tool,
                         content: result,
@@ -996,7 +1078,12 @@ impl ReactAgent {
         }
     }
 
-    async fn execute_tool_call(&self, call: &kernel_core::ToolCall, ctx: &ToolContext) -> String {
+    async fn execute_tool_call(
+        &self,
+        call: &kernel_core::ToolCall,
+        ctx: &ToolContext,
+        human_gate: Option<&HumanGateCtx>,
+    ) -> String {
         // Classify the tool name+args into an Action variant so Plan mode can
         // block writes/commands and AssertionGuard can scan diffs. Previously
         // every tool was Action::CallTool, making WriteFile/RunCommand dead
@@ -1050,6 +1137,25 @@ impl ReactAgent {
                         call.function.name
                     );
                 }
+            }
+        }
+        // Human Gate (Clutch #3): hooks + dry-run both let it through, so before
+        // the side effect lands, suspend a destructive action for interactive
+        // approval. Approve → fall through to the real invoke; Reject/Retry →
+        // synthesize the tool result without invoking (mirrors execute_one_call).
+        if let Some(gate) = human_gate {
+            let workdir = ctx
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or_else(|| std::path::Path::new("."));
+            match gate
+                .check(&action, &call.function.name, &call.function.arguments, workdir)
+                .await
+            {
+                HumanGateOutcome::Allow => {}
+                HumanGateOutcome::Reject => return "[blocked: 用户拒绝该破坏性操作]".to_string(),
+                HumanGateOutcome::Retry(feedback) => return format!("[retry: {feedback}]"),
             }
         }
         let mut result = match self.tools.find(&call.function.name) {
@@ -1153,6 +1259,7 @@ impl kernel_core::Agent for ReactAgent {
         let app_opt = self.app.clone();
         let sid_opt = self.session_id.clone();
         let compaction_buf_opt = self.compaction_blocks.clone();
+        let approval_opt = self.approval.clone();
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -1170,6 +1277,17 @@ impl kernel_core::Agent for ReactAgent {
             let mut history = Vec::with_capacity(2 + prior_history.len());
             history.push(Message::system(&system_prompt));
             history.extend(prior_history.iter().cloned());
+            // Human Gate context (Clutch #3): built once so the seq counter
+            // yields distinct resume tokens across turns. No-op when app /
+            // session_id / approval aren't all set (workflow/test/ACP agents) —
+            // fail-open Allow, matching run_loop. Destructive actions suspend
+            // here for interactive approval before the tool lands.
+            let hg = match (&app_opt, &sid_opt, &approval_opt) {
+                (Some(app), Some(sid), Some(ap)) => {
+                    Some(HumanGateCtx::new(app.clone(), sid.clone(), ap.clone()))
+                }
+                _ => None,
+            };
             // D2 lifecycle: dispatch UserPromptSubmit BEFORE the user message
             // enters history; user-hook stdout (exit 0) is appended to the prompt
             // as additional context (claude-code additionalContext injection).
@@ -1565,7 +1683,8 @@ impl kernel_core::Agent for ReactAgent {
                             result: None,
                         });
                     }
-                    let outcomes = execute_call_set(&tools, &turn_tool_calls, &ctx, &hooks).await;
+                    let outcomes =
+                        execute_call_set(&tools, &turn_tool_calls, &ctx, &hooks, hg.as_ref()).await;
                     for o in &outcomes {
                         for ev in &o.events {
                             yield AgentEvent::ToolCall(ev.clone());
@@ -1592,7 +1711,8 @@ impl kernel_core::Agent for ReactAgent {
                             status: kernel_core::ToolCallStatus::Started,
                             result: None,
                         });
-                        let o = execute_one_call(&tools, call, &ctx, &hooks).await;
+                        let o =
+                            execute_one_call(&tools, call, &ctx, &hooks, hg.as_ref()).await;
                         for ev in &o.events {
                             yield AgentEvent::ToolCall(ev.clone());
                         }
@@ -1838,7 +1958,8 @@ mod tests {
             probe_call("dispatch_subagent", r#"{"task":"b"}"#),
             probe_call("dispatch_subagent", r#"{"task":"c"}"#),
         ];
-        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        let outcomes =
+            execute_call_set(&reg, &calls, &ToolContext::default(), &None, None).await;
         assert_eq!(outcomes.len(), 3);
         assert_eq!(
             max_seen.load(Ordering::SeqCst),
@@ -1885,7 +2006,8 @@ mod tests {
             probe_call("dispatch_subagent", r#"{"task":"b"}"#),
             probe_call("dispatch_subagent", r#"{"task":"c"}"#),
         ];
-        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        let outcomes =
+            execute_call_set(&reg, &calls, &ToolContext::default(), &None, None).await;
         assert_eq!(outcomes.len(), 3);
         assert_eq!(
             max_seen.load(Ordering::SeqCst),
@@ -1921,7 +2043,8 @@ mod tests {
             probe_call("echo", r#"{"v":"1"}"#),
             probe_call("echo", r#"{"v":"2"}"#),
         ];
-        let outcomes = execute_call_set(&reg, &calls, &ToolContext::default(), &None).await;
+        let outcomes =
+            execute_call_set(&reg, &calls, &ToolContext::default(), &None, None).await;
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[0].call_id, calls[0].id);
         assert_eq!(outcomes[1].call_id, calls[1].id);
@@ -2219,7 +2342,7 @@ mod tests {
         let ctx = ToolContext::default();
 
         let r1 = agent
-            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx, None)
             .await;
         assert!(
             r1.contains("[dry-run]"),
@@ -2231,7 +2354,7 @@ mod tests {
         );
 
         let r2 = agent
-            .execute_tool_call(&probe_call("read_file", r#"{"path":"a.rs"}"#), &ctx)
+            .execute_tool_call(&probe_call("read_file", r#"{"path":"a.rs"}"#), &ctx, None)
             .await;
         assert!(
             !r2.contains("[dry-run]"),
@@ -2246,7 +2369,7 @@ mod tests {
         // Unknown tool in dry-run: find() is None so it falls through to the
         // stable "[unknown tool]" path — dry-run never invents execution.
         let r3 = agent
-            .execute_tool_call(&probe_call("nope", "{}"), &ctx)
+            .execute_tool_call(&probe_call("nope", "{}"), &ctx, None)
             .await;
         assert!(
             r3.contains("[unknown tool: nope]"),
@@ -2273,7 +2396,7 @@ mod tests {
         let ctx = ToolContext::default();
 
         let r = agent
-            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx, None)
             .await;
         assert!(!r.contains("[dry-run]"), "real mode must NOT simulate: {r}");
         assert_eq!(
@@ -3049,7 +3172,7 @@ mod tests {
         let ctx = ToolContext::default();
 
         let r = agent
-            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx)
+            .execute_tool_call(&probe_call("write_file", r#"{"path":"a.rs"}"#), &ctx, None)
             .await;
         assert!(
             r.contains("[blocked by user-hook:no-writes:"),
@@ -4304,6 +4427,7 @@ mod tests {
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
             None, // compaction_blocks — test agents don't persist Compact events
+            None, // approval — test agents don't run the Human Gate
         )
         .expect("build_react_agent assembles from GUI provider config");
         let mut stream = agent
@@ -4380,6 +4504,7 @@ mod tests {
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
             None, // compaction_blocks — test agents don't persist Compact events
+            None, // approval — test agents don't run the Human Gate
         )
         .expect("build_react_agent");
         // 强引导并行:"一次性发出两个tool调用,不要分开做"。
@@ -4608,6 +4733,7 @@ mod tests {
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
             None, // compaction_blocks — test agents don't persist Compact events
+            None, // approval — test agents don't run the Human Gate
         )
         .expect("build_react_agent");
         let mut stream = agent
@@ -4724,6 +4850,7 @@ mod tests {
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
             None, // compaction_blocks — test agents don't persist Compact events
+            None, // approval — test agents don't run the Human Gate
         )
         .expect("build_react_agent");
         let mut stream = agent

@@ -99,6 +99,91 @@ pub struct BlockReason {
     pub severity: Severity,
 }
 
+/// Human Gate predicate (Clutch #3): should this action SUSPEND for interactive
+/// approval before landing? Scoped to DESTRUCTIVE ops only — the obviously
+/// dangerous-but-not-catastrophic set that [`classify_catastrophe`] doesn't
+/// already hard-block. Catastrophe (rm -rf /, mkfs, dd to a device, fork bombs)
+/// is blocked in ALL modes before Human Gate ever sees it; this predicate
+/// catches the broader "you probably want to think twice" surface:
+///
+/// - Shell: `rm`/`rmdir`/`del`/`Remove-Item` (explicit delete), `git push
+///   --force`/`-f`, `git reset --hard`, `format`/`mkfs` (defensive — catastrophe
+///   should already block these).
+/// - Write: overwriting an EXISTING file (a new file is not destructive — the
+///   agent creates files all the time; only clobbering existing content is).
+///
+/// Read-only tools and brand-new writes return false → run without prompting,
+/// so Human Gate doesn't nag on every edit. `working_dir` resolves relative
+/// write paths for the existence check (kernel agents pass `ctx.working_dir`).
+pub fn is_destructive(action: &Action, working_dir: &std::path::Path) -> bool {
+    match action {
+        Action::RunCommand { command } => command_is_destructive(command),
+        Action::WriteFile { path, .. } => {
+            // Overwriting an existing file is destructive; creating a new one
+            // is not. Resolve relative paths against working_dir (kernel agents
+            // operate there); absolute paths are checked as-is.
+            let p = std::path::Path::new(path);
+            let resolved = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                working_dir.join(p)
+            };
+            resolved.exists()
+        }
+        // Other tools (search/read/dispatch_subagent) are not destructive.
+        Action::CallTool { .. } => false,
+    }
+}
+
+/// Shell-command destructiveness test — the RunCommand half of
+/// [`is_destructive`]. Conservative substring/token matchers; false negatives
+/// (missing a novel destructive idiom) are SAFE — the worst case is an
+/// unapproved op runs, same as every non-HumanGate mode. False positives would
+/// nag, so we keep the patterns tight to clearly-destructive intent.
+fn command_is_destructive(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let prog = tokens[0].trim_end_matches(".exe");
+    // Explicit delete programs.
+    if matches!(prog, "rm" | "rmdir" | "del" | "unlink" | "shred") {
+        return true;
+    }
+    // PowerShell Remove-Item (and its aliases ri/rm — but those collide with
+    // posix rm above, which is fine: both are deletes).
+    if lower.contains("remove-item") || lower.contains("remove_item") {
+        return true;
+    }
+    // git force-push / hard-reset — history-rewriting or force-overwriting ops.
+    if prog == "git" {
+        let joined = lower.clone();
+        let is_push = tokens.iter().nth(1) == Some(&"push");
+        let has_force = tokens.iter().any(|t| {
+            *t == "--force" || *t == "-f" || *t == "--force-with-lease"
+        });
+        if is_push && has_force {
+            return true;
+        }
+        // git reset --hard
+        if tokens.iter().nth(1) == Some(&"reset") && joined.contains("--hard") {
+            return true;
+        }
+        // git clean -fd / -fdx (untracked files, unrecoverable without reflog)
+        if tokens.iter().nth(1) == Some(&"clean")
+            && (joined.contains("-fd") || joined.contains("-df"))
+        {
+            return true;
+        }
+    }
+    // Filesystem-format — catastrophe should already block, but flag defensively.
+    if matches!(prog, "mkfs" | "format") || lower.starts_with("mkfs.") {
+        return true;
+    }
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
@@ -145,6 +230,18 @@ pub enum PermissionMode {
     Silent,
     /// Skip every permission check — bypass all before-hooks.
     SkipPermissions,
+    /// Human Gate (Clutch #3) — destructive actions (delete files, force-push,
+    /// overwrite an existing file, format) are intercepted in `execute_one_call`
+    /// AFTER the before-hook passes and BEFORE the tool lands: the agent emits an
+    /// `approval_required` meta-event and SUSPENDS until the user Approves /
+    /// Rejects / Retries via `resolve_human_gate_cmd`. Non-destructive actions run
+    /// without prompting (mirrors Clutch's MCP-risk approval, scoped to
+    /// destructive ops only). `blocks_action` returns `None` for it — the gate is
+    /// NOT a static veto, it's an interactive suspend that lives one layer down in
+    /// the tool-execution path (it needs the AppHandle + approval channel, which
+    /// the gate predicate does not). Only the ReactKernel (self-built) path
+    /// supports it; opaque CLI agents skip it (Clutch default-skip-permissions).
+    HumanGate,
 }
 
 impl PermissionMode {
@@ -185,6 +282,14 @@ impl PermissionMode {
     /// current phase distinctly from `Default`.
     pub fn is_executing(self) -> bool {
         matches!(self, PermissionMode::Executing)
+    }
+
+    /// Is this Human Gate mode (Clutch #3)? Destructive actions suspend for
+    /// interactive approval. The interception lives in `execute_one_call`
+    /// (it needs the AppHandle + approval channel); this flag is what the run
+    /// loop + driver check to wire the approval context in.
+    pub fn is_human_gate(self) -> bool {
+        matches!(self, PermissionMode::HumanGate)
     }
 }
 
@@ -682,6 +787,54 @@ mod tests {
 
     fn cmd(c: &str) -> Action {
         Action::RunCommand { command: c.into() }
+    }
+
+    #[test]
+    fn is_destructive_flags_explicit_deletes_and_force_push() {
+        let wd = std::path::Path::new(".");
+        // Explicit delete programs.
+        assert!(is_destructive(&cmd("rm foo.txt"), wd));
+        assert!(is_destructive(&cmd("rm -rf build/"), wd));
+        assert!(is_destructive(&cmd("rmdir old"), wd));
+        assert!(is_destructive(&cmd("del cache.tmp"), wd));
+        assert!(is_destructive(&cmd("Remove-Item -Recurse node_modules"), wd));
+        // History-rewriting / force-overwriting git ops.
+        assert!(is_destructive(&cmd("git push --force origin main"), wd));
+        assert!(is_destructive(&cmd("git push -f"), wd));
+        assert!(is_destructive(&cmd("git reset --hard HEAD~1"), wd));
+        assert!(is_destructive(&cmd("git clean -fd"), wd));
+    }
+
+    #[test]
+    fn is_destructive_allows_safe_commands_and_pushes() {
+        let wd = std::path::Path::new(".");
+        // Non-destructive commands run without prompting.
+        assert!(!is_destructive(&cmd("cargo build"), wd));
+        assert!(!is_destructive(&cmd("git push origin main"), wd), "plain push is safe");
+        assert!(!is_destructive(&cmd("git commit -m x"), wd));
+        assert!(!is_destructive(&cmd("ls -la"), wd));
+        assert!(!is_destructive(&cmd("echo hi"), wd));
+        // force-with-lease is the safer force-push (rejected remote overwrites
+        // instead of blindly clobbering) — flag it too: it still rewrites remote
+        // history, so the user should confirm. Documented behaviour.
+        assert!(is_destructive(&cmd("git push --force-with-lease"), wd));
+    }
+
+    #[test]
+    fn is_destructive_write_only_flags_overwrite_of_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wd = dir.path();
+        // Existing file → overwrite is destructive.
+        let existing = wd.join("present.txt");
+        std::fs::write(&existing, "old").unwrap();
+        assert!(is_destructive(&write("present.txt"), wd));
+        // Absolute path to the same file also resolves.
+        assert!(is_destructive(
+            &write(existing.to_str().unwrap()),
+            wd
+        ));
+        // Brand-new file → NOT destructive (agent creates files routinely).
+        assert!(!is_destructive(&write("brand_new.txt"), wd));
     }
 
     #[tokio::test]

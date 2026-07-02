@@ -310,6 +310,7 @@ async fn drive_prompt_turn(
         None, // knowledge_ids
         None, // app — ACP stdio server has no AppHandle; no WorkflowTool here.
         None, // compaction_blocks — no UI/driver to persist into.
+        None, // approval — ACP stdio server has no managed state; no Human Gate.
     ) {
         Ok(a) => a,
         Err(e) => {

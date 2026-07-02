@@ -598,6 +598,17 @@ export type ChatStreamEvent =
       /** true on circuit-breaker trip (MAX_CONSECUTIVE_COMPACT_FAILURES) —
        *  renders an error card instead of an info card. */
       is_error: boolean;
+    }
+  | {
+      kind: 'approval_required';
+      /** Tool name about to run (e.g. write_file / bash). */
+      tool: string;
+      /** Raw JSON arguments string — shown as a destructive-op preview. */
+      arguments: string;
+      /** Token the resolve command carries back (`approve__{sid}__{seq}`). */
+      resume_token: string;
+      /** One-line WHY this is destructive (modal title). */
+      summary: string;
     };
 
 // ---- LLM trace observability types ----

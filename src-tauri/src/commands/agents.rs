@@ -16,6 +16,55 @@ use tauri::{Emitter, Manager, State};
 /// Tauri managed state wrapping AgentProcesses (PTY-based)
 pub struct AgentState(pub Arc<pty::AgentProcesses>);
 
+/// Managed registry of in-flight Human-Gate approvals. Thin wrapper around the
+/// kernel-side [`ApprovalMap`](crate::kernel_impl::human_gate::ApprovalMap) so
+/// `resolve_human_gate_cmd` and the driver (which clones an owned handle into
+/// the spawned run) share one registry. Defined here (not in `human_gate`)
+/// because Tauri managed state is a command-layer concern.
+#[derive(Default)]
+pub struct AgentApprovalState(pub crate::kernel_impl::human_gate::ApprovalMap);
+
+impl AgentApprovalState {
+    /// Drop every pending approval for a session — called from
+    /// `stop_agent_session` on abort so a cancelled run doesn't leak Senders.
+    pub fn clear_session(&self, session_id: &str) {
+        crate::kernel_impl::human_gate::clear_session_approvals(&self.0, session_id);
+    }
+}
+
+/// Resolve a Human-Gate-suspended tool call. `action` is `"approve"`,
+/// `"reject"`, or `"retry"` (with `feedback`); `resume_token` must match the
+/// `approval_required` event the frontend received. A token that already timed
+/// out (auto-Reject after 300s) or whose session was aborted returns NotFound —
+/// the UI treats that as "no longer relevant".
+#[tauri::command]
+pub async fn resolve_human_gate_cmd(
+    approval_state: State<'_, AgentApprovalState>,
+    resume_token: String,
+    action: String,
+    feedback: Option<String>,
+) -> Result<(), AppError> {
+    use crate::kernel_impl::human_gate::{resolve_approval, HumanGateDecision};
+    let decision = match action.as_str() {
+        "approve" => HumanGateDecision::Approve,
+        "reject" => HumanGateDecision::Reject,
+        "retry" => HumanGateDecision::Retry {
+            feedback: feedback.unwrap_or_default(),
+        },
+        other => {
+            return Err(AppError::Internal(format!(
+                "unknown approval action '{other}' (want approve|reject|retry)"
+            )));
+        }
+    };
+    match resolve_approval(&approval_state.0, &resume_token, decision) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(AppError::NotFound(format!(
+            "no active approval for {resume_token} (timed out or session ended?)"
+        ))),
+    }
+}
+
 // Agent discovery commands
 #[tauri::command]
 pub fn discover_agents_cmd(db: State<'_, DbState>) -> Result<Vec<AgentInfo>, AppError> {
@@ -288,6 +337,14 @@ fn react_chat_driver(
     // Cloned into build_react_agent below.
     let compaction_blocks: std::sync::Arc<std::sync::Mutex<Vec<pty::ChatStreamEvent>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // v2 Human Gate: clone the shared approval map so the ReactAgent can
+    // suspend destructive calls and resolve_human_gate_cmd (managed state) can
+    // deliver the decision. Only actually consulted when mode == HumanGate
+    // (build_react_agent gates the wiring); cloning unconditionally is cheap
+    // (Arc<Mutex>) and keeps the driver signature uniform across modes.
+    let approval_map = app
+        .try_state::<AgentApprovalState>()
+        .map(|s| std::sync::Arc::clone(&s.0));
 
     let handle = tokio::spawn(async move {
         log::info!("[react_chat] task ENTERED sid={sid_drv}");
@@ -311,6 +368,7 @@ fn react_chat_driver(
             // self-plan a DAG for complex multi-step tasks.
             Some(app_drv.clone()),
             Some(std::sync::Arc::clone(&compaction_blocks)),
+            approval_map,
         ) {
             Ok(a) => a,
             Err(e) => {
@@ -615,11 +673,18 @@ pub fn stop_agent_session(
     state: State<'_, AgentState>,
     db: State<'_, DbState>,
     kernel_tasks: State<'_, KernelTasks>,
+    approval_state: State<'_, AgentApprovalState>,
     session_id: String,
 ) -> Result<(), AppError> {
     // Kernel agents have no PID — abort their driver task. Returns true iff this
     // session was a kernel task, in which case we skip the pty/PID kill below.
     let was_kernel = kernel_tasks.abort(&session_id);
+    // v2 Human Gate: reclaim any pending approval for this session. Aborting the
+    // driver task drops its future, which drops the Receiver of a suspended
+    // check() — but the Sender stays in the map until cleared, leaking entries.
+    // Clearing here also lets a still-live check() auto-reject promptly (its
+    // Receiver gets None → Reject) instead of waiting the full 300s timeout.
+    approval_state.clear_session(&session_id);
     if !was_kernel {
         // Best-effort PID kill; process may already be dead (stale session)
         let _ = pty::stop_agent(&state.0, &session_id);

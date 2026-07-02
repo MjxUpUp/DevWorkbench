@@ -148,6 +148,9 @@ impl Executor for KernelExecutor {
                     // compaction_blocks — workflow workers run headless; no
                     // driver/UI to collect Compact events into.
                     None,
+                    // approval — workflow workers run headless; Human Gate is a
+                    // chat-path interactive feature only.
+                    None,
                 )?)
             }
         };
@@ -275,6 +278,11 @@ pub(crate) fn build_react_agent(
     // them into session.blocks. None for workflow/ACP/test agents (compaction
     // runs but stays silent — no archive, no UI event). v1.3 C2.
     compaction_blocks: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>>,
+    // Human Gate approval registry (Clutch #3). When set AND mode == HumanGate,
+    // destructive tool calls suspend for interactive approval. None = gate off.
+    // The chat driver passes the same `ApprovalMap` it manages as
+    // `AgentApprovalState`; workflow/ACP/test agents leave it None. v2 Human Gate.
+    approval: Option<crate::kernel_impl::human_gate::ApprovalMap>,
 ) -> Result<ReactAgent, String> {
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
     let config = crate::config::providers::load_providers_config(&data_dir).ok();
@@ -647,6 +655,20 @@ pub(crate) fn build_react_agent(
             agent.with_compaction_archive(sid.to_string(), handle, buf)
         }
         _ => agent,
+    };
+    // v2 Human Gate: wire the approval registry for the chat path in HumanGate
+    // mode. with_human_gate reuses the app/session_id just set by
+    // with_compaction_archive (the ctx built in run()/run_loop() becomes a no-op
+    // Allow when either is absent, so a workflow/test agent that sets approval
+    // but not session_id stays ungated). Only HumanGate mode suspends — every
+    // other mode (Default/Plan/DryRun/SkipPermissions) ignores the registry.
+    let agent = if mode.is_human_gate() {
+        match approval {
+            Some(ap) => agent.with_human_gate(ap),
+            None => agent,
+        }
+    } else {
+        agent
     };
     Ok(agent)
 }

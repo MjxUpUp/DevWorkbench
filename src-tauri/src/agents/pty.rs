@@ -801,6 +801,25 @@ pub enum ChatStreamEvent {
         dropped_count: usize,
         is_error: bool,
     },
+    /// Human-Gate approval request (Clutch #3). NOT a chat block — a control
+    /// signal: emitted when a destructive action is about to land in
+    /// `PermissionMode::HumanGate`, telling the UI to open an approval modal.
+    /// The agent SUSPENDS until `resolve_human_gate_cmd` delivers a decision
+    /// (or 300s auto-rejects). Never persisted into session.blocks and never
+    /// enters model history (`react_chat` filters it out, like `Compact`).
+    #[serde(rename = "approval_required")]
+    ApprovalRequired {
+        /// Tool name about to run (e.g. `bash`, `write_file`).
+        tool: String,
+        /// Raw JSON arguments string — the modal previews these so the user
+        /// sees exactly what would execute.
+        arguments: String,
+        /// `approve__{session_id}__{seq}` — the UI returns this verbatim in
+        /// `resolve_human_gate_cmd` to resume the right suspended call.
+        resume_token: String,
+        /// One-line "why this is destructive" summary (modal title).
+        summary: String,
+    },
 }
 
 impl ClaudeBlock {
@@ -3324,6 +3343,7 @@ mod tests {
                 ChatStreamEvent::Result { .. } => "result",
                 ChatStreamEvent::FileChanged { .. } => "file_changed",
                 ChatStreamEvent::Compact { .. } => "compact",
+                ChatStreamEvent::ApprovalRequired { .. } => "approval_required",
             })
             .collect();
         assert_eq!(

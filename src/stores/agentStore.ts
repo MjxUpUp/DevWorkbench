@@ -6,6 +6,20 @@ import { listen } from '@tauri-apps/api/event';
 import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
 import type { AgentMode } from '../components/ModeSelector';
 
+/** A destructive tool call paused for interactive approval (Human Gate). The
+ *  agent:event listener short-circuits an `approval_required` block into this
+ *  instead of rendering a card — the modal resolves it back via
+ *  `resolve_human_gate_cmd`. One pending approval at a time per store: the
+ *  kernel runs tool calls serially, so a second can't arrive before the first
+ *  resolves (and a stray one would just replace the modal, not wedge the run). */
+export interface PendingApproval {
+  sessionId: string;
+  tool: string;
+  arguments: string;
+  resumeToken: string;
+  summary: string;
+}
+
 interface AgentState {
   agents: AgentInfo[];
   /** All turns (sessions) across every project. A turn is one user prompt →
@@ -81,6 +95,13 @@ interface AgentState {
   clearPtyOutput: (sessionId: string) => void;
   appendBlock: (sessionId: string, event: ChatStreamEvent) => void;
   clearBlocks: (sessionId: string) => void;
+  /** The destructive tool call currently paused for approval, if any. The modal
+   *  binds to this; resolving it fires `resolveApproval`. */
+  pendingApproval: PendingApproval | null;
+  /** Resolve the pending approval: approve lets the tool run, reject blocks it
+   *  (the agent adapts), retry feeds feedback back as the tool result. Clears
+   *  `pendingApproval` once delivered so the modal closes. */
+  resolveApproval: (action: 'approve' | 'reject' | 'retry', feedback?: string) => Promise<void>;
   initEventListeners: () => () => void;
 }
 
@@ -92,6 +113,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   ptyOutput: new Map(),
   sessionBlocks: new Map(),
   qualityReports: new Map(),
+  pendingApproval: null,
 
   refreshAgents: async () => {
     try {
@@ -376,6 +398,26 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     });
   },
 
+  resolveApproval: async (action, feedback) => {
+    const pending = get().pendingApproval;
+    if (!pending) return;
+    const token = pending.resumeToken;
+    // Optimistically close the modal: even if the invoke errors, re-showing a
+    // stale modal that the kernel has already auto-rejected (300s timeout) is
+    // worse than letting the run continue. The kernel ignores a late resolve
+    // for an unknown token (maps to NotFound) without wedging.
+    set({ pendingApproval: null });
+    try {
+      await invoke('resolve_human_gate_cmd', {
+        resumeToken: token,
+        action,
+        feedback: feedback ?? null,
+      });
+    } catch (e) {
+      console.error('Failed to resolve human gate:', e);
+    }
+  },
+
   initEventListeners: () => {
     const { refreshSessions } = get();
 
@@ -443,7 +485,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // folds these into block cards via BlocksView. Raw agents (pi) emit no
     // agent:event, so they keep the TerminalView/Markdown path unchanged.
     const p4 = listen<{ sessionId: string; event: ChatStreamEvent }>('agent:event', (event) => {
-      get().appendBlock(event.payload.sessionId, event.payload.event);
+      const { sessionId, event: ev } = event.payload;
+      // Human Gate: an approval_required block is a CONTROL signal, not a chat
+      // block — short-circuit into pendingApproval so the modal opens, and never
+      // persist it into sessionBlocks (it would render as a stray card on replay
+      // and pollute the model history on the Rust side — react_chat filters it
+      // out there too).
+      if (ev.kind === 'approval_required') {
+        set({
+          pendingApproval: {
+            sessionId,
+            tool: ev.tool,
+            arguments: ev.arguments,
+            resumeToken: ev.resume_token,
+            summary: ev.summary,
+          },
+        });
+        return;
+      }
+      get().appendBlock(sessionId, ev);
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Initial load

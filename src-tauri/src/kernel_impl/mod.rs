@@ -11,6 +11,7 @@ pub mod context_compact;
 pub mod executor;
 pub mod hooks;
 pub mod honesty;
+pub mod human_gate;
 pub mod llm_recovery;
 pub mod mission;
 pub mod mcp_tool;

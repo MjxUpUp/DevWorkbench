@@ -167,6 +167,9 @@ pub fn chat_event_to_agent_events(
         // opaque CLI — kept exhaustive. It carries no kernel AgentEvent (it
         // never enters the model's stream, only the UI's block list).
         ChatStreamEvent::Compact { .. } => Vec::new(),
+        // Human-Gate control signal — UI-only (opens a modal); never an
+        // AgentEvent, never model history. Same bypass as Compact.
+        ChatStreamEvent::ApprovalRequired { .. } => Vec::new(),
     }
 }
 
@@ -324,6 +327,7 @@ fn blocks_to_assistant_message(
             ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
             ChatStreamEvent::FileChanged { .. } => {} // per-write signal, not history prose
             ChatStreamEvent::Compact { .. } => {} // compaction meta-event, not history prose
+            ChatStreamEvent::ApprovalRequired { .. } => {} // Human-Gate control signal, not history
         }
     }
 

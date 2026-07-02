@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from 'react';
 // 'executing' is Mission Phase 2 (D4) — set internally by the `mission_apply`
 // command, not surfaced in MODE_OPTIONS for manual selection. It round-trips
 // the backend PermissionMode::Executing wire value.
-export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'executing' | 'dry-run' | 'silent' | 'skip-permissions';
+export type AgentMode = 'default' | 'auto-edit' | 'plan' | 'executing' | 'dry-run' | 'silent' | 'skip-permissions' | 'human-gate';
 
 interface ModeOption {
   id: AgentMode;
@@ -14,6 +14,7 @@ interface ModeOption {
 
 const MODE_OPTIONS: ModeOption[] = [
   { id: 'default', label: '默认', shortLabel: '默认', desc: '交互式执行，询问关键操作' },
+  { id: 'human-gate', label: '人工审批', shortLabel: '审批', desc: '破坏性操作（删文件/强推等）执行前弹窗，需人工同意' },
   { id: 'auto-edit', label: '自动', shortLabel: '自动', desc: '自动接受文件编辑不询问' },
   { id: 'plan', label: '计划', shortLabel: '计划', desc: '先输出计划，确认后执行' },
   { id: 'dry-run', label: '预演', shortLabel: '预演', desc: '预演执行计划：只读工具真跑、写入类工具不落地' },

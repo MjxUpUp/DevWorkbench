@@ -8,6 +8,7 @@ import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
+import { ApprovalModal } from './ApprovalModal';
 import { shouldFollowLatest } from './turnFollow';
 import { useProvidersStore } from '../../stores/providersStore';
 import type { ModelOption } from '../ModelSelector';
@@ -563,6 +564,7 @@ export function ChatView() {
         onSteer={() => toast.info('Steering 消息发送待后端支持（当前会继续运行）')}
         placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}
       />
+      <ApprovalModal />
     </div>
   );
 }

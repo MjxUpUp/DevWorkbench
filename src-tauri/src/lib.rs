@@ -241,6 +241,7 @@ pub fn run() {
         )))
         .manage(mcp::registry::McpRegistry::new())
         .manage(commands::workflows::ApprovalState::default())
+        .manage(commands::agents::AgentApprovalState::default())
         .manage(agents::kernel_tasks::KernelTasks::new())
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
@@ -277,6 +278,7 @@ pub fn run() {
             commands::agents::load_sessions,
             commands::agents::read_session_output_cmd,
             commands::agents::read_compact_archive_cmd,
+            commands::agents::resolve_human_gate_cmd,
             commands::agents::list_conversations,
             commands::agents::update_conversation,
             commands::agents::archive_conversation,
