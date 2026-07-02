@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { invoke } from '@tauri-apps/api/core';
 import type { ChatStreamEvent } from '../../types';
 import { Frame } from '../ui/Frame/Frame';
 import { L1Thinking } from './layers/L1Thinking';
@@ -11,6 +12,12 @@ import styles from './BlocksView.module.css';
 interface BlocksViewProps {
   events: ChatStreamEvent[];
   running: boolean;
+  /** Session id this block stream belongs to. Required to resolve the compact
+   *  card's expand action (loads dropped-message archive via
+   *  read_compact_archive_cmd). Optional because the orchestrate canvas path
+   *  renders BlocksView per-node without a session id — there the compact card
+   *  shows its summary but the expand is disabled. */
+  sessionId?: string;
 }
 
 /** Merge consecutive same-kind text/thinking events into one block before
@@ -40,7 +47,7 @@ function normalizeEvents(events: ChatStreamEvent[]): ChatStreamEvent[] {
  *
  * v3 重构：用 L1Thinking / L2ToolPill 替换原 ThinkingCard / ToolUseCard+
  * ToolResultCard，落地 Cursor 3.0 / Codex app 三段折叠范式。 */
-export function BlocksView({ events, running }: BlocksViewProps) {
+export function BlocksView({ events, running, sessionId }: BlocksViewProps) {
   const waiting = running && events.length === 0;
   const merged = useMemo(() => normalizeEvents(events), [events]);
   return (
@@ -53,7 +60,7 @@ export function BlocksView({ events, running }: BlocksViewProps) {
       ) : (
         <>
           {merged.map((ev, i) => (
-            <BlockCard key={i} event={ev} running={running} />
+            <BlockCard key={i} event={ev} running={running} sessionId={sessionId} />
           ))}
           {running && <span className={styles.cursor} data-testid="chat-streaming-cursor" aria-hidden="true" />}
         </>
@@ -62,7 +69,7 @@ export function BlocksView({ events, running }: BlocksViewProps) {
   );
 }
 
-function BlockCard({ event, running }: { event: ChatStreamEvent; running: boolean }) {
+function BlockCard({ event, running, sessionId }: { event: ChatStreamEvent; running: boolean; sessionId?: string }) {
   switch (event.kind) {
     case 'text':
       return (
@@ -114,7 +121,100 @@ function BlockCard({ event, running }: { event: ChatStreamEvent; running: boolea
           <span className={styles.filePath}>{event.path}</span>
         </div>
       );
+    case 'compact':
+      return <CompactCard event={event} sessionId={sessionId} />;
   }
+}
+
+/** compact meta-event → 折叠摘要卡片。压缩发生时内核把被替换出模型历史的
+ *  陈旧消息归档到 ~/.dev-workbench/agents/compact/{sid}.jsonl，并发出此事件。
+ *  折叠态：一行摘要 + dropped 计数；展开态：异步 invoke 读 JSONL 原文（仅当
+ *  有 sessionId；orchestrate canvas 路径无 sid 时禁用展开）。is_error 为熔断态
+ *  （连续 3 次压缩失败 MAX_CONSECUTIVE_COMPACT_FAILURES）——渲染为危险卡片。 */
+function CompactCard({ event, sessionId }: { event: Extract<ChatStreamEvent, { kind: 'compact' }>; sessionId?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [archive, setArchive] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // 展开只对有 sessionId 且非 error 的卡片有意义（error 态无归档可读）。
+  const canExpand = !event.is_error && !!sessionId;
+
+  async function handleExpand() {
+    if (!canExpand || !sessionId) return;
+    const next = !expanded;
+    setExpanded(next);
+    if (!next || archive !== null || loading) return;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const rows = await invoke<unknown[] | null>('read_compact_archive_cmd', { sessionId });
+      setArchive(formatArchive(rows));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div
+      className={`${styles.compact}${event.is_error ? ` ${styles.isError}` : ''}`}
+      data-testid="chat-block-compact"
+    >
+      <button
+        type="button"
+        className={styles.compactHeader}
+        aria-expanded={expanded}
+        disabled={!canExpand}
+        onClick={handleExpand}
+      >
+        <span className={styles.compactIcon} aria-hidden="true">{event.is_error ? '⚠' : '🗜'}</span>
+        <span className={styles.compactSummary}>{event.summary}</span>
+        {event.dropped_count > 0 && (
+          <span className={styles.compactCount}>-{event.dropped_count} msg</span>
+        )}
+        {canExpand && <span className={styles.compactToggle}>{expanded ? '▾' : '▸'}</span>}
+      </button>
+      {expanded && (
+        <div className={styles.compactBody}>
+          {loading && <span>加载归档…</span>}
+          {loadError && <span>读取归档失败：{loadError}</span>}
+          {!loading && !loadError && archive !== null && (
+            <pre className={styles.compactArchive} data-testid="chat-block-compact-archive">{archive}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 把 JSONL 归档行（{ts, kind, summary, dropped_count, dropped_messages}）格式化
+ *  为可读文本。归档是调试/审计用途——等宽 pre 展示，不做 Markdown 渲染。接受
+ *  null（read_compact_archive_cmd 返回 None 当归档文件不存在时）。 */
+function formatArchive(rows: unknown[] | null): string {
+  if (!Array.isArray(rows) || rows.length === 0) return '（无归档记录）';
+  return rows
+    .map((row, i) => {
+      const r = row as Record<string, unknown>;
+      const kind = typeof r.kind === 'string' ? r.kind : '?';
+      const summary = typeof r.summary === 'string' ? r.summary : '';
+      const count = typeof r.dropped_count === 'number' ? r.dropped_count : 0;
+      const ts = typeof r.ts === 'string' ? r.ts : '';
+      const head = `#${i + 1} [${kind}] ${ts} · dropped ${count}\n${summary}`;
+      const msgs = Array.isArray(r.dropped_messages) ? r.dropped_messages : [];
+      if (msgs.length === 0) return head;
+      const body = msgs
+        .map((m) => {
+          const msg = m as Record<string, unknown>;
+          const role = typeof msg.role === 'string' ? msg.role : '?';
+          const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '');
+          return `  - (${role}) ${truncate(content, 160)}`;
+        })
+        .join('\n');
+      return `${head}\n${body}`;
+    })
+    .join('\n\n');
 }
 
 /** tool_use → L2ToolPill（running 态，等配对的 tool_result 到达后转 success/error）*/

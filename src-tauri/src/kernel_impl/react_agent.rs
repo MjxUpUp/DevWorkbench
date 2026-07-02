@@ -15,8 +15,9 @@
 //! Chat Completions API in [`crate::kernel_impl::openai_chat_model`], both
 //! sharing cross-cutting state via [`crate::kernel_impl::chat_model_shared`].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
+use tauri::Emitter;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -32,6 +33,7 @@ use crate::kernel_impl::llm_recovery::{
     should_retry,
 };
 use crate::kernel_impl::model_router::TierCtx;
+use crate::kernel_impl::context_compact::{self, ArchivedChunk};
 
 /// Injectable audit callback signature (project audit: cargo check + assertion
 /// weakening scan). Shared by the config field, the builder, and test stubs.
@@ -655,6 +657,23 @@ pub struct ReactAgent {
     /// Extended-thinking budget for GLM Interleaved Thinking. None = thinking
     /// off (the default for `new`); `build_react_agent` turns it on for glm-4.6.
     thinking: Option<kernel_core::ThinkingConfig>,
+    /// Session id this agent run belongs to (chat path only). When set, the
+    /// compaction sink can archive the dropped原文 + emit a Compact meta-event
+    /// scoped to this session. Workflow/ACP agents leave it None (no archive,
+    /// no UI event — pure compaction). v1.3 C2.
+    session_id: Option<String>,
+    /// Tauri AppHandle for emitting the Compact meta-event on `agent:event`.
+    /// Held directly (NOT via ToolContext) — same pattern as `WorkflowTool`.
+    /// None for tests / workflow agents / ACP → sink becomes a no-op. The
+    /// Option is shared with session_id above; both must be Some to archive.
+    app: Option<tauri::AppHandle>,
+    /// Shared buffer the compaction sink appends Compact events into, so the
+    /// driver loop can persist them into `session.blocks` (Compact bypasses the
+    /// AgentEvent stream, so it can't be collected there). Held via Arc<Mutex>
+    /// so the FnMut sink (which the try_stream owns) and the driver (which owns
+    /// the agent) both see the same Vec. None = sink doesn't persist into this
+    /// buffer (workflow/test path).
+    compaction_blocks: Option<Arc<Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>>,
 }
 
 impl ReactAgent {
@@ -691,6 +710,9 @@ impl ReactAgent {
             ctx: ToolContext::default(),
             history: Vec::new(),
             thinking: None,
+            session_id: None,
+            app: None,
+            compaction_blocks: None,
         }
     }
 
@@ -789,6 +811,25 @@ impl ReactAgent {
     pub fn with_context_compaction(mut self, max_tokens: usize, keep_recent: usize) -> Self {
         self.max_context_tokens = Some(max_tokens);
         self.compact_keep_recent = keep_recent;
+        self
+    }
+
+    /// Wire the chat-path session id + AppHandle + shared Compact-event buffer
+    /// so the compaction sink can (a) archive the dropped原文 to
+    /// `agents/compact/{sid}.jsonl`, (b) emit a Compact meta-event on
+    /// `agent:event`, and (c) append the event into the driver's final_blocks
+    /// for persistence. All three are gated together — workflow/test/ACP agents
+    /// leave them None and the sink stays a no-op (compaction runs but stays
+    /// silent, the original kernel behavior). v1.3 C2.
+    pub fn with_compaction_archive(
+        mut self,
+        session_id: String,
+        app: tauri::AppHandle,
+        compaction_blocks: Arc<Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>,
+    ) -> Self {
+        self.session_id = Some(session_id);
+        self.app = Some(app);
+        self.compaction_blocks = Some(compaction_blocks);
         self
     }
 
@@ -1109,6 +1150,9 @@ impl kernel_core::Agent for ReactAgent {
         let budget_check = self.budget_check.clone();
         let max_context_tokens = self.max_context_tokens;
         let compact_keep_recent = self.compact_keep_recent;
+        let app_opt = self.app.clone();
+        let sid_opt = self.session_id.clone();
+        let compaction_buf_opt = self.compaction_blocks.clone();
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -1218,15 +1262,98 @@ impl kernel_core::Agent for ReactAgent {
                 // error is swallowed (skip this round, retry next turn) rather
                 // than truncating and losing information mid-run.
                 if let Some(max_tok) = max_context_tokens {
-                    let _ = crate::kernel_impl::context_compact::maybe_compact(
+                    // Compaction is a meta-event: it never enters the AgentEvent
+                    // stream. maybe_compact pushes each dropped原文 chunk into a
+                    // shared Arc<Mutex> buffer (an owned Arc — no &mut borrow of a
+                    // local, so the future stays Send across the summarizer
+                    // .await without tripping the borrow checker). AFTER the call
+                    // returns we drain the buffer and emit one Compact agent:event
+                    // per chunk + append into the driver's final_blocks — this
+                    // emit/drain runs in sync code, free of any await-lifetime
+                    // entanglement. Only the chat path has all three of
+                    // session_id/app/driver_buf; workflow/ACP/test agents leave
+                    // them None → no buffer passed, no emit (pure compaction,
+                    // the original behavior).
+                    let archive_buf: Arc<Mutex<Vec<ArchivedChunk>>> =
+                        Arc::new(Mutex::new(Vec::new()));
+                    let archive_buf_for_call = match (&sid_opt, &app_opt) {
+                        (Some(_), Some(_)) => Some(Arc::clone(&archive_buf)),
+                        _ => None,
+                    };
+                    let _ = context_compact::maybe_compact(
                         &mut history,
                         model.as_ref(),
                         &opts,
                         max_tok,
                         compact_keep_recent,
                         &mut compact_consecutive_failures,
+                        archive_buf_for_call,
                     )
                     .await;
+                    // Drain + emit/persist OUTSIDE the maybe_compact borrow.
+                    if let (Some(sid), Some(app), Some(driver_buf)) =
+                        (sid_opt.as_ref(), app_opt.as_ref(), compaction_buf_opt.as_ref())
+                    {
+                        let chunks: Vec<ArchivedChunk> = archive_buf
+                            .lock()
+                            .map(|mut g| g.drain(..).collect())
+                            .unwrap_or_default();
+                        for chunk in chunks {
+                            let dropped_count = chunk.dropped_messages.len();
+                            // Resolve (summary, is_error) per kind. BreakerTripped
+                            // is the failure case — surfaces the silent-suspension
+                            // mode as a danger card; the other two are normal
+                            // compactions (info cards).
+                            let (summary_text, is_error) = match chunk.kind {
+                                context_compact::ArchivedKind::BreakerTripped => (
+                                    chunk.summary.clone().unwrap_or_else(|| {
+                                        "上下文压缩已暂停".to_string()
+                                    }),
+                                    true,
+                                ),
+                                context_compact::ArchivedKind::MicroClear => (
+                                    chunk.summary.clone().unwrap_or_else(|| {
+                                        format!("已压缩 {} 条陈旧工具输出", dropped_count)
+                                    }),
+                                    false,
+                                ),
+                                context_compact::ArchivedKind::Summarize => (
+                                    chunk.summary
+                                        .clone()
+                                        .unwrap_or_else(|| "已压缩历史".to_string()),
+                                    false,
+                                ),
+                            };
+                            // Archive dropped原文 to disk (best-effort; the
+                            // returned path becomes the card's archived_at —
+                            // the UI's expand view keys off its presence). Skip
+                            // for BreakerTripped: nothing was compacted, so there
+                            // is no original to archive (and an empty JSONL line
+                            // would only pollute the audit log).
+                            let archived_at = if is_error {
+                                None
+                            } else {
+                                crate::agents::pty::append_compact_archive(sid, &chunk)
+                            };
+                            let wire = crate::agents::pty::ChatStreamEvent::Compact {
+                                summary: summary_text,
+                                archived_at,
+                                dropped_count,
+                                is_error,
+                            };
+                            let _ = app.emit(
+                                "agent:event",
+                                serde_json::json!({ "sessionId": sid, "event": &wire }),
+                            );
+                            // Persist into the driver's final_blocks so the
+                            // compact card survives the live→persisted handoff
+                            // (Compact bypasses the AgentEvent stream, so the
+                            // driver loop can't collect it itself).
+                            if let Ok(mut g) = driver_buf.lock() {
+                                g.push(wire);
+                            }
+                        }
+                    }
                 }
                 // Real streaming: consume the model's SSE stream, yielding each
                 // text delta as a Token (chat renders token-by-token) while the
@@ -4176,6 +4303,7 @@ mod tests {
             None, // mcp_filter
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
+            None, // compaction_blocks — test agents don't persist Compact events
         )
         .expect("build_react_agent assembles from GUI provider config");
         let mut stream = agent
@@ -4251,6 +4379,7 @@ mod tests {
             None, // mcp_filter
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
+            None, // compaction_blocks — test agents don't persist Compact events
         )
         .expect("build_react_agent");
         // 强引导并行:"一次性发出两个tool调用,不要分开做"。
@@ -4478,6 +4607,7 @@ mod tests {
             None, // mcp_filter
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
+            None, // compaction_blocks — test agents don't persist Compact events
         )
         .expect("build_react_agent");
         let mut stream = agent
@@ -4593,6 +4723,7 @@ mod tests {
             None, // mcp_filter
             None, // knowledge_ids
             None, // app — test agents get no WorkflowTool
+            None, // compaction_blocks — test agents don't persist Compact events
         )
         .expect("build_react_agent");
         let mut stream = agent

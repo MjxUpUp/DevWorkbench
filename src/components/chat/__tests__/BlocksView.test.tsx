@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BlocksView } from '../BlocksView';
 import type { ChatStreamEvent } from '../../../types';
 
@@ -7,6 +7,15 @@ import type { ChatStreamEvent } from '../../../types';
 // to a Tauri event. Stub listen so the strip's effect is inert under jsdom.
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
+// compact-card expand calls invoke('read_compact_archive_cmd'). Default stub
+// returns null (no archive file on disk); per-test overrides via mockResolvedValue.
+const invokeMock = vi.fn(
+  (_cmd: string, _args?: unknown): Promise<unknown> => Promise.resolve(null),
+);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
 }));
 
 /**
@@ -179,5 +188,67 @@ describe('BlocksView', () => {
       />,
     );
     expect(screen.getByText(/自规划工作流 · 3 节点/)).toBeInTheDocument();
+  });
+
+  it('renders a compact summary card with dropped-count badge (collapsed, no sessionId)', () => {
+    render(
+      <BlocksView
+        events={[
+          { kind: 'compact', summary: '已压缩历史', archived_at: null, dropped_count: 12, is_error: false },
+        ]}
+        running={false}
+      />,
+    );
+    const card = screen.getByTestId('chat-block-compact');
+    expect(card).toHaveTextContent('已压缩历史');
+    expect(card).toHaveTextContent('-12 msg');
+    // 无 sessionId：展开按钮禁用，不触发 invoke
+    expect(screen.queryByTestId('chat-block-compact-archive')).toBeNull();
+  });
+
+  it('renders a compact error card with the error class', () => {
+    render(
+      <BlocksView
+        events={[
+          { kind: 'compact', summary: '压缩熔断', archived_at: null, dropped_count: 0, is_error: true },
+        ]}
+        running={false}
+      />,
+    );
+    const card = screen.getByTestId('chat-block-compact');
+    expect(card.className).toMatch(/isError/);
+    // 熔断态不可展开（canExpand = !is_error）
+    expect(card.querySelector('button')).toHaveAttribute('disabled');
+  });
+
+  it('expands the compact card and loads the archive via invoke', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        ts: '2026-07-02T00:00:00Z',
+        kind: 'summarize',
+        summary: '早期工具调用摘要',
+        dropped_count: 2,
+        dropped_messages: [
+          { role: 'user', content: 'do something' },
+          { role: 'assistant', content: 'tool result blob' },
+        ],
+      },
+    ]);
+    render(
+      <BlocksView
+        events={[
+          { kind: 'compact', summary: '已压缩历史', archived_at: '/tmp/x.jsonl', dropped_count: 2, is_error: false },
+        ]}
+        running={false}
+        sessionId="sess-compact-1"
+      />,
+    );
+    fireEvent.click(screen.getByTestId('chat-block-compact').querySelector('button')!);
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-block-compact-archive')).toBeInTheDocument();
+    });
+    expect(invokeMock).toHaveBeenCalledWith('read_compact_archive_cmd', { sessionId: 'sess-compact-1' });
+    expect(screen.getByTestId('chat-block-compact-archive')).toHaveTextContent('早期工具调用摘要');
+    expect(screen.getByTestId('chat-block-compact-archive')).toHaveTextContent('do something');
   });
 });

@@ -24,6 +24,7 @@
 //!   early, which is safe.
 
 use kernel_core::{ChatModel, Error, Message, ModelOptions, Role};
+use std::sync::{Arc, Mutex};
 
 /// Rough token estimate for a history slice: ~4 chars per token, summing each
 /// message's content + tool-call name/arguments. CJK overestimates slightly,
@@ -137,6 +138,38 @@ pub fn micro_compact(history: &[Message], keep_recent: usize) -> Option<Vec<Mess
     }
 }
 
+/// Compute the exclusive end index of the middle slice that [`summarize_middle`]
+/// compresses: `history[1 .. end]`. Shared between [`summarize_middle`] (to know
+/// what to blend) and [`maybe_compact`]'s archive sink (to snapshot the exact
+/// middle being dropped before the cover-assignment discards it).
+///
+/// Returns `None` when history is too short to have a meaningful middle
+/// (system(1) + at least 2 middle turns + `keep_recent` tail), or when the
+/// boundary walk collapses the whole middle into the tail.
+fn summarize_middle_end(history: &[Message], keep_recent: usize) -> Option<usize> {
+    let len = history.len();
+    // Need: system(1) + at least 2 middle turns + keep_recent tail. Anything
+    // tighter leaves nothing meaningful to summarize.
+    if len <= 1 + keep_recent + 2 {
+        return None;
+    }
+    let mut summarize_end = len.saturating_sub(keep_recent);
+    // Never start the verbatim tail on a Tool result message: its paired
+    // assistant tool_use would land in the summarized middle, orphaning the
+    // result and breaking the tool_use/tool_result pairing the Anthropic API
+    // enforces (HTTP 400). Walk the boundary back through any leading Tool
+    // results to the spawning assistant so the pair stays whole in the tail;
+    // if the assistant is also cut, the results get absorbed into the summary
+    // text instead of being sent dangling.
+    while summarize_end > 1 && history[summarize_end].role == Role::Tool {
+        summarize_end -= 1;
+    }
+    if summarize_end <= 1 {
+        return None;
+    }
+    Some(summarize_end)
+}
+
 /// Compress the middle of `history` into a single summary message.
 ///
 /// Result layout: `[system] [summary(user)] ...last keep_recent messages...`.
@@ -152,26 +185,10 @@ pub async fn summarize_middle(
     opts: &ModelOptions,
     keep_recent: usize,
 ) -> Result<Option<Vec<Message>>, Error> {
-    let len = history.len();
-    // Need: system(1) + at least 2 middle turns + keep_recent tail. Anything
-    // tighter leaves nothing meaningful to summarize.
-    if len <= 1 + keep_recent + 2 {
-        return Ok(None);
-    }
-    let mut summarize_end = len.saturating_sub(keep_recent);
-    // Never start the verbatim tail on a Tool result message: its paired
-    // assistant tool_use would land in the summarized middle, orphaning the
-    // result and breaking the tool_use/tool_result pairing the Anthropic API
-    // enforces (HTTP 400). Walk the boundary back through any leading Tool
-    // results to the spawning assistant so the pair stays whole in the tail;
-    // if the assistant is also cut, the results get absorbed into the summary
-    // text instead of being sent dangling.
-    while summarize_end > 1 && history[summarize_end].role == Role::Tool {
-        summarize_end -= 1;
-    }
-    if summarize_end <= 1 {
-        return Ok(None);
-    }
+    let summarize_end = match summarize_middle_end(history, keep_recent) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
     let middle = &history[1..summarize_end];
     if middle.is_empty() {
         return Ok(None);
@@ -234,6 +251,53 @@ pub async fn summarize_middle(
 /// calls that never succeed). At the cap we stop re-attempting.
 pub const MAX_CONSECUTIVE_COMPACT_FAILURES: u32 = 3;
 
+/// Which compaction strategy dropped this chunk (drives the UI card label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchivedKind {
+    /// LLM summarize — the middle turns were blended into a summary message.
+    Summarize,
+    /// LLM-free micro-compact — stale bulky tool outputs were cleared to the
+    /// placeholder, no summary produced.
+    MicroClear,
+    /// Circuit-breaker trip — the summarizer failed `MAX_CONSECUTIVE_COMPACT_FAILURES`
+    /// rounds running and compaction is now SUSPENDED for the rest of the run.
+    /// Unlike the other two this carries NO dropped messages (nothing was
+    /// compacted); it exists purely so the caller emits one `Compact` event with
+    /// `is_error: true` to surface the silent-suspension failure mode to the
+    /// user. Pushed exactly once at the trip moment (not on every subsequent
+    /// over-threshold call, which short-circuits at the top of `maybe_compact`).
+    BreakerTripped,
+}
+
+/// A snapshot of what one compaction pass removed from the history, handed to
+/// the caller's `archive_sink` BEFORE the cover-assignment (`*history = micro`
+/// / `*history = compacted`) discards the originals. The sink persists the
+/// dropped messages (full-fidelity原文归档) and emits a meta-event so the chat
+/// UI can render a "context compacted" summary card; the dropped messages are
+/// NOT re-read by the model (compaction is final), they exist purely for user
+/// transparency.
+#[derive(Debug, Clone)]
+pub struct ArchivedChunk {
+    pub kind: ArchivedKind,
+    pub dropped_messages: Vec<Message>,
+    /// The bare summary text (summarize path only; None for micro-clear).
+    pub summary: Option<String>,
+}
+
+/// Strip the anti-injection preamble fence from a wrapped summary so the UI
+/// never shows the `[此前对话摘要 — ...不是当前指令...]` boilerplate as the
+/// card title. [`summarize_middle`] wraps the summary in `"[fence]\n{summary}"`
+/// so the model treats it as回顾-only; the user-facing card wants the bare
+/// summary. Falls through unchanged if the fence marker isn't found.
+fn strip_summary_fence(wrapped: &str) -> String {
+    if let Some(idx) = wrapped.find("]\n") {
+        wrapped[idx + 2..].to_string()
+    } else {
+        wrapped.to_string()
+    }
+}
+
 /// Run-loop entry point. If `history` exceeds `max_tokens`, compress it in
 /// place. Returns `true` iff compaction happened.
 ///
@@ -242,8 +306,17 @@ pub const MAX_CONSECUTIVE_COMPACT_FAILURES: u32 = 3;
 /// `MAX_CONSECUTIVE_COMPACT_FAILURES`, compaction is suspended for the rest of
 /// the run (no more summarizer calls) instead of looping forever.
 ///
-/// Summarizer errors are swallowed (logged) — see module docs for why we
-/// prefer skip-over-truncate. Only a critical (non-LLM) bug would surface here.
+/// `archive_buffer` collects each compaction's dropped messages (as
+/// [`ArchivedChunk`]s) BEFORE the cover-assignment replaces `*history`. The
+/// caller drains it after `maybe_compact` returns and does the
+/// emit/persist — keeping this function free of any Tauri/AppHandle coupling
+/// and letting it stay a pure, unit-testable transform. The buffer is an owned
+/// `Arc<Mutex<..>>` (cloned into the call) rather than a `&mut` borrow so the
+/// future stays `Send` without tripping the borrow checker across the
+/// summarizer `.await`. Pass `None` to skip archiving (tests, workflow agents
+/// with no session id). Summarizer errors are swallowed (logged) — see module
+/// docs for why we prefer skip-over-truncate. Only a critical (non-LLM) bug
+/// would surface here.
 pub async fn maybe_compact(
     history: &mut Vec<Message>,
     model: &dyn ChatModel,
@@ -251,6 +324,7 @@ pub async fn maybe_compact(
     max_tokens: usize,
     keep_recent: usize,
     consecutive_failures: &mut u32,
+    archive_buffer: Option<Arc<Mutex<Vec<ArchivedChunk>>>>,
 ) -> Result<bool, Error> {
     if estimate_tokens(history) <= max_tokens {
         return Ok(false);
@@ -261,6 +335,27 @@ pub async fn maybe_compact(
     // CCB runs micro-compact before autocompact for the same reason. Falls
     // through to summarize_middle on the already-trimmed history if still over.
     if let Some(micro) = micro_compact(history, keep_recent) {
+        // Snapshot the cleared tool outputs (the messages whose content is
+        // about to become CLEARED_PLACEHOLDER) BEFORE the cover-assignment
+        // discards them. Diffing pre/post captures exactly what micro cleared
+        // without re-running micro_compact's index logic here.
+        if let Some(buf) = archive_buffer.as_ref() {
+            let dropped: Vec<Message> = history
+                .iter()
+                .zip(micro.iter())
+                .filter(|(a, b)| a.content != b.content)
+                .map(|(a, _)| a.clone())
+                .collect();
+            if !dropped.is_empty() {
+                if let Ok(mut g) = buf.lock() {
+                    g.push(ArchivedChunk {
+                        kind: ArchivedKind::MicroClear,
+                        dropped_messages: dropped,
+                        summary: None,
+                    });
+                }
+            }
+        }
         *history = micro;
         if estimate_tokens(history) <= max_tokens {
             return Ok(true);
@@ -279,6 +374,24 @@ pub async fn maybe_compact(
     match summarize_middle(history, model, opts, keep_recent).await {
         Ok(Some(compacted)) => {
             *consecutive_failures = 0;
+            // Snapshot the middle slice that was blended into the summary.
+            // `history` still holds the original (replacement is the line
+            // below), and summarize_middle_end recomputes the exact boundary
+            // summarize_middle used. The summary text lives in compacted[1]
+            // (the user-wrapped fence message); strip the fence for the UI.
+            if let Some(buf) = archive_buffer.as_ref() {
+                if let Some(end) = summarize_middle_end(history, keep_recent) {
+                    let dropped = history[1..end].to_vec();
+                    let summary = compacted.get(1).map(|m| strip_summary_fence(&m.content));
+                    if let Ok(mut g) = buf.lock() {
+                        g.push(ArchivedChunk {
+                            kind: ArchivedKind::Summarize,
+                            dropped_messages: dropped,
+                            summary,
+                        });
+                    }
+                }
+            }
             *history = compacted;
             Ok(true)
         }
@@ -290,6 +403,25 @@ pub async fn maybe_compact(
                 *consecutive_failures,
                 MAX_CONSECUTIVE_COMPACT_FAILURES
             );
+            // Surface the breaker trip as a one-shot error chunk the caller
+            // turns into a `Compact { is_error: true }` card. Without this the
+            // suspension is invisible — the run degrades into context overflow
+            // with no user-visible signal. Pushed only at the exact trip moment
+            // (== MAX after increment); subsequent calls hit the top-of-function
+            // short-circuit and push nothing, so the card appears exactly once.
+            if *consecutive_failures == MAX_CONSECUTIVE_COMPACT_FAILURES {
+                if let Some(buf) = archive_buffer.as_ref() {
+                    if let Ok(mut g) = buf.lock() {
+                        g.push(ArchivedChunk {
+                            kind: ArchivedKind::BreakerTripped,
+                            dropped_messages: Vec::new(),
+                            summary: Some(format!(
+                                "上下文压缩连续失败 {MAX_CONSECUTIVE_COMPACT_FAILURES} 次，已暂停本次会话的自动压缩"
+                            )),
+                        });
+                    }
+                }
+            }
             Ok(false)
         }
     }
@@ -454,9 +586,17 @@ mod tests {
             hist.push(tool_msg(&format!("t{i}"), &"x".repeat(400)));
         }
         let mut fails = 0u32;
-        let compacted = maybe_compact(&mut hist, &model, &ModelOptions::default(), 300, 1, &mut fails)
-            .await
-            .unwrap();
+        let compacted = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            300,
+            1,
+            &mut fails,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(compacted, "compaction should have happened");
         assert!(
             model.calls().is_empty(),
@@ -599,6 +739,7 @@ mod tests {
             1_000_000,
             3,
             &mut fails,
+            None,
         )
         .await
         .unwrap();
@@ -624,6 +765,7 @@ mod tests {
             100,
             4,
             &mut fails,
+            None,
         )
         .await
         .unwrap();
@@ -788,6 +930,7 @@ mod tests {
                 100,
                 4,
                 &mut fails,
+                None,
             )
             .await;
         }
@@ -820,10 +963,155 @@ mod tests {
             100,
             4,
             &mut fails,
+            None,
         )
         .await
         .unwrap();
         assert!(did);
         assert_eq!(fails, 0, "success resets the failure counter");
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_archive_sink_snapshots_micro_clear() {
+        // 4 bulky read_file results under a tiny threshold → micro_compact
+        // alone fires (no summarize_middle LLM call). The sink must snapshot
+        // the cleared tool outputs with kind=MicroClear and no summary,
+        // BEFORE the placeholder overwrites the original content.
+        let model = SummaryChatModel::new("不应被调用");
+        let mut hist = vec![
+            msg(Role::System, "sys"),
+            assistant_with_tool("a1", "t1", "read_file"),
+            tool_msg("t1", &"x".repeat(400)),
+            assistant_with_tool("a2", "t2", "read_file"),
+            tool_msg("t2", &"y".repeat(400)),
+            assistant_with_tool("a3", "t3", "read_file"),
+            tool_msg("t3", &"z".repeat(400)),
+            assistant_with_tool("a4", "t4", "read_file"),
+            tool_msg("t4", &"w".repeat(400)),
+        ];
+        let mut fails = 0u32;
+        let archived: Arc<Mutex<Vec<ArchivedChunk>>> = Arc::new(Mutex::new(Vec::new()));
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            300,
+            1,
+            &mut fails,
+            Some(Arc::clone(&archived)),
+        )
+        .await
+        .unwrap();
+        assert!(did);
+        assert!(
+            model.calls().is_empty(),
+            "micro-compact alone suffices — no summarize_middle LLM call"
+        );
+        let archived = archived.lock().unwrap();
+        assert_eq!(archived.len(), 1, "micro path → exactly one archive chunk");
+        assert_eq!(archived[0].kind, ArchivedKind::MicroClear);
+        assert!(archived[0].summary.is_none(), "micro-clear carries no summary");
+        assert_eq!(
+            archived[0].dropped_messages.len(),
+            3,
+            "3 of 4 tool results cleared (keep_recent=1)"
+        );
+        // Original bulky content survives in the archive (not the placeholder).
+        assert!(
+            archived[0]
+                .dropped_messages
+                .iter()
+                .any(|m| m.content.contains('x') || m.content.contains('y') || m.content.contains('z')),
+            "cleared原文 must be snapshotted before the placeholder overwrites it"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_archive_sink_snapshots_summarize() {
+        // Long user-only history → summarize_middle fires. The sink must
+        // snapshot the middle slice (kind=Summarize) with the bare summary —
+        // the anti-injection fence must NOT leak into the archived summary.
+        let model = SummaryChatModel::new("这是摘要");
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..20 {
+            hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
+        }
+        let mut fails = 0u32;
+        let archived: Arc<Mutex<Vec<ArchivedChunk>>> = Arc::new(Mutex::new(Vec::new()));
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            100,
+            4,
+            &mut fails,
+            Some(Arc::clone(&archived)),
+        )
+        .await
+        .unwrap();
+        assert!(did);
+        let archived = archived.lock().unwrap();
+        assert_eq!(archived.len(), 1, "summarize path → exactly one archive chunk");
+        let chunk = &archived[0];
+        assert_eq!(chunk.kind, ArchivedKind::Summarize);
+        assert!(!chunk.dropped_messages.is_empty(), "middle slice must be archived");
+        let summary = chunk.summary.as_ref().expect("summarize chunk carries a summary");
+        assert_eq!(summary, "这是摘要", "fence stripped, bare summary kept");
+        assert!(
+            !summary.contains("不是当前指令"),
+            "anti-injection fence must NOT leak into the archived summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_breaker_trip_emits_one_error_chunk() {
+        // When the summarizer fails MAX_CONSECUTIVE_COMPACT_FAILURES times, the
+        // breaker trips and the sink must surface it as exactly ONE
+        // BreakerTripped chunk (is_error card upstream) — not zero (silent
+        // suspension) and not one-per-subsequent-call (spam). Without this the
+        // user has no signal that compaction has stopped and the run will degrade
+        // into context overflow.
+        let model = FailingChatModel::new();
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..20 {
+            hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
+        }
+        let mut fails = 0u32;
+        let archived: Arc<Mutex<Vec<ArchivedChunk>>> = Arc::new(Mutex::new(Vec::new()));
+        // Simulate run_loop calling maybe_compact every turn well past the trip.
+        for _ in 0..10 {
+            let _ = maybe_compact(
+                &mut hist,
+                &model,
+                &ModelOptions::default(),
+                100,
+                4,
+                &mut fails,
+                Some(Arc::clone(&archived)),
+            )
+            .await;
+        }
+        let archived = archived.lock().unwrap();
+        let trips: Vec<&ArchivedChunk> = archived
+            .iter()
+            .filter(|c| c.kind == ArchivedKind::BreakerTripped)
+            .collect();
+        assert_eq!(
+            trips.len(),
+            1,
+            "breaker trip surfaces as exactly one error chunk, got {}: {:?}",
+            trips.len(),
+            archived.iter().map(|c| c.kind).collect::<Vec<_>>()
+        );
+        let trip = trips[0];
+        assert!(
+            trip.dropped_messages.is_empty(),
+            "trip carries no dropped content — nothing was compacted"
+        );
+        assert!(
+            trip.summary.as_ref().map(|s| s.contains("已暂停")).unwrap_or(false),
+            "trip summary tells the user compaction is suspended: {:?}",
+            trip.summary
+        );
     }
 }

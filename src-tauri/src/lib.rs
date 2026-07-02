@@ -276,6 +276,7 @@ pub fn run() {
             commands::agents::stop_agent_session,
             commands::agents::load_sessions,
             commands::agents::read_session_output_cmd,
+            commands::agents::read_compact_archive_cmd,
             commands::agents::list_conversations,
             commands::agents::update_conversation,
             commands::agents::archive_conversation,

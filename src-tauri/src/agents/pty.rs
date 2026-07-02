@@ -785,6 +785,22 @@ pub enum ChatStreamEvent {
     /// kernel-core `AgentEvent::FileChanged`.
     #[serde(rename = "file_changed")]
     FileChanged { path: String },
+    /// Context auto-compaction meta-event (v1.3 C2). NOT produced by a model
+    /// turn — emitted by the compaction sink when `maybe_compact` replaces part
+    /// of the history. A meta-event: it never enters the model's history
+    /// (dropped in turns_to_history / blocks_to_assistant_message), it only
+    /// tells the UI to render a "context compacted" summary card. Expand the
+    /// card to read the archived原文 via `read_compact_archive_cmd`. `is_error`
+    /// marks a breaker trip (summarizer failed repeatedly; compaction suspended
+    /// for the rest of the run — the run continues, just without further
+    /// compression).
+    #[serde(rename = "compact")]
+    Compact {
+        summary: String,
+        archived_at: Option<String>,
+        dropped_count: usize,
+        is_error: bool,
+    },
 }
 
 impl ClaudeBlock {
@@ -1856,6 +1872,83 @@ pub(crate) fn read_full_session_output(session_id: &str) -> Option<String> {
 fn read_output_summary(session_id: &str) -> Option<String> {
     let text = read_full_session_output(session_id)?;
     Some(truncate_tail(&text, OUTPUT_SUMMARY_MAX_CHARS))
+}
+
+/// Persist one compaction chunk as a JSONL line under
+/// `~/.dev-workbench/agents/compact/{session_id}.jsonl` (原文归档). Each line
+/// is one compaction pass (`micro_clear` or `summarize`) holding the dropped
+/// messages verbatim so the user can expand the summary card and read what was
+/// compacted away. Append-only — a long run that compacts several times
+/// accumulates one line per pass. Best-effort: a write failure is logged, never
+/// surfaced (archiving is transparency-only, never blocks compaction).
+///
+/// Returns the archive path on success (reported back over the wire as
+/// `archived_at` so the UI knows an expand view exists), or `None` on any I/O /
+/// serialize failure (already logged).
+pub(crate) fn append_compact_archive(
+    session_id: &str,
+    chunk: &crate::kernel_impl::context_compact::ArchivedChunk,
+) -> Option<String> {
+    let dir = crate::agents::session::agents_dir().ok()?.join("compact");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("[compact] create archive dir failed for {session_id}: {e}");
+        return None;
+    }
+    let path = dir.join(format!("{session_id}.jsonl"));
+    let line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": chunk.kind,
+        "summary": chunk.summary,
+        "dropped_count": chunk.dropped_messages.len(),
+        "dropped_messages": chunk.dropped_messages,
+    });
+    let mut serialized = match serde_json::to_string(&line) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[compact] serialize archive line failed for {session_id}: {e}");
+            return None;
+        }
+    };
+    serialized.push('\n');
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, serialized.as_bytes()))
+    {
+        log::warn!("[compact] write archive failed for {session_id}: {e}");
+        return None;
+    }
+    Some(path.display().to_string())
+}
+
+/// Read all archived compaction chunks for a session (JSONL, oldest first) —
+/// the expand view behind a summary card. Each line mirrors one
+/// [`append_compact_archive`] write. Returns `None` when no archive exists.
+pub(crate) fn read_compact_archive(session_id: &str) -> Option<Vec<serde_json::Value>> {
+    let path = crate::agents::session::agents_dir()
+        .ok()?
+        .join("compact")
+        .join(format!("{session_id}.jsonl"));
+    if !path.exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => out.push(v),
+            Err(e) => log::warn!("[compact] skip malformed archive line for {session_id}: {e}"),
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Keep only the tail of `text` (up to `max` bytes), prefixed with `...`.
@@ -3230,6 +3323,7 @@ mod tests {
                 ChatStreamEvent::ToolResult { .. } => "tool_result",
                 ChatStreamEvent::Result { .. } => "result",
                 ChatStreamEvent::FileChanged { .. } => "file_changed",
+                ChatStreamEvent::Compact { .. } => "compact",
             })
             .collect();
         assert_eq!(

@@ -237,7 +237,7 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
           </button>
           {!terminalCollapsed && (
             <div className="agent-block-body agent-output">
-              <BlocksView events={blocks} running={running} />
+              <BlocksView events={blocks} running={running} sessionId={session.id} />
             </div>
           )}
         </div>

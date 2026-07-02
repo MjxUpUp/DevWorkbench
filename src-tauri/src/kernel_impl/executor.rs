@@ -145,6 +145,9 @@ impl Executor for KernelExecutor {
                     // Worker (graph Agent node) — NO WorkflowTool, else it could
                     // self-plan a sub-workflow and recurse unboundedly.
                     None,
+                    // compaction_blocks — workflow workers run headless; no
+                    // driver/UI to collect Compact events into.
+                    None,
                 )?)
             }
         };
@@ -268,6 +271,10 @@ pub(crate) fn build_react_agent(
     // can self-plan a DAG. None for worker agents (graph Agent nodes) and tests,
     // bounding self-planning recursion at depth 1.
     app: Option<tauri::AppHandle>,
+    // Shared buffer for collecting Compact meta-events so the driver can persist
+    // them into session.blocks. None for workflow/ACP/test agents (compaction
+    // runs but stays silent — no archive, no UI event). v1.3 C2.
+    compaction_blocks: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>>,
 ) -> Result<ReactAgent, String> {
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
     let config = crate::config::providers::load_providers_config(&data_dir).ok();
@@ -508,6 +515,10 @@ pub(crate) fn build_react_agent(
     // run_workflow_graph to execute it. Worker agents (graph Agent nodes, built
     // with app = None) get no WorkflowTool, bounding self-planning recursion at
     // depth 1 — an orchestrator's worker cannot spawn its own sub-workflow.
+    // Clone app first — the `if let` below moves the inner AppHandle out of the
+    // Option, but the compaction-archive wiring at the end of this fn needs app
+    // again (v1.3 C2). AppHandle is a cheap inner-Arc clone.
+    let app_for_compaction = app.clone();
     if let Some(app) = app {
         registry.push(crate::kernel_impl::workflow_tool::WorkflowTool::new(app));
         // Teach the orchestrator WHEN/HOW to self-plan a DAG — injected here
@@ -607,7 +618,7 @@ pub(crate) fn build_react_agent(
     } else {
         agent
     };
-    Ok(agent
+    let agent = agent
         .with_budget_check(budget_check)
         // v1.3 C1 + v2.0 fix: summarize the conversation middle once it exceeds a
         // threshold sized to the MODEL's declared context window (75%), keeping
@@ -625,7 +636,19 @@ pub(crate) fn build_react_agent(
         // limit". claude-code has no such hard ceiling; 30 leaves room to learn
         // a tool AND finish. Sub-agent stays at 8 (focused investigation only).
         .with_max_steps(30)
-        .with_hooks(Arc::new(hooks)))
+        .with_hooks(Arc::new(hooks));
+    // v1.3 C2: wire the compaction archive sink for the chat path only. All
+    // three (session_id + app + compaction_blocks) are present → the sink
+    // archives dropped原文, emits the Compact agent:event, and appends to the
+    // driver's final_blocks. Workflow/ACP/test agents pass None for at least
+    // one → skip, and compaction stays silent (the original behavior).
+    let agent = match (session_id, app_for_compaction, compaction_blocks) {
+        (Some(sid), Some(handle), Some(buf)) => {
+            agent.with_compaction_archive(sid.to_string(), handle, buf)
+        }
+        _ => agent,
+    };
+    Ok(agent)
 }
 
 /// Skill directories a kernel agent searches, in priority order: global

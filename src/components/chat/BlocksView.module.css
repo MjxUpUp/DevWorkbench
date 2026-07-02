@@ -148,7 +148,82 @@
   opacity: 0.75;
 }
 
+/* compact 卡片——长会话上下文压缩摘要（meta-event，不进模型历史）。
+ * info 态用 accent-muted（中性提示），error 态用 danger-muted（熔断）。
+ * 折叠态只露一行摘要 + dropped 计数；展开态异步读 JSONL 原文归档。 */
+.compact {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.compact.isError {
+  border-color: var(--danger-muted);
+  background: var(--danger-muted);
+}
+.compactHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.compact.isError .compactHeader {
+  color: var(--color-error);
+}
+.compactIcon {
+  opacity: 0.8;
+}
+.compactSummary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compactCount {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-xxs);
+}
+.compact.isError .compactCount {
+  background: var(--surface-sunken);
+}
+.compactToggle {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+.compactBody {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+}
+.compactArchive {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-base);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
 /* file_changed 行 */
+
 .file {
   display: flex;
   align-items: center;

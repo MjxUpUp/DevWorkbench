@@ -581,7 +581,24 @@ export type ChatStreamEvent =
   | { kind: 'tool_use'; name: string; input: unknown }
   | { kind: 'tool_result'; content: string; is_error: boolean }
   | { kind: 'result'; is_error: boolean; secs: number }
-  | { kind: 'file_changed'; path: string };
+  | { kind: 'file_changed'; path: string }
+  | {
+      kind: 'compact';
+      /** One-line human summary of what was archived. The LLM summarize path
+       *  carries the model's summary text (anti-injection fence already
+       *  stripped on the Rust side); the micro_clear path carries a generic
+       *  "已压缩 N 条陈旧工具输出" line. Never the raw fence wrapper. */
+      summary: string;
+      /** Absolute path to the dropped-messages archive JSONL, or null when
+       *  archiving was unavailable (no session id / write failed). The frontend
+       *  resolves this against the session id via read_compact_archive_cmd. */
+      archived_at: string | null;
+      /** Number of messages dropped from model history by this compaction. */
+      dropped_count: number;
+      /** true on circuit-breaker trip (MAX_CONSECUTIVE_COMPACT_FAILURES) —
+       *  renders an error card instead of an info card. */
+      is_error: boolean;
+    };
 
 // ---- LLM trace observability types ----
 

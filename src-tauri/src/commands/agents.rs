@@ -43,6 +43,18 @@ pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, App
     Ok(pty::read_full_session_output(&session_id))
 }
 
+/// Read all archived compaction chunks for a session (v1.3 C2). Each chunk is
+/// one compaction pass (micro-clear or summarize) holding the dropped messages
+/// verbatim — the expand view behind a "context compacted" summary card.
+/// Returns `null` when no archive exists (session never compacted). Mirrors
+/// [`read_session_output_cmd`] but for the compact archive.
+#[tauri::command]
+pub fn read_compact_archive_cmd(
+    session_id: String,
+) -> Result<Option<Vec<serde_json::Value>>, AppError> {
+    Ok(pty::read_compact_archive(&session_id))
+}
+
 // Agent process lifecycle commands (PTY-based for CLI agents + kernel for the
 // self-hosted ReactAgent).
 
@@ -269,6 +281,13 @@ fn react_chat_driver(
     let prompt_drv = prompt.to_string();
     let conv_drv = resolved_conv_id.clone();
     let task_ref_drv = task_ref.map(|s| s.to_string());
+    // v1.3 C2: shared buffer between the ReactAgent's compaction path (which
+    // pushes Compact meta-events here — they bypass the AgentEvent stream, so
+    // the loop below can't collect them) and this driver (which splices them
+    // into final_blocks at stream end so the summary card persists + replays).
+    // Cloned into build_react_agent below.
+    let compaction_blocks: std::sync::Arc<std::sync::Mutex<Vec<pty::ChatStreamEvent>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let handle = tokio::spawn(async move {
         log::info!("[react_chat] task ENTERED sid={sid_drv}");
@@ -291,6 +310,7 @@ fn react_chat_driver(
             // Main orchestrator agent — give it WorkflowTool so it can
             // self-plan a DAG for complex multi-step tasks.
             Some(app_drv.clone()),
+            Some(std::sync::Arc::clone(&compaction_blocks)),
         ) {
             Ok(a) => a,
             Err(e) => {
@@ -401,9 +421,22 @@ fn react_chat_driver(
         // Stream ended (ReactAgent always yields Done before ending — this is the
         // normal completion path). Remove from the stop table so a later stop on
         // this completed session doesn't touch a dead handle, then persist state.
+        // v1.3 C2: splice the compaction sink's Compact events into final_blocks
+        // so the summary card survives the live→persisted handoff + replays on
+        // reload. The LIVE path (agentStore.appendBlock via the emitted
+        // agent:event) already placed them in real-time order during the run;
+        // here we append them at the tail of the persisted transcript (perfect
+        // time-interleaving isn't recoverable without per-event timestamps, and
+        // a tail marker "compacted N× this session" is honest for the replay).
+        let compact_count = compaction_blocks.lock().map(|mut b| {
+            let n = b.len();
+            final_blocks.append(&mut b);
+            n
+        }).unwrap_or(0);
         log::info!(
-            "[react_chat] stream ENDED sid={sid_drv} status={final_status:?} blocks={}",
-            final_blocks.len()
+            "[react_chat] stream ENDED sid={sid_drv} status={final_status:?} blocks={} ({} compact)",
+            final_blocks.len(),
+            compact_count
         );
         if let Some(kt) = app_drv.try_state::<KernelTasks>() {
             kt.remove(&sid_drv);

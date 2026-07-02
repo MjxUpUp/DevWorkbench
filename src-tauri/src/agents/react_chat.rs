@@ -163,6 +163,10 @@ pub fn chat_event_to_agent_events(
         // stream, so this arm keeps the match exhaustive as a no-op rather than
         // fabricating a kernel event.
         ChatStreamEvent::FileChanged { .. } => Vec::new(),
+        // Compact is a meta-event emitted by the compaction sink, never by an
+        // opaque CLI — kept exhaustive. It carries no kernel AgentEvent (it
+        // never enters the model's stream, only the UI's block list).
+        ChatStreamEvent::Compact { .. } => Vec::new(),
     }
 }
 
@@ -319,6 +323,7 @@ fn blocks_to_assistant_message(
             ChatStreamEvent::ToolUse { .. } | ChatStreamEvent::ToolResult { .. } => {}
             ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
             ChatStreamEvent::FileChanged { .. } => {} // per-write signal, not history prose
+            ChatStreamEvent::Compact { .. } => {} // compaction meta-event, not history prose
         }
     }
 
