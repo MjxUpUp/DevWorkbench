@@ -57,7 +57,6 @@ export function ChatView() {
   const agents = useAgentStore((s) => s.agents);
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const getTurnsForConversation = useAgentStore((s) => s.getTurnsForConversation);
-  const recommendAgent = useAgentStore((s) => s.recommendAgent);
   const createConversation = useAgentStore((s) => s.createConversation);
   const continueConversation = useAgentStore((s) => s.continueConversation);
   const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
@@ -175,19 +174,10 @@ export function ChatView() {
 
   useEffect(() => {
     if (selectedAgent) return;
-    const tags = project?.tags ?? [];
-    recommendAgent(tags).then((rec) => {
-      if (rec && agents.find((a) => a.agentType === rec)?.installed) {
-        setSelectedAgent(rec);
-      } else if (installedAgents.length > 0) {
-        setSelectedAgent(installedAgents[0].agentType);
-      }
-    }).catch(() => {
-      if (installedAgents.length > 0) {
-        setSelectedAgent(installedAgents[0].agentType);
-      }
-    });
-  }, [project, agents, installedAgents, selectedAgent, recommendAgent]);
+    // 砍 CLI 后唯一内核 ReactKernel——不再按项目标签 recommend 或 installed
+    // CLI 选择，agent 选择器只有 Kernel Agent 一个选项。
+    setSelectedAgent('react_kernel');
+  }, [selectedAgent]);
 
   // Map an agent type to its display name (falls back to the raw type). Used by
   // the agent-switch divider between turns of different agents.
@@ -201,8 +191,9 @@ export function ChatView() {
   // change it — switching agents mid-conversation is the point).
   useEffect(() => {
     if (turns.length > 0 && !runningSession) {
-      const last = turns[turns.length - 1];
-      setSelectedAgent(last.agentType);
+      // 历史会话续聊：selectedAgent 固定 ReactKernel（砍 CLI 后唯一内核），
+      // 不再跟随 last.agentType（历史可能是 CLI agentType，执行已统一）。
+      setSelectedAgent('react_kernel');
     }
   }, [activeConversationId, turns, runningSession]);
 
@@ -248,11 +239,8 @@ export function ChatView() {
   const handleEditSubmit = useCallback(async (sessionId: string) => {
     if (!project || !editPrompt.trim() || runningSession) return;
     try {
-      // kernel flag mirrors the edited turn's agent family — react_kernel runs
-      // the self-hosted ReactAgent; others fork through their CLI spawn path.
-      const edited = sessionById.get(sessionId);
-      const kernel = edited?.agentType === 'react_kernel';
-      await editAndRegenerate(sessionId, editPrompt.trim(), kernel);
+      // 砍 CLI 后唯一内核 ReactKernel——edit fork 不再按 agent family 分流。
+      await editAndRegenerate(sessionId, editPrompt.trim());
       setEditingSessionId(null);
       setEditPrompt('');
     } catch (e) {
@@ -315,18 +303,17 @@ export function ChatView() {
     sendingRef.current = true;
     const text = buildFullPrompt();
     try {
-      const kernel = selectedAgent === 'react_kernel';
       const model = selectedModel && selectedModel !== 'default' ? selectedModel : undefined;
       if (activeConversationId && !runningSession) {
         const parentSessionId = turns.length > 0 ? turns[turns.length - 1].id : undefined;
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, kernel, agentMode, model, parentSessionId);
+        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, agentMode, model, parentSessionId);
         void session;
         // Force store sync to guarantee ChatView re-render with new turn
         void useAgentStore.getState().refreshSessions();
       } else {
         const agent = selectedAgent || getDefaultAgent();
         if (agent) {
-          const session = await createConversation(project.path, text, agent, kernel, agentMode, model);
+          const session = await createConversation(project.path, text, agent, agentMode, model);
           selectConversation(session.conversationId);
           // Force store sync to guarantee ChatView re-render with new turn
           void useAgentStore.getState().refreshSessions();

@@ -235,7 +235,7 @@ describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', ()
 
   it('passes the selected mode through to the spawn_agent_session payload', async () => {
     await useAgentStore.getState().spawnAgent(
-      '/p', 'claude_code', 'hi', undefined, undefined, undefined, undefined, false, 'plan',
+      '/p', 'claude_code', 'hi', undefined, undefined, undefined, undefined, 'plan',
     );
     const [cmd, payload] = vi.mocked(invoke).mock.calls[0];
     expect(cmd).toBe('spawn_agent_session');
@@ -268,13 +268,13 @@ describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', ()
   });
 
   it('createConversation forwards mode to spawnAgent', async () => {
-    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', false, 'skip-permissions');
+    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', 'skip-permissions');
     const [, payload] = vi.mocked(invoke).mock.calls[0];
     expect(payload).toMatchObject({ mode: 'skip-permissions' });
   });
 
   it('continueConversation forwards mode to spawnAgent', async () => {
-    await useAgentStore.getState().continueConversation('/p', 'c1', 'hi', 'claude_code', false, 'auto-edit');
+    await useAgentStore.getState().continueConversation('/p', 'c1', 'hi', 'claude_code', 'auto-edit');
     const [, payload] = vi.mocked(invoke).mock.calls[0];
     expect(payload).toMatchObject({ mode: 'auto-edit' });
   });
@@ -283,19 +283,19 @@ describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', ()
     // model must reach the backend so the chosen provider/model actually
     // routes — was undefined → backend logged model=None → fallback or the
     // "send fails directly" symptom when no default key was configured.
-    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', false, undefined, 'glm-4.6');
+    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', undefined, 'glm-4.6');
     const [, payload] = vi.mocked(invoke).mock.calls[0];
     expect(payload).toMatchObject({ model: 'glm-4.6' });
   });
 
   it('continueConversation forwards model to spawn_agent_session', async () => {
-    await useAgentStore.getState().continueConversation('/p', 'c1', 'hi', 'claude_code', false, undefined, 'glm-4.6');
+    await useAgentStore.getState().continueConversation('/p', 'c1', 'hi', 'claude_code', undefined, 'glm-4.6');
     const [, payload] = vi.mocked(invoke).mock.calls[0];
     expect(payload).toMatchObject({ model: 'glm-4.6' });
   });
 
   it('createConversation sends model null when none selected', async () => {
-    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', false, undefined, undefined);
+    await useAgentStore.getState().createConversation('/p', 'hi', 'claude_code', undefined, undefined);
     const [, payload] = vi.mocked(invoke).mock.calls[0];
     expect(payload).toMatchObject({ model: null });
   });

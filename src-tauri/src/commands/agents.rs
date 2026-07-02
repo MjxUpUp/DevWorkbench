@@ -134,7 +134,6 @@ fn expand_slash_command(db: &crate::db::DbState, prompt: String) -> Result<Strin
 #[tauri::command]
 pub async fn spawn_agent_session(
     app: tauri::AppHandle,
-    state: State<'_, AgentState>,
     db: State<'_, DbState>,
     kernel_tasks: State<'_, KernelTasks>,
     project_path: String,
@@ -144,7 +143,6 @@ pub async fn spawn_agent_session(
     linked_requirement_id: Option<String>,
     parent_session_id: Option<String>,
     conversation_id: Option<String>,
-    kernel: bool,
     mode: Option<crate::kernel_impl::hooks::PermissionMode>,
     task_ref: Option<String>,
 ) -> Result<Session, AppError> {
@@ -157,38 +155,23 @@ pub async fn spawn_agent_session(
     // context is present and `tokio::spawn` succeeds. The CLI path
     // (spawn_pty_agent) uses `std::thread::spawn` and never had this issue.
     let prompt = expand_slash_command(db.inner(), prompt)?;
-    if kernel {
-        // Self-hosted ReactAgent path: no child process, no PTY. The agent runs
-        // as a tokio task driving a BoxStream<AgentEvent>, mapped to the SAME
-        // `agent:event` wire schema claude uses (see react_chat). This is the B
-        // plan's core payoff — one chat-block presentation layer for both CLI
-        // and self-hosted agents.
-        return Ok(react_chat_driver(
-            &app,
-            db.inner().clone(),
-            kernel_tasks.inner(),
-            &project_path,
-            &agent_type,
-            &prompt,
-            model.as_deref(),
-            linked_requirement_id.as_deref(),
-            parent_session_id.as_deref(),
-            conversation_id.as_deref(),
-            mode.unwrap_or_default(),
-            task_ref.as_deref(),
-        )?);
-    }
-    Ok(pty::spawn_pty_agent(
+    // 砍 CLI（用户决定 1）：chat 唯一执行路径 = 自研 ReactKernel。原 kernel=false
+    // 的 pty::spawn_pty_agent 分支退役——CLI agent 选项已从 ChatHeader 移除，
+    // pty::spawn_pty_agent 仅由 OpaqueAgent（工作流节点桥接外部 CLI）调用。
+    // 多模型通过协议层（Anthropic/OpenAI，de-glm 已落地）支撑，不靠 CLI 壳。
+    Ok(react_chat_driver(
         &app,
-        state.0.clone(),
         db.inner().clone(),
+        kernel_tasks.inner(),
         &project_path,
-        agent_type,
+        &agent_type,
         &prompt,
         model.as_deref(),
         linked_requirement_id.as_deref(),
         parent_session_id.as_deref(),
         conversation_id.as_deref(),
+        mode.unwrap_or_default(),
+        task_ref.as_deref(),
     )?)
 }
 
@@ -618,12 +601,10 @@ pub fn restore_conversation(db: State<'_, DbState>, id: String) -> Result<(), Ap
 #[tauri::command]
 pub async fn edit_and_regenerate(
     app: tauri::AppHandle,
-    state: State<'_, AgentState>,
     db: State<'_, DbState>,
     kernel_tasks: State<'_, KernelTasks>,
     session_id: String,
     new_prompt: String,
-    kernel: bool,
 ) -> Result<Session, AppError> {
     let edited = {
         let conn = db.get()?;
@@ -639,7 +620,6 @@ pub async fn edit_and_regenerate(
     // 的分支——这是避免分支污染的关键。
     spawn_agent_session(
         app,
-        state,
         db,
         kernel_tasks,
         edited.project_path,
@@ -649,7 +629,6 @@ pub async fn edit_and_regenerate(
         None, // linked_requirement_id 不继承
         edited.parent_session_id, // ← fork 点
         Some(conversation_id),    // ← 同 conversation
-        kernel,
         None,              // mode: 默认权限态
         edited.task_ref,   // 复用原任务上下文
     )

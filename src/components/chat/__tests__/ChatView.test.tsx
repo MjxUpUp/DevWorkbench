@@ -137,7 +137,7 @@ describe('ChatView — edit & regenerate (A4)', () => {
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
   });
 
-  it('edits a turn prompt and submits edit_and_regenerate with the kernel flag', async () => {
+  it('edits a turn prompt and submits edit_and_regenerate with the edited prompt', async () => {
     const user = userEvent.setup();
     render(<ChatView />);
 
@@ -154,15 +154,14 @@ describe('ChatView — edit & regenerate (A4)', () => {
 
     await user.click(screen.getByRole('button', { name: '重新生成' }));
 
-    // edit_and_regenerate fires with the edited prompt, the source turn id,
-    // and kernel=true (react_kernel agent family → self-hosted ReactAgent fork).
+    // edit_and_regenerate fires with the edited prompt + source turn id.
+    // 砍 CLI 后唯一内核——不再带 kernel flag（fork 统一走 ReactKernel）。
     const calls = vi.mocked(invoke).mock.calls as unknown as [string, Record<string, unknown>][];
     const editCall = calls.find(([cmd]) => cmd === 'edit_and_regenerate');
     expect(editCall).toBeDefined();
     expect(editCall![1]).toMatchObject({
       sessionId: 't1',
       newPrompt: '改写后的需求',
-      kernel: true,
     });
   });
 });

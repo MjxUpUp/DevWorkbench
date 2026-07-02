@@ -46,7 +46,6 @@ interface AgentState {
     linkedRequirementId?: string,
     parentSessionId?: string,
     conversationId?: string,
-    kernel?: boolean,
     mode?: AgentMode,
   ) => Promise<Session>;
   stopAgent: (sessionId: string) => Promise<void>;
@@ -70,7 +69,7 @@ interface AgentState {
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
   /** First turn of a brand-new conversation (no conversation_id yet). */
-  createConversation: (projectPath: string, prompt: string, agentType: AgentType, kernel?: boolean, mode?: AgentMode, model?: string) => Promise<Session>;
+  createConversation: (projectPath: string, prompt: string, agentType: AgentType, mode?: AgentMode, model?: string) => Promise<Session>;
   /** Append a follow-up turn to an existing conversation. The agent may differ
    *  from prior turns — that's the whole point of the conversation container. */
   continueConversation: (
@@ -78,7 +77,6 @@ interface AgentState {
     conversationId: string,
     prompt: string,
     agentType: AgentType,
-    kernel?: boolean,
     mode?: AgentMode,
     model?: string,
     parentSessionId?: string,
@@ -86,7 +84,7 @@ interface AgentState {
   /** 编辑某条 turn 的 prompt 并重新生成:后端从该 turn 的父节点 fork 一个
    *  新兄弟 turn(同 conversation,parent = 被编辑 turn 的 parent)并重跑 agent。
    *  新 turn 与旧 turn 成兄弟 = 可切换分支。返回 forked session。 */
-  editAndRegenerate: (sessionId: string, newPrompt: string, kernel?: boolean) => Promise<Session>;
+  editAndRegenerate: (sessionId: string, newPrompt: string) => Promise<Session>;
   /** 拉取一个 conversation 的扁平分支节点(turn + parent 指针),供前端渲染
    *  分支切换器。 */
   getConversationBranches: (conversationId: string) => Promise<BranchNode[]>;
@@ -162,7 +160,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, kernel, mode) => {
+  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, mode) => {
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
       agentType,
@@ -171,7 +169,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       linkedRequirementId: linkedRequirementId || null,
       parentSessionId: parentSessionId || null,
       conversationId: conversationId || null,
-      kernel: kernel ?? false,
       mode: mode ?? null,
     });
     // Upsert, NEVER blind-append. The backend (react_chat_driver →
@@ -286,36 +283,28 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().qualityReports.get(sessionId) ?? null;
   },
 
-  createConversation: async (projectPath, prompt, agentType, kernel, mode, model) => {
+  createConversation: async (projectPath, prompt, agentType, mode, model) => {
     if (!agentType) {
-      throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
+      throw new Error('没有可用的 Agent');
     }
     // No conversation_id → backend creates a new container and attaches this
-    // turn as its first. The returned session carries the new conversationId.
-    // `model` flows through to spawn_agent_session so the chosen provider/model
-    // actually routes — previously undefined, the backend saw model=None and
-    // fell back to the default (or failed outright if no key was configured).
-    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, undefined, kernel, mode);
+    // turn as its first. `model` flows through to spawn_agent_session so the
+    // chosen provider/model actually routes（砍 CLI 后唯一内核 ReactKernel，
+    // 多模型靠协议层 Anthropic/OpenAI 支撑，不再靠 CLI 壳）。
+    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, undefined, mode);
   },
 
-  continueConversation: async (projectPath, conversationId, prompt, agentType, kernel, mode, model, parentSessionId) => {
+  continueConversation: async (projectPath, conversationId, prompt, agentType, mode, model, parentSessionId) => {
     if (!agentType) {
-      throw new Error('没有可用的 Agent：请先在设置中确认 CLI 已安装');
+      throw new Error('没有可用的 Agent');
     }
-    // conversation_id present → backend attaches this as a follow-up turn of
-    // the existing container and touches its last_agent / last_activity_at.
-    // parentSessionId links this turn into the conversation's turn chain — the
-    // backbone of branch-aware history (visibleTurns walks it; a fork via
-    // edit_and_regenerate branches off it). Undefined → backend treats as no
-    // parent (backwards compatible with the first turn of a container).
-    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, parentSessionId, conversationId, kernel, mode);
+    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, parentSessionId, conversationId, mode);
   },
 
-  editAndRegenerate: async (sessionId, newPrompt, kernel) => {
+  editAndRegenerate: async (sessionId, newPrompt) => {
     const session = await invoke<Session>('edit_and_regenerate', {
       sessionId,
       newPrompt,
-      kernel: kernel ?? false,
     });
     // Upsert + refresh — same dedup rationale as spawnAgent: the backend
     // (spawn_agent_session → react_chat_driver → register_running_session) emits

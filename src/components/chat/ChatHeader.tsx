@@ -1,4 +1,3 @@
-import { useAgentStore } from '../../stores/agentStore';
 import { ModeSelector, type AgentMode } from '../ModeSelector';
 import { ModelSelector, type ModelOption } from '../ModelSelector';
 import { IconTrash } from '../Icons';
@@ -34,9 +33,6 @@ export function ChatHeader({
   requestId,
   running = false,
 }: ChatHeaderProps) {
-  const agents = useAgentStore((s) => s.agents);
-  const installedAgents = agents.filter((a) => a.installed);
-
   return (
     <div className="chat-header">
       <select
@@ -44,14 +40,9 @@ export function ChatHeader({
         value={selectedAgent ?? ''}
         onChange={(e) => onAgentChange(e.target.value ? (e.target.value as AgentType) : null)}
       >
-        {installedAgents.length === 0 && <option value="">无可用 Agent</option>}
-        {installedAgents.map((agent) => (
-          <option key={agent.agentType} value={agent.agentType}>
-            {agent.displayName}
-          </option>
-        ))}
-        {/* Self-hosted ReactAgent — always available (no CLI to discover), runs
-            in-process via the kernel react_chat driver. */}
+        {/* 砍 CLI（决定1）：chat 唯一执行路径 = 自研 ReactKernel。CLI agent 选项
+            移除——多模型靠协议层（Anthropic/OpenAI）支撑，不靠 CLI 壳；外部 CLI
+            仅工作流 OpaqueAgent 节点桥接用。 */}
         <option value="react_kernel">Kernel Agent</option>
       </select>
 
