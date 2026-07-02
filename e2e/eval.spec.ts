@@ -1,0 +1,72 @@
+import { test, expect } from '@playwright/test';
+
+/**
+ * Eval/Replay panel front-end E2E. EvalPanel runs in a real browser against
+ * the recorded-shape rows the back-end eval::cases::list_eval_cases /
+ * eval::verdicts::list_verdicts / eval::runs::eval_trend return, served through
+ * the real IPC boundary shape (window.__MOCK_INVOKE__). Paired with the back-end
+ * pure-core tests (score_replay / compare_paired / extract_trajectory), this
+ * closes the loop: store → invoke → render without spinning up the Tauri app or
+ * contacting a provider.
+ *
+ * The point of the feature is making the three anti-gaming principles VISIBLE:
+ *  - 客观事实代码判 — P1 lists ready + probe cases; P2 shows input_prompt
+ *    LOCKED (C1: the conversation record is read-only) while contract fields
+ *    stay editable.
+ *  - 因果归因 — V1 ledger renders CLEAR + BRAKE attribution badges across
+ *    eval/honesty gates, and the gate filter narrows rows.
+ *  - 配对回放 — P5 paired compare renders old(0.5 FAIL/BRAKE) vs new(0.9
+ *    PASS/CLEAR) and surfaces 净提升 (net improve). This is also the
+ *    regression guard for the oldV/newV label-swap bug that inverted the
+ *    brake/admit verdict.
+ */
+test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, object gap-note', async ({
+  page,
+}) => {
+  await page.goto('/eval.html');
+
+  // ── P1 default: both cases render (ready + probe). ──
+  await expect(page.getByText('修复 BlocksView tool_use 切分')).toBeVisible();
+  await expect(page.getByText('compaction 跨模型归档')).toBeVisible();
+
+  // ── 客观事实 / C1: P2 detail — input_prompt LOCKED, name EDITABLE. ──
+  await page.getByText('修复 BlocksView tool_use 切分').click();
+  await expect(page.getByTestId('eval-feature-title')).toHaveText('Case 详情 / 编辑');
+  // The prompt renders as a read-only text node (not an input the agent could
+  // rewrite to cover its tracks).
+  await expect(page.getByText('edit 工具一直调用中，帮我排查')).toBeVisible();
+  // The name, by contrast, is an editable textbox (the first one in P2)
+  // carrying the current value — distinct from the locked prompt text node.
+  await expect(page.getByRole('textbox').first()).toHaveValue('修复 BlocksView tool_use 切分');
+
+  // ── 因果归因: V1 ledger — CLEAR + BRAKE badges across eval/honesty gates. ──
+  await page.getByTestId('eval-nav-V1').click();
+  await expect(page.getByTestId('eval-feature-title')).toHaveText('Verdicts 查询');
+  const table = page.getByTestId('eval-verdict-table');
+  // Two eval rows (the new + old runs — the paired-compare data source) and
+  // one honesty row.
+  await expect(table.getByText('eval')).toHaveCount(2);
+  await expect(table.getByText('honesty')).toHaveCount(1);
+  // One CLEAR (the PASS eval) + two BRAKE (the FAIL eval + the honesty FAIL).
+  await expect(table.getByText('CLEAR', { exact: true })).toHaveCount(1);
+  await expect(table.getByText('BRAKE', { exact: true })).toHaveCount(2);
+
+  // Gate filter narrows: honesty only → both eval rows leave the table.
+  await page.getByRole('combobox').first().selectOption('honesty');
+  await expect(table.getByText('eval')).toHaveCount(0);
+  await expect(table.getByText('honesty')).toHaveCount(1);
+
+  // ── 配对回放: P5 — new run (0.9 PASS/CLEAR) beat old (0.5 FAIL/BRAKE) → 净提升. ──
+  await page.getByTestId('eval-nav-P5').click();
+  await expect(page.getByText('净提升 · 可准入')).toBeVisible();
+  await expect(page.getByText('回归 · 拦')).toHaveCount(0);
+
+  // ── 4 evaluation objects + honest gap-note for the 3 platform types (P4). ──
+  await page.getByTestId('eval-nav-P4').click();
+  await expect(page.getByText('平台-机制')).toBeVisible();
+  await expect(page.getByText('平台-e2e')).toBeVisible();
+  await expect(page.getByText('平台-加持')).toBeVisible();
+  // Selecting a platform object surfaces the honest gap-note — no fake driver.
+  await page.locator('label', { hasText: '平台-机制' }).click();
+  await expect(page.getByText(/需平台评测驱动/)).toBeVisible();
+});

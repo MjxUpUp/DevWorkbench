@@ -1,0 +1,35 @@
+[
+  {
+    "id": "v-eval-new",
+    "session_id": null,
+    "case_id": "c-ready",
+    "gate": "eval",
+    "verdict": "PASS",
+    "attribution": "CLEAR",
+    "report": "{\"score\":0.9,\"actual_steps\":[\"Read\",\"Grep\",\"Edit\"],\"negative_violated\":false,\"reason\":\"工具序列匹配，无反例命中\"}",
+    "commit_sha": null,
+    "created_at": "2026-07-02T14:02:00Z"
+  },
+  {
+    "id": "v-eval-old",
+    "session_id": null,
+    "case_id": "c-ready",
+    "gate": "eval",
+    "verdict": "FAIL",
+    "attribution": "BRAKE",
+    "report": "{\"score\":0.5,\"actual_steps\":[\"Read\",\"Bash\"],\"negative_violated\":true,\"reason\":\"命中反例 Bash\"}",
+    "commit_sha": null,
+    "created_at": "2026-07-01T14:02:00Z"
+  },
+  {
+    "id": "v-honesty",
+    "session_id": "sess-9c79b2a1",
+    "case_id": null,
+    "gate": "honesty",
+    "verdict": "FAIL",
+    "attribution": "BRAKE",
+    "report": "{\"reason\":\"verify 模糊默认通过 fallback，判 FAIL 待人判\"}",
+    "commit_sha": "2c16939",
+    "created_at": "2026-07-02T09:00:00Z"
+  }
+]

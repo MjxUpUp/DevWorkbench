@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Eval/Replay E2E harness</title>
+    <!--
+      Tauri IPC shim (same shape as trace.html / chat.html). EvalPanel's
+      useEvalData fires invoke('list_eval_cases'/{list_verdicts/eval_trend) on
+      mount; the harness serves recorded-shape fixtures from
+      window.__MOCK_INVOKE__ so the real IPC boundary shape (cmd name +
+      camelCase args) is exercised against a real browser. No provider is
+      contacted, no credentials involved — the fixtures carry only gate /
+      verdict / attribution / score / step-sequence fields (the anti-gaming
+      data plane). The replay path (run_eval_replay) needs a live LLM provider
+      and is verified separately via the build_react_agent smoke test, not here.
+    -->
+    <script>
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args) => {
+          (window.__INVOKE_CALLS__ = window.__INVOKE_CALLS__ || []).push({ cmd, args });
+          const mock = window.__MOCK_INVOKE__;
+          if (mock && Object.prototype.hasOwnProperty.call(mock, cmd)) {
+            const v = mock[cmd];
+            return typeof v === 'function' ? v(args) : v;
+          }
+          return null;
+        },
+        transformCallback: () => 0,
+        unregisterCallback: () => {},
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./eval-main.tsx"></script>
+  </body>
+</html>

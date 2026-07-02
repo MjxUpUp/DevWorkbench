@@ -731,7 +731,10 @@ function PairedCompare({
   }, [readyCases, caseId]);
 
   const evalVerdicts = verdicts.filter((v) => v.gate === 'eval' && v.case_id === caseId);
-  const [oldV, newV] = evalVerdicts; // list_verdicts 是 new-first：[0]=新, [1]=旧
+  // list_verdicts 是 new-first：[0]=新(本次), [1]=旧(上次)。解构名须与序对齐——
+  // 旧版 `[oldV, newV]` 把新赋给 oldV，导致 newScore(old,new) 反号、提升被误判
+  // 回归（配对回放的准入/刹车判定反转）。按名赋值：newV=[0], oldV=[1]。
+  const [newV, oldV] = evalVerdicts;
 
   return (
     <div className="eval-card">

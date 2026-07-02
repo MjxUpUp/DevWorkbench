@@ -142,6 +142,40 @@ describe('EvalPanel', () => {
     expect(screen.getByText('断链 · 失败未沉淀（V2 空）')).toBeInTheDocument();
   });
 
+  it('P5 paired compare flags net-improve when the new run beats the old (regression guard)', async () => {
+    // list_verdicts is new-first: [0]=本次(0.9 PASS), [1]=上次(0.5 FAIL).
+    // A prior swap of oldV/newV mislabeled this as 回归 — the brake/admit
+    // verdict inverted. This locks the fix: a real improvement must readmit.
+    mockAll({
+      cases: [case_()],
+      verdicts: [
+        verdict({
+          id: 'v-new',
+          case_id: 'c1',
+          gate: 'eval',
+          verdict: 'PASS',
+          attribution: 'CLEAR',
+          report: '{"score":0.9,"actual_steps":["Read","Edit"],"negative_violated":false}',
+          created_at: '2026-07-02T14:02:00Z',
+        }),
+        verdict({
+          id: 'v-old',
+          case_id: 'c1',
+          gate: 'eval',
+          verdict: 'FAIL',
+          attribution: 'BRAKE',
+          report: '{"score":0.5,"actual_steps":["Read","Bash"],"negative_violated":true}',
+          created_at: '2026-07-01T14:02:00Z',
+        }),
+      ],
+    });
+    render(<EvalPanel />);
+    await waitFor(() => expect(evalApi.listVerdicts).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('eval-nav-P5'));
+    expect(screen.getByText('净提升 · 可准入')).toBeInTheDocument();
+    expect(screen.queryByText('回归 · 拦')).not.toBeInTheDocument();
+  });
+
   it('P2 detail saves the edited contract via updateCase (input_prompt stays locked)', async () => {
     const c = case_();
     mockAll({ cases: [c] });
