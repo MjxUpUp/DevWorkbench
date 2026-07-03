@@ -689,6 +689,13 @@ pub struct ReactAgent {
     /// (~3 full user/assistant/tool rounds) so the model still sees the live
     /// tool results it's reacting to.
     compact_keep_recent: usize,
+    /// G3 step-repetition breaker threshold. When the agent issues the same tool
+    /// call (same name + same arguments) this many times in a row, the loop
+    /// halts with a clear failure instead of burning the whole step budget — the
+    /// MAST top failure mode is a weak model re-issuing an identical call hoping
+    /// for a different result. Defaults to 5 (a normal explore-then-act sequence
+    /// rarely repeats an identical call 5×). 1 disables (a single call trips).
+    step_repetition_threshold: usize,
     system_prompt: String,
     /// Context passed to every tool invocation. Defaults to empty
     /// (`ToolContext::default()`) — set via [`with_context`] when the agent
@@ -730,6 +737,53 @@ pub struct ReactAgent {
     approval: Option<crate::kernel_impl::human_gate::ApprovalMap>,
 }
 
+/// G3 step-repetition breaker — detects when the agent loops on the same tool
+/// call (identical name + arguments) and trips so `run_loop` can halt with a
+/// clear failure instead of burning the whole step budget. This is the MAST
+/// top failure mode: a weak model re-issues an identical call hoping for a
+/// different result. Exact-arg matching is deliberate — differing args (even
+/// trivially) is exploration, not a loop, and fuzzy matching would risk false
+/// positives that abort legitimate retry. Pure + deterministic; no IO.
+struct StepRepetitionBreaker {
+    threshold: usize,
+    last_sig: Option<String>,
+    consecutive: usize,
+}
+
+impl StepRepetitionBreaker {
+    fn new(threshold: usize) -> Self {
+        Self {
+            // threshold of 0/1 makes the very first repeat trip; guard so a
+            // misconfigured 0 still means "trip on the 2nd identical call".
+            threshold: threshold.max(2),
+            last_sig: None,
+            consecutive: 0,
+        }
+    }
+
+    /// Observe one tool call's signature. Returns `Some(reason)` when the breaker
+    /// trips on this observation (i.e. `consecutive` reaches `threshold`). A
+    /// different signature resets the streak to 1 (this call).
+    fn observe(&mut self, name: &str, arguments: &str) -> Option<String> {
+        // NUL can't appear in either field, so it's a safe separator.
+        let sig = format!("{name}\u{0}{arguments}");
+        if self.last_sig.as_deref() == Some(sig.as_str()) {
+            self.consecutive += 1;
+        } else {
+            self.consecutive = 1;
+            self.last_sig = Some(sig);
+        }
+        if self.consecutive >= self.threshold {
+            Some(format!(
+                "step 重复熔断：连续 {n} 次相同「{name}」调用（参数未变）——疑似循环，停止以免空耗步数",
+                n = self.consecutive
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 impl ReactAgent {
     pub fn new(
         model: impl ChatModel + 'static,
@@ -760,6 +814,7 @@ impl ReactAgent {
             budget_check: None,
             max_context_tokens: None,
             compact_keep_recent: 6,
+            step_repetition_threshold: 5,
             system_prompt: system_prompt.into(),
             ctx: ToolContext::default(),
             history: Vec::new(),
@@ -778,6 +833,14 @@ impl ReactAgent {
 
     pub fn with_max_steps(mut self, n: usize) -> Self {
         self.max_steps = n;
+        self
+    }
+
+    /// Set the step-repetition breaker threshold (G3). The run halts once the
+    /// same tool call (name + arguments) repeats this many times consecutively.
+    /// Default 5; lower for cheaper loop detection in tests.
+    pub fn with_step_repetition_threshold(mut self, n: usize) -> Self {
+        self.step_repetition_threshold = n;
         self
     }
 
@@ -963,6 +1026,11 @@ impl ReactAgent {
             _ => None,
         };
         let result: Result<String, Error> = async {
+            // G3 step-repetition breaker: a weak model re-issuing the same tool
+            // call (same name + args) consecutively is the MAST top failure mode.
+            // Trips at step_repetition_threshold identical calls → halt with a
+            // clear reason instead of burning the whole step budget on a loop.
+            let mut rep_breaker = StepRepetitionBreaker::new(self.step_repetition_threshold);
             for _step in 0..self.max_steps {
                 let mut resp = model.generate(&history, &opts).await?;
                 // B6 tool-call-repair (generate path) — same plain-text
@@ -989,6 +1057,16 @@ impl ReactAgent {
                 history.push(resp.clone());
                 if resp.tool_calls.is_empty() {
                     return Ok(resp.content);
+                }
+                // G3: observe each call's signature; if the same tool+args
+                // repeats past the threshold, halt (loop detected) — before
+                // spending another tool execution on an identical call.
+                for call in &resp.tool_calls {
+                    if let Some(reason) = rep_breaker
+                        .observe(&call.function.name, &call.function.arguments)
+                    {
+                        return Err(Error::Agent(reason));
+                    }
                 }
                 for call in &resp.tool_calls {
                     let result = self
@@ -1260,6 +1338,9 @@ impl kernel_core::Agent for ReactAgent {
         let sid_opt = self.session_id.clone();
         let compaction_buf_opt = self.compaction_blocks.clone();
         let approval_opt = self.approval.clone();
+        // Clone the threshold by value (usize) so the async block below doesn't
+        // borrow `&self` — the stream must own its data to satisfy 'static.
+        let step_repetition_threshold = self.step_repetition_threshold;
 
         let s = async_stream::try_stream! {
             let infos = tools.infos();
@@ -1352,6 +1433,12 @@ impl kernel_core::Agent for ReactAgent {
             // LLM error → graceful message), or neither (hit max_steps).
             let mut converged = false;
             let mut degraded: Option<FatalReason> = None;
+            // G3 step-repetition breaker: trips when the same tool call (name +
+            // args) repeats past step_repetition_threshold → halt with a clear
+            // failure instead of looping. Same detector run_loop uses; this is
+            // the streaming chat path (the MAST top failure mode happens here).
+            let mut rep_breaker = StepRepetitionBreaker::new(step_repetition_threshold);
+            let mut step_repetition_trip: Option<String> = None;
             // T7 self-verify: how many audit-and-feed-back cycles have run.
             let mut verify_count = 0u32;
             // D1(b): consecutive summarizer failures this run. Feed to maybe_compact
@@ -1660,6 +1747,21 @@ impl kernel_core::Agent for ReactAgent {
                     yield AgentEvent::TurnBoundary;
                     break;
                 }
+                // G3: observe this turn's calls; if the same tool+args repeats
+                // past the threshold, record the trip + halt (loop detected).
+                if step_repetition_trip.is_none() {
+                    for call in &turn_tool_calls {
+                        if let Some(reason) = rep_breaker
+                            .observe(&call.function.name, &call.function.arguments)
+                        {
+                            step_repetition_trip = Some(reason);
+                            break;
+                        }
+                    }
+                    if step_repetition_trip.is_some() {
+                        break;
+                    }
+                }
                 // C2/D3 subagent concurrency: when ≥2 calls this turn are
                 // dispatch_subagent, fan them out concurrently (bounded by
                 // SubAgentTool's Semaphore); the rest stay serial. Outcomes are
@@ -1735,7 +1837,9 @@ impl kernel_core::Agent for ReactAgent {
             // for side effects (notifications, cleanup); the summary reflects how
             // the run ended so a hook can branch on success vs failure.
             if let Some(h) = hooks.as_ref() {
-                let summary = if let Some(reason) = &degraded {
+                let summary = if let Some(t) = &step_repetition_trip {
+                    t.clone()
+                } else if let Some(reason) = &degraded {
                     fatal_user_message(*reason).to_string()
                 } else if !converged {
                     format!(
@@ -1753,7 +1857,15 @@ impl kernel_core::Agent for ReactAgent {
             // Honest terminal status: degraded (graceful LLM failure), max-steps
             // (no convergence), or completed (model gave a final answer). Never
             // report Completed when the run actually failed.
-            if let Some(reason) = degraded {
+            if let Some(reason) = step_repetition_trip {
+                yield AgentEvent::Done(AgentOutcome {
+                    status: AgentRunStatus::Failed,
+                    files_changed: Vec::new(),
+                    exit_code: Some(1),
+                    output_summary: Some(reason),
+                    honesty: None,
+                });
+            } else if let Some(reason) = degraded {
                 yield AgentEvent::Done(AgentOutcome {
                     status: AgentRunStatus::Failed,
                     files_changed: Vec::new(),
@@ -3466,6 +3578,100 @@ mod tests {
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
         let summary = outcome.output_summary.expect("step-limit summary");
         assert!(summary.contains("step"), "step-limit message: {summary}");
+    }
+
+    // --- G3: step-repetition breaker (same tool+args loop → halt) ---
+
+    #[test]
+    fn step_repetition_breaker_trips_at_threshold_and_resets_on_change() {
+        // Pure logic: trips at threshold consecutive identical sigs; a different
+        // sig (different args) resets the streak to 1.
+        let mut b = StepRepetitionBreaker::new(3);
+        assert_eq!(b.observe("grep", r#"{"q":"x"}"#), None); // streak 1
+        assert_eq!(b.observe("grep", r#"{"q":"x"}"#), None); // streak 2
+        // different args → reset to 1, no trip
+        assert_eq!(b.observe("grep", r#"{"q":"y"}"#), None);
+        // back to identical → 2, then 3 trips
+        assert_eq!(b.observe("grep", r#"{"q":"y"}"#), None); // streak 2
+        let trip = b.observe("grep", r#"{"q":"y"}"#).expect("trips at threshold 3");
+        assert!(trip.contains("step 重复熔断"), "trip reason: {trip}");
+        assert!(trip.contains("grep"), "names the looping tool: {trip}");
+        // threshold 0/1 clamps to 2 (misconfig guard — first repeat trips).
+        let mut b0 = StepRepetitionBreaker::new(0);
+        assert_eq!(b0.observe("t", "{}"), None); // 1
+        assert!(b0.observe("t", "{}").is_some()); // 2 → trip
+    }
+
+    #[tokio::test]
+    async fn run_trips_step_repetition_breaker_on_identical_loop() {
+        use kernel_core::Agent;
+        // G3: the model re-issues the SAME tool call (name + args) every turn —
+        // a classic weak-model loop. With threshold=2 the 2nd identical call
+        // halts with the breaker reason, NOT the step-limit message.
+        let loop_msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![kernel_core::ToolCall {
+                id: "c".into(),
+                call_type: "function".into(),
+                function: kernel_core::FunctionCall {
+                    name: "echo".into(),
+                    arguments: r#"{"text":"x"}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let model = ScriptedModel::new(vec![loop_msg; 16]);
+        let reg = ToolRegistry::new().with(EchoTool);
+        let agent = ReactAgent::new(model, reg, "sys")
+            .with_max_steps(10)
+            .with_step_repetition_threshold(2);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("breaker summary");
+        assert!(
+            summary.contains("step 重复熔断"),
+            "breaker message (not step-limit): {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_does_not_trip_when_args_vary() {
+        use kernel_core::Agent;
+        // G3: same tool, DIFFERENT args each turn = exploration, not a loop →
+        // breaker must NOT trip; the run converges when the model emits a bare
+        // answer on turn 3.
+        let mk = |id: &str, args: &str| Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![kernel_core::ToolCall {
+                id: id.into(),
+                call_type: "function".into(),
+                function: kernel_core::FunctionCall {
+                    name: "echo".into(),
+                    arguments: args.into(),
+                },
+            }],
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        let varied = vec![
+            mk("c1", r#"{"text":"a"}"#),
+            mk("c2", r#"{"text":"b"}"#),
+            Message::assistant("done"),
+        ];
+        let model = ScriptedModel::new(varied);
+        let reg = ToolRegistry::new().with(EchoTool);
+        let agent = ReactAgent::new(model, reg, "sys")
+            .with_max_steps(10)
+            .with_step_repetition_threshold(2);
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
     }
 
     // --- v1.2 T7: self-verify gate (audit feeds back → self-repair) ---

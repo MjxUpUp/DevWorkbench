@@ -14,10 +14,15 @@ import styles from './workbench.module.css';
  *  - 超预算熔断警告（percentage>=100 → 红色 + ⚠），让成本失控前置可见
  *  - 挂载即 fetchDashboard：门控层常驻，成本必须实时可见而非等用户开 Dashboard
  *
- * 未做（留块4b/后端）：
+ * 已落地（G3，react_agent.rs 后端强制）：
+ *  - step-repetition 硬熔断：同一 tool+args 连续重复到阈值即停（直击 MAST 17.14%
+ *    最大失败）。run_loop（子agent路径）+ 流式 run()（chat主路径）双接入，trip→
+ *    Failed + output_summary 注明「step 重复熔断」。前端不在此常驻 badge——它是
+ *    后端隐式保护，触发时以 Failed 终态浮现，不属 GateBar 实时状态范畴。
+ *
+ * 未做（仍 pending / 块4b）：
  *  - during-action interrupt：ChatView 已有 stopAgent 按钮（stop_agent_session IPC），
  *    GateBar 不重复造；与成本熔断联动的硬停止属后端 cost breaker，前端先做软警告
- *  - multi-step step-repetition 硬熔断：直击 MAST 17.14% 最大失败，需后端检测
  *
  * 反例（启示 2）：不把每个微操作都弹审批（automation bias/skill fade）；不把人审当
  * 唯一安全网（结构性不可扩展，PAI claim3/4）。
@@ -66,8 +71,9 @@ export function GateBar() {
           {nearBudget && <span className={styles.gateBreakerNear}>⚠ 接近预算</span>}
         </span>
       )}
-      {/* 块4b/后端：during-action interrupt 与 step-repetition 硬熔断（需后端 cost breaker） */}
-      <span className={styles.gatePlaceholder}>interrupt · step-重复熔断 — 块4b</span>
+      {/* 块4b/后端：during-action interrupt（成本熔断硬停止，需后端 cost breaker）。
+          step-重复熔断已落地（G3 react_agent.rs），不在此占位——见文件头注释。 */}
+      <span className={styles.gatePlaceholder}>during-action 成本中断 — 待后端 cost breaker</span>
     </footer>
   );
 }
