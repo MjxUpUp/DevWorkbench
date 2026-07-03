@@ -978,3 +978,261 @@
   font-size: var(--text-lg);
 }
 
+/* === Batch1 新增/补全（P1 stale · P3 edge · P4 matrix · P5/A1 improve · F1 version · A1 paired-trace · V3 chain）=== */
+
+/* P1 引用失效（来源 session 已删除）*/
+.eval-case-row.stale {
+  border-color: var(--color-sunkissed);
+  background: var(--warning-muted);
+}
+
+/* P3 边缘态 badges 行 */
+.eval-edge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+/* tool tag 三态：improve 绿（配对独有增量）/ fail 红（失败）*/
+.eval-tool-tag.improve {
+  background: var(--success-muted);
+  color: var(--color-sage);
+}
+
+/* P4 功能开关矩阵 */
+.eval-feature-matrix {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.eval-feature-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.eval-feature-toggle.on {
+  border-color: var(--color-sage);
+  background: var(--success-muted);
+  color: var(--color-sage);
+}
+.eval-feature-toggle.off {
+  opacity: 0.7;
+}
+.eval-feature-toggle.fixed {
+  cursor: default;
+}
+.eval-feature-toggle input {
+  margin: 0;
+}
+.eval-feature-toggle .eval-hint {
+  margin-left: auto;
+}
+
+/* F1 版本对比 */
+.eval-version-compare {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+}
+.eval-version-col {
+  text-align: center;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+.eval-version-col.new {
+  border-color: var(--color-sage);
+}
+.eval-version-avg {
+  font-family: var(--font-mono);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 2px 0;
+}
+.eval-version-delta {
+  text-align: center;
+}
+.eval-version-delta-val {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.eval-version-delta-val.admit {
+  color: var(--color-sage);
+}
+.eval-version-delta-val.brake {
+  color: var(--color-error);
+}
+
+/* A1 配对双栏 trace */
+.eval-paired-traces {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+}
+.eval-trace-col {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface-1);
+  min-width: 0;
+}
+.eval-trace-col.regress {
+  border-color: var(--color-error);
+  box-shadow: 0 0 0 3px var(--danger-muted);
+}
+.eval-trace-col.improve {
+  border-color: var(--color-sage);
+  box-shadow: 0 0 0 3px var(--success-muted);
+}
+.eval-span-forest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+.eval-span {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  padding: 2px 0;
+}
+.eval-span.llm {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.eval-span.tool {
+  color: var(--text-secondary);
+}
+.eval-span.fail {
+  color: var(--color-error);
+}
+.eval-span.unique {
+  background: var(--warning-muted);
+  border-radius: var(--radius-xs);
+  padding: 2px 4px;
+}
+.eval-span-kind {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+}
+.eval-span-name {
+  color: inherit;
+}
+
+/* V3 归因链（镜像 parse_verdict）*/
+.eval-trace-chain {
+  background: var(--surface-1);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.eval-chain-step {
+  font-size: var(--text-xxs);
+  color: var(--text-tertiary);
+}
+.eval-chain-step.hit {
+  color: var(--text-secondary);
+}
+.eval-chain-step.miss {
+  opacity: 0.6;
+}
+.eval-chain-mark {
+  display: inline-block;
+  width: 14px;
+  color: var(--accent);
+}
+.eval-chain-outcome {
+  margin-top: var(--space-1);
+  font-weight: 600;
+  font-size: var(--text-xs);
+}
+.eval-chain-outcome.pass {
+  color: var(--color-sage);
+}
+.eval-chain-outcome.fail {
+  color: var(--color-error);
+}
+
+/* P3 文件变更（预存类补全）*/
+.eval-files-box {
+  margin-top: var(--space-2);
+}
+.eval-file-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.eval-file-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+
+/* P4 机制/e2e runner 容器 + YAML（预存类补全）*/
+.eval-mechanism {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+.eval-yaml {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+/* P6 rubric Q 汇总（预存类补全）*/
+.eval-rubric-q {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+.eval-rubric-q-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.eval-rubric-q-val {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.eval-rubric-q-val.good {
+  color: var(--color-sage);
+}
+.eval-rubric-q-val.warn {
+  color: var(--color-sunkissed);
+}
+.eval-rubric-q-val.bad {
+  color: var(--color-error);
+}
+

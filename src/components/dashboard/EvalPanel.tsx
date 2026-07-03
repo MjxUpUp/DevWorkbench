@@ -180,6 +180,8 @@ function VerdictBadge({ verdict }: { verdict: string }) {
 // ── 主组件 ──
 export function EvalPanel() {
   const data = useEvalData();
+  // P1 引用失效检测：case 的 source_session_id 是否仍在运行记录里。
+  const sessions = useAgentStore((s) => s.sessions);
   const [selected, setSelected] = useState<FeatureId>('P1');
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
 
@@ -247,7 +249,7 @@ export function EvalPanel() {
         {data.error && <p className="eval-empty">加载失败：{data.error}</p>}
 
         {selected === 'P1' && (
-          <CasePool cases={data.cases} onSelect={pickCase} onNewCase={() => setSelected('P3')} />
+          <CasePool cases={data.cases} sessions={sessions} onSelect={pickCase} onNewCase={() => setSelected('P3')} />
         )}
         {selected === 'P2' && (
           <CaseDetail caseId={selectedCaseId} cases={data.cases} onChanged={data.refresh} />
@@ -261,11 +263,11 @@ export function EvalPanel() {
         {selected === 'V1' && <VerdictsLedger verdicts={data.verdicts} caseName={caseName} />}
         {selected === 'V2' && <FailureAssets verdicts={data.verdicts} caseName={caseName} />}
         {selected === 'V3' && <AmbiguousFail verdicts={data.verdicts} caseName={caseName} />}
-        {selected === 'F1' && <RegressionCurve trend={data.trend} />}
+        {selected === 'F1' && <RegressionCurve trend={data.trend} verdicts={data.verdicts} />}
         {selected === 'F2' && (
           <Flywheel caseCount={data.cases.length} verdictCount={data.verdicts.length} failCount={failCount} />
         )}
-        {selected === 'A1' && <OtelTraces />}
+        {selected === 'A1' && <OtelTraces cases={data.cases} verdicts={data.verdicts} />}
       </section>
     </div>
   );
@@ -274,10 +276,12 @@ export function EvalPanel() {
 // ── P1 Case 池 ──
 function CasePool({
   cases,
+  sessions,
   onSelect,
   onNewCase,
 }: {
   cases: EvalCaseRow[];
+  sessions: { id: string }[];
   onSelect: (id: string) => void;
   onNewCase: () => void;
 }) {
@@ -286,6 +290,9 @@ function CasePool({
 
   const status = (c: EvalCaseRow): 'ready' | 'probe' | 'backlog' =>
     c.category === 'backlog' ? 'backlog' : c.draft ? 'probe' : 'ready';
+
+  // P1 边缘态：case 引用的 source session 已不在运行记录里 → 来源失效（需重绑/归档）。
+  const liveSessionIds = useMemo(() => new Set(sessions.map((s) => s.id)), [sessions]);
 
   const rows = cases.filter((c) => {
     const s = status(c);
@@ -321,16 +328,26 @@ function CasePool({
         <div className="eval-case-list">
           {rows.map((c) => {
             const s = status(c);
+            const stale = c.source_session_id != null && !liveSessionIds.has(c.source_session_id);
             return (
-              <button key={c.id} className="eval-case-row" onClick={() => onSelect(c.id)}>
+              <button key={c.id} className={`eval-case-row ${stale ? 'stale' : ''}`} onClick={() => onSelect(c.id)}>
                 <span className={`eval-badge eval-badge-${s === 'ready' ? 'clear' : s === 'probe' ? 'unclear' : 'muted'}`}>
                   {s}
                 </span>
                 <span className="eval-case-title">{c.name}</span>
-                <span className="eval-case-meta mono">
-                  {c.source_session_id ? `#${c.source_session_id.slice(0, 8)}` : '—'}
-                  {c.commit_sha ? ` · ${c.commit_sha.slice(0, 7)}` : ''}
-                </span>
+                {stale ? (
+                  <span
+                    className="eval-badge eval-badge-unclear"
+                    title={`来源 session #${c.source_session_id!.slice(0, 8)} 已删除，需重绑或归档`}
+                  >
+                    ⚠ 来源缺失
+                  </span>
+                ) : (
+                  <span className="eval-case-meta mono">
+                    {c.source_session_id ? `#${c.source_session_id.slice(0, 8)}` : '—'}
+                    {c.commit_sha ? ` · ${c.commit_sha.slice(0, 7)}` : ''}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -435,8 +452,21 @@ function CaseDetail({
         onChange={(e) => set('expected_steps_json', e.target.value || null)}
         placeholder='[{"name":"Read"},{"name":"Edit"}]'
       />
-      <div className="eval-hint mono">
-        当前解析：{parseSteps(draft.expected_steps_json).map((s) => s.name).join(' → ') || '（空）'}
+      <div className="eval-section-label">当前解析步骤（结构化预览 · 顺序敏感）</div>
+      <div className="eval-step-list">
+        {(() => {
+          const steps = parseSteps(draft.expected_steps_json);
+          return steps.length === 0 ? (
+            <span className="eval-empty">（空 · 任何轨迹都 vacuous pass）</span>
+          ) : (
+            steps.map((s, i) => (
+              <div key={i} className="eval-step">
+                <span className="eval-step-idx">{i + 1}</span>
+                <span className={`eval-tool-tag ${s.status === 'error' ? 'fail' : ''}`}>{s.name}</span>
+              </div>
+            ))
+          );
+        })()}
       </div>
 
       <div className="eval-section-label">expected observables（✏ 可编辑 · 怎么被证伪）</div>
@@ -575,6 +605,27 @@ function SessionToCase({
             {traj.input_tokens}+{traj.output_tokens} tokens · ≈ {traj.cost_cents.toFixed(3)}¢（估算）·{' '}
             {traj.span_tree.roots.length} LLM span
           </div>
+          {(() => {
+            // P3 边缘态：提取出的轨迹本身可能不可锚——空轨迹（vacuous pass）、
+            // 全步失败（会话损坏）、异常高 token（疑似刷分）。显式标出来，让用户
+            // 决定是否仍要以此轨迹冻结契约（反刷分：契约先要诚实）。
+            const edges: string[] = [];
+            if (traj.steps.length === 0) edges.push('空轨迹（纯文本轮 · vacuous pass）');
+            else if (failedN === traj.steps.length) edges.push('全步骤失败（会话损坏？）');
+            const totTok = traj.input_tokens + traj.output_tokens;
+            if (totTok > 200000)
+              edges.push(`token 异常高（${Math.round(totTok / 1000)}k · 疑似刷分）`);
+            if (edges.length === 0) return null;
+            return (
+              <div className="eval-edge-row">
+                {edges.map((e, i) => (
+                  <span key={i} className="eval-badge eval-badge-unclear">
+                    ⚠ {e}
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
           <div className="eval-step-list">
             {traj.steps.length === 0 ? (
               <span className="eval-empty">该会话无工具调用（纯文本轮）</span>
@@ -665,6 +716,8 @@ function ReplayLaunch({
   const [caseId, setCaseId] = useState('');
   const [workingDir, setWorkingDir] = useState(workingFallback);
   const [matcher, setMatcher] = useState<Matcher>('exact_match');
+  const [model, setModel] = useState('');
+  const [enableSkills, setEnableSkills] = useState(true);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<ReplayVerdict | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -683,7 +736,13 @@ function ReplayLaunch({
     setErr(null);
     setResult(null);
     try {
-      const v = await evalApi.runReplay(caseId, workingDir, matcher);
+      const v = await evalApi.runReplay(
+        caseId,
+        workingDir,
+        matcher,
+        model.trim() || undefined,
+        enableSkills,
+      );
       setResult(v);
       await onReplayed();
     } catch (e) {
@@ -718,7 +777,43 @@ function ReplayLaunch({
 
       {obj === 'agent' && (
         <>
-          <div className="eval-section-label">② Case（已审核）</div>
+          <div className="eval-section-label">② 功能开关矩阵 + 环境（模型）</div>
+          <div className="eval-feature-matrix">
+            <label className={`eval-feature-toggle ${enableSkills ? 'on' : 'off'}`}>
+              <input
+                type="checkbox"
+                checked={enableSkills}
+                onChange={(e) => setEnableSkills(e.target.checked)}
+              />
+              <b>Skills</b>
+              <span className="eval-hint">真生效 · enable_skills</span>
+            </label>
+            {(
+              [
+                ['MemoryRail', '记忆注入'],
+                ['GateBar', '熔断'],
+                ['Harness', '测试 harness'],
+                ['compaction', '上下文压缩'],
+              ] as [string, string][]
+            ).map(([k, desc]) => (
+              <div key={k} className="eval-feature-toggle off fixed">
+                <b>{k}</b>
+                <span className="eval-hint">{desc} · replay 单轮只读沙箱不注入</span>
+              </div>
+            ))}
+          </div>
+          <input
+            className="eval-input"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="模型 id（留空=默认；glm-4.6 / deepseek-chat / kimi …）"
+          />
+          <div className="eval-hint">
+            环境控制：模型切换（大窗口 Kimi/DeepSeek 与 GLM 的窗口差异由 provider 配置处理）。MemoryRail/GateBar/Harness/compaction
+            在 replay 单轮只读沙箱中本就不注入——矩阵如实标注，不造假开关。
+          </div>
+
+          <div className="eval-section-label">③ Case（已审核）</div>
           <div className="eval-case-list">
             {readyCases.length === 0 ? (
               <span className="eval-empty">无已审核 case。先在 P2 审核。</span>
@@ -737,7 +832,7 @@ function ReplayLaunch({
             )}
           </div>
 
-          <div className="eval-section-label">③ 工作区 / 匹配器</div>
+          <div className="eval-section-label">④ 工作区 / 匹配器</div>
           <div className="eval-row2">
             <input className="eval-input" value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="工作区路径（只读沙箱）" />
             <select className="eval-input" value={matcher} onChange={(e) => setMatcher(e.target.value as Matcher)}>
@@ -1053,11 +1148,70 @@ function PairedCompare({
   cases: EvalCaseRow[];
   verdicts: VerdictRow[];
 }) {
-  const [caseId, setCaseId] = useState('');
   const readyCases = cases.filter((c) => !c.draft);
-  useEffect(() => {
-    if (!caseId && readyCases.length > 0) setCaseId(readyCases[0].id);
-  }, [readyCases, caseId]);
+  const [caseId, setCaseId] = useState('__all__');
+
+  // 单 case 视图：取该 case 的 eval verdicts 新旧各一（list_verdicts new-first：
+  // [0]=新, [1]=旧）。'__all__' 视图：聚合每个 ready case 的净判定 → 全 improve=
+  // 准入 / 有 regress=拦 / 提升与回归并存=split 分歧待人审。
+  const caseOptions = (
+    <>
+      <option value="__all__">全部 case（聚合准入判定）</option>
+      {readyCases.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name}
+        </option>
+      ))}
+    </>
+  );
+
+  if (caseId === '__all__') {
+    const perCase = readyCases
+      .map((c) => {
+        const evs = verdicts.filter((v) => v.gate === 'eval' && v.case_id === c.id);
+        if (evs.length < 2) return { c, net: null as 'improve' | 'regress' | 'same' | null, n: evs.length };
+        return { c, net: netVerdict(evs[1], evs[0]), n: evs.length };
+      });
+    const judged = perCase.filter((x) => x.net !== null);
+    const improves = judged.filter((x) => x.net === 'improve').length;
+    const regresses = judged.filter((x) => x.net === 'regress').length;
+    const split = improves > 0 && regresses > 0;
+    return (
+      <div className="eval-card">
+        <div className="eval-section-label">选 Case（按 case_id 取其 eval verdicts，新旧各一）</div>
+        <select className="eval-input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>
+          {caseOptions}
+        </select>
+        {judged.length === 0 ? (
+          <p className="eval-empty">无 case 有 ≥2 次 eval verdict。至少回放两次（P4）才能配对。</p>
+        ) : (
+          <div className="eval-compare-summary">
+            {regresses > 0 ? (
+              <span className="eval-badge eval-badge-brake">回归 · 拦（{regresses}/{judged.length} case 倒退）</span>
+            ) : split ? (
+              <span className="eval-badge eval-badge-unclear">
+                分歧 · 待判（{improves} 提升 / {judged.length - improves} 持平，人审）
+              </span>
+            ) : (
+              <span className="eval-badge eval-badge-clear">净提升 · 可准入（{improves}/{judged.length}）</span>
+            )}
+          </div>
+        )}
+        <div className="eval-case-list">
+          {perCase.map(({ c, net, n }) => (
+            <button key={c.id} className="eval-case-row" onClick={() => setCaseId(c.id)}>
+              <span className="eval-case-title">{c.name}</span>
+              <span className="eval-hint mono">{n} 次</span>
+              {net === 'improve' && <span className="eval-badge eval-badge-clear">提升</span>}
+              {net === 'regress' && <span className="eval-badge eval-badge-brake">回归</span>}
+              {net === 'same' && <span className="eval-badge eval-badge-muted">持平</span>}
+              {net === null && <span className="eval-badge eval-badge-muted">不足2次</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   const evalVerdicts = verdicts.filter((v) => v.gate === 'eval' && v.case_id === caseId);
   // list_verdicts 是 new-first：[0]=新(本次), [1]=旧(上次)。解构名须与序对齐——
@@ -1069,11 +1223,7 @@ function PairedCompare({
     <div className="eval-card">
       <div className="eval-section-label">选 Case（按 case_id 取其 eval verdicts，新旧各一）</div>
       <select className="eval-input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>
-        {readyCases.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
+        {caseOptions}
       </select>
 
       {evalVerdicts.length < 2 ? (
@@ -1082,12 +1232,7 @@ function PairedCompare({
         </p>
       ) : (
         <div className="eval-compare">
-          <CompareCol
-            title={`旧 · ${fmtTime(oldV.created_at)}`}
-            v={oldV}
-            kind="old"
-            otherSteps={stepsOf(newV)}
-          />
+          <CompareCol title={`旧 · ${fmtTime(oldV.created_at)}`} v={oldV} kind="old" otherSteps={stepsOf(newV)} />
           <CompareCol
             title={`新 · ${fmtTime(newV.created_at)}`}
             v={newV}
@@ -1182,7 +1327,7 @@ function CompareCol({
             return (
               <div key={i} className="eval-step">
                 <span className="eval-step-idx">{i + 1}</span>
-                <span className={`eval-tool-tag ${unique ? 'diff' : ''}`}>{s}</span>
+                <span className={`eval-tool-tag ${unique ? (kind === 'regress' ? 'fail' : 'improve') : ''}`}>{s}</span>
               </div>
             );
           })
@@ -1368,7 +1513,7 @@ function VerdictsLedger({
   );
 }
 
-// ── V2 失败资产（从 FAIL/TRIPPED/BRAKE 派生）──
+// ── V2 失败资产知识库（FAIL/TRIPPED/BRAKE 派生 · 可搜索 / 多索引）──
 function FailureAssets({
   verdicts,
   caseName,
@@ -1376,59 +1521,153 @@ function FailureAssets({
   verdicts: VerdictRow[];
   caseName: (id: string | null) => string;
 }) {
+  const [q, setQ] = useState('');
+  const [indexBy, setIndexBy] = useState<'gate' | 'attribution' | 'reason'>('gate');
+
   const fails = verdicts.filter(
     (v) => v.verdict === 'FAIL' || v.verdict === 'TRIPPED' || v.attribution === 'BRAKE',
   );
 
-  // 按 gate + 摘要 reason 分组（reason 来自 eval report；其它 gate 用 verdict 当键）。
+  // root cause：优先 eval report 的 reason（score_replay 写入的具体命中描述），
+  // 否则回退 verdict 串。是「这条为什么挂」的一句话索引。
+  const reasonOf = useCallback((v: VerdictRow): string => {
+    try {
+      const r = JSON.parse(v.report ?? '{}') as { reason?: string };
+      return r.reason ?? v.verdict;
+    } catch {
+      return v.verdict;
+    }
+  }, []);
+
+  const rows = fails.filter((v) => {
+    if (!q) return true;
+    const hay =
+      `${verdictTarget(v, caseName)} ${v.gate} ${v.attribution ?? ''} ${reasonOf(v)} ${v.case_id ?? ''} ${v.session_id ?? ''}`.toLowerCase();
+    return hay.includes(q.toLowerCase());
+  });
+
+  // 多索引：按 stage(gate) / lever(attribution) / root-cause(reason) 聚合，让用户
+  // 从不同维度检索失败资产（反刷分：失败要能被下轮 case 生成前查到规避）。
   const groups = useMemo(() => {
     const m = new Map<string, VerdictRow[]>();
-    for (const v of fails) {
-      let reason = v.verdict;
-      try {
-        const r = JSON.parse(v.report ?? '{}') as { reason?: string };
-        if (r.reason) reason = r.reason;
-      } catch {
-        /* keep verdict */
-      }
-      const key = `${v.gate} · ${reason}`.slice(0, 80);
+    for (const v of rows) {
+      const key =
+        indexBy === 'gate'
+          ? v.gate
+          : indexBy === 'attribution'
+            ? v.attribution ?? 'UNCLEAR'
+            : reasonOf(v).slice(0, 80);
       const arr = m.get(key) ?? [];
       arr.push(v);
       m.set(key, arr);
     }
     return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
-  }, [fails]);
+  }, [rows, indexBy, reasonOf]);
 
   return (
     <div className="eval-card">
       <div className="eval-hint">
-        失败资产从 FAIL / TRIPPED / BRAKE 判决派生（按 gate + reason 聚合）。下次 case 生成前检索规避。
+        失败资产从 FAIL / TRIPPED / BRAKE 判决派生。可搜索 + 按 stage(gate) / lever(attribution) /
+        root-cause(reason) 索引，下次 case 生成前检索规避。
       </div>
-      {groups.length === 0 ? (
+      {fails.length === 0 ? (
         <p className="eval-empty">尚无失败沉淀（无 FAIL/TRIPPED/BRAKE 判决）。</p>
       ) : (
-        <div className="eval-fail-list">
-          {groups.map(([key, vs]) => (
-            <div key={key} className="eval-fail-card">
-              <div className="eval-fail-head">
-                <b>{key}</b>
-                <span className="eval-badge eval-badge-brake">×{vs.length}</span>
-              </div>
-              <div className="eval-hint mono">
-                {vs
-                  .slice(0, 3)
-                  .map((v) => verdictTarget(v, caseName))
-                  .join(' · ')}
-              </div>
+        <>
+          <div className="eval-toolbar">
+            <input
+              className="eval-input"
+              placeholder="搜索 case / session / reason / gate"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            <select
+              className="eval-input"
+              value={indexBy}
+              onChange={(e) => setIndexBy(e.target.value as typeof indexBy)}
+            >
+              <option value="gate">索引 · stage (gate)</option>
+              <option value="attribution">索引 · lever (attribution)</option>
+              <option value="reason">索引 · root cause (reason)</option>
+            </select>
+          </div>
+          {groups.length === 0 ? (
+            <p className="eval-empty">无匹配失败。</p>
+          ) : (
+            <div className="eval-fail-list">
+              {groups.map(([key, vs]) => (
+                <div key={key} className="eval-fail-card">
+                  <div className="eval-fail-head">
+                    <b>{key}</b>
+                    <span className="eval-badge eval-badge-brake">×{vs.length}</span>
+                  </div>
+                  <div className="eval-hint mono">
+                    {vs
+                      .slice(0, 5)
+                      .map((v) => verdictTarget(v, caseName))
+                      .join(' · ')}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-// ── V3 模糊 FAIL ──
+// ── V3 模糊 FAIL：归因链 + reviewer 原文 + 人判按钮 ──
+
+/// 前端镜像后端 gates.rs `parse_verdict`，把「为什么这条判 FAIL」拆成可读的归因链
+/// 三步（① 首行 VERDICT 契约 ② body fail marker 覆盖 ③ keyword fallback / 默认 FAIL）。
+/// 必须与后端逐字同形——这是反刷分账本卫生：UI 展示的归因要等于后端实际判定。
+/// 后端改动（gates.rs:67）须同步此处。
+export function parseVerdictTrace(report: string): { steps: { label: string; hit: boolean }[]; passed: boolean } {
+  const hasFailMarker = (text: string) => {
+    const l = text.toLowerCase();
+    return l.includes('fail') || l.includes('defect') || l.includes('不通过') || l.includes('缺陷');
+  };
+  const firstLine = report.split('\n')[0] ?? '';
+  // 与后端一致：trim + 去尾句末标点（.。!？!?）后小写精确匹配。
+  const norm = firstLine.trim().replace(/[.。!？!?]+$/, '').toLowerCase();
+  const steps: { label: string; hit: boolean }[] = [];
+
+  if (norm === 'verdict: pass') {
+    steps.push({ label: '① 首行 VERDICT: PASS 契约命中', hit: true });
+    if (hasFailMarker(report)) {
+      steps.push({
+        label: '② body fail marker 覆盖 → FAIL（reviewer 正文含 fail/defect/不通过/缺陷）',
+        hit: true,
+      });
+      return { steps, passed: false };
+    }
+    return { steps, passed: true };
+  }
+  if (norm === 'verdict: fail') {
+    steps.push({ label: '① 首行 VERDICT: FAIL 契约命中 → 直接 FAIL', hit: true });
+    return { steps, passed: false };
+  }
+  steps.push({
+    label: `① 首行 VERDICT 契约未命中（违约/空）→ 降级 keyword`,
+    hit: false,
+  });
+
+  const l = report.toLowerCase();
+  const pass = l.includes('pass') || l.includes('通过');
+  const failMarker = hasFailMarker(l);
+  if (pass && !failMarker) {
+    steps.push({ label: '③ keyword fallback → PASS（含 pass/通过，无 fail marker）', hit: true });
+    return { steps, passed: true };
+  }
+  if (failMarker) {
+    steps.push({ label: '③ keyword fallback → FAIL（fail marker 主导）', hit: true });
+    return { steps, passed: false };
+  }
+  steps.push({ label: '③ 默认 FAIL（模糊/无可判信号 · 对抗性默认）', hit: true });
+  return { steps, passed: false };
+}
+
 function AmbiguousFail({
   verdicts,
   caseName,
@@ -1436,81 +1675,241 @@ function AmbiguousFail({
   verdicts: VerdictRow[];
   caseName: (id: string | null) => string;
 }) {
-  // 模糊 FAIL = verify/honesty 的 FAIL，且 report 含「模糊/未含标准/默认/fallback」线索。
+  const activeProject = useNavigationStore((s) => s.activeProject);
+  const sessions = useAgentStore((s) => s.sessions);
+  const workingFallback = activeProject?.path ?? sessions[0]?.projectPath ?? '';
+  // 人判反馈：confirm（认同 FAIL）/ dispute（推翻）。本地态——后端持久化 verify-gate
+  // 人判反馈是后续工作（与 human-gate verdict 同机制，但这条是 verify gate）。
+  const [judged, setJudged] = useState<Record<string, 'confirm' | 'dispute'>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [rerunMsg, setRerunMsg] = useState<Record<string, string>>({});
+  const [rerunning, setRerunning] = useState<Record<string, boolean>>({});
+
+  // 模糊 FAIL = verify/honesty 的 FAIL，且 report 含「模糊/未含标准/默认/fallback」线索，
+  // 或归因链落在 ③ 默认 FAIL（无可判信号）。
   const ambiguous = verdicts.filter((v) => {
     if (v.verdict !== 'FAIL' || !['verify', 'honesty'].includes(v.gate)) return false;
     const blob = `${v.report ?? ''}`.toLowerCase();
-    return ['模糊', '未含标准', '默认', 'fallback', 'ambiguous'].some((k) => blob.includes(k));
+    const lexical = ['模糊', '未含标准', '默认', 'fallback', 'ambiguous'].some((k) => blob.includes(k));
+    const trace = parseVerdictTrace(v.report ?? '');
+    const defaultFail = trace.steps.some((s) => s.label.startsWith('③ 默认 FAIL'));
+    return lexical || defaultFail;
   });
+
+  async function doRerun(v: VerdictRow) {
+    if (!v.case_id) {
+      setRerunMsg((r) => ({ ...r, [v.id]: '该 verdict 无 case_id，无法重跑' }));
+      return;
+    }
+    if (!workingFallback) {
+      setRerunMsg((r) => ({ ...r, [v.id]: '需先选活动项目（工作区）才能重跑' }));
+      return;
+    }
+    setRerunning((r) => ({ ...r, [v.id]: true }));
+    setRerunMsg((r) => ({ ...r, [v.id]: '重跑中…' }));
+    try {
+      const res = await evalApi.runReplay(v.case_id, workingFallback, 'exact_match');
+      setRerunMsg((r) => ({ ...r, [v.id]: `重跑完成：${res.verdict} (${res.score.toFixed(2)})` }));
+    } catch (e) {
+      setRerunMsg((r) => ({ ...r, [v.id]: `重跑失败：${e}` }));
+    } finally {
+      setRerunning((r) => ({ ...r, [v.id]: false }));
+    }
+  }
 
   return (
     <div className="eval-card">
       <div className="eval-hint">
-        verify 对抗评审模糊时默认判 FAIL（gates.rs parse_verdict）。这里列出需人判的模糊 FAIL，给归因链 + 原文，避免假绿或误杀。
+        verify 对抗评审模糊时默认判 FAIL（gates.rs parse_verdict）。这里列出需人判的模糊 FAIL，给归因链①②③ +
+        reviewer 原文 + 确认/误判/重跑，避免假绿或误杀。
       </div>
       {ambiguous.length === 0 ? (
         <p className="eval-empty">无模糊 FAIL 判决（所有 verify/honesty FAIL 都清晰，或尚无此类判决）。</p>
       ) : (
-        ambiguous.map((v) => (
-          <div key={v.id} className="eval-ambiguous-card">
-            <div className="eval-fail-head">
-              <b>{verdictTarget(v, caseName)}</b>
-              <span className="eval-badge eval-badge-unclear">⚠ 模糊 FAIL</span>
+        ambiguous.map((v) => {
+          const trace = parseVerdictTrace(v.report ?? '');
+          const isExp = expanded[v.id];
+          const judge = judged[v.id];
+          return (
+            <div key={v.id} className="eval-ambiguous-card">
+              <div className="eval-fail-head">
+                <b>{verdictTarget(v, caseName)}</b>
+                <span className="eval-badge eval-badge-unclear">⚠ 模糊 FAIL</span>
+                {judge === 'confirm' && <span className="eval-badge eval-badge-brake">人判 · 确认 FAIL</span>}
+                {judge === 'dispute' && <span className="eval-badge eval-badge-clear">人判 · 误判（推翻）</span>}
+              </div>
+
+              <div className="eval-section-label">归因链（镜像后端 parse_verdict）</div>
+              <div className="eval-trace-chain mono">
+                {trace.steps.map((s, i) => (
+                  <div key={i} className={`eval-chain-step ${s.hit ? 'hit' : 'miss'}`}>
+                    <span className="eval-chain-mark">{s.hit ? '▸' : '·'}</span>
+                    {s.label}
+                  </div>
+                ))}
+                <div className={`eval-chain-outcome ${trace.passed ? 'pass' : 'fail'}`}>
+                  判定：{trace.passed ? 'PASS' : 'FAIL'}
+                </div>
+              </div>
+
+              <div className="eval-section-label">
+                reviewer 原文（{isExp ? '全文' : '截断 300'}）
+              </div>
+              <div className="eval-locked mono">
+                {isExp ? v.report ?? '(无 report)' : (v.report ?? '(无 report)').slice(0, 300)}
+              </div>
+              <button
+                className="eval-link"
+                onClick={() => setExpanded((e) => ({ ...e, [v.id]: !e[v.id] }))}
+              >
+                {isExp ? '收起' : '展开全文'}
+              </button>
+
+              <div className="eval-actions">
+                <Button
+                  variant="ghost"
+                  onClick={() => setJudged((j) => ({ ...j, [v.id]: 'confirm' }))}
+                >
+                  ✓ 确认 FAIL
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => setJudged((j) => ({ ...j, [v.id]: 'dispute' }))}
+                >
+                  ✗ 误判（推翻）
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={() => void doRerun(v)}
+                  disabled={rerunning[v.id]}
+                >
+                  {rerunning[v.id] ? '重跑中…' : '▶ 重跑'}
+                </Button>
+                {rerunMsg[v.id] && <span className="eval-hint mono">{rerunMsg[v.id]}</span>}
+              </div>
+              <div className="eval-hint">
+                人判反馈当前为本地态（未持久化）；重跑调 run_eval_replay 落新 eval verdict。
+              </div>
             </div>
-            <div className="eval-section-label">归因链 / report（截断）</div>
-            <div className="eval-locked mono">{(v.report ?? '(无 report)').slice(0, 300)}</div>
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );
 }
 
-// ── F1 回归曲线 ──
-function RegressionCurve({ trend }: { trend: TrendPoint[] }) {
-  if (trend.length === 0) {
+// ── F1 回归曲线 + 新旧版本对比 ──
+function RegressionCurve({ trend, verdicts }: { trend: TrendPoint[]; verdicts: VerdictRow[] }) {
+  // 版本对比卡片：eval_trend 后端无 version 维度，这里前端按 commit_sha 派生。
+  // 取 eval gate 且带 commit_sha 的 verdicts，按 commit 分组算均分，最新两个
+  // commit = 新/旧版本，delta 决定准入（admit/brake/hold）—— 反刷分 #3 配对回放
+  // 的版本级视图（P5 是 case 级，F1 是 commit 级）。
+  const versionCompare = useMemo(() => {
+    const byCommit = new Map<string, { scores: number[]; latestAt: string }>();
+    for (const v of verdicts) {
+      if (v.gate !== 'eval' || !v.commit_sha) continue;
+      const entry = byCommit.get(v.commit_sha) ?? { scores: [], latestAt: v.created_at };
+      entry.scores.push(scoreOf(v));
+      if (v.created_at > entry.latestAt) entry.latestAt = v.created_at;
+      byCommit.set(v.commit_sha, entry);
+    }
+    if (byCommit.size < 2) return null;
+    const commits = [...byCommit.entries()].sort((a, b) => b[1].latestAt.localeCompare(a[1].latestAt));
+    const newC = commits[0];
+    const oldC = commits[1];
+    const newAvg = newC[1].scores.reduce((a, b) => a + b, 0) / newC[1].scores.length;
+    const oldAvg = oldC[1].scores.reduce((a, b) => a + b, 0) / oldC[1].scores.length;
+    const delta = newAvg - oldAvg;
+    const admit: 'admit' | 'brake' | 'hold' = delta > 0.001 ? 'admit' : delta < -0.001 ? 'brake' : 'hold';
+    return {
+      newSha: newC[0],
+      oldSha: oldC[0],
+      newAvg,
+      oldAvg,
+      delta,
+      admit,
+      newN: newC[1].scores.length,
+      oldN: oldC[1].scores.length,
+    };
+  }, [verdicts]);
+
+  if (trend.length === 0 && !versionCompare) {
     return <p className="eval-empty">暂无评估数据。回放（P4）或对会话打分即生成首条轨迹评分。</p>;
   }
-  if (trend.length < 2) {
-    // 单点画不出趋势线 —— 诚实标注数据不足，不渲染一根伪趋势。
-    return (
-      <div className="eval-card">
-        <p className="eval-empty">
-          仅 {trend.length} 天数据（{trend[0].date} · 均分 {trend[0].avg_score.toFixed(2)} · {trend[0].count} 次）。
-          回归曲线需 ≥2 天才能看趋势 —— 再回放几次（P4）补点。
-        </p>
+
+  const curve =
+    trend.length < 2 ? (
+      // 单点画不出趋势线 —— 诚实标注数据不足，不渲染一根伪趋势。
+      <p className="eval-empty">
+        仅 {trend.length} 天数据
+        {trend.length === 1 && `（${trend[0].date} · 均分 ${trend[0].avg_score.toFixed(2)} · ${trend[0].count} 次）`}
+        。回归曲线需 ≥2 天才能看趋势 —— 再回放几次（P4）补点。
+      </p>
+    ) : (
+      <div className="eval-chart">
+        <Line
+          data={{
+            labels: trend.map((p) => p.date),
+            datasets: [
+              {
+                label: '平均得分',
+                data: trend.map((p) => p.avg_score),
+                fill: true,
+                borderColor: 'var(--accent)',
+                backgroundColor: 'rgba(75, 96, 124, 0.08)',
+                tension: 0.3,
+                pointRadius: 3,
+              },
+            ],
+          }}
+          options={{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { y: { min: 0, max: 1 }, x: {} },
+          }}
+        />
       </div>
     );
-  }
-  const data = {
-    labels: trend.map((p) => p.date),
-    datasets: [
-      {
-        label: '平均得分',
-        data: trend.map((p) => p.avg_score),
-        fill: true,
-        borderColor: 'var(--accent)',
-        backgroundColor: 'rgba(75, 96, 124, 0.08)',
-        tension: 0.3,
-        pointRadius: 3,
-      },
-    ],
-  };
-  const options = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      y: { min: 0, max: 1 },
-      x: {},
-    },
-  };
+
   return (
-    <div className="eval-card">
-      <div className="eval-chart">
-        <Line data={data} options={options} />
-      </div>
-    </div>
+    <>
+      <div className="eval-card">{curve}</div>
+      {versionCompare && (
+        <div className="eval-card">
+          <div className="eval-section-label">新旧版本均分对比（按 commit_sha 派生 · 反刷分配对回放门）</div>
+          <div className="eval-version-compare">
+            <div className="eval-version-col old">
+              <div className="eval-hint mono">旧 · {versionCompare.oldSha.slice(0, 7)}</div>
+              <div className="eval-version-avg">{versionCompare.oldAvg.toFixed(3)}</div>
+              <div className="eval-hint mono">{versionCompare.oldN} 次 eval</div>
+            </div>
+            <div className="eval-version-delta">
+              <div className={`eval-version-delta-val ${versionCompare.admit}`}>
+                {versionCompare.delta >= 0 ? '+' : ''}
+                {versionCompare.delta.toFixed(3)}
+              </div>
+              {versionCompare.admit === 'admit' ? (
+                <span className="eval-badge eval-badge-clear">净提升 · 可准入</span>
+              ) : versionCompare.admit === 'brake' ? (
+                <span className="eval-badge eval-badge-brake">回归 · 拦</span>
+              ) : (
+                <span className="eval-badge eval-badge-unclear">持平 · 待判</span>
+              )}
+            </div>
+            <div className="eval-version-col new">
+              <div className="eval-hint mono">新 · {versionCompare.newSha.slice(0, 7)}</div>
+              <div className="eval-version-avg">{versionCompare.newAvg.toFixed(3)}</div>
+              <div className="eval-hint mono">{versionCompare.newN} 次 eval</div>
+            </div>
+          </div>
+          <div className="eval-hint">
+            verdicts 已带 commit_sha（run_eval_replay 记录），前端按 commit 聚合均分；delta&gt;0 准入 / &lt;0 拦 / =0 待判。
+            与 P5（case 级配对）互补：F1 是 commit 级整体回归门。
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1558,91 +1957,174 @@ function Flywheel({
   );
 }
 
-// ── A1 配对 Trace 树（span forest）──
-function OtelTraces() {
-  const sessions = useAgentStore((s) => s.sessions);
-  const finished = sessions.filter((s) => s.status === 'completed' || s.status === 'failed');
+// ── A1 配对 Trace 树（左右双栏 span forest）──
+function OtelTraces({ cases, verdicts }: { cases: EvalCaseRow[]; verdicts: VerdictRow[] }) {
+  const readyCases = cases.filter((c) => !c.draft);
+  const [caseId, setCaseId] = useState('');
+  useEffect(() => {
+    if (!caseId && readyCases.length > 0) setCaseId(readyCases[0].id);
+  }, [readyCases, caseId]);
 
-  const [sessionId, setSessionId] = useState('');
-  const [traj, setTraj] = useState<FullTrajectory | null>(null);
+  // 取该 case 的 eval verdicts（带 session_id 才能重建轨迹），new-first：
+  // [0]=新, [1]=旧（与 P5/PairedCompare 同序约定）。
+  const evalVs = verdicts.filter((v) => v.gate === 'eval' && v.case_id === caseId && v.session_id);
+  const [newV, oldV] = evalVs;
+
+  const [newTraj, setNewTraj] = useState<FullTrajectory | null>(null);
+  const [oldTraj, setOldTraj] = useState<FullTrajectory | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!sessionId && finished.length > 0) setSessionId(finished[0].id);
-  }, [finished, sessionId]);
-
-  async function load() {
-    if (!sessionId) return;
-    setLoading(true);
+    setNewTraj(null);
+    setOldTraj(null);
     setErr(null);
-    try {
-      setTraj(await evalApi.previewTrajectory(sessionId));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
+    if (!newV?.session_id) return;
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      evalApi.previewTrajectory(newV.session_id),
+      oldV?.session_id ? evalApi.previewTrajectory(oldV.session_id) : Promise.resolve(null),
+    ])
+      .then(([n, o]) => {
+        if (cancelled) return;
+        setNewTraj(n);
+        setOldTraj(o);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [newV?.session_id, oldV?.session_id]);
 
-  useEffect(() => {
-    if (sessionId) void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
-  const rootCount = traj?.span_tree.roots.length ?? 0;
-  const toolSpanCount =
-    traj?.span_tree.roots.reduce((n, r) => n + (r.children?.length ?? 0), 0) ?? 0;
+  const spanCount = (t: FullTrajectory | null) =>
+    t ? t.span_tree.roots.length + t.span_tree.roots.reduce((n, r) => n + (r.children?.length ?? 0), 0) : 0;
+  const stepNames = (t: FullTrajectory | null) => t?.steps.map((s) => s.name) ?? [];
 
   return (
     <div className="eval-card">
-      <div className="eval-section-label">选会话（渲染其 span 森林）</div>
-      <select className="eval-input" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-        {finished.length === 0 && <option value="">暂无已完成会话</option>}
-        {finished.map((s) => (
-          <option key={s.id} value={s.id}>
-            #{s.id.slice(0, 8)} · {s.prompt.slice(0, 40) || '(无提示词)'}
+      <div className="eval-section-label">选 Case（左右双栏渲染其新旧 eval 的 span 森林）</div>
+      <select className="eval-input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>
+        {readyCases.length === 0 && <option value="">暂无已审核 case</option>}
+        {readyCases.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
           </option>
         ))}
       </select>
 
-      {loading && <p className="eval-empty">提取 span 树…</p>}
+      {evalVs.length < 2 && (
+        <p className="eval-empty">
+          该 case 的 eval verdict 不足 2 条（{evalVs.length}）。至少回放两次（P4）才能左右配对 trace。
+        </p>
+      )}
+
+      {loading && <p className="eval-empty">提取双栏 span 树…</p>}
       {err && <p className="eval-empty">提取失败：{err}</p>}
 
-      {traj && (
-        <>
-          <div className="eval-hint mono">
-            {rootCount} 个 LLM 父 span · {toolSpanCount} 个 tool 子 span · 配对对齐底座（LLM=父，tool=子，
-            tid 串联给 L4 paired 用）
-          </div>
-          <div className="eval-span-forest">
-            {rootCount === 0 ? (
-              <span className="eval-empty">该会话无 trace span（纯文本轮 / 未记录）</span>
-            ) : (
-              traj.span_tree.roots.map((r, i) => <SpanNode key={i} span={r} depth={0} />)
-            )}
-          </div>
-          <div className="eval-hint">
-            现状：span 树从已记录的 HTTP trace 派生（非 OTLP）。左右配对会话的 tid 串联对齐是 L4 paired
-            的下一步。
-          </div>
-        </>
+      {newTraj && oldTraj && (
+        <div className="eval-paired-traces">
+          <TraceCol
+            title={`旧 · ${fmtTime(oldV.created_at)}`}
+            traj={oldTraj}
+            otherNames={stepNames(newTraj)}
+          />
+          <TraceCol
+            title={`新 · ${fmtTime(newV.created_at)}`}
+            traj={newTraj}
+            otherNames={stepNames(oldTraj)}
+            kind={netVerdict(oldV, newV)}
+          />
+        </div>
       )}
+      {newTraj && oldTraj && (
+        <div className="eval-compare-summary">
+          {netVerdict(oldV, newV) === 'improve' ? (
+            <span className="eval-badge eval-badge-clear">净提升 · 可准入</span>
+          ) : netVerdict(oldV, newV) === 'regress' ? (
+            <span className="eval-badge eval-badge-brake">回归 · 拦</span>
+          ) : (
+            <span className="eval-badge eval-badge-unclear">持平 · 待判</span>
+          )}
+          <span className="eval-hint mono">
+            {' '}
+            span 数：旧 {spanCount(oldTraj)} → 新 {spanCount(newTraj)}
+          </span>
+        </div>
+      )}
+      <div className="eval-hint">
+        span 树从已记录的 HTTP trace 派生（LLM=父 ◐，tool=子 └）。左右双栏对齐新旧 eval 的 tid 串联——
+        L4 paired 的可视化底座。OTLP 原生导出是后续工作。
+      </div>
     </div>
   );
 }
 
-function SpanNode({ span, depth }: { span: Span; depth: number }) {
+function TraceCol({
+  title,
+  traj,
+  otherNames,
+  kind,
+}: {
+  title: string;
+  traj: FullTrajectory;
+  otherNames: string[];
+  kind?: string;
+}) {
+  const rootCount = traj.span_tree.roots.length;
+  const toolSpanCount = traj.span_tree.roots.reduce((n, r) => n + (r.children?.length ?? 0), 0);
+  // diff: 一个 tool step 名字只在本侧出现（另一侧没有）= 这侧独有的策略增量。
+  const other = new Set(otherNames.map((s) => s.toLowerCase()));
+  return (
+    <div className={`eval-trace-col ${kind === 'regress' ? 'regress' : kind === 'improve' ? 'improve' : ''}`}>
+      <div className="eval-col-head">
+        <span>{title}</span>
+        <span className="eval-hint mono">
+          {rootCount} 父 · {toolSpanCount} 子
+        </span>
+      </div>
+      <div className="eval-span-forest">
+        {rootCount === 0 ? (
+          <span className="eval-empty">无 span（trace 已清或纯文本轮）</span>
+        ) : (
+          traj.span_tree.roots.map((r, i) => (
+            <SpanNode key={i} span={r} depth={0} diffOther={other} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SpanNode({
+  span,
+  depth,
+  diffOther,
+}: {
+  span: Span;
+  depth: number;
+  diffOther?: Set<string>;
+}) {
   const isLlm = span.kind === 'llm';
   const failed = span.status === 'error';
+  // tool span 名字在配对另一侧没有 → 这侧独有的策略增量，unique 高亮。
+  const unique = !isLlm && diffOther != null && !diffOther.has(span.name.toLowerCase());
   return (
-    <div className={`eval-span ${isLlm ? 'llm' : 'tool'} ${failed ? 'fail' : ''}`} style={{ marginLeft: depth * 16 }}>
+    <div
+      className={`eval-span ${isLlm ? 'llm' : 'tool'} ${failed ? 'fail' : ''} ${unique ? 'unique' : ''}`}
+      style={{ marginLeft: depth * 16 }}
+    >
       <span className="eval-span-kind">{isLlm ? '◐ LLM' : '└ tool'}</span>
       <span className="eval-span-name mono">{span.name}</span>
       {span.latency_ms != null && <span className="eval-hint mono">{span.latency_ms}ms</span>}
       {failed && <span className="eval-badge eval-badge-brake">error</span>}
       {(span.children ?? []).map((c, i) => (
-        <SpanNode key={i} span={c} depth={depth + 1} />
+        <SpanNode key={i} span={c} depth={depth + 1} diffOther={diffOther} />
       ))}
     </div>
   );

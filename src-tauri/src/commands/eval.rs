@@ -283,6 +283,7 @@ pub async fn run_eval_replay(
     working_dir: String,
     model: Option<String>,
     matcher: Matcher,
+    enable_skills: Option<bool>,
 ) -> Result<crate::eval::replay::ReplayVerdict, AppError> {
     let conn = db.get().map_err(|e| AppError::Internal(format!("db lock: {e}")))?;
     let case = eval_cases::get_eval_case(&conn, &case_id)?
@@ -295,9 +296,10 @@ pub async fn run_eval_replay(
         session_id,
         working_dir,
         model,
-        // A plain agent replay admits installed skills (the default). The
-        // platform-enablement eval toggles this off for its baseline run.
-        enable_skills: true,
+        // P4 功能开关矩阵的 skills 维：默认 true（plain agent replay admits
+        // installed skills），但 P4 现在允许显式关掉测基线（对齐 enablement
+        // 探针的 off 跑）。None = 默认 true，保持旧调用兼容。
+        enable_skills: enable_skills.unwrap_or(true),
         // Persist the verdict under the `eval` gate so it lands in the case's
         // formal eval history (the default; enablement probes pass None).
         verdict_gate: Some("eval".to_string()),

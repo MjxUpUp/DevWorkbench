@@ -27,7 +27,7 @@ vi.mock('../../utils/evalApi', () => ({
 import { evalApi } from '../../utils/evalApi';
 import { useAgentStore } from '../../stores/agentStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { EvalPanel, scoreOf } from '../dashboard/EvalPanel';
+import { EvalPanel, scoreOf, parseVerdictTrace } from '../dashboard/EvalPanel';
 import type { EvalCaseRow, VerdictRow } from '../../utils/evalApi';
 
 // A finished session the P3/A1 wizards can pick from.
@@ -234,8 +234,10 @@ describe('EvalPanel', () => {
     render(<EvalPanel />);
     await waitFor(() => expect(evalApi.listVerdicts).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId('eval-nav-P5'));
-    expect(screen.getByText('净提升 · 可准入')).toBeInTheDocument();
-    expect(screen.queryByText('回归 · 拦')).not.toBeInTheDocument();
+    // __all__ 聚合视图默认：c1 净提升 → "净提升 · 可准入（1/1）"。正则匹配保留序
+    // 守卫——若 [newV, oldV] 反号会聚合出 "回归 · 拦（N/N）"，被 /回归 · 拦/ 捉到。
+    expect(screen.getByText(/净提升 · 可准入/)).toBeInTheDocument();
+    expect(screen.queryByText(/回归 · 拦/)).not.toBeInTheDocument();
   });
 
   it('P2 detail saves the edited contract via updateCase (input_prompt stays locked)', async () => {
@@ -327,19 +329,46 @@ describe('EvalPanel', () => {
     expect(screen.getByText('manual intervention ⚠硬门')).toBeInTheDocument();
   });
 
-  it('A1 renders the span forest (LLM parent + tool child) from previewTrajectory', async () => {
-    useAgentStore.setState({ sessions: [finishedSession()] });
-    mockAll({ cases: [case_()] });
+  it('A1 renders the paired span forests (LLM parent + tool child) from previewTrajectory', async () => {
+    // A1 是 case 驱动双栏：取 c1 的新旧 eval verdicts（带 session_id）→ 两次
+    // previewTrajectory → 左右双栏 span 树。seed 两条 eval verdict，序 new-first。
+    mockAll({
+      cases: [case_()],
+      verdicts: [
+        verdict({
+          id: 'v-new',
+          case_id: 'c1',
+          gate: 'eval',
+          session_id: 'sess-new',
+          verdict: 'PASS',
+          attribution: 'CLEAR',
+          report: '{"score":0.9}',
+          created_at: '2026-07-02T14:02:00Z',
+        }),
+        verdict({
+          id: 'v-old',
+          case_id: 'c1',
+          gate: 'eval',
+          session_id: 'sess-old',
+          verdict: 'FAIL',
+          attribution: 'BRAKE',
+          report: '{"score":0.5}',
+          created_at: '2026-07-01T14:02:00Z',
+        }),
+      ],
+    });
     render(<EvalPanel />);
     fireEvent.click(screen.getByTestId('eval-nav-A1'));
-    // A1 auto-loads on session select; the mock's span tree has 1 LLM root
-    // (glm-4.6) with a Read tool child. Both render — replaces the old empty
-    // "A1 未接入" shell with a real span-tree view.
+    // 双栏各加载一次 previewTrajectory（新 + 旧 session）。
     await waitFor(() => {
-      expect(screen.getByText(/1 个 LLM 父 span/)).toBeInTheDocument();
+      expect(evalApi.previewTrajectory).toHaveBeenCalledWith('sess-new');
+      expect(evalApi.previewTrajectory).toHaveBeenCalledWith('sess-old');
     });
-    expect(screen.getByText('glm-4.6')).toBeInTheDocument();
-    expect(screen.getByText('Read')).toBeInTheDocument();
+    // mock span 树两边都含 glm-4.6 LLM 父 + Read tool 子（双栏 → 出现 ≥2 次）。
+    await waitFor(() => {
+      expect(screen.getAllByText('glm-4.6').length).toBeGreaterThanOrEqual(2);
+    });
+    expect(screen.getAllByText('Read').length).toBeGreaterThanOrEqual(2);
   });
 
   it('P2 blocks save on malformed expected_steps_json (contract must be well-formed)', async () => {
@@ -465,5 +494,78 @@ describe('EvalPanel', () => {
     expect(scoreOf(verdict({ verdict: 'FAIL', report: null }))).toBe(0);
     // PASS with no report → 1.
     expect(scoreOf(verdict({ verdict: 'PASS', report: null }))).toBe(1);
+  });
+
+  it('parseVerdictTrace mirrors backend gates.rs parse_verdict (adversarial contract)', () => {
+    // ① 首行 VERDICT: PASS 契约命中 + body 无 fail marker → PASS
+    expect(parseVerdictTrace('VERDICT: PASS\nlooks good').passed).toBe(true);
+    // ① 首行 PASS 但 body 有 fail marker → 覆盖为 FAIL（对抗性：冲突信号判 FAIL）
+    expect(parseVerdictTrace('VERDICT: PASS\nhowever, one defect remains.').passed).toBe(false);
+    // ① 首行 VERDICT: FAIL → FAIL
+    expect(parseVerdictTrace('VERDICT: FAIL\nfound a bug').passed).toBe(false);
+    // ③ 无契约 → keyword fallback：pass 词且无 fail marker → PASS
+    expect(parseVerdictTrace('The implementation is correct and passes review.').passed).toBe(true);
+    // ③ fail marker 主导 → FAIL
+    expect(parseVerdictTrace('大致通过，但存在缺陷。').passed).toBe(false);
+    // ③ 默认 FAIL（模糊/空 · 对抗性默认）
+    expect(parseVerdictTrace('').passed).toBe(false);
+    // 违约契约（首行仅含 VERDICT: PASS 但前置 defect）→ 降级 keyword → FAIL
+    expect(parseVerdictTrace('The work has defects. VERDICT: PASS').passed).toBe(false);
+  });
+
+  it('P1 flags a stale case whose source session is gone (⚠ 来源缺失)', async () => {
+    // case source_session_id='a3f2c468'，但 sessions 里没有它 → 来源失效。
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    await screen.findByText('⚠ 来源缺失');
+    expect(screen.queryByText(/#a3f2c468/)).not.toBeInTheDocument();
+  });
+
+  it('P1 clears stale when the source session is still live', async () => {
+    useAgentStore.setState({ sessions: [{ id: 'a3f2c468', status: 'completed' } as never] });
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    await screen.findByText(/#a3f2c468/);
+    expect(screen.queryByText('⚠ 来源缺失')).not.toBeInTheDocument();
+  });
+
+  it('F1 surfaces the new vs old commit version-compare card with delta + admit', async () => {
+    // 两个 commit 的 eval verdicts：新 commit 均分高 → 准入。verdicts 已带 commit_sha，
+    // 前端按 commit 派生（eval_trend 后端无 version 维度）。
+    mockAll({
+      cases: [case_()],
+      verdicts: [
+        verdict({
+          id: 'v-new',
+          case_id: 'c1',
+          gate: 'eval',
+          verdict: 'PASS',
+          commit_sha: 'new1111',
+          report: '{"score":0.9}',
+          created_at: '2026-07-02T14:02:00Z',
+        }),
+        verdict({
+          id: 'v-old',
+          case_id: 'c1',
+          gate: 'eval',
+          verdict: 'FAIL',
+          commit_sha: 'old0000',
+          report: '{"score":0.5}',
+          created_at: '2026-07-01T14:02:00Z',
+        }),
+      ],
+      trend: [
+        { date: '2026-07-01', avg_score: 0.5, count: 1 },
+        { date: '2026-07-02', avg_score: 0.9, count: 1 },
+      ],
+    });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-F1'));
+    // 版本对比卡片渲染：新 0.9 / 旧 0.5 / delta +0.400 / 准入。
+    await waitFor(() => {
+      expect(screen.getByText(/新旧版本均分对比/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/净提升 · 可准入/)).toBeInTheDocument();
+    expect(screen.getByText('+0.400')).toBeInTheDocument();
   });
 });

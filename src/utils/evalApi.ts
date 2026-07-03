@@ -295,9 +295,22 @@ export const evalApi = {
 
   // ----- L3 replay（P4 触发 / P5 单次视图）-----
   /** 跑一次回放：加载 case → Plan 沙箱 agent 跑 input_prompt → 轨迹打分 → 落 verdict。
-   *  需 live provider key（agent 真跑）。working_dir 是被测工作区（只读沙箱）。 */
-  runReplay: (caseId: string, workingDir: string, matcher: Matcher, model?: string) =>
-    invoke<ReplayVerdict>('run_eval_replay', { caseId, workingDir, matcher, model }),
+   *  需 live provider key（agent 真跑）。working_dir 是被测工作区（只读沙箱）。
+   *  enableSkills: P4 功能开关矩阵的 skills 维（None=默认 true）。 */
+  runReplay: (
+    caseId: string,
+    workingDir: string,
+    matcher: Matcher,
+    model?: string,
+    enableSkills?: boolean,
+  ) =>
+    invoke<ReplayVerdict>('run_eval_replay', {
+      caseId,
+      workingDir,
+      matcher,
+      model,
+      enableSkills,
+    }),
 
   // ----- P3 会话→Case 预览 -----
   /** 预览一个会话重建的富轨迹（不落库）：步 + 文件 + token + 成本 + span 树。
