@@ -17,6 +17,44 @@ use crate::cost::circuit_breaker::CircuitBreaker;
 use crate::cost::sink::CostSink;
 use crate::trace::{LlmTrace, TimingChecker, TraceSink};
 
+/// A1 (OTel span tree): the span context a ChatModel attributes every LLM call
+/// to. One per agent instance — `span_id` groups all calls this model makes
+/// into one trace-tree node; `parent_span_id` is the orchestrating agent's
+/// span (None for the root). Set at agent construction (`SpanContext::root`)
+/// and at fork (`SpanContext::child_of`) so the agent-DAG nesting (main →
+/// subagent) surfaces in TraceView. All-None = no span context (ad-hoc/test
+/// agents) — recorded as NULL, an honest absence rather than a faked root.
+#[derive(Debug, Clone, Default)]
+pub struct SpanContext {
+    pub span_id: Option<String>,
+    pub parent_span_id: Option<String>,
+    pub span_name: Option<String>,
+}
+
+impl SpanContext {
+    /// Root span for a top-level agent (no parent). `name` labels the node in
+    /// the trace tree (e.g. "agent").
+    pub fn root(name: &str) -> Self {
+        Self {
+            span_id: Some(uuid::Uuid::new_v4().to_string()),
+            parent_span_id: None,
+            span_name: Some(name.to_string()),
+        }
+    }
+
+    /// Child span under `parent_span_id` — used at fork so a sub-agent's calls
+    /// nest under the orchestrating agent in the tree. `parent_span_id` = None
+    /// (the parent carried no span) yields a rootless child: still attributed
+    /// to its own span, just not nested (honest, not faked).
+    pub fn child_of(parent_span_id: Option<&str>, name: &str) -> Self {
+        Self {
+            span_id: Some(uuid::Uuid::new_v4().to_string()),
+            parent_span_id: parent_span_id.map(str::to_string),
+            span_name: Some(name.to_string()),
+        }
+    }
+}
+
 /// Cross-cutting state shared by every concrete `ChatModel`: HTTP client,
 /// credential, circuit breaker, cost/trace sinks, timing + session attribution,
 /// and the bound tools (tools bind identically at the trait level; only the
@@ -50,6 +88,10 @@ pub struct ChatModelShared {
     /// protocol, but held here so the trait's `with_tools` clone-and-swap is
     /// shared.
     pub bound_tools: Vec<ToolInfo>,
+    /// A1 (OTel span tree): every LLM call this model makes is attributed to
+    /// this span. Default = no span context (ad-hoc/test); production agents
+    /// set a root span at construction and a child span at fork.
+    pub span: SpanContext,
 }
 
 impl ChatModelShared {
@@ -72,6 +114,7 @@ impl ChatModelShared {
             timing_checker: None,
             session_id: None,
             bound_tools: Vec::new(),
+            span: SpanContext::default(),
         }
     }
 
@@ -101,6 +144,15 @@ impl ChatModelShared {
 
     pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    /// Attach a span context (A1 OTel span tree). Every LLM call this model
+    /// makes is then attributed to `span.span_id` with `span.parent_span_id`,
+    /// so TraceView renders the agent-DAG nesting. Used at agent construction
+    /// (root span) and at fork (child span under the orchestrator).
+    pub fn with_span(mut self, span: SpanContext) -> Self {
+        self.span = span;
         self
     }
 
@@ -165,8 +217,111 @@ impl ChatModelShared {
                     output_tokens,
                     ttfb_ms,
                     stream_ms,
+                    span_id: self.span.span_id.clone(),
+                    parent_span_id: self.span.parent_span_id.clone(),
+                    span_name: self.span.span_name.clone(),
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A TraceSink that captures every (session_id, LlmTrace) pair so a test can
+    /// assert exactly what record_trace stamped — the production DbTraceSink
+    /// fire-and-forgets into SQLite, which would make the span attribution
+    /// unverifiable without a DB round-trip.
+    struct CapturingSink(Mutex<Vec<(Option<String>, LlmTrace)>>);
+    impl TraceSink for CapturingSink {
+        fn record_llm_call(&self, session_id: Option<&str>, trace: LlmTrace) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((session_id.map(String::from), trace));
+        }
+    }
+
+    #[test]
+    fn span_context_root_has_no_parent() {
+        let s = SpanContext::root("agent");
+        assert!(s.span_id.is_some(), "root gets a fresh span_id");
+        assert!(s.parent_span_id.is_none(), "root has no parent");
+        assert_eq!(s.span_name.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn span_context_child_of_nests_under_parent() {
+        let s = SpanContext::child_of(Some("span-root"), "subagent");
+        assert!(s.span_id.is_some());
+        assert_ne!(
+            s.span_id.as_deref(),
+            Some("span-root"),
+            "child must get its OWN span_id, not reuse the parent's"
+        );
+        assert_eq!(s.parent_span_id.as_deref(), Some("span-root"));
+        assert_eq!(s.span_name.as_deref(), Some("subagent"));
+    }
+
+    #[test]
+    fn span_context_child_of_none_is_rootless_not_faked() {
+        // A fork from an ad-hoc/test parent (no span) yields a child with its
+        // own span but no parent — an honest rootless node, not a faked root.
+        let s = SpanContext::child_of(None, "subagent");
+        assert!(s.span_id.is_some());
+        assert!(s.parent_span_id.is_none());
+    }
+
+    #[test]
+    fn span_context_default_is_all_none() {
+        let s = SpanContext::default();
+        assert!(s.span_id.is_none());
+        assert!(s.parent_span_id.is_none());
+        assert!(s.span_name.is_none());
+    }
+
+    /// The core A1 attribution contract: record_trace stamps the model's span
+    /// context onto the LlmTrace it hands the sink, so every call this agent
+    /// makes lands in the trace tree under its span. Without this the span
+    /// columns would always be NULL — the columns exist but carry nothing.
+    #[test]
+    fn record_trace_stamps_span_context_onto_trace() {
+        let inner = Arc::new(CapturingSink(Mutex::new(vec![])));
+        let sink: Arc<dyn TraceSink> = inner.clone();
+        let shared = ChatModelShared::new("https://x", "k", "m")
+            .with_session_id(Some("sess-1".into()))
+            .with_trace_sink(sink)
+            .with_span(SpanContext {
+                span_id: Some("span-agent".into()),
+                parent_span_id: None,
+                span_name: Some("agent".into()),
+            });
+        shared.record_trace("glm-4.6", Some(200), None, "{}", None, 5, None, None, None, None);
+        let captured = inner.0.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one trace recorded");
+        let (sid, trace) = &captured[0];
+        assert_eq!(sid.as_deref(), Some("sess-1"));
+        assert_eq!(trace.span_id.as_deref(), Some("span-agent"));
+        assert!(trace.parent_span_id.is_none());
+        assert_eq!(trace.span_name.as_deref(), Some("agent"));
+    }
+
+    /// An ad-hoc model (no span attached) records span_id = NULL — honest
+    /// absence, not a faked root span. Guards against record_trace inventing a
+    /// span where none was set.
+    #[test]
+    fn record_trace_leaves_span_null_when_no_span_attached() {
+        let inner = Arc::new(CapturingSink(Mutex::new(vec![])));
+        let sink: Arc<dyn TraceSink> = inner.clone();
+        let shared = ChatModelShared::new("https://x", "k", "m").with_trace_sink(sink);
+        shared.record_trace("m", None, Some("network"), "{}", None, 1, None, None, None, None);
+        let captured = inner.0.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].1.span_id.is_none());
+        assert!(captured[0].1.parent_span_id.is_none());
+        assert!(captured[0].1.span_name.is_none());
     }
 }

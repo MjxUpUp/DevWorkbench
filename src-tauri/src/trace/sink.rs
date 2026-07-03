@@ -56,6 +56,21 @@ pub struct LlmTrace {
     /// there was no streaming phase (e.g. headers-only non_2xx) or pre-B3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_ms: Option<u64>,
+    /// A1 (OTel span tree): the span this call belongs to. One span per agent
+    /// instance — every LLM call a model makes shares its `span_id`, so
+    /// TraceView groups calls by the agent that issued them and renders the
+    /// agent-DAG nesting (main → subagent). None for ad-hoc/test agents that
+    /// carry no span context (honest absence, not a faked root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// A1: the orchestrating agent's `span_id` (the span that spawned this
+    /// one). None for the root agent (top of the tree) or ad-hoc/test agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_span_id: Option<String>,
+    /// A1: human label for the span ("agent" | "subagent" | …) so the tree
+    /// renders a name per node instead of a bare id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_name: Option<String>,
 }
 
 /// Receives one trace record per LLM call. Implementations must be cheap to
@@ -110,6 +125,9 @@ impl TraceSink for DbTraceSink {
             output_tokens: trace.output_tokens.map(|t| t as i64),
             ttfb_ms: trace.ttfb_ms.map(|t| t as i64),
             stream_ms: trace.stream_ms.map(|t| t as i64),
+            span_id: trace.span_id,
+            parent_span_id: trace.parent_span_id,
+            span_name: trace.span_name,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         let db = self.db.clone();
@@ -284,6 +302,9 @@ mod tests {
                 output_tokens: None,
                 ttfb_ms: None,
                 stream_ms: None,
+                span_id: None,
+                parent_span_id: None,
+                span_name: None,
             },
         );
         // spawn_blocking is fire-and-forget; poll the table until the row lands
@@ -327,6 +348,9 @@ mod tests {
                 output_tokens: None,
                 ttfb_ms: None,
                 stream_ms: None,
+                span_id: None,
+                parent_span_id: None,
+                span_name: None,
             },
         );
     }

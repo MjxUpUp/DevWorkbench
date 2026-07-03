@@ -45,6 +45,13 @@ fn build_chat_model(
     trace_sink: Arc<dyn crate::trace::TraceSink>,
     session_id: Option<String>,
     timing_checker: Arc<crate::trace::TimingChecker>,
+    // A1: span_name labels the root span this model attributes its LLM calls to.
+    // "agent" = an orchestrator/main agent; "workflow-worker" = a workflow DAG
+    // node (not nested under its orchestrator — threading parent_span_id through
+    // build_react_agent's long param list is high blast radius, deferred); a
+    // worker's calls are still attributed to its own node, just distinguishable
+    // from the orchestrator. Sub-agents fork a child span under this root.
+    span_name: &str,
 ) -> Arc<dyn kernel_core::ChatModel> {
     match protocol {
         crate::config::providers::ProtocolKind::Anthropic => Arc::new(
@@ -53,7 +60,10 @@ fn build_chat_model(
                 .with_cost_sink(cost_sink)
                 .with_trace_sink(trace_sink)
                 .with_session_id(session_id)
-                .with_timing_checker(timing_checker),
+                .with_timing_checker(timing_checker)
+                .with_span(crate::kernel_impl::chat_model_shared::SpanContext::root(
+                    span_name,
+                )),
         ),
         crate::config::providers::ProtocolKind::OpenAI => Arc::new(
             OpenAIChatModel::new(endpoint, api_key, model)
@@ -61,7 +71,10 @@ fn build_chat_model(
                 .with_cost_sink(cost_sink)
                 .with_trace_sink(trace_sink)
                 .with_session_id(session_id)
-                .with_timing_checker(timing_checker),
+                .with_timing_checker(timing_checker)
+                .with_span(crate::kernel_impl::chat_model_shared::SpanContext::root(
+                    span_name,
+                )),
         ),
     }
 }
@@ -111,6 +124,10 @@ fn build_one_shot_chat(
         crate::trace::sink::optional_shared(Some(db.clone()), Some(conv)),
         None,
         Arc::new(crate::trace::TimingChecker::default_threshold()),
+        // A1: the adversarial reviewer is a one-shot gate call, not an agent in
+        // the run DAG — distinct span_name so its trace node doesn't masquerade
+        // as an orchestrator/worker agent.
+        "gate-verify",
     ))
 }
 
@@ -604,6 +621,13 @@ pub(crate) fn build_react_agent(
         // > 30s) via a warn log. Pure observability (no gating) so a hardcoded
         // default threshold is honest here.
         std::sync::Arc::new(crate::trace::TimingChecker::default_threshold()),
+        // A1: span_name distinguishes an orchestrator (app = Some, can self-plan)
+        // from a workflow DAG worker node (app = None). Worker nodes are NOT
+        // nested under their orchestrator's span — threading parent_span_id
+        // through this builder's param list is high blast radius, so deferred;
+        // the worker still gets its own attributed span, just a distinct label
+        // so TraceView can tell it from the orchestrator.
+        if app.is_some() { "agent" } else { "workflow-worker" },
     );
 
     // Build the tool registry: skills + MCP tools + the subagent dispatcher.

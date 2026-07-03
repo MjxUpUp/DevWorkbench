@@ -54,6 +54,276 @@ function statusBadge(t: LlmTrace): Badge {
   return { label: String(t.status_code), color: 'var(--danger)' };
 }
 
+// ---- A1 span tree (OTel-aligned trace attribution) ----
+
+/** A span node in the trace tree: one per agent instance. Holds the calls that
+ *  agent made (ASC) + its child spans (the sub-agents it dispatched). Built from
+ *  the flat trace list by grouping on span_id and linking via parent_span_id —
+ *  the same parent/child relationship an OTel tracer emits, derived here from
+ *  the per-call span context the ChatModel stamps at record time. */
+type SpanNode = {
+  spanId: string;
+  name: string;
+  parent: string | null;
+  traces: LlmTrace[];
+  children: SpanNode[];
+};
+
+/** Synthetic id for traces with no span_id (pre-v22 rows / ad-hoc agents). They
+ *  bucket into one root-level "unattributed" group so a mixed session still
+ *  renders every call. */
+const UNATTRIBUTED = '__dw_unattributed__';
+
+/** True when at least one trace carries a span_id — i.e. the session was
+ *  recorded post-A1 by a span-attributed agent. When false, TraceView renders
+ *  the legacy flat timeline (backward-compatible with all pre-A1 sessions). */
+function hasSpans(traces: LlmTrace[]): boolean {
+  return traces.some((t) => t.span_id != null);
+}
+
+function cmpCreated(a: LlmTrace, b: LlmTrace): number {
+  return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0;
+}
+
+/** Group a flat trace list into a span forest. Each unique span_id becomes a
+ *  node; parent_span_id links a node under its orchestrator's node. A node
+ *  whose parent isn't in the set (the orchestrator made no LLM calls itself) is
+ *  treated as a root. Root + child order is deterministic by first-call time. */
+function buildSpanForest(traces: LlmTrace[]): SpanNode[] {
+  const buckets = new Map<string, LlmTrace[]>();
+  const parentOf = new Map<string, string | null>();
+  const nameOf = new Map<string, string>();
+  for (const t of traces) {
+    const key = t.span_id ?? UNATTRIBUTED;
+    const arr = buckets.get(key);
+    if (arr) arr.push(t);
+    else buckets.set(key, [t]);
+    if (!parentOf.has(key)) {
+      parentOf.set(key, t.span_id == null ? null : t.parent_span_id);
+    }
+    if (!nameOf.has(key)) {
+      nameOf.set(key, t.span_id == null ? '无 span 归属' : t.span_name ?? 'span');
+    }
+  }
+  const nodes = new Map<string, SpanNode>();
+  for (const [key, arr] of buckets) {
+    arr.sort(cmpCreated);
+    nodes.set(key, {
+      spanId: key,
+      name: nameOf.get(key) ?? 'span',
+      parent: parentOf.get(key) ?? null,
+      traces: arr,
+      children: [],
+    });
+  }
+  const roots: SpanNode[] = [];
+  for (const node of nodes.values()) {
+    const parent = node.parent != null ? nodes.get(node.parent) : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+  const byFirstCall = (a: SpanNode, b: SpanNode) => cmpCreated(a.traces[0], b.traces[0]);
+  roots.sort(byFirstCall);
+  for (const node of nodes.values()) node.children.sort(byFirstCall);
+  return roots;
+}
+
+/** One trace row (button + expand). Extracted so the flat timeline and the span
+ *  tree render identical rows — the expand/detail UX doesn't diverge by mode. */
+function TraceRow({
+  trace,
+  index,
+  expanded,
+  onToggle,
+}: {
+  trace: LlmTrace;
+  index: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const badge = statusBadge(trace);
+  const slow = timingBadge(trace);
+  const is2xx =
+    trace.status_code != null && trace.status_code >= 200 && trace.status_code < 300;
+  return (
+    <div style={{ borderBottom: '1px solid var(--border)' }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={onToggle}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          width: '100%',
+          padding: '8px 12px',
+          background: 'transparent',
+          border: 'none',
+          textAlign: 'left',
+          font: 'inherit',
+          color: 'inherit',
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{ color: 'var(--text-tertiary)', minWidth: 28 }}>#{index + 1}</span>
+        <span style={{ minWidth: 140, fontWeight: 500 }}>{trace.model}</span>
+        <span style={{ color: badge.color, fontWeight: 600, minWidth: 48 }}>{badge.label}</span>
+        <span style={{ color: 'var(--text-tertiary)', minWidth: 72 }}>
+          {trace.latency_ms != null ? `${trace.latency_ms}ms` : '—'}
+        </span>
+        <span style={{ color: 'var(--text-tertiary)', minWidth: 108, fontSize: 'var(--text-xs)' }}>
+          {trace.ttfb_ms != null || trace.stream_ms != null
+            ? `ttfb ${trace.ttfb_ms ?? '—'} / stream ${trace.stream_ms ?? '—'}`
+            : ''}
+        </span>
+        <span style={{ color: 'var(--text-tertiary)', minWidth: 96 }}>
+          {trace.input_tokens != null || trace.output_tokens != null
+            ? `${trace.input_tokens ?? 0}/${trace.output_tokens ?? 0} tok`
+            : '—'}
+        </span>
+        {slow && (
+          <span style={{ color: slow.color, fontSize: 'var(--text-xs)', fontWeight: 600 }}>
+            {slow.label}
+          </span>
+        )}
+        {trace.error_kind && (
+          <span style={{ color: 'var(--danger)', fontSize: 'var(--text-xs)' }}>{trace.error_kind}</span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--text-tertiary)' }}>{expanded ? '▾' : '▸'}</span>
+      </button>
+      {expanded && (
+        <div style={{ padding: '8px 12px 12px', background: 'var(--surface-2)' }}>
+          <TimingBreakdown trace={trace} />
+          <DetailSection title="Request body" body={trace.req_body} />
+          {trace.resp_body ? (
+            <DetailSection
+              title={is2xx ? 'Response body' : 'Response body (error)'}
+              body={trace.resp_body}
+              isError={!is2xx}
+            />
+          ) : (
+            trace.error_kind && (
+              <div style={{ marginTop: 8, color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
+                无 response body（{trace.error_kind}：调用未到达 HTTP，没有响应体可记录）。
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Recursive span group: header (name + call count + failures + tokens) then
+ *  this span's trace rows, then child spans indented under a left rule. */
+function SpanGroup({
+  node,
+  depth,
+  indexMap,
+  expanded,
+  onToggle,
+}: {
+  node: SpanNode;
+  depth: number;
+  indexMap: Map<string, number>;
+  expanded: string | null;
+  onToggle: (id: string) => void;
+}) {
+  const failCount = node.traces.filter(
+    (t) => t.status_code == null || t.status_code >= 400,
+  ).length;
+  const inTok = node.traces.reduce((s, t) => s + (t.input_tokens ?? 0), 0);
+  const outTok = node.traces.reduce((s, t) => s + (t.output_tokens ?? 0), 0);
+  return (
+    <div
+      style={{
+        marginLeft: depth > 0 ? 16 : 0,
+        borderLeft: depth > 0 ? '2px solid var(--border)' : 'none',
+        paddingLeft: depth > 0 ? 8 : 0,
+      }}
+    >
+      <div
+        data-testid="span-group-header"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '6px 12px',
+          background: 'var(--surface-2)',
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>{node.name}</span>
+        <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
+          {node.traces.length} 次调用
+        </span>
+        {failCount > 0 && (
+          <span style={{ color: 'var(--danger)', fontSize: 'var(--text-xs)' }}>{failCount} 失败</span>
+        )}
+        {(inTok > 0 || outTok > 0) && (
+          <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
+            {inTok}/{outTok} tok
+          </span>
+        )}
+      </div>
+      {node.traces.map((t) => (
+        <TraceRow
+          key={t.id}
+          trace={t}
+          index={indexMap.get(t.id) ?? 0}
+          expanded={expanded === t.id}
+          onToggle={() => onToggle(t.id)}
+        />
+      ))}
+      {node.children.map((c) => (
+        <SpanGroup
+          key={c.spanId}
+          node={c}
+          depth={depth + 1}
+          indexMap={indexMap}
+          expanded={expanded}
+          onToggle={onToggle}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Build the forest + a global call-index map (depth-first: a span's own calls
+ *  before its children) and render the roots. Global numbering lets a user
+ *  reference "call #5" regardless of which span it sits in. */
+function SpanForest({
+  traces,
+  expanded,
+  onToggle,
+}: {
+  traces: LlmTrace[];
+  expanded: string | null;
+  onToggle: (id: string) => void;
+}) {
+  const forest = buildSpanForest(traces);
+  const indexMap = new Map<string, number>();
+  let counter = 0;
+  const walk = (node: SpanNode) => {
+    for (const t of node.traces) indexMap.set(t.id, counter++);
+    for (const c of node.children) walk(c);
+  };
+  for (const root of forest) walk(root);
+  return (
+    <>
+      {forest.map((root) => (
+        <SpanGroup
+          key={root.spanId}
+          node={root}
+          depth={0}
+          indexMap={indexMap}
+          expanded={expanded}
+          onToggle={onToggle}
+        />
+      ))}
+    </>
+  );
+}
+
 export function TraceView() {
   const traceSessionId = useNavigationStore((s) => s.traceSessionId);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
@@ -113,71 +383,23 @@ export function TraceView() {
 
         {!loading && !error && traces && traces.length > 0 && (
           <div className="agent-block-body" style={{ padding: 0 }}>
-            {traces.map((t, i) => {
-              const badge = statusBadge(t);
-              const slow = timingBadge(t);
-              const isOpen = expanded === t.id;
-              // 2xx success rows now also persist resp_body (the full assistant
-              // output); only those render the body section as a normal (non-error)
-              // response. Anything else carrying a body is an error diagnostic.
-              const is2xx = t.status_code != null && t.status_code >= 200 && t.status_code < 300;
-              return (
-                <div key={t.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <button
-                    type="button"
-                    aria-expanded={isOpen}
-                    onClick={() => setExpanded(isOpen ? null : t.id)}
-                    style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '8px 12px', background: 'transparent', border: 'none', textAlign: 'left', font: 'inherit', color: 'inherit', cursor: 'pointer' }}
-                  >
-                    <span style={{ color: 'var(--text-tertiary)', minWidth: 28 }}>#{i + 1}</span>
-                    <span style={{ minWidth: 140, fontWeight: 500 }}>{t.model}</span>
-                    <span style={{ color: badge.color, fontWeight: 600, minWidth: 48 }}>{badge.label}</span>
-                    <span style={{ color: 'var(--text-tertiary)', minWidth: 72 }}>
-                      {t.latency_ms != null ? `${t.latency_ms}ms` : '—'}
-                    </span>
-                    {/* B3 ttfb/stream split — time-to-first-byte vs output time.
-                        Shown inline only when present (post-v18 rows); the full
-                        breakdown + "other" (send overhead) is in the expand. */}
-                    <span style={{ color: 'var(--text-tertiary)', minWidth: 108, fontSize: 'var(--text-xs)' }}>
-                      {t.ttfb_ms != null || t.stream_ms != null
-                        ? `ttfb ${t.ttfb_ms ?? '—'} / stream ${t.stream_ms ?? '—'}`
-                        : ''}
-                    </span>
-                    <span style={{ color: 'var(--text-tertiary)', minWidth: 96 }}>
-                      {t.input_tokens != null || t.output_tokens != null
-                        ? `${t.input_tokens ?? 0}/${t.output_tokens ?? 0} tok`
-                        : '—'}
-                    </span>
-                    {slow && (
-                      <span style={{ color: slow.color, fontSize: 'var(--text-xs)', fontWeight: 600 }}>{slow.label}</span>
-                    )}
-                    {t.error_kind && (
-                      <span style={{ color: 'var(--danger)', fontSize: 'var(--text-xs)' }}>{t.error_kind}</span>
-                    )}
-                    <span style={{ marginLeft: 'auto', color: 'var(--text-tertiary)' }}>{isOpen ? '▾' : '▸'}</span>
-                  </button>
-                  {isOpen && (
-                    <div style={{ padding: '8px 12px 12px', background: 'var(--surface-2)' }}>
-                      <TimingBreakdown trace={t} />
-                      <DetailSection title="Request body" body={t.req_body} />
-                      {t.resp_body ? (
-                        <DetailSection
-                          title={is2xx ? 'Response body' : 'Response body (error)'}
-                          body={t.resp_body}
-                          isError={!is2xx}
-                        />
-                      ) : (
-                        t.error_kind && (
-                          <div style={{ marginTop: 8, color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
-                            无 response body（{t.error_kind}：调用未到达 HTTP，没有响应体可记录）。
-                          </div>
-                        )
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {hasSpans(traces) ? (
+              <SpanForest
+                traces={traces}
+                expanded={expanded}
+                onToggle={(id) => setExpanded(expanded === id ? null : id)}
+              />
+            ) : (
+              traces.map((t, i) => (
+                <TraceRow
+                  key={t.id}
+                  trace={t}
+                  index={i}
+                  expanded={expanded === t.id}
+                  onToggle={() => setExpanded(expanded === t.id ? null : t.id)}
+                />
+              ))
+            )}
           </div>
         )}
       </div>

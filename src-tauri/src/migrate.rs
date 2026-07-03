@@ -915,6 +915,56 @@ pub fn migrate_v21_to_v22(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v22→v23: add `llm_traces.span_id` / `parent_span_id` / `span_name` so each
+/// trace row carries its OTel-style span context (A1 trace span tree). One span
+/// per agent instance: every LLM call a model makes shares its `span_id`, and
+/// `parent_span_id` is the orchestrating agent's span (NULL for the root) —
+/// TraceView groups calls by span and renders the agent-DAG nesting (main →
+/// subagent). Same idempotent shape as v17→v18: probe each column (fresh DBs
+/// already have them from the static SCHEMA), ALTER only if missing, then bump
+/// the version. ALTER without DEFAULT → NULL on existing rows, which is the
+/// honest "no span context" signal (pre-v23 rows and ad-hoc agents).
+pub fn migrate_v22_to_v23(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 23 {
+        return Ok(());
+    }
+
+    let span_id_exists = conn
+        .prepare("SELECT span_id FROM llm_traces LIMIT 0")
+        .is_ok();
+    if !span_id_exists {
+        conn.execute("ALTER TABLE llm_traces ADD COLUMN span_id TEXT", [])?;
+    }
+    let parent_exists = conn
+        .prepare("SELECT parent_span_id FROM llm_traces LIMIT 0")
+        .is_ok();
+    if !parent_exists {
+        conn.execute("ALTER TABLE llm_traces ADD COLUMN parent_span_id TEXT", [])?;
+    }
+    let name_exists = conn
+        .prepare("SELECT span_name FROM llm_traces LIMIT 0")
+        .is_ok();
+    if !name_exists {
+        conn.execute("ALTER TABLE llm_traces ADD COLUMN span_name TEXT", [])?;
+    }
+    if !span_id_exists || !parent_exists || !name_exists {
+        log::info!("Migrated schema v22→v23: added llm_traces span columns (A1 OTel span tree)");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (23, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,14 +1524,16 @@ mod tests {
         assert_eq!(table_exists, 1, "llm_traces must be created on pre-v14 DB");
 
         // Bring the table to the CURRENT shape before inserting: production
-        // always runs the full v14→v18 chain, and v17→v18 is what ALTERs in the
-        // timing columns insert_llm_trace now writes. v13→v14 alone stops at the
-        // pre-timing shape, so the insert path is only meaningful against the
-        // fully-migrated table that real DBs reach.
+        // always runs the full migration chain. v17→v18 ALTERs in the timing
+        // columns and v22→v23 ALTERs in the span columns insert_llm_trace now
+        // writes. v13→v14 alone stops at the pre-timing/pre-span shape, so the
+        // insert path is only meaningful against the fully-migrated table that
+        // real DBs reach.
         migrate_v14_to_v15(&conn).unwrap();
         migrate_v15_to_v16(&conn).unwrap();
         migrate_v16_to_v17(&conn).unwrap();
         migrate_v17_to_v18(&conn).unwrap();
+        migrate_v22_to_v23(&conn).unwrap();
 
         // The insert path works end-to-end against the fully-migrated table.
         crate::trace::db::insert_llm_trace(
@@ -1501,10 +1553,69 @@ mod tests {
                 output_tokens: None,
                 ttfb_ms: None,
                 stream_ms: None,
+                span_id: None,
+                parent_span_id: None,
+                span_name: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
         .expect("insert must work on migrated table");
+    }
+
+    /// v22→v23 adds the span columns (span_id / parent_span_id / span_name) to
+    /// a pre-v23 llm_traces table that lacks them, then a span-attributed row
+    /// round-trips through INSERT→SELECT so TraceView can build the agent-DAG
+    /// tree. Idempotent: a second run is a no-op (columns already present,
+    /// version already 23). Mirrors the v17→v18 timing migration's probe-then-
+    /// ALTER shape.
+    #[test]
+    fn migrate_v22_to_v23_adds_span_columns_and_round_trips() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("legacy23.db");
+        let conn = db::init_db(&path).unwrap();
+        // Simulate a pre-v23 table: drop the SCHEMA-created table, clear the
+        // version row, then rebuild via v13→v14 (old shape) + v17→v18 (timing
+        // only). Span columns are still absent — the precondition v22→v23 fixes.
+        conn.execute("DROP TABLE llm_traces", []).unwrap();
+        conn.execute("DELETE FROM schema_version", []).unwrap();
+        migrate_v13_to_v14(&conn).unwrap();
+        migrate_v17_to_v18(&conn).unwrap();
+        assert!(
+            conn.prepare("SELECT span_id FROM llm_traces LIMIT 0")
+                .is_err(),
+            "span_id must be absent before v22→v23"
+        );
+
+        migrate_v22_to_v23(&conn).expect("v22→v23 must add span columns");
+        // Idempotent: columns now present + version>=23 → short-circuits.
+        migrate_v22_to_v23(&conn).expect("v22→v23 must be idempotent");
+
+        let row = crate::trace::db::LlmTraceRow {
+            id: "span1".into(),
+            session_id: Some("s1".into()),
+            conversation_id: None,
+            model: "glm-4.6".into(),
+            base_url: "https://x".into(),
+            status_code: Some(200),
+            error_kind: None,
+            req_body: "{}".into(),
+            resp_body: None,
+            latency_ms: Some(5),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            ttfb_ms: None,
+            stream_ms: None,
+            span_id: Some("span-aaa".into()),
+            parent_span_id: Some("span-root".into()),
+            span_name: Some("subagent".into()),
+            created_at: "2026-07-03T00:00:00Z".into(),
+        };
+        crate::trace::db::insert_llm_trace(&conn, &row).unwrap();
+        let rows = crate::trace::db::list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 1, "span-attributed row must persist");
+        assert_eq!(rows[0].span_id.as_deref(), Some("span-aaa"));
+        assert_eq!(rows[0].parent_span_id.as_deref(), Some("span-root"));
+        assert_eq!(rows[0].span_name.as_deref(), Some("subagent"));
     }
 
     /// v14→v15 creates the trace_settings table + idx_llm_traces_created. On a

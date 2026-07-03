@@ -197,6 +197,10 @@ pub fn run() {
                     "v21→v22 eval_cases migration",
                     migrate::migrate_v21_to_v22(&conn)
                 );
+                run_migrate!(
+                    "v22→v23 llm_traces span columns migration",
+                    migrate::migrate_v22_to_v23(&conn)
+                );
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {

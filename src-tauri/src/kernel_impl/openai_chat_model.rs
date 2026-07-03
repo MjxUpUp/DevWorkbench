@@ -77,6 +77,12 @@ impl OpenAIChatModel {
         }
     }
 
+    pub fn with_span(self, span: crate::kernel_impl::chat_model_shared::SpanContext) -> Self {
+        Self {
+            shared: self.shared.with_span(span),
+        }
+    }
+
     /// Resolve the Chat Completions POST URL from a base URL. Trims a trailing
     /// `/`; if the base already ends with a `/v<digits>` version segment
     /// (`/v1`, `/v4`, …), append `/chat/completions` directly; otherwise insert
@@ -429,7 +435,15 @@ impl ChatModel for OpenAIChatModel {
             self.shared.cost_sink.clone(),
             Arc::clone(&accumulator),
         )) as Arc<dyn CostSink>;
-        let forked = self.clone().with_cost_sink(counting);
+        // A1 (OTel span tree): the forked sub-agent gets its own span under the
+        // parent's span_id, so every LLM call it makes is attributed to the
+        // sub-agent span and nests under this orchestrating agent in TraceView.
+        // Parent carries no span (ad-hoc/test) → child is rootless (honest).
+        let child_span = crate::kernel_impl::chat_model_shared::SpanContext::child_of(
+            self.shared.span.span_id.as_deref(),
+            "subagent",
+        );
+        let forked = self.clone().with_cost_sink(counting).with_span(child_span);
         Some((Arc::new(forked) as Arc<dyn ChatModel>, accumulator))
     }
 }

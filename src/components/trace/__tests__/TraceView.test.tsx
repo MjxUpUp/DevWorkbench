@@ -23,6 +23,9 @@ const trace400: LlmTrace = {
   output_tokens: null,
   ttfb_ms: null,
   stream_ms: null,
+  span_id: null,
+  parent_span_id: null,
+  span_name: null,
   created_at: '2026-06-19T00:00:00Z',
 };
 
@@ -141,5 +144,62 @@ describe('TraceView', () => {
     fireEvent.click(screen.getByText('400'));
     // total = ttfb + stream (+ other for the remainder) — the breakdown equation.
     expect(await screen.findByText(/total 5000ms = ttfb 1200ms \+ stream 3500ms/)).toBeInTheDocument();
+  });
+
+  it('groups traces into a span tree (root agent + nested subagent)', async () => {
+    // A1: when traces carry span context, TraceView stops rendering a flat
+    // timeline and groups calls by the agent that issued them — a root "agent"
+    // span with a "subagent" child nested under it, mirroring the agent-DAG
+    // the backend attributed via fork_with_counting_cost → SpanContext.
+    const rootCall: LlmTrace = {
+      ...trace400,
+      id: 'root-call',
+      status_code: 200,
+      error_kind: null,
+      latency_ms: 100,
+      input_tokens: 50,
+      output_tokens: 10,
+      span_id: 'span-root',
+      parent_span_id: null,
+      span_name: 'agent',
+      created_at: '2026-07-03T00:00:00Z',
+    };
+    const childCall: LlmTrace = {
+      ...trace400,
+      id: 'child-call',
+      // 400 — surfaces as a failure badge on the subagent span header.
+      span_id: 'span-child',
+      parent_span_id: 'span-root',
+      span_name: 'subagent',
+      created_at: '2026-07-03T00:00:01Z',
+    };
+    vi.mocked(invoke).mockResolvedValue([rootCall, childCall]);
+    render(<TraceView />);
+    await waitFor(() => expect(useTraceStore.getState().traces).toHaveLength(2));
+    // Both span group headers render — the tree, not a flat list.
+    expect(screen.getByText('agent')).toBeInTheDocument();
+    expect(screen.getByText('subagent')).toBeInTheDocument();
+    // The subagent's one failed call surfaces on its header (1 失败).
+    expect(screen.getByText('1 失败')).toBeInTheDocument();
+    // Both calls' rows are present (model + status badges).
+    expect(screen.getAllByText('glm-4.6').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('200')).toBeInTheDocument();
+    expect(screen.getByText('400')).toBeInTheDocument();
+  });
+
+  it('renders a legacy (span-less) session as a flat timeline', async () => {
+    // Backward compat: pre-A1 sessions (no span_id on any trace) must NOT show
+    // span group headers — they render the original flat row list unchanged.
+    vi.mocked(invoke).mockResolvedValue([
+      { ...trace400, span_id: null, parent_span_id: null, span_name: null },
+      { ...trace200, span_id: null, parent_span_id: null, span_name: null },
+    ]);
+    render(<TraceView />);
+    await waitFor(() => expect(useTraceStore.getState().traces).toHaveLength(2));
+    // No span group headers (agent / subagent / 次调用) in flat mode.
+    expect(screen.queryByTestId('span-group-header')).not.toBeInTheDocument();
+    // Flat rows still render both calls.
+    expect(screen.getByText('400')).toBeInTheDocument();
+    expect(screen.getByText('200')).toBeInTheDocument();
   });
 });

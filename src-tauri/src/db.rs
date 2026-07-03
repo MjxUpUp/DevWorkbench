@@ -420,6 +420,13 @@ CREATE TABLE IF NOT EXISTS llm_traces (
     -- Added by migrate_v17_to_v18 on existing DBs; present in CREATE for fresh.
     ttfb_ms INTEGER,
     stream_ms INTEGER,
+    -- A1 (OTel span tree): one span per agent instance. span_id identifies the
+    -- agent that issued the call; parent_span_id is the orchestrating agent's
+    -- span (NULL for the root). TraceView groups calls by span_id and renders
+    -- the agent-DAG nesting. NULL for pre-v22 rows and ad-hoc/test agents.
+    span_id TEXT,
+    parent_span_id TEXT,
+    span_name TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, created_at);

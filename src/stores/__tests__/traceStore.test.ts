@@ -21,6 +21,9 @@ const trace400: LlmTrace = {
   output_tokens: null,
   ttfb_ms: null,
   stream_ms: null,
+  span_id: null,
+  parent_span_id: null,
+  span_name: null,
   created_at: '2026-06-19T00:00:00Z',
 };
 

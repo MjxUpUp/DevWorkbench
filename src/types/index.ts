@@ -650,6 +650,16 @@ export interface LlmTrace {
   /** B3: first-byte → completion (output/stream duration), in ms. null when
    *  there was no streaming phase (e.g. headers-only non_2xx) or pre-v18. */
   stream_ms: number | null;
+  /** A1 (OTel span tree): the span this call belongs to — one per agent
+   *  instance, so all calls one agent makes share its span_id. null for
+   *  pre-v22 rows and ad-hoc/test agents (honest absence, not a faked root). */
+  span_id: string | null;
+  /** A1: the orchestrating agent's span_id (the span that spawned this one).
+   *  null for the root agent (top of the tree). */
+  parent_span_id: string | null;
+  /** A1: human label for the span ("agent" | "subagent" | …) so the tree
+   *  renders a name per node instead of a bare id. */
+  span_name: string | null;
   created_at: string;
 }
 

@@ -31,6 +31,16 @@ pub struct LlmTraceRow {
     /// was no streaming phase (e.g. a headers-only non_2xx) or pre-v18 rows.
     #[serde(default)]
     pub stream_ms: Option<i64>,
+    /// A1 (OTel span tree): the span this call belongs to (one per agent
+    /// instance). NULL for pre-v22 rows and ad-hoc/test agents.
+    #[serde(default)]
+    pub span_id: Option<String>,
+    /// A1: the orchestrating agent's span_id. NULL for the root agent.
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    /// A1: human label for the span ("agent" | "subagent" | …).
+    #[serde(default)]
+    pub span_name: Option<String>,
     pub created_at: String,
 }
 
@@ -41,8 +51,8 @@ pub fn insert_llm_trace(conn: &Connection, row: &LlmTraceRow) -> Result<(), AppE
         "INSERT INTO llm_traces
             (id, session_id, conversation_id, model, base_url, status_code, error_kind,
              req_body, resp_body, latency_ms, input_tokens, output_tokens, ttfb_ms, stream_ms,
-             created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             span_id, parent_span_id, span_name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             row.id,
             row.session_id,
@@ -58,6 +68,9 @@ pub fn insert_llm_trace(conn: &Connection, row: &LlmTraceRow) -> Result<(), AppE
             row.output_tokens,
             row.ttfb_ms,
             row.stream_ms,
+            row.span_id,
+            row.parent_span_id,
+            row.span_name,
             row.created_at,
         ],
     )?;
@@ -74,7 +87,7 @@ pub fn list_traces_for_session(
     let mut stmt = conn.prepare(
         "SELECT id, session_id, conversation_id, model, base_url, status_code, error_kind,
                 req_body, resp_body, latency_ms, input_tokens, output_tokens, ttfb_ms, stream_ms,
-                created_at
+                span_id, parent_span_id, span_name, created_at
          FROM llm_traces
          WHERE session_id = ?1
          ORDER BY created_at ASC",
@@ -95,7 +108,10 @@ pub fn list_traces_for_session(
             output_tokens: row.get(11)?,
             ttfb_ms: row.get(12)?,
             stream_ms: row.get(13)?,
-            created_at: row.get(14)?,
+            span_id: row.get(14)?,
+            parent_span_id: row.get(15)?,
+            span_name: row.get(16)?,
+            created_at: row.get(17)?,
         })
     })?;
     let mut out = Vec::new();
@@ -209,6 +225,9 @@ mod tests {
                 output_tokens INTEGER,
                 ttfb_ms INTEGER,
                 stream_ms INTEGER,
+                span_id TEXT,
+                parent_span_id TEXT,
+                span_name TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
@@ -241,6 +260,9 @@ mod tests {
             output_tokens: None,
             ttfb_ms: None,
             stream_ms: None,
+            span_id: None,
+            parent_span_id: None,
+            span_name: None,
             created_at: created.into(),
         }
     }
@@ -301,6 +323,29 @@ mod tests {
         assert_eq!(rows[0].ttfb_ms, Some(1_200), "ttfb_ms must round-trip");
         assert_eq!(rows[0].stream_ms, Some(3_800), "stream_ms must round-trip");
         assert_eq!(rows[0].latency_ms, Some(5_000));
+    }
+
+    #[test]
+    fn insert_then_list_round_trips_span_context() {
+        // A1: span_id / parent_span_id / span_name must survive INSERT → SELECT
+        // with each landing in its OWN column (the SELECT maps them by index —
+        // an off-by-one would swap span_id with parent_span_id silently).
+        // TraceView builds the agent-DAG tree from these, so a swap would nest
+        // every call under the wrong parent.
+        let conn = test_conn();
+        let mut row = sample("spanned", "s1", "2026-06-19T00:00:00Z");
+        row.status_code = Some(200);
+        row.error_kind = None;
+        row.span_id = Some("span-child".into());
+        row.parent_span_id = Some("span-root".into());
+        row.span_name = Some("subagent".into());
+        insert_llm_trace(&conn, &row).unwrap();
+
+        let rows = list_traces_for_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].span_id.as_deref(), Some("span-child"));
+        assert_eq!(rows[0].parent_span_id.as_deref(), Some("span-root"));
+        assert_eq!(rows[0].span_name.as_deref(), Some("subagent"));
     }
 
     #[test]
