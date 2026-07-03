@@ -7,6 +7,22 @@ import type { AppSettings, ToolStatus, TerminalInfo } from '../../types';
 
 const NON_AGENT_TOOLS = ['code', 'git'];
 
+/**
+ * AgentSection — 设置页「智能体工具」分区。
+ *
+ * CLI 默认执行路径已退役（起底重构：ReactKernel 唯一执行路径），但下列工具配置仍有
+ * 真实消费链，故保留：
+ *  - 工具状态（detect_tools + tool_paths 自定义路径）：OpaqueAgent 桥（workflow 节点
+ *    接外部 CLI）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制；editor.rs 用
+ *    它打开 VS Code；code/git 检测服务项目页 ToolButton。
+ *  - 终端偏好（preferred_terminal）：open_terminal 经 terminal.rs:163 读它选终端 app，
+ *    GitPanel「打开终端做 git commit」仍走此路径——与 CLI agent 执行无关。
+ *
+ * 已移除：「CLI 启动参数」（cli_flags）段——其唯一消费方是 launchTool 在外部终端启动
+ * CLI agent（claude/pi/codex）时拼 --dangerously-skip-permissions 等启动 flag。CLI 取消
+ * 后该外部终端执行路径退役，cli_flags 不再有配置意义。launchTool 的兼容性读取（永远
+ * 空）保留，AppSettings.cli_flags 字段 + DB 列保留以免迁移，只是设置页不再暴露编辑。
+ */
 export function AgentSection() {
   const agents = useAgentStore(s => s.agents);
   const settings = useSettingsStore((s) => s.settings);
@@ -43,10 +59,6 @@ export function AgentSection() {
     debouncedSave({ tool_paths: { ...settings.tool_paths, [tool]: path } });
   };
 
-  const setCliFlag = (tool: string, flag: string) => {
-    debouncedSave({ cli_flags: { ...settings.cli_flags, [tool]: flag } });
-  };
-
   const setPreferredTerminal = (id: string) => {
     saveSettings({ preferred_terminal: id });
   };
@@ -71,13 +83,6 @@ export function AgentSection() {
     }));
 
   const allToolEntries = [...agentEntries, ...nonAgentEntries];
-
-  // CLI flags
-  const cliEntries = agents.map(a => ({
-    key: a.commandName,
-    label: a.displayName,
-    hint: a.agentType === 'claude_code' ? '--dangerously-skip-permissions' : '',
-  }));
 
   return (
     <>
@@ -154,29 +159,6 @@ export function AgentSection() {
             </button>
           )}
         </div>
-      </div>
-
-      {/* CLI flags — zcode settings rows */}
-      <div className="settings-section">
-        <h3 className="settings-section-title">CLI 启动参数</h3>
-        <p className="settings-section-desc">为每个 Agent 配置自定义启动参数。</p>
-
-        {cliEntries.map(t => (
-          <div key={t.key} className="settings-row">
-            <div className="settings-row-info">
-              <span className="settings-row-label">{t.label}</span>
-              <span className="settings-row-desc">{t.hint || '自定义启动参数'}</span>
-            </div>
-            <div className="settings-row-control">
-              <input
-                className="settings-row-input settings-row-input-sm"
-                value={settings.cli_flags[t.key] || ''}
-                onChange={e => setCliFlag(t.key, e.target.value)}
-                placeholder={t.hint || '自定义启动参数'}
-              />
-            </div>
-          </div>
-        ))}
       </div>
     </>
   );

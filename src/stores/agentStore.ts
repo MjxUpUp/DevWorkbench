@@ -3,8 +3,7 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, AgentType, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
-import type { AgentMode } from '../components/ModeSelector';
+import type { AgentInfo, Session, AgentType, AgentMode, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
 
 /** A destructive tool call paused for interactive approval (Human Gate). The
  *  agent:event listener short-circuits an `approval_required` block into this
@@ -88,7 +87,6 @@ interface AgentState {
   /** 拉取一个 conversation 的扁平分支节点(turn + parent 指针),供前端渲染
    *  分支切换器。 */
   getConversationBranches: (conversationId: string) => Promise<BranchNode[]>;
-  getDefaultAgent: () => AgentType | null;
   appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
   clearPtyOutput: (sessionId: string) => void;
   appendBlock: (sessionId: string, event: ChatStreamEvent) => void;
@@ -328,11 +326,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // Defensive: invoke may resolve null (test mocks, or a transient backend
     // hiccup) — coerce to [] so the branch UI never throws on a non-array.
     return Array.isArray(result) ? result : [];
-  },
-
-  getDefaultAgent: () => {
-    const installed = get().agents.filter(a => a.installed);
-    return installed.length > 0 ? installed[0].agentType : null;
   },
 
   appendPtyOutput: (sessionId, data) => {

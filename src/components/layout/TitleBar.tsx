@@ -20,8 +20,8 @@ import { WindowControls } from './WindowControls';
  */
 export function TitleBar() {
   const activeProject = useNavigationStore((s) => s.activeProject);
-  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
-  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
+  const setActiveView = useNavigationStore((s) => s.setActiveView);
+  const selectConversation = useNavigationStore((s) => s.selectConversation);
   const [gitBranch, setGitBranch] = useState<string>('');
   const [maximized, setMaximized] = useState(false);
 
@@ -55,10 +55,9 @@ export function TitleBar() {
       <div className="title-bar-left" data-tauri-drag-region>
         <button
           className="title-bar-brand"
-          onClick={toggleSidebar}
-          title={sidebarOpen ? '收起边栏' : '展开边栏'}
-          aria-label="切换边栏"
-          aria-expanded={sidebarOpen}
+          onClick={() => { setActiveView('task'); selectConversation(null); }}
+          title="返回任务视图"
+          aria-label="返回任务视图"
           type="button"
         >
           DW

@@ -2,7 +2,6 @@ import React, { useState, useRef } from 'react';
 import { IconPlay, IconStop } from '../Icons';
 import { TriggerMenu } from '../TriggerMenu';
 import { Button } from '../ui/Button/Button';
-import type { AgentMode } from '../ModeSelector';
 
 interface AttachedFile {
   path: string;
@@ -19,9 +18,6 @@ interface ComposerProps {
   attachedFiles: AttachedFile[];
   onAttachFile: (file: AttachedFile) => void;
   onRemoveFile: (path: string) => void;
-  /** Agent execution mode — surfaces a "计划模式" toggle in the action bar. */
-  agentMode?: AgentMode;
-  onModeChange?: (mode: AgentMode) => void;
   placeholder?: string;
   /** Steering 模式（Cursor 3.0 / Codex app 范式）：
    * 运行中时允许输入插话/排队消息。true 时显示双行提示 + 不禁用 textarea。
@@ -41,13 +37,10 @@ export function Composer({
   attachedFiles,
   onAttachFile,
   onRemoveFile,
-  agentMode: _agentMode,
-  onModeChange: _onModeChange,
   placeholder,
   steering = false,
   onSteer,
 }: ComposerProps) {
-  void _agentMode; void _onModeChange;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [triggerMenu, setTriggerMenu] = useState<{ type: '@' | '/' | '$'; position: { top: number; left: number } } | null>(null);
 
@@ -59,7 +52,7 @@ export function Composer({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Steering 模式：运行中时 Enter 插话（不走默认 Ctrl+Enter 发送）
+    // Steering 模式：运行中时 Enter 插话（不走默认 CTRL+Enter 发送）
     if (steering && isRunning && e.key === 'Enter' && !e.shiftKey && prompt.trim() && onSteer) {
       e.preventDefault();
       onSteer();
@@ -195,7 +188,7 @@ export function Composer({
         />
       </div>
 
-      {/* Bottom action bar: 发送 (plan mode 统一走 ChatHeader 的 ModeSelector) */}
+      {/* Bottom action bar: 发送 / 停止（模式选择器已移除，破坏性操作走 ApprovalModal）*/}
       <div className="composer-actions">
         <div className="composer-actions-left"></div>
         {isRunning ? (

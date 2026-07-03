@@ -1,0 +1,81 @@
+/* === Activity Bar — 48px 纯图标导航竖条（对齐原型 axis-workbench.html:82-111）===
+ *
+ * 工作区重构（方案 B）：视图导航（Task/Trace/搜索/设置）独立成 VS Code 式 48px
+ * activity-bar 常驻最左列。项目/会话管理迁出侧栏——工作区走底部 WorkspaceTabs，
+ * 会话走 ChatView 顶部 SessionStartCards。无 left-column 二级面板。
+ */
+.activity-bar {
+  grid-area: activity;
+  width: 48px;
+  background: var(--surface-1);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-3) 0;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.ab-icon {
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  position: relative;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+
+.ab-icon:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.ab-icon:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ab-icon.active {
+  color: var(--text-primary);
+}
+
+/* 激活态左侧色条（对齐原型 .ab-icon.active::before）*/
+.ab-icon.active::before {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.ab-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ab-spacer {
+  flex: 1;
+  min-height: var(--space-2);
+}
+
+/* 新建会话 — 强调态（accent-muted 底），对齐原型 .ab-new */
+.ab-icon.ab-new {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.ab-icon.ab-new:hover {
+  background: var(--accent);
+  color: #fff;
+}

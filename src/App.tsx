@@ -1,6 +1,7 @@
 import { useState, useEffect, Component, type ErrorInfo, type ReactNode } from 'react';
 import { AddProject } from './components/AddProject';
-import { Sidebar } from './components/Sidebar';
+import { ActivityBar } from './components/layout/ActivityBar';
+import { WorkspaceTabs } from './components/layout/WorkspaceTabs';
 import { MainStage } from './components/MainPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { SettingsView } from './components/settings/SettingsView';
@@ -57,7 +58,6 @@ function App() {
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
   const onboardingOpen = useNavigationStore((s) => s.onboardingOpen);
   const setOnboardingOpen = useNavigationStore((s) => s.setOnboardingOpen);
-  const sidebarOpen = useNavigationStore((s) => s.sidebarOpen);
   const activeView = useNavigationStore((s) => s.activeView);
 
   // Onboarding overlay trigger: auto-show once on a fresh install
@@ -163,16 +163,11 @@ function App() {
         }
       }
 
-      // Ctrl+B: Toggle left column (zcode-style sidebar toggle)
-      if (e.key === 'b' && (e.ctrlKey || e.metaKey)) {
+      // Ctrl+1~3: Switch views (task / trace / settings) — 对齐 ActivityBar 视图图标顺序
+      // （search 是命令面板入口，非独立 view，不占 Ctrl 槽位）
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '3') {
         e.preventDefault();
-        useNavigationStore.getState().toggleSidebar();
-      }
-
-      // Ctrl+1~4: Switch views (task / search / orchestrate / settings)
-      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '4') {
-        e.preventDefault();
-        const views: ViewId[] = ['task', 'search', 'orchestrate', 'settings'];
+        const views: ViewId[] = ['task', 'trace', 'settings'];
         const idx = parseInt(e.key) - 1;
         if (idx < views.length) {
           useNavigationStore.getState().setActiveView(views[idx]);
@@ -187,9 +182,9 @@ function App() {
   return (
     <ErrorBoundary>
     <ToastProvider>
-    <div className={`app${!sidebarOpen ? ' left-column-hidden' : ''}`}>
+    <div className="app">
       <TitleBar />
-      <Sidebar />
+      <ActivityBar />
       <MainStage />
       <CommandPalette />
       {activeView === 'settings' && <SettingsView />}
@@ -211,6 +206,7 @@ function App() {
         <AddProject onAdd={async (p) => { await addProject(p); setAddProjectOpen(false); }} onClose={() => setAddProjectOpen(false)} existingProjects={projects} />
       )}
 
+      <WorkspaceTabs />
       <StatusBar />
     </div>
     </ToastProvider>

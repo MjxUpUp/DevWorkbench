@@ -126,7 +126,7 @@ export function CommandPalette() {
 
   const grouped: { kind: ResultKind; title: string; items: ResultItem[] }[] = [];
   if (commandItems.length) grouped.push({ kind: 'command', title: '操作', items: commandItems });
-  if (projectItems.length) grouped.push({ kind: 'project', title: '项目', items: projectItems });
+  if (projectItems.length) grouped.push({ kind: 'project', title: '工作区', items: projectItems });
   if (conversationItems.length) grouped.push({ kind: 'conversation', title: '对话', items: conversationItems });
   if (knowledgeItems.length) grouped.push({ kind: 'knowledge', title: '知识', items: knowledgeItems });
 
@@ -140,7 +140,7 @@ export function CommandPalette() {
           ref={inputRef}
           className="command-palette-input"
           type="text"
-          placeholder="搜索操作、项目、对话、知识…"
+          placeholder="搜索操作、工作区、对话、知识…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {

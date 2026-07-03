@@ -96,6 +96,20 @@ export type AgentType =
 
 export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
+/** Agent execution mode. 'executing' is Mission Phase 2 (D4) — set internally by
+ *  `mission_apply`, not surfaced for manual selection. UI 模式选择器已完全移除（用户
+ *  决定），保留类型供 agentStore 签名 + 后端 PermissionMode wire 对齐：前端不再传
+ *  mode，后端用默认；破坏性操作由 ApprovalModal 在触发时承接。 */
+export type AgentMode =
+  | 'default'
+  | 'auto-edit'
+  | 'plan'
+  | 'executing'
+  | 'dry-run'
+  | 'silent'
+  | 'skip-permissions'
+  | 'human-gate';
+
 export interface AgentInfo {
   agentType: AgentType;
   displayName: string;

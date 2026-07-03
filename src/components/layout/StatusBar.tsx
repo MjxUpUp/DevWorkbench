@@ -19,7 +19,6 @@ export function StatusBar() {
     ? sessions.filter(s => s.projectPath === activeProject.path)
     : sessions;
   const runningSession = projectSessions.find(s => s.status === 'running');
-  const projectName = activeProject?.name ?? 'No project';
   const runningCount = projectSessions.filter(s => s.status === 'running').length;
 
   useEffect(() => { getVersion().then(v => setAppVersion(v)).catch(() => setAppVersion('dev')); }, []);
@@ -38,10 +37,6 @@ export function StatusBar() {
   return (
     <footer className="status-bar">
       <div className="status-bar-left">
-        <span className="status-bar-item">
-          <span className="status-dot" />
-          {projectName}
-        </span>
         {runningCount > 0 && (
           <span className="status-bar-item running">
             <span className="status-dot" />

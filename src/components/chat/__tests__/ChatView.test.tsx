@@ -68,7 +68,6 @@ describe('ChatView — agent-switch divider', () => {
     useNavigationStore.setState({
       activeProject: project,
       activeView: 'task',
-      sidebarOpen: true,
       selectedConversationId: 'c1',
     });
     useAgentStore.setState({
@@ -124,7 +123,6 @@ describe('ChatView — edit & regenerate (A4)', () => {
     useNavigationStore.setState({
       activeProject: project,
       activeView: 'task',
-      sidebarOpen: true,
       selectedConversationId: 'c1',
     });
     useAgentStore.setState({

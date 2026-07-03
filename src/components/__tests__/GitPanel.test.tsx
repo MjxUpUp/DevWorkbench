@@ -60,7 +60,7 @@ describe('GitPanel', () => {
 
   it('prompts to select a project when no path is given', () => {
     render(<GitPanel projectPath={null} />);
-    expect(screen.getByText('选择项目后查看 Git 状态')).toBeInTheDocument();
+    expect(screen.getByText('选择工作区后查看 Git 状态')).toBeInTheDocument();
   });
 
   it('shows the insertions/deletions counts for a dirty repo', async () => {

@@ -82,7 +82,7 @@ function GitPanelInner({ projectPath }: { projectPath: string | null }) {
     if (!projectPath) return;
     try {
       await invoke('open_terminal', { workingDir: projectPath });
-      info('已在项目目录打开终端，可执行 git add / commit');
+      info('已在工作区目录打开终端，可执行 git add / commit');
     } catch (e) {
       error(`打开终端失败：${e}`);
     }
@@ -93,7 +93,7 @@ function GitPanelInner({ projectPath }: { projectPath: string | null }) {
     return (
       <aside className="git-panel git-panel-empty">
         <div className="git-panel-header">Git 工具</div>
-        <div className="git-panel-placeholder">选择项目后查看 Git 状态</div>
+        <div className="git-panel-placeholder">选择工作区后查看 Git 状态</div>
       </aside>
     );
   }
@@ -157,7 +157,7 @@ function GitPanelInner({ projectPath }: { projectPath: string | null }) {
           className="git-commit-btn"
           onClick={handleCommit}
           disabled={!dirty}
-          title={dirty ? '在项目目录打开终端进行提交' : '没有可提交的更改'}
+          title={dirty ? '在工作区目录打开终端进行提交' : '没有可提交的更改'}
         >
           提交 ...
         </button>

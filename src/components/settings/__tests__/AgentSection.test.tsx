@@ -46,7 +46,7 @@ describe('AgentSection crash defense', () => {
 
     expect(await screen.findByText('工具状态')).toBeInTheDocument();
     expect(screen.getByText('终端偏好')).toBeInTheDocument();
-    expect(screen.getByText('CLI 启动参数')).toBeInTheDocument();
+    expect(screen.queryByText('CLI 启动参数')).toBeNull(); // CLI 取消后已移除
     expect(mockInvoke).toHaveBeenCalledWith('detect_tools');
     expect(mockInvoke).toHaveBeenCalledWith('detect_terminals');
   });

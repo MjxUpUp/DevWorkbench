@@ -5,7 +5,9 @@ import { TitleBar } from '../layout/TitleBar';
 import { useNavigationStore } from '../../stores/navigationStore';
 
 /**
- * Brand-mark-as-sidebar-toggle coverage.
+ * Brand-mark coverage. 工作区重构后 brand 按钮从「切换边栏」改为「返回任务视图」
+ * （Sidebar 删除，无 left-column 可折叠）。点击 → setActiveView('task') +
+ * selectConversation(null)，对齐网页 logo 回首页的肌肉记忆。
  *
  * The TitleBar also touches Tauri APIs (git status via invoke, window maximize state),
  * which are unrelated to this change. We mock them so the component renders without
@@ -31,42 +33,30 @@ vi.mock('../../utils/env', () => ({
   isTauri: () => true,
 }));
 
-describe('TitleBar — brand mark toggles the left column', () => {
+describe('TitleBar — brand mark returns to the task view', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Reset store so each test starts with the sidebar open.
-    useNavigationStore.setState({ sidebarOpen: true });
+    useNavigationStore.setState({
+      activeView: 'trace',
+      selectedConversationId: 'conv-1',
+    });
   });
 
-  it('renders the brand mark with the collapse tooltip when the sidebar is open', () => {
+  it('renders the brand mark with the return-to-task tooltip', () => {
     render(<TitleBar />);
-    const brand = screen.getByRole('button', { name: '切换边栏' });
+    const brand = screen.getByRole('button', { name: '返回任务视图' });
     expect(brand).toBeInTheDocument();
-    expect(brand).toHaveAttribute('title', '收起边栏');
-    expect(brand).toHaveAttribute('aria-expanded', 'true');
+    expect(brand).toHaveAttribute('title', '返回任务视图');
   });
 
-  it('toggles to the expand tooltip after clicking the brand mark', async () => {
+  it('clicking the brand mark switches to the task view and clears the conversation', async () => {
     const user = userEvent.setup();
     render(<TitleBar />);
-    const brand = screen.getByRole('button', { name: '切换边栏' });
+    const brand = screen.getByRole('button', { name: '返回任务视图' });
 
     await user.click(brand);
 
-    // sidebarOpen flipped to false → tooltip now invites expanding.
-    expect(screen.getByRole('button', { name: '切换边栏' })).toHaveAttribute('title', '展开边栏');
-    expect(useNavigationStore.getState().sidebarOpen).toBe(false);
-  });
-
-  it('restores the collapse tooltip when clicked again', async () => {
-    const user = userEvent.setup();
-    render(<TitleBar />);
-    const brand = screen.getByRole('button', { name: '切换边栏' });
-
-    await user.click(brand); // collapse
-    await user.click(brand); // expand
-
-    expect(screen.getByRole('button', { name: '切换边栏' })).toHaveAttribute('title', '收起边栏');
-    expect(useNavigationStore.getState().sidebarOpen).toBe(true);
+    expect(useNavigationStore.getState().activeView).toBe('task');
+    expect(useNavigationStore.getState().selectedConversationId).toBeNull();
   });
 });

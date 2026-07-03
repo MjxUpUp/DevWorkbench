@@ -1,0 +1,100 @@
+.wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* 两张入口卡片（开始新会话 / 选择旧会话）*/
+.cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.card:hover {
+  border-color: var(--accent);
+}
+.cardActive {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+.cardIcon {
+  font-size: 24px;
+  line-height: 1;
+  color: var(--accent);
+}
+.cardTitle {
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+}
+.cardDesc {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+
+/* 旧会话列表 */
+.convList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 640px;
+}
+.convEmpty {
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+.convItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.convItem:hover {
+  background: var(--surface-2);
+}
+.pin {
+  font-size: var(--text-xs);
+}
+.convTitle {
+  flex: 1;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.convMeta {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+/* 新会话提示（卡片下方，引导用户到 Composer）*/
+.newHint {
+  padding: var(--space-3) var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}

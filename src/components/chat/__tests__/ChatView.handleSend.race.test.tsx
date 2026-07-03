@@ -62,7 +62,6 @@ describe('ChatView — handleSend re-entry guard (F12: closure race)', () => {
     useNavigationStore.setState({
       activeProject: project,
       activeView: 'task',
-      sidebarOpen: true,
       // null = first send in a fresh conversation → goes through createConversation
       selectedConversationId: null,
     });
@@ -110,9 +109,9 @@ describe('ChatView — handleSend re-entry guard (F12: closure race)', () => {
     const textarea = await screen.findByTestId('chat-composer-input');
     await user.type(textarea, '做点东西');
 
-    // Wait for the auto-recommend-agent effect to settle (selectedAgent starts
-    // null and is set asynchronously via recommendAgent → setSelectedAgent).
-    // Until it resolves, canSend is false and the send button stays disabled.
+    // canSend = project set + prompt 非空 + 无 running（agent 固定 react_kernel，
+    // 模式选择器移除后 canSend 不再依赖 selectedAgent）。type 已写入 prompt →
+    // sendBtn 启用。
     const sendBtn = await screen.findByTestId('composer-send-btn');
     await waitFor(() => expect(sendBtn).not.toBeDisabled());
 

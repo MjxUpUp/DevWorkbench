@@ -46,11 +46,11 @@ test.describe('Full App interaction E2E', () => {
 
     await page.goto('/app.html');
 
-    // 1. App mounted → load_projects → Sidebar shows the seeded project. Click
-    //    → selectProject → ChatView mounts in empty-state. Use the empty-state
-    //    h2 (not getByText — "创建任务" also matches the Sidebar nav button).
-    await page.getByTestId('left-column-project').first().click();
-    await expect(page.getByTestId('chat-empty-title')).toHaveText('创建任务');
+    // 1. App mounted → load_projects → WorkspaceTabs shows the seeded workspace.
+    //    Click → selectProject → ChatView mounts in empty-state, SessionStartCards
+    //    renders the new/old session choice.
+    await page.getByTestId('ws-tab').first().click();
+    await expect(page.getByTestId('session-start-cards')).toBeVisible();
 
     // 2. Type a prompt. canSend also needs selectedAgent, which ChatView's
     //    recommend-effect sets async after discover_agents_cmd resolves. Wait

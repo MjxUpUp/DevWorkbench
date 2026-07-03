@@ -78,7 +78,6 @@ describe('ChatView — branches effect (F10: no per-token refetch)', () => {
     useNavigationStore.setState({
       activeProject: project,
       activeView: 'task',
-      sidebarOpen: true,
       selectedConversationId: 'c1',
     });
     useAgentStore.setState({

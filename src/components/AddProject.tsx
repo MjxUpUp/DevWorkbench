@@ -84,7 +84,7 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
     if (!name || !path) return;
 
     if (existingPaths.has(path.toLowerCase())) {
-      setError('该项目已存在');
+      setError('该工作区已存在');
       return;
     }
 
@@ -108,7 +108,7 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
     );
 
     if (newRepos.length === 0) {
-      setError('选中的项目都已存在');
+      setError('选中的工作区都已存在');
       return;
     }
 
@@ -137,9 +137,9 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
   };
 
   return (
-    <Modal open onClose={onClose} aria-label="添加项目">
+    <Modal open onClose={onClose} aria-label="添加工作区">
       <Modal.Header>
-        <h2>添加项目</h2>
+        <h2>添加工作区</h2>
         <Modal.Close onClose={onClose} />
       </Modal.Header>
 
@@ -152,17 +152,17 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
 
         {mode === 'manual' ? (
           <Modal.Body>
-            <Label>项目名称 *</Label>
-            <Input value={name} onChange={e => { setName(e.target.value); setError(''); }} placeholder="My Project" />
+            <Label>工作区名称 *</Label>
+            <Input value={name} onChange={e => { setName(e.target.value); setError(''); }} placeholder="My Workspace" />
 
-            <Label>项目路径 *</Label>
+            <Label>工作区路径 *</Label>
             <div className="input-row">
-              <Input value={path} onChange={e => { setPath(e.target.value); setError(''); }} placeholder="/path/to/project" />
+              <Input value={path} onChange={e => { setPath(e.target.value); setError(''); }} placeholder="/path/to/workspace" />
               <button onClick={pickDirectory}>选择目录</button>
             </div>
 
             <Label>描述</Label>
-            <Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="项目简介..." rows={2} />
+            <Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="工作区简介..." rows={2} />
 
             <Label>标签（逗号分隔）</Label>
             <Input value={tags} onChange={e => setTags(e.target.value)} placeholder="React, Rust, CLI" />
@@ -198,7 +198,7 @@ export function AddProject({ onAdd, onClose, existingProjects }: AddProjectProps
                   );
                 })}
                 <Button variant="primary" onClick={addScanned} disabled={selectedRepos.size === 0}>
-                  添加选中的 {scanResults.filter(r => selectedRepos.has(r.path) && !existingPaths.has(r.path.toLowerCase())).length} 个项目
+                  添加选中的 {scanResults.filter(r => selectedRepos.has(r.path) && !existingPaths.has(r.path.toLowerCase())).length} 个工作区
                 </Button>
               </div>
             )}

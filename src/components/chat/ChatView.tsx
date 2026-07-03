@@ -2,12 +2,12 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
 import type { AgentType, BranchNode, Session } from '../../types';
-import type { AgentMode } from '../ModeSelector';
 import { ChatHeader } from './ChatHeader';
 import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
+import { SessionStartCards } from './SessionStartCards';
 import { ApprovalModal } from './ApprovalModal';
 import { shouldFollowLatest } from './turnFollow';
 import { useProvidersStore } from '../../stores/providersStore';
@@ -25,10 +25,10 @@ export function ChatView() {
   const selectConversation = useNavigationStore((s) => s.selectConversation);
   const toast = useToast();
 
-  // Agent state — the selected agent applies to the NEXT turn. Because turns
-  // can switch agents within one conversation, this is per-send, not per-conversation.
-  const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null);
-  const [agentMode, setAgentMode] = useState<AgentMode>('default');
+  // 砍 CLI + 移除 agent/模式选择器后：agent 固定 Kernel Agent（唯一自研内核），执行
+  // 模式不暴露给用户手切（破坏性操作由 ApprovalModal 在触发时承接，后端用默认 mode）。
+  // 不再用 selectedAgent/agentMode state——canSend/handleSend 直接用常量 AGENT。
+  const AGENT: AgentType = 'react_kernel';
   const [selectedModel, setSelectedModel] = useState('default');
   // Providers config (providers.toml) — the source of truth for the model
   // picker, so the chat selector lists the SAME models Settings → Providers
@@ -59,7 +59,6 @@ export function ChatView() {
   const getTurnsForConversation = useAgentStore((s) => s.getTurnsForConversation);
   const createConversation = useAgentStore((s) => s.createConversation);
   const continueConversation = useAgentStore((s) => s.continueConversation);
-  const getDefaultAgent = useAgentStore((s) => s.getDefaultAgent);
   const qualityReports = useAgentStore((s) => s.qualityReports);
   const fetchQualityReport = useAgentStore((s) => s.fetchQualityReport);
 
@@ -158,44 +157,13 @@ export function ChatView() {
   // Auto-select agent on mount
   const installedAgents = useMemo(() => agents.filter((a) => a.installed), [agents]);
 
-  // Reset agent selection when switching projects. Without this, the prior
-  // project's recommended agent lingers in local state and the <select> can
-  // render with a value that no longer matches its options — the "selector
-  // loses its options on project switch" symptom. Resetting to null lets the
-  // recommend-effect below re-pick for the new project.
-  const prevProjectPath = useRef<string | null>(project?.path ?? null);
-  useEffect(() => {
-    const currentPath = project?.path ?? null;
-    if (prevProjectPath.current !== currentPath) {
-      prevProjectPath.current = currentPath;
-      setSelectedAgent(null);
-    }
-  }, [project?.path]);
-
-  useEffect(() => {
-    if (selectedAgent) return;
-    // 砍 CLI 后唯一内核 ReactKernel——不再按项目标签 recommend 或 installed
-    // CLI 选择，agent 选择器只有 Kernel Agent 一个选项。
-    setSelectedAgent('react_kernel');
-  }, [selectedAgent]);
-
   // Map an agent type to its display name (falls back to the raw type). Used by
-  // the agent-switch divider between turns of different agents.
+  // the agent-switch divider between turns of different agents（砍 CLI 后唯一
+  // react_kernel，divider 实际不会触发——保留以应对未来多内核）。
   const agentDisplayName = useCallback(
     (t: AgentType) => agents.find((a) => a.agentType === t)?.displayName ?? t.replace(/_/g, ' '),
     [agents],
   );
-
-  // When the selected conversation already has turns, default the agent picker
-  // to the last turn's agent so a follow-up feels continuous (user can still
-  // change it — switching agents mid-conversation is the point).
-  useEffect(() => {
-    if (turns.length > 0 && !runningSession) {
-      // 历史会话续聊：selectedAgent 固定 ReactKernel（砍 CLI 后唯一内核），
-      // 不再跟随 last.agentType（历史可能是 CLI agentType，执行已统一）。
-      setSelectedAgent('react_kernel');
-    }
-  }, [activeConversationId, turns, runningSession]);
 
   // Fetch quality report when session completes
   const qualityReport = useMemo(() => {
@@ -276,7 +244,7 @@ export function ChatView() {
   }, [childrenByParent, deepestLeaf]);
 
   const isContinuing = turns.length > 0 && !runningSession;
-  const canSend = !!project && !!selectedAgent && !!prompt.trim() && !runningSession;
+  const canSend = !!project && !!prompt.trim() && !runningSession;
 
   // Build full prompt with attached files — use absolute paths so backend can read them
   const buildFullPrompt = useCallback(() => {
@@ -299,25 +267,22 @@ export function ChatView() {
   const sendingRef = useRef(false);
   const handleSend = useCallback(async () => {
     if (sendingRef.current) return;
-    if (!selectedAgent || !prompt.trim() || runningSession || !project) return;
+    if (!prompt.trim() || runningSession || !project) return;
     sendingRef.current = true;
     const text = buildFullPrompt();
     try {
       const model = selectedModel && selectedModel !== 'default' ? selectedModel : undefined;
       if (activeConversationId && !runningSession) {
         const parentSessionId = turns.length > 0 ? turns[turns.length - 1].id : undefined;
-        const session = await continueConversation(project.path, activeConversationId, text, selectedAgent, agentMode, model, parentSessionId);
+        const session = await continueConversation(project.path, activeConversationId, text, AGENT, undefined, model, parentSessionId);
         void session;
         // Force store sync to guarantee ChatView re-render with new turn
         void useAgentStore.getState().refreshSessions();
       } else {
-        const agent = selectedAgent || getDefaultAgent();
-        if (agent) {
-          const session = await createConversation(project.path, text, agent, agentMode, model);
-          selectConversation(session.conversationId);
-          // Force store sync to guarantee ChatView re-render with new turn
-          void useAgentStore.getState().refreshSessions();
-        }
+        const session = await createConversation(project.path, text, AGENT, undefined, model);
+        selectConversation(session.conversationId);
+        // Force store sync to guarantee ChatView re-render with new turn
+        void useAgentStore.getState().refreshSessions();
       }
       setPrompt('');
       setAttachedFiles([]);
@@ -327,7 +292,7 @@ export function ChatView() {
     } finally {
       sendingRef.current = false;
     }
-  }, [selectedAgent, prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, getDefaultAgent, selectConversation, buildFullPrompt, agentMode, selectedModel, toast]);
+  }, [prompt, runningSession, project, activeConversationId, turns, createConversation, continueConversation, selectConversation, buildFullPrompt, selectedModel, toast]);
 
   const handleStop = useCallback(async () => {
     if (!runningSession) return;
@@ -367,7 +332,7 @@ export function ChatView() {
           <h2>Dev Workbench</h2>
           <p>多 Agent 编码操作系统</p>
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>
-            从左侧选择项目开始创建任务
+            从底部选择工作区，或点击「+」添加新工作区开始任务
           </p>
           {installedAgents.length > 0 && (
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
@@ -388,10 +353,6 @@ export function ChatView() {
     return (
       <div className="chat-view">
         <ChatHeader
-          selectedAgent={selectedAgent}
-          onAgentChange={setSelectedAgent}
-          agentMode={agentMode}
-          onModeChange={setAgentMode}
           selectedModel={selectedModel}
           onModelChange={setSelectedModel}
           modelOptions={modelOptions}
@@ -399,11 +360,7 @@ export function ChatView() {
           requestId={activeConversationId ?? undefined}
           running={false}
         />
-        <div className="chat-empty">
-          <div style={{ fontSize: 32, marginBottom: 'var(--space-2)' }}>✦</div>
-          <h2 data-testid="chat-empty-title">创建任务</h2>
-          <p>在下方输入需求或指令，开始与 Agent 协作</p>
-        </div>
+        <SessionStartCards project={project} />
         <Composer
           prompt={prompt}
           onPromptChange={setPrompt}
@@ -414,8 +371,6 @@ export function ChatView() {
           attachedFiles={attachedFiles}
           onAttachFile={handleAttachFile}
           onRemoveFile={handleRemoveFile}
-          agentMode={agentMode}
-          onModeChange={setAgentMode}
           placeholder="提出后续修改要求... @ 文件 / 命令 $ 技能"
         />
       </div>
@@ -426,10 +381,6 @@ export function ChatView() {
   return (
     <div className="chat-view">
       <ChatHeader
-        selectedAgent={selectedAgent}
-        onAgentChange={setSelectedAgent}
-        agentMode={agentMode}
-        onModeChange={setAgentMode}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
         modelOptions={modelOptions}
@@ -545,8 +496,6 @@ export function ChatView() {
         attachedFiles={attachedFiles}
         onAttachFile={handleAttachFile}
         onRemoveFile={handleRemoveFile}
-        agentMode={agentMode}
-        onModeChange={setAgentMode}
         steering={!!runningSession}
         onSteer={() => toast.info('Steering 消息发送待后端支持（当前会继续运行）')}
         placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}

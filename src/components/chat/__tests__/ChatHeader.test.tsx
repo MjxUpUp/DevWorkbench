@@ -1,51 +1,33 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatHeader } from '../ChatHeader';
 
-// Stub the sibling selectors so the test isolates the agent <select> only.
-vi.mock('../../ModeSelector', () => ({
-  ModeSelector: () => <div data-testid="mode-stub" />,
-}));
+// Stub ModelSelector so the test isolates ChatHeader's own chrome (requestId /
+// LiveDot / clear). 模式选择器与 agent 选择器已移除，不再需要 stub ModeSelector。
 vi.mock('../../ModelSelector', () => ({
   ModelSelector: () => <div data-testid="model-stub" />,
 }));
 
-const baseProps = {
-  agentMode: 'default' as never,
-  onModeChange: () => {},
-  selectedModel: 'default',
-  onModelChange: () => {},
-  onClear: () => {},
-};
-
-// 砍 CLI（用户决定 1）：chat 唯一执行路径 = 自研 ReactKernel。ChatHeader 不再
-// 从 useAgentStore 读 installed CLI agents 渲染 <option>——CLI agent 选项移除，
-// 多模型靠协议层（Anthropic/OpenAI）支撑。select 恒为 Kernel Agent 单选。
-describe('ChatHeader — agent selector（砍 CLI 后唯一 Kernel Agent）', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+// 砍 CLI + 移除模式/agent 选择器后，ChatHeader 只剩 ModelSelector（保留）+ requestId/
+// LiveDot + 清空。这些测试钉住保留侧不被误删。
+describe('ChatHeader — 模型选择器保留（agent/模式选择器已移除）', () => {
+  it('渲染 ModelSelector（模型选择器保留）', () => {
+    render(<ChatHeader selectedModel="default" onModelChange={() => {}} onClear={() => {}} />);
+    expect(screen.getByTestId('model-stub')).toBeInTheDocument();
   });
 
-  it('只渲染 Kernel Agent 单选——store 即便有 installed CLI 也不列', () => {
-    render(<ChatHeader selectedAgent="react_kernel" onAgentChange={() => {}} {...baseProps} />);
-    const labels = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(labels).toEqual(['Kernel Agent']);
-  });
-
-  it('selectedAgent=null → select 默认落在唯一 Kernel Agent option', () => {
-    // 单 option select：value=null 时浏览器默认选第一个（且唯一）option，不会真
-    // 空——与 ChatView 初始化逻辑一致（useEffect 立即 setSelectedAgent('react_kernel')）。
-    render(<ChatHeader selectedAgent={null} onAgentChange={() => {}} {...baseProps} />);
-    const select = screen.getByRole('combobox') as HTMLSelectElement;
-    expect(select.value).toBe('react_kernel');
-  });
-
-  it('选 Kernel Agent → onAgentChange(react_kernel)', async () => {
+  it('点击清空按钮 → onClear', async () => {
     const user = userEvent.setup();
-    const onAgentChange = vi.fn();
-    render(<ChatHeader selectedAgent={null} onAgentChange={onAgentChange} {...baseProps} />);
-    await user.selectOptions(screen.getByRole('combobox'), 'react_kernel');
-    expect(onAgentChange).toHaveBeenCalledWith('react_kernel');
+    const onClear = vi.fn();
+    render(<ChatHeader selectedModel="default" onModelChange={() => {}} onClear={onClear} />);
+    await user.click(screen.getByTitle('清空对话'));
+    expect(onClear).toHaveBeenCalled();
+  });
+
+  it('running=true → 显示 LiveDot + requestId', () => {
+    render(<ChatHeader selectedModel="default" onModelChange={() => {}} onClear={() => {}} running requestId="req-1" />);
+    expect(screen.getByText('req-1')).toBeInTheDocument();
+    expect(document.querySelector('.chat-header-livedot')).not.toBeNull();
   });
 });

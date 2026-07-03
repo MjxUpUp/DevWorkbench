@@ -184,18 +184,6 @@ export function IconChat({ size = defaults.size, className }: IconProps) {
   );
 }
 
-export function IconOrchestrate({ size = defaults.size, className }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <circle cx="12" cy="5" r="2" />
-      <circle cx="4" cy="19" r="2" />
-      <circle cx="20" cy="19" r="2" />
-      <line x1="12" y1="7" x2="4" y2="17" />
-      <line x1="12" y1="7" x2="20" y2="17" />
-    </svg>
-  );
-}
-
 export function IconSkillMarket({ size = defaults.size, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>

@@ -71,9 +71,16 @@ export function GateBar() {
           {nearBudget && <span className={styles.gateBreakerNear}>⚠ 接近预算</span>}
         </span>
       )}
-      {/* 块4b/后端：during-action interrupt（成本熔断硬停止，需后端 cost breaker）。
-          step-重复熔断已落地（G3 react_agent.rs），不在此占位——见文件头注释。 */}
-      <span className={styles.gatePlaceholder}>during-action 成本中断 — 待后端 cost breaker</span>
+      {/* 熔断保护状态徽章（G3 step-重复熔断 + 成本熔断均由后端 react_agent 隐式执行）：
+          前端无实时 trip 计数可暴露，故只显「就绪」状态——诚实告知保护已启用，触发时
+          以 session Failed 终态浮现，不伪造计数。 */}
+      <span
+        className={styles.gateGuard}
+        data-testid="gate-guard"
+        title="step 重复熔断(G3) + 成本熔断由后端隐式执行，触发时以 Failed 终态浮现"
+      >
+        熔断保护 · 就绪
+      </span>
     </footer>
   );
 }

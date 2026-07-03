@@ -3,8 +3,7 @@
 @import './base.css';
 @import './titlebar.css';
 @import './status-bar.css';
-@import './sidebar.css';
-@import './left-column.css';
+@import './activity-bar.css';
 @import './main-panel.css';
 @import './chat-view.css';
 @import './components.css';
@@ -16,7 +15,6 @@
 @import './dashboard.css';
 @import './skill-market.css';
 @import './git-panel.css';
-@import './orchestrate.css';
 @import './animations.css';
 
 /* chat 组件级 CSS（class 名不变）*/
@@ -24,4 +22,3 @@
 @import '../components/chat/ChatHeader.css';
 @import '../components/chat/AgentMessage.css';
 @import '../components/chat/Composer.css';
-@import '../components/ModeSelector.css';

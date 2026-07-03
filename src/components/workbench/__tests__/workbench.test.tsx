@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { PlanBar } from '../PlanBar';
 import { GateBar } from '../GateBar';
 import { MemoryRail } from '../MemoryRail';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
-import { useOrchestrateStore } from '../../../stores/orchestrateStore';
 import { useDashboardStore } from '../../../stores/dashboardStore';
 import { useKnowledgeStore } from '../../../stores/knowledgeStore';
 import type { Session, SessionStatus, CostSummary } from '../../../types';
@@ -18,9 +17,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 /**
  * 起底重构 块1-4 契约测试。
- *  4 区结构 + Stage 路由 + Chat 步骤分组的正确性由 E2E 覆盖（7/7）。此处单测纯派生：
- *  - PlanBar：activeView → 模式（轴线A 位置）+ sessions/nodes → plan 进度（执行）
+ *  4 区结构 + Stage 路由 + Chat 步骤分组的正确性由 E2E 覆盖。此处单测纯派生：
+ *  - PlanBar：activeView → mode-segmented 高亮（轴线A 位置）+ sessions → plan 进度
  *  - GateBar：sessions → 运行计数 + budget → 成本门控/熔断（块4）
+ *
+ * 砍 DAG 后 PlanBar mode-segmented 只剩 Chat / Trace 两段（orchestrate 用例移除）。
  */
 
 const mkSession = (status: SessionStatus, over: Partial<Session> = {}): Session => ({
@@ -52,27 +53,31 @@ describe('PlanBar — 视图→运行模式派生（轴线A·位置可见）', (
       selectedConversationId: null,
     });
     useAgentStore.setState({ sessions: [] });
-    useOrchestrateStore.setState({ nodes: {} });
   });
 
-  it('task 视图 → Chat Agent，plan∈LLM context', () => {
+  it('task 视图 → mode-segmented 高亮 Chat，plan∈LLM context', () => {
     useNavigationStore.setState({ activeView: 'task' });
     render(<PlanBar />);
-    expect(screen.getByTestId('plan-mode')).toHaveTextContent('Chat Agent');
+    const chatBtn = screen.getByTestId('plan-mode');
+    expect(chatBtn).toHaveTextContent('Chat');
+    expect(chatBtn.getAttribute('aria-selected')).toBe('true');
     expect(screen.getByTestId('plan-bar')).toHaveTextContent(/plan ∈ LLM context/);
   });
 
-  it('orchestrate 视图 → DAG Script，plan∈脚本变量', () => {
-    useNavigationStore.setState({ activeView: 'orchestrate' });
-    render(<PlanBar />);
-    expect(screen.getByTestId('plan-mode')).toHaveTextContent('DAG Script');
-    expect(screen.getByTestId('plan-bar')).toHaveTextContent(/plan ∈ 脚本变量/);
-  });
-
-  it('trace 视图 → 观测模式', () => {
+  it('trace 视图 → mode-segmented 高亮 Trace', () => {
     useNavigationStore.setState({ activeView: 'trace' });
     render(<PlanBar />);
-    expect(screen.getByTestId('plan-mode')).toHaveTextContent('观测');
+    const traceBtn = screen.getByTestId('plan-mode');
+    expect(traceBtn).toHaveTextContent('Trace');
+    expect(traceBtn.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('mode-segmented 点击 → 切换 activeView', () => {
+    useNavigationStore.setState({ activeView: 'task' });
+    render(<PlanBar />);
+    // task active 时，trace 段是非 active → testid mode-seg-trace
+    fireEvent.click(screen.getByTestId('mode-seg-trace'));
+    expect(useNavigationStore.getState().activeView).toBe('trace');
   });
 });
 
@@ -84,7 +89,6 @@ describe('PlanBar — plan 进度派生（轴线A·执行可见，块2）', () =
       selectedConversationId: null,
     });
     useAgentStore.setState({ sessions: [] });
-    useOrchestrateStore.setState({ nodes: {} });
   });
 
   it('Chat 模式：running session 的 tool 步骤数 + 状态', () => {
@@ -109,68 +113,8 @@ describe('PlanBar — plan 进度派生（轴线A·执行可见，块2）', () =
     expect(screen.getByTestId('plan-progress')).toHaveTextContent('无活跃会话');
   });
 
-  it('DAG 模式：nodes done/total + running 标注', () => {
-    useNavigationStore.setState({ activeView: 'orchestrate' });
-    useOrchestrateStore.setState({
-      nodes: {
-        n1: { status: 'done' },
-        n2: { status: 'done' },
-        n3: { status: 'running' },
-      },
-    });
-    render(<PlanBar />);
-    expect(screen.getByTestId('plan-progress')).toHaveTextContent('节点 2/3 · 运行中');
-  });
-
-  it('DAG 模式：未加载工作流', () => {
-    useNavigationStore.setState({ activeView: 'orchestrate' });
-    render(<PlanBar />);
-    expect(screen.getByTestId('plan-progress')).toHaveTextContent('未加载工作流');
-  });
-
-  it('B1: task 视图 tool 步骤 stepper——done/active dots + 未来∈LLM 边界标注', () => {
-    // Chat 模式 plan∈LLM context 隐式，stepper 只展示已发起 tool 调用：有 tool_result
-    // 的 done(✓)、无 tool_result 的 active（序号）。不造 pending 假步骤（反刷分）。
-    useNavigationStore.setState({ activeView: 'task', selectedConversationId: 'c1' });
-    useAgentStore.setState({
-      sessions: [
-        mkSession('running', {
-          id: 's-run',
-          conversationId: 'c1',
-          blocks: [
-            toolUse('read_file'),
-            { kind: 'tool_result', content: 'ok', is_error: false },
-            toolUse('write_file'), // active（无配对 tool_result，session 仍 running）
-          ],
-        }),
-      ],
-    });
-    render(<PlanBar />);
-    const stepper = screen.getByTestId('plan-stepper');
-    // 两个 tool 步骤名都渲染（done 的 read_file + active 的 write_file）
-    expect(stepper).toHaveTextContent('read_file');
-    expect(stepper).toHaveTextContent('write_file');
-    // 边界标注：未来步骤 ∈ LLM context（诚实告知，非 pending 假步骤）
-    expect(stepper).toHaveTextContent(/未来/);
-    // plan-progress 汇总仍保留（a11y + 兼容现有断言）
-    expect(screen.getByTestId('plan-progress')).toHaveTextContent('步骤 2');
-  });
-
-  it('B1: 无 tool_use 的 session → 不渲染 stepper（仅汇总）', () => {
-    useNavigationStore.setState({ activeView: 'task', selectedConversationId: 'c1' });
-    useAgentStore.setState({
-      sessions: [
-        mkSession('running', {
-          id: 's-text',
-          conversationId: 'c1',
-          blocks: [{ kind: 'text', content: '只想了想，没调工具' }],
-        }),
-      ],
-    });
-    render(<PlanBar />);
-    expect(screen.queryByTestId('plan-stepper')).toBeNull();
-    expect(screen.getByTestId('plan-progress')).toHaveTextContent('步骤 0');
-  });
+  // B1 plan stepper（tool 调用序列横向渲染）已移除：与 Stage 步骤块重复，且 chat 模式
+  // plan∈LLM context 隐式拿不到真 plan 阶段，tool 序列只是伪代理。进度归 planProgress 汇总。
 });
 
 describe('GateBar — 运行态派生（门控层）', () => {
@@ -198,6 +142,13 @@ describe('GateBar — 运行态派生（门控层）', () => {
     render(<GateBar />);
     expect(screen.getByTestId('gate-bar')).toHaveTextContent(/2 个 agent 运行中/);
     expect(screen.getByTestId('gate-bar').querySelector('[data-running="true"]')).not.toBeNull();
+  });
+
+  it('熔断保护徽章常驻（G3 后端隐式，前端只显就绪不伪造计数）', () => {
+    // G3 step-重复熔断 + 成本熔断由后端 react_agent 隐式执行；前端无实时 trip 计数可
+    // 暴露，只显「就绪」状态——触发时以 Failed 终态浮现，不伪造 0 计数。
+    render(<GateBar />);
+    expect(screen.getByTestId('gate-guard')).toHaveTextContent(/就绪/);
   });
 });
 
@@ -258,9 +209,9 @@ describe('GateBar — 成本门控/熔断（块4，启示3）', () => {
 
 describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
   beforeEach(() => {
-    // orchestrate 视图避开 GitPanel(其调 git invoke)；记忆统计与视图无关
+    // trace 视图避开 GitPanel(其调 git invoke)；记忆统计与视图无关
     useNavigationStore.setState({
-      activeView: 'orchestrate',
+      activeView: 'trace',
       activeProject: null,
       selectedConversationId: null,
     });
@@ -294,9 +245,9 @@ describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
     });
     render(<MemoryRail />);
     expect(screen.queryByTestId('memory-compaction-stat')).toBeNull();
-    expect(screen.getByTestId('memory-rail')).toHaveTextContent('无压缩记录');
-    // 无 activeProject → 反射占位提示选项目
-    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择项目后展示反思记录');
+    expect(screen.getByTestId('memory-rail')).toHaveTextContent('当前会话无压缩记录');
+    // 无 activeProject → 反射占位提示选工作区
+    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择工作区后展示反思记录');
   });
 
   it('react_reflection 条目 → 反射列表（仅反射类目，按 createdAt 倒序）', () => {

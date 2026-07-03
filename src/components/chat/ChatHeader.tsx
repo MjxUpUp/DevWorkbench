@@ -1,13 +1,7 @@
-import { ModeSelector, type AgentMode } from '../ModeSelector';
 import { ModelSelector, type ModelOption } from '../ModelSelector';
 import { IconTrash } from '../Icons';
-import type { AgentType } from '../../types';
 
 interface ChatHeaderProps {
-  selectedAgent: AgentType | null;
-  onAgentChange: (agent: AgentType | null) => void;
-  agentMode: AgentMode;
-  onModeChange: (mode: AgentMode) => void;
   selectedModel: string;
   onModelChange: (model: string) => void;
   /** Model options sourced from providers.toml (built in ChatView). When
@@ -21,11 +15,13 @@ interface ChatHeaderProps {
   running?: boolean;
 }
 
+/**
+ * ChatHeader — 对话顶栏。砍 CLI（唯一 ReactKernel）+ 移除模式选择器后，只剩
+ * ModelSelector（模型选择，保留）+ requestId/LiveDot + 清空。agent 选择器与执行模式
+ * 选择器均已移除：agent 固定 Kernel Agent，执行模式不暴露给用户手切（破坏性操作由
+ * ApprovalModal 在触发时自动承接）。
+ */
 export function ChatHeader({
-  selectedAgent,
-  onAgentChange,
-  agentMode,
-  onModeChange,
   selectedModel,
   onModelChange,
   modelOptions,
@@ -35,18 +31,6 @@ export function ChatHeader({
 }: ChatHeaderProps) {
   return (
     <div className="chat-header">
-      <select
-        className="chat-agent-select"
-        value={selectedAgent ?? ''}
-        onChange={(e) => onAgentChange(e.target.value ? (e.target.value as AgentType) : null)}
-      >
-        {/* 砍 CLI（决定1）：chat 唯一执行路径 = 自研 ReactKernel。CLI agent 选项
-            移除——多模型靠协议层（Anthropic/OpenAI）支撑，不靠 CLI 壳；外部 CLI
-            仅工作流 OpaqueAgent 节点桥接用。 */}
-        <option value="react_kernel">Kernel Agent</option>
-      </select>
-
-      <ModeSelector value={agentMode} onChange={onModeChange} />
       <ModelSelector value={selectedModel} onChange={onModelChange} models={modelOptions} />
 
       {/* requestId 显示（Cursor 3.0 范式）+ 运行中 LiveDot */}

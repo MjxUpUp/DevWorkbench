@@ -2,19 +2,18 @@ import { create } from 'zustand';
 import type { Project } from '../types';
 import type { SettingsSection } from '../components/settings/types';
 
-export type ViewId = 'task' | 'search' | 'orchestrate' | 'settings' | 'trace';
+export type ViewId = 'task' | 'search' | 'settings' | 'trace';
 
 interface NavigationState {
   /** Currently active view in the main stage */
   activeView: ViewId;
-  /** Currently selected project (single source of truth) */
+  /** Currently selected project (single source of truth). UI 称「工作区」，
+   *  标识符保留 project* 避免 DB/IPC 层 churn。 */
   activeProject: Project | null;
   /** Currently selected conversation ID (the topic container). The main task
    *  view renders the turns of THIS conversation. Selecting a project clears it;
    *  sending the first message creates + selects one. */
   selectedConversationId: string | null;
-  /** Currently expanded project ID in sidebar */
-  expandedProjectId: string | null;
   /** Command palette open */
   commandPaletteOpen: boolean;
   /** Add project modal open */
@@ -24,10 +23,6 @@ interface NavigationState {
    *  only re-opens an already-completed wizard when the user clicks the relaunch
    *  button in Settings → 引导. */
   onboardingOpen: boolean;
-  /** Sidebar width (user draggable) */
-  sidebarWidth: number;
-  /** Left column visible — zcode-style single-column toggle (replaces per-view auto-hide) */
-  sidebarOpen: boolean;
   /** The session whose LLM traces the 'trace' view shows. Set by AgentMessage's
    *  「🔍 Trace」 button; cleared when leaving the trace view. null = no session
    *  selected → TraceView shows its empty state. */
@@ -41,13 +36,10 @@ interface NavigationState {
   setActiveView: (view: ViewId) => void;
   selectProject: (project: Project | null) => void;
   selectConversation: (id: string | null) => void;
-  toggleProjectExpand: (projectId: string) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setAddProjectOpen: (open: boolean) => void;
   setOnboardingOpen: (open: boolean) => void;
-  setSidebarWidth: (width: number) => void;
-  toggleSidebar: () => void;
   /** Jump to the trace view scoped to one session (a turn). The trace view then
    *  fetches that session's LLM HTTP calls via traceStore. */
   setTrace: (sessionId: string) => void;
@@ -58,12 +50,9 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   activeView: 'task',
   activeProject: null,
   selectedConversationId: null,
-  expandedProjectId: null,
   commandPaletteOpen: false,
   addProjectOpen: false,
   onboardingOpen: false,
-  sidebarWidth: 240,
-  sidebarOpen: true,
   traceSessionId: null,
   settingsInitialSection: null,
 
@@ -76,15 +65,10 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     // Switch to the task view when selecting a conversation.
     ...(id ? { activeView: 'task' as ViewId } : {}),
   }),
-  toggleProjectExpand: (projectId) => set((s) => ({
-    expandedProjectId: s.expandedProjectId === projectId ? null : projectId,
-  })),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
   setOnboardingOpen: (open) => set({ onboardingOpen: open }),
-  setSidebarWidth: (width) => set({ sidebarWidth: Math.max(180, Math.min(400, width)) }),
-  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setTrace: (sessionId) => set({ traceSessionId: sessionId, activeView: 'trace' }),
   setSettingsInitialSection: (section) => set({ settingsInitialSection: section }),
 }));
