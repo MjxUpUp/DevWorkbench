@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { generateInvokedCommandsFile } from './scripts/gen-invoked-commands'
+// 显式 .mjs 扩展名：rolldown bundle vite.config 时对无扩展名 import 解析不到
+// scripts/gen-invoked-commands.mjs（只入库了 .mjs + 配套声明，无 .ts 源），导致 vite
+// build 加载配置即 UNRESOLVED_IMPORT 失败。配套声明文件用 .d.mts（TS 对 .mjs 的标准
+// 类型声明扩展名，bundler 模式下显式 .mjs import 查 .d.mts 而非 .d.ts）。
+import { generateInvokedCommandsFile } from './scripts/gen-invoked-commands.mjs'
 
 // https://vite.dev/config/
 export default defineConfig({
