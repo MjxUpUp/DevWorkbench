@@ -22,9 +22,11 @@ use kernel_core::{Error, Tool, ToolContext, ToolInfo};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::commands::agents::AgentState;
+use crate::agents::pty::ChatStreamEvent;
+use crate::commands::agents::{AgentApprovalState, AgentState};
 use crate::db::DbState;
 use crate::kernel_impl::executor::KernelExecutor;
+use crate::kernel_impl::human_gate::{ApprovalMap, HumanGateDecision, HUMAN_GATE_TIMEOUT};
 
 /// Default wall-clock cap (seconds) for one graph run. A workflow fans out
 /// multiple agents; bounding the total keeps a wedged worker from hanging the
@@ -107,7 +109,24 @@ impl Tool for WorkflowTool {
             .ok_or_else(|| Error::Agent("workflow 引擎不可用：DbState 未初始化".into()))?;
         let executor = KernelExecutor::new(self.app.clone(), processes, db);
 
-        let (stream, _approval_tx) = kernel_compose::run_graph_with_approvals(
+        // B4 DAG human-in-the-loop: the shared Human-Gate approval registry
+        // (AgentApprovalState, the same map resolve_human_gate_cmd delivers to).
+        // Reusing it — instead of a workflow-specific channel — means a `human`
+        // DAG node surfaces in the SAME approval modal as a destructive tool
+        // call, and the same resolve command + verdict ledger persist it. None
+        // only for non-orchestrator contexts (tests / ACP), where a human node
+        // auto-rejects fast rather than wedging 300s with no UI to resolve it.
+        let approvals = self
+            .app
+            .try_state::<AgentApprovalState>()
+            .map(|s| s.inner().0.clone());
+        // The orchestrator's session id — embedded in the approval token so
+        // (a) clear_session_approvals reclaims it on abort, (b) the verdict
+        // ledger attributes the intervention to this session, (c) the frontend
+        // agent:event listener routes the modal to the right session.
+        let session_id = ctx.conversation_id.clone();
+
+        let (stream, approval_tx) = kernel_compose::run_graph_with_approvals(
             compiled,
             input,
             working_dir,
@@ -135,6 +154,92 @@ impl Tool for WorkflowTool {
                     serde_json::json!({ "run_id": run_id.as_str(), "event": &ev }),
                 );
                 match ev {
+                    kernel_compose::GraphEvent::ApprovalRequired {
+                        node,
+                        prompt,
+                        resume_token: runner_token,
+                    } => {
+                        // B4: a `human` DAG node paused. Surface it via the same
+                        // approval modal the Human Gate uses, and spawn a bridge
+                        // that forwards the user's decision to the runner's
+                        // approval channel. Without this the discarded approval
+                        // sender left every human node hanging 300s then failing.
+                        // The drive loop does NOT block on the human — it keeps
+                        // consuming the stream while the bridge awaits the modal.
+                        match (session_id.as_ref(), approvals.as_ref()) {
+                            (Some(sid), Some(ap)) => {
+                                // Session-scoped token: `approve__{sid}__wf-{run}-{node}`.
+                                // session_of_resume_token (agents.rs) does
+                                // rsplit_once("__") on the part after `approve__`,
+                                // so the SUFFIX must contain no `__` or the sid
+                                // parses wrong (→ verdict ledger attributes to a
+                                // non-existent session). sid (UUID) and run_id
+                                // (UUID) are `__`-free, but a graph author may
+                                // write a node id like `review__security` —
+                                // sanitize it. The token is opaque (only a map
+                                // key + ledger attribution key; no consumer parses
+                                // the node out of it), so mangling `__`→`-` here
+                                // is safe. run_id keeps it unique across concurrent
+                                // workflow runs; the `wf-` prefix can't collide
+                                // with a Human-Gate seq token (`{n}`, numeric).
+                                let safe_node = node.replace("__", "-");
+                                let wf_token = format!(
+                                    "approve__{sid}__wf-{run_id}-{safe_node}"
+                                );
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                if let Ok(mut g) = ap.lock() {
+                                    g.insert(wf_token.clone(), tx);
+                                }
+                                // Control meta-event — NOT a chat block; the
+                                // frontend short-circuits on `approval_required`
+                                // to open the modal (agentStore → ApprovalModal).
+                                let wire = ChatStreamEvent::ApprovalRequired {
+                                    tool: "run_workflow_graph".to_string(),
+                                    arguments: prompt.clone(),
+                                    resume_token: wf_token.clone(),
+                                    summary: format!("工作流人工审批节点「{node}」：{prompt}"),
+                                };
+                                let _ = self.app.emit(
+                                    "agent:event",
+                                    serde_json::json!({ "sessionId": sid, "event": &wire }),
+                                );
+                                // Bridge: oneshot decision → runner approval.
+                                // Detached so the drive loop keeps pulling events
+                                // while the human decides; the runner is paused
+                                // on its approval receiver until this sends (or
+                                // its own 300s timeout fires, whichever first).
+                                let ap_bridge = ap.clone();
+                                let tx_bridge = approval_tx.clone();
+                                let wf_bridge = wf_token.clone();
+                                tokio::spawn(async move {
+                                    forward_approval(
+                                        rx,
+                                        runner_token,
+                                        wf_bridge,
+                                        ap_bridge,
+                                        tx_bridge,
+                                        HUMAN_GATE_TIMEOUT,
+                                    )
+                                    .await;
+                                });
+                            }
+                            _ => {
+                                // No session/approval context (test/ACP) → no UI
+                                // can resolve this. Reject the node fast instead
+                                // of wedging the runner's full 300s.
+                                log::warn!(
+                                    "[workflow] human node '{node}' paused with no \
+                                     session/approval context — auto-rejecting"
+                                );
+                                let _ = approval_tx.send(
+                                    kernel_compose::HumanApproval {
+                                        resume_token: runner_token,
+                                        decision: None,
+                                    },
+                                ).await;
+                            }
+                        }
+                    }
                     kernel_compose::GraphEvent::NodeEnd { node, status, error } => {
                         node_status
                             .insert(node, (format!("{status:?}").to_lowercase(), error));
@@ -171,6 +276,79 @@ impl Tool for WorkflowTool {
     /// tools.
     fn is_read_only(&self) -> bool {
         false
+    }
+}
+
+/// Bridge a paused `human` DAG node to its resolution: await the user's
+/// one-shot decision (delivered by `resolve_human_gate_cmd` into the shared
+/// approval map) and forward it to the runner's approval channel as a
+/// [`HumanApproval`].
+///
+/// The mapping is 1:1 with the approval modal's three buttons:
+/// - **Approve** → green-light; the (optional) feedback flows onward as the
+///   node's output value (so a human can steer the downstream path by typing).
+///   No feedback → `"approved"` sentinel — a non-empty value that still reads
+///   as "the human said go" to successor nodes.
+/// - **Reject** → `decision: None`, which the runner treats as "human
+///   rejected" → the node fails (and fails the graph unless a successor routes
+///   around it).
+/// - **Retry** → the feedback becomes the node value. For a pure approval gate
+///   there is no action to "redo", so Retry collapses to "approved, but use my
+///   edited value" — the useful payload (the amended text) is preserved rather
+///   than discarded.
+///
+/// Three failure modes, all honest (never silently succeed against a dead run):
+/// - The bridge's own [`HUMAN_GATE_TIMEOUT`] (300s) fires → the human never
+///   decided; reclaim the stale Sender and return WITHOUT sending. The runner's
+///   own 300s on its approval receiver fires independently → node fails. Not
+///   sending avoids a race with that timeout (both paths fail the node anyway).
+/// - The Sender was dropped (`clear_session_approvals` on abort) → forward a
+///   Reject so the runner fails the node immediately instead of waiting out its
+///   own 300s.
+/// - The send itself fails → the runner already moved on (its 300s fired or the
+///   graph ended). Reclaim the stale Sender so a LATE second resolve returns
+///   NotFound instead of silently "succeeding" against a run that's already over.
+async fn forward_approval(
+    rx: tokio::sync::oneshot::Receiver<HumanGateDecision>,
+    runner_token: String,
+    wf_token: String,
+    approvals: ApprovalMap,
+    approval_tx: tokio::sync::mpsc::Sender<kernel_compose::HumanApproval>,
+    // How long to wait for the human before reclaiming. Production passes
+    // HUMAN_GATE_TIMEOUT (300s); tests pass a short duration to exercise the
+    // timeout-reclaim path without waiting the full 300s.
+    timeout: std::time::Duration,
+) {
+    let decision: Option<Value> = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(HumanGateDecision::Approve)) => Some(Value::String("approved".into())),
+        Ok(Ok(HumanGateDecision::Retry { feedback })) => Some(Value::String(feedback)),
+        Ok(Ok(HumanGateDecision::Reject)) => None,
+        // Sender dropped (session aborted / cleared) → reject so the runner
+        // fails the node now rather than waiting out its own 300s.
+        Ok(Err(_)) => None,
+        // Our 300s — human never decided. Reclaim the stale Sender; let the
+        // runner's own 300s fail the node (don't send → no race).
+        Err(_) => {
+            if let Ok(mut g) = approvals.lock() {
+                g.remove(&wf_token);
+            }
+            return;
+        }
+    };
+    // Forward to the runner.
+    if approval_tx
+        .send(kernel_compose::HumanApproval {
+            resume_token: runner_token,
+            decision,
+        })
+        .await
+        .is_err()
+    {
+        // Runner already gone (its 300s fired or the graph ended). Reclaim so a
+        // late resolve returns NotFound instead of silently succeeding.
+        if let Ok(mut g) = approvals.lock() {
+            g.remove(&wf_token);
+        }
     }
 }
 
@@ -254,5 +432,130 @@ mod tests {
         let s = format_outcome(false, Some("end unreachable"), &Value::Null, &HashMap::new(), &HashMap::new());
         assert!(s.contains("[workflow 失败"), "failure header: {s}");
         assert!(s.contains("end unreachable"), "error surfaced: {s}");
+    }
+
+    // ---- B4: forward_approval bridges a paused human DAG node to its resolution ----
+
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// Drive `forward_approval` under one of the resolution shapes and report
+    /// (what the runner received, whether the token is still in the map). The
+    /// caller picks: the decision to resolve with (None = don't resolve), whether
+    /// to simulate an abort that drops the Sender, whether the runner's approval
+    /// receiver stays alive, and the bridge timeout.
+    async fn run_forward(
+        decision: Option<HumanGateDecision>,
+        drop_sender: bool,
+        keep_approval_rx: bool,
+        timeout: Duration,
+    ) -> (
+        Option<kernel_compose::HumanApproval>, // what the runner received
+        bool,                                  // wf_token still in map?
+    ) {
+        let wf_token = "approve__sess__wf-r1-h".to_string();
+        let map: ApprovalMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // resolve_approval owns "remove-then-send", so resolving through it
+        // mirrors resolve_human_gate_cmd exactly. Register tx under the token.
+        map.lock().unwrap().insert(wf_token.clone(), tx);
+
+        if drop_sender {
+            // Abort: clear_session_approvals strips the Sender → rx Err.
+            crate::kernel_impl::human_gate::clear_session_approvals(&map, "sess");
+        } else if let Some(d) = decision {
+            crate::kernel_impl::human_gate::resolve_approval(&map, &wf_token, d).unwrap();
+        }
+
+        let (approval_tx, approval_rx) = mpsc::channel::<kernel_compose::HumanApproval>(8);
+        let rx_for_runner = approval_tx.clone();
+        // Wrap in Option so the receiver is dropped (runner-gone case) without
+        // the borrow-checker seeing a move-then-use across the branches.
+        let mut approval_rx_opt = if keep_approval_rx { Some(approval_rx) } else { None };
+
+        forward_approval(
+            rx,
+            "approve__h".into(),
+            wf_token.clone(),
+            map.clone(),
+            rx_for_runner,
+            timeout,
+        )
+        .await;
+
+        let received = approval_rx_opt
+            .as_mut()
+            .and_then(|rx| rx.try_recv().ok());
+        let still_present = map.lock().unwrap().contains_key(&wf_token);
+        (received, still_present)
+    }
+
+    #[tokio::test]
+    async fn forward_approval_approve_sends_default_value() {
+        let (received, still_present) =
+            run_forward(Some(HumanGateDecision::Approve), false, true, Duration::from_secs(5)).await;
+        let approval = received.expect("runner should receive an approval");
+        assert_eq!(approval.resume_token, "approve__h");
+        assert_eq!(approval.decision, Some(Value::String("approved".into())));
+        assert!(!still_present, "resolved token must be removed from the map");
+    }
+
+    #[tokio::test]
+    async fn forward_approval_reject_sends_none_decision() {
+        let (received, _) =
+            run_forward(Some(HumanGateDecision::Reject), false, true, Duration::from_secs(5)).await;
+        let approval = received.expect("runner should receive the reject");
+        assert_eq!(approval.decision, None, "reject maps to decision: None");
+    }
+
+    #[tokio::test]
+    async fn forward_approval_retry_carries_feedback_as_value() {
+        let (received, _) = run_forward(
+            Some(HumanGateDecision::Retry { feedback: "use plan B".into() }),
+            false,
+            true,
+            Duration::from_secs(5),
+        )
+        .await;
+        let approval = received.expect("runner should receive the retry");
+        assert_eq!(
+            approval.decision,
+            Some(Value::String("use plan B".into())),
+            "retry feedback becomes the node's onward value"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_approval_dropped_sender_sends_none() {
+        // Session aborted mid-approval → clear_session_approvals drops the Sender
+        // → rx returns Err → forward_approval forwards a Reject (None) so the
+        // runner fails the node now instead of waiting out its own 300s.
+        let (received, _) =
+            run_forward(None, true, true, Duration::from_secs(5)).await;
+        let approval = received.expect("a dropped Sender must still produce a forward");
+        assert_eq!(approval.decision, None, "dropped Sender → reject (None)");
+    }
+
+    #[tokio::test]
+    async fn forward_approval_timeout_reclaims_and_does_not_send() {
+        // Human never decides. After the (short) timeout the bridge must reclaim
+        // the stale Sender and NOT send — letting the runner's own timeout fail
+        // the node without a race. No decision reaches the runner.
+        let (received, still_present) =
+            run_forward(None, false, true, Duration::from_millis(50)).await;
+        assert!(received.is_none(), "timeout must not forward anything to the runner");
+        assert!(!still_present, "timed-out token must be reclaimed from the map");
+    }
+
+    #[tokio::test]
+    async fn forward_approval_send_failed_reclaims_stale_token() {
+        // Runner already gone (its receiver dropped) → send fails. The bridge
+        // must reclaim so a LATE resolve returns NotFound instead of silently
+        // succeeding against a dead run.
+        let (received, still_present) =
+            run_forward(Some(HumanGateDecision::Approve), false, false, Duration::from_secs(5)).await;
+        assert!(received.is_none(), "no receiver alive to observe the send");
+        assert!(!still_present, "stale token must be reclaimed after a failed send");
     }
 }

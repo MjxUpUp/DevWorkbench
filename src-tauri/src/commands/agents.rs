@@ -907,4 +907,25 @@ mod tests {
         assert_eq!(session_of_resume_token("other__sess__0"), None);
         assert_eq!(session_of_resume_token("approve____0"), None);
     }
+
+    /// B4: a workflow human-node approval token has the shape
+    /// `approve__{sid}__wf-{run_id}-{node}`. The verdict ledger persists it via
+    /// this resolver, so session_of_resume_token MUST extract `sid` correctly
+    /// — including when the original node id contained `__` (workflow_tool
+    /// sanitizes `__`→`-` so the suffix stays `__`-free; this test pins that the
+    /// sanitized form parses, attributing the intervention to the right session).
+    #[test]
+    fn session_of_resume_token_parses_workflow_human_token() {
+        // Plain node id.
+        assert_eq!(
+            session_of_resume_token("approve__550e8400-e29b__wf-r1-approve_step"),
+            Some("550e8400-e29b")
+        );
+        // Node id was `review__security` → sanitized to `review-security` so the
+        // suffix has no `__`. sid must still parse (NOT `…__wf-r1-review`).
+        assert_eq!(
+            session_of_resume_token("approve__550e8400-e29b__wf-r1-review-security"),
+            Some("550e8400-e29b")
+        );
+    }
 }
