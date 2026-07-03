@@ -14,7 +14,7 @@ import styles from './workbench.module.css';
  *    events 统计——死档归档已有，compaction-archive-complete）。常驻信号让用户感知
  *    context 压力，不必进对话流翻 CompactCard。
  *
- *  - 反射笔记（块5b）：项目级 knowledge_entries 里 category=react_reflection 的条目。
+ *  - 反思记录（块5b）：项目级 knowledge_entries 里 category=react_reflection 的条目。
  *    后端 persist_completion_memory 已落地（session_reflection.rs + knowledge/store.rs）：
  *    agent 完成会话时内核把结构化反思（工具用量/改动文件/失败数）写入；executor
  *    memory_prompt_suffix 下次注入 system prompt。此处只读回展示——Reflexion 闭环的
@@ -44,7 +44,7 @@ export function MemoryRail() {
   const compactCount = compactEvents.length;
   const droppedTotal = compactEvents.reduce((sum, e) => sum + e.dropped_count, 0);
 
-  // 反射笔记（块5b）：项目切换时拉 knowledge，过滤 react_reflection 最近 5 条。
+  // 反思记录（块5b）：项目切换时拉 knowledge，过滤 react_reflection 最近 5 条。
   useEffect(() => {
     if (activeProject) void loadForProject(activeProject.path);
   }, [activeProject, loadForProject]);
@@ -68,7 +68,7 @@ export function MemoryRail() {
         )}
       </div>
       <div className={styles.railSection}>
-        <h4 className={styles.railTitle}>反射笔记 · 最近</h4>
+        <h4 className={styles.railTitle}>反思记录 · 最近</h4>
         {reflections.length > 0 ? (
           <ul className={styles.railReflectionList} data-testid="reflection-list">
             {reflections.map((r) => (
@@ -82,7 +82,7 @@ export function MemoryRail() {
           </ul>
         ) : (
           <div className={styles.railPlaceholder} data-testid="reflection-placeholder">
-            {activeProject ? '无反射记录——完成任务后内核自动积累' : '选择项目后展示反射笔记'}
+            {activeProject ? '无反思记录——完成任务后内核自动积累' : '选择项目后展示反思记录'}
           </div>
         )}
       </div>

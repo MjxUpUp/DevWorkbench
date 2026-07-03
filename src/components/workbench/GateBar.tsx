@@ -32,6 +32,8 @@ export function GateBar() {
   const runningCount = sessions.filter((s) => s.status === 'running').length;
   const isRunning = runningCount > 0;
   const overBudget = budget.total > 0 && budget.percentage >= 100;
+  // G2 三态：正常 / near（≥80% 黄警告，成本接近失控前置可见）/ over（≥100% 红熔断）。
+  const nearBudget = budget.total > 0 && !overBudget && budget.percentage >= 80;
 
   // 门控层常驻——挂载即拉预算/成本，让成本前置可见（启示3：非事后 trace）。
   useEffect(() => {
@@ -50,7 +52,7 @@ export function GateBar() {
         </span>
       )}
       {budget.total > 0 && (
-        <span className={styles.gateBudget} data-over={overBudget} data-testid="gate-budget">
+        <span className={styles.gateBudget} data-over={overBudget} data-near={nearBudget} data-testid="gate-budget">
           <span className={styles.gateBudgetText}>
             预算 ${budget.spent.toFixed(2)} / ${budget.total.toFixed(2)}
           </span>
@@ -61,6 +63,7 @@ export function GateBar() {
             />
           </span>
           {overBudget && <span className={styles.gateBreaker}>⚠ 超预算</span>}
+          {nearBudget && <span className={styles.gateBreakerNear}>⚠ 接近预算</span>}
         </span>
       )}
       {/* 块4b/后端：during-action interrupt 与 step-repetition 硬熔断（需后端 cost breaker） */}

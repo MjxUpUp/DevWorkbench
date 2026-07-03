@@ -188,6 +188,19 @@ describe('GateBar — 成本门控/熔断（块4，启示3）', () => {
     expect(screen.getByTestId('gate-budget-bar')).toBeInTheDocument();
   });
 
+  it('G2: 接近预算（≥80%）→ 黄色接近警告 data-near=true，但不熔断', () => {
+    // 三态：正常 / near(≥80% 黄) / over(≥100% 红)。near 前置可见，让用户在熔断前察觉。
+    useDashboardStore.setState({
+      budget: { spent: 3.5, total: 4, percentage: 87 },
+      costSummary: mkCost(3.5),
+    });
+    render(<GateBar />);
+    expect(screen.getByTestId('gate-budget').getAttribute('data-near')).toBe('true');
+    expect(screen.getByTestId('gate-budget').getAttribute('data-over')).toBe('false');
+    expect(screen.getByTestId('gate-bar')).toHaveTextContent('接近预算');
+    expect(screen.getByTestId('gate-bar')).not.toHaveTextContent('超预算');
+  });
+
   it('未设预算(total=0) → 不渲染预算条，仅累计成本', () => {
     useDashboardStore.setState({
       budget: { spent: 0, total: 0, percentage: 0 },
@@ -239,7 +252,7 @@ describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
     expect(screen.queryByTestId('memory-compaction-stat')).toBeNull();
     expect(screen.getByTestId('memory-rail')).toHaveTextContent('无压缩记录');
     // 无 activeProject → 反射占位提示选项目
-    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择项目后展示反射笔记');
+    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择项目后展示反思记录');
   });
 
   it('react_reflection 条目 → 反射列表（仅反射类目，按 createdAt 倒序）', () => {
@@ -300,5 +313,7 @@ describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
     // 倒序：r-new(07-02) 排在 r-old(07-01) 之前
     const txt = list.textContent ?? '';
     expect(txt.indexOf('修了 cargo 错')).toBeLessThan(txt.indexOf('老反思'));
+    // C2: UI 文案改名"反思记录 · 最近"（react_reflection 后端 category key 保留不动）
+    expect(screen.getByText('反思记录 · 最近')).toBeInTheDocument();
   });
 });

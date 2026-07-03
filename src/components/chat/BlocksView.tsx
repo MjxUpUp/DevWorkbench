@@ -163,14 +163,14 @@ function StepGroup({ step, running, sessionId }: { step: Step; running: boolean;
       </div>
       <div className={styles.stepBody}>
         {step.events.map((ev, i) => (
-          <BlockCard key={i} event={ev} running={running} sessionId={sessionId} />
+          <BlockCard key={i} event={ev} running={running} sessionId={sessionId} stepStatus={step.status} />
         ))}
       </div>
     </div>
   );
 }
 
-function BlockCard({ event, running, sessionId }: { event: ChatStreamEvent; running: boolean; sessionId?: string }) {
+function BlockCard({ event, running, sessionId, stepStatus }: { event: ChatStreamEvent; running: boolean; sessionId?: string; stepStatus: StepStatus }) {
   switch (event.kind) {
     case 'text':
       return (
@@ -186,11 +186,11 @@ function BlockCard({ event, running, sessionId }: { event: ChatStreamEvent; runn
       // tool_result 的 format_outcome 文本作持久记录）。
       return event.name === 'run_workflow_graph' ? (
         <div>
-          <ToolUsePill name={event.name} input={event.input} />
+          <ToolUsePill name={event.name} input={event.input} status={stepStatus} />
           <WorkflowProgressStrip />
         </div>
       ) : (
-        <ToolUsePill name={event.name} input={event.input} />
+        <ToolUsePill name={event.name} input={event.input} status={stepStatus} />
       );
     case 'tool_result':
       return <ToolResultPill content={event.content} isError={event.is_error} />;
@@ -339,15 +339,27 @@ function formatArchive(rows: unknown[] | null): string {
     .join('\n\n');
 }
 
-/** tool_use → L2ToolPill（running 态，等配对的 tool_result 到达后转 success/error）*/
-function ToolUsePill({ name, input }: { name: string; input: unknown }) {
+/** tool_use → L2ToolPill。status 跟随所在 tool 步骤的完成度（step.status）：
+ *  tool_result 到达前 running（调用中）；到达后 done→success / error→失败。
+ *  之前硬编码 running——工具已完成却永显"调用中"，与步骤头 status 自相矛盾。 */
+function ToolUsePill({
+  name,
+  input,
+  status,
+}: {
+  name: string;
+  input: unknown;
+  status: StepStatus;
+}) {
   const inputStr = typeof input === 'string' ? input : safeStringify(input);
+  const pillStatus = status === 'running' ? 'running' : status === 'error' ? 'error' : 'success';
+  const meta = status === 'running' ? '调用中' : status === 'error' ? '失败' : '完成';
   return (
     <L2ToolPill
       name={name}
       desc={deriveToolDesc(name, input)}
-      status="running"
-      meta="调用中"
+      status={pillStatus}
+      meta={meta}
       nameTestId="chat-block-tool-name"
       data-testid="chat-block-tool"
     >

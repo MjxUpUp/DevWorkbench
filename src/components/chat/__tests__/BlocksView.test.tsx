@@ -251,4 +251,35 @@ describe('BlocksView', () => {
     expect(screen.getByTestId('chat-block-compact-archive')).toHaveTextContent('早期工具调用摘要');
     expect(screen.getByTestId('chat-block-compact-archive')).toHaveTextContent('do something');
   });
+
+  // ── B2: ToolUsePill 状态跟随 step.status（之前硬编码 running，工具已完成却永显"调用中"）──
+  it('B2: ToolUsePill shows 完成 once its paired tool_result arrives (not stuck on 调用中)', () => {
+    // groupByStep 把 tool_result 合进 tool 步骤并标记 status=done；修复前 ToolUsePill
+    // 丢弃 step.status 永显 running——与步骤头"完成"自相矛盾。
+    const events: ChatStreamEvent[] = [
+      { kind: 'tool_use', name: 'Read', input: { file_path: '/a.txt' } },
+      { kind: 'tool_result', content: 'file contents', is_error: false },
+    ];
+    render(<BlocksView events={events} running={false} />);
+    const toolPill = screen.getByTestId('chat-block-tool');
+    expect(toolPill).toHaveTextContent('完成');
+    expect(toolPill).not.toHaveTextContent('调用中');
+  });
+
+  it('B2: ToolUsePill stays 调用中 while tool_result has not arrived (step still running)', () => {
+    const events: ChatStreamEvent[] = [
+      { kind: 'tool_use', name: 'Read', input: { file_path: '/a.txt' } },
+    ];
+    render(<BlocksView events={events} running={true} />);
+    expect(screen.getByTestId('chat-block-tool')).toHaveTextContent('调用中');
+  });
+
+  it('B2: ToolUsePill shows 失败 when its paired tool_result is_error', () => {
+    const events: ChatStreamEvent[] = [
+      { kind: 'tool_use', name: 'Bash', input: { command: 'bad' } },
+      { kind: 'tool_result', content: 'boom', is_error: true },
+    ];
+    render(<BlocksView events={events} running={false} />);
+    expect(screen.getByTestId('chat-block-tool')).toHaveTextContent('失败');
+  });
 });

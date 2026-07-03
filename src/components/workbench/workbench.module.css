@@ -216,7 +216,14 @@
 .gateBudget[data-over='true'] .gateBudgetFill {
   background: var(--color-error);
 }
+.gateBudget[data-near='true'] .gateBudgetFill {
+  background: var(--color-warning);
+}
 .gateBreaker {
   color: var(--color-error);
+  font-weight: 600;
+}
+.gateBreakerNear {
+  color: var(--color-warning);
   font-weight: 600;
 }
