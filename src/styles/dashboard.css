@@ -662,6 +662,65 @@
   color: var(--text-secondary);
   margin: var(--space-3) 0;
 }
+.eval-meta {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.eval-help {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1.6;
+  margin: var(--space-2) 0 var(--space-3);
+}
+.eval-help strong {
+  color: var(--color-error);
+}
+
+/* SA 平台自审 verdict（IPC 接线：死按钮 FAIL / 死代码 WARN）*/
+.eval-coverage-verdict {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+}
+.eval-coverage-verdict.pass {
+  background: var(--success-muted);
+  color: var(--color-sage);
+}
+.eval-coverage-verdict.fail {
+  background: var(--danger-muted);
+  color: var(--color-error);
+}
+.eval-coverage-section {
+  margin-bottom: var(--space-3);
+}
+.eval-coverage-h {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  margin: 0 0 var(--space-2);
+}
+.eval-coverage-h.fail {
+  color: var(--color-error);
+}
+.eval-coverage-h.warn {
+  color: var(--color-sunkissed);
+}
+.eval-coverage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+  max-height: 240px;
+  overflow: auto;
+}
+.eval-coverage-list li {
+  color: var(--text-secondary);
+}
 
 /* badges */
 .eval-badge {

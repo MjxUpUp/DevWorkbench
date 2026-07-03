@@ -15,11 +15,13 @@ import {
   type E2EExpect,
   type E2EVerdict,
   type EnablementVerdict,
+  type CoverageVerdict,
   type Matcher,
   type CreateCaseInput,
 } from '../../utils/evalApi';
 import { useAgentStore } from '../../stores/agentStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { INVOKED_COMMANDS } from '../../generated/invoked-commands';
 import { Button } from '../ui/Button/Button';
 
 /**
@@ -34,13 +36,14 @@ import { Button } from '../ui/Button/Button';
  * 诚实缺口：P6 八维 rubric（仅 3 态 grade，8 维待 scoring.rs 扩展）、
  * A1 OTel（零起步）—— 明确标注「未接入」，不造假数据。
  */
-type FeatureId = 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'V1' | 'V2' | 'V3' | 'F1' | 'F2' | 'A1';
+type FeatureId = 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'V1' | 'V2' | 'V3' | 'F1' | 'F2' | 'A1' | 'SA';
 
 const GROUPS: { title: string; items: FeatureId[] }[] = [
   { title: 'P · Case 池 & 回放', items: ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'] },
   { title: 'V · 判决 & 失败资产', items: ['V1', 'V2', 'V3'] },
   { title: 'F · 飞轮', items: ['F1', 'F2'] },
   { title: 'A · OTel', items: ['A1'] },
+  { title: 'SA · 平台自审', items: ['SA'] },
 ];
 
 const FEATURE_TITLE: Record<FeatureId, string> = {
@@ -56,6 +59,7 @@ const FEATURE_TITLE: Record<FeatureId, string> = {
   F1: '回归曲线',
   F2: '飞轮闭环可视化',
   A1: '配对 Trace 树（OTel）',
+  SA: 'IPC 接线自审（评测 dev workbench 本身）',
 };
 
 const MATCHERS: Matcher[] = ['exact_match', 'in_order', 'any_order'];
@@ -268,7 +272,95 @@ export function EvalPanel() {
           <Flywheel caseCount={data.cases.length} verdictCount={data.verdicts.length} failCount={failCount} />
         )}
         {selected === 'A1' && <OtelTraces cases={data.cases} verdicts={data.verdicts} />}
+        {selected === 'SA' && <CoverageSelfAudit />}
       </section>
+    </div>
+  );
+}
+
+// ── SA 平台自审（IPC 接线完整性：dev workbench 自评测）──
+// 反刷分核心立场的自我应用：评测系统用它审计 dev workbench 自身——前端 invoke
+// 集合（构建期 grep src/ → INVOKED_COMMANDS）vs 后端 generate_handler! 注册集合
+// （include_str! lib.rs）。F\B=死按钮 FAIL，B\F=死代码 WARN。两集合独立 grep，
+// 零手工契约，不可自我标榜。
+function CoverageSelfAudit() {
+  const [verdict, setVerdict] = useState<CoverageVerdict | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // INVOKED_COMMANDS 是构建期生成的 F 集合真相源（readonly），展开传入后端比对。
+      const v = await evalApi.runPlatformCoverage([...INVOKED_COMMANDS]);
+      setVerdict(v);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void run();
+  }, [run]);
+
+  return (
+    <div className="eval-card">
+      <div className="eval-toolbar">
+        <span className="eval-meta mono">
+          前端 invoke {verdict?.frontend_count ?? '…'} · 后端注册 {verdict?.backend_count ?? '…'} · 对齐{' '}
+          {verdict?.aligned_count ?? '…'}
+        </span>
+        <Button variant="primary" onClick={() => void run()} disabled={loading}>
+          {loading ? '审计中…' : '重新审计'}
+        </Button>
+      </div>
+      <p className="eval-help">
+        反刷分自审：F（前端 invoke，构建期 grep src/）vs B（后端 generate_handler! 注册，include_str! lib.rs）。
+        死按钮（前端调了后端没注册）= <strong>FAIL</strong>；死代码（后端注册前端没调）= WARN。
+        两集合独立 grep 客观事实，零手工契约。
+      </p>
+      {error && <p className="eval-empty">审计失败：{error}</p>}
+      {verdict && (
+        <>
+          <div
+            className={`eval-coverage-verdict ${verdict.pass ? 'pass' : 'fail'}`}
+            data-testid="coverage-verdict"
+          >
+            {verdict.pass
+              ? `✓ PASS · 零死按钮（${verdict.aligned_count} 命令对齐）`
+              : `✗ FAIL · ${verdict.dead_buttons.length} 个死按钮`}
+          </div>
+          {verdict.dead_buttons.length > 0 && (
+            <div className="eval-coverage-section" data-testid="coverage-dead-buttons">
+              <h4 className="eval-coverage-h fail">死按钮（前端 invoke 但后端未注册 → FAIL）</h4>
+              <ul className="eval-coverage-list">
+                {verdict.dead_buttons.map((c) => (
+                  <li key={c} className="mono">
+                    ✗ {c}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {verdict.dead_code.length > 0 && (
+            <div className="eval-coverage-section" data-testid="coverage-dead-code">
+              <h4 className="eval-coverage-h warn">
+                死代码（后端注册但前端未调用 · {verdict.dead_code.length} · WARN）
+              </h4>
+              <ul className="eval-coverage-list">
+                {verdict.dead_code.map((c) => (
+                  <li key={c} className="mono">
+                    · {c}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

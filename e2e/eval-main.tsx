@@ -114,6 +114,23 @@ useAgentStore.setState({ sessions: [] } as never);
     on_score: 0.9,
     reason: 'ON 闭合了到 expected 的缺口',
   }),
+  // SA 平台自审: 前端 invoke 集合 (F, 构建期 grep src/ 生成的 INVOKED_COMMANDS
+  // manifest) vs 后端 generate_handler! 注册集合 (B, include_str! lib.rs) 对齐。
+  // CoverageSelfAudit 展开传入 IPC — 真实后端在编译期嵌入 B；这里 mock 一个零死按钮
+  // PASS 态（少量死代码 WARN），让 spec 验证 manifest 真接线 + 渲染结论。F\B 死按钮的
+  // FAIL 形态由 EvalPanel 单测（coverage-dead-buttons）覆盖。
+  eval_platform_coverage: () => ({
+    pass: true,
+    frontend_count: 107,
+    backend_count: 109,
+    aligned_count: 107,
+    dead_buttons: [],
+    dead_code: ['list_llm_traces', 'prune_llm_traces_now'],
+    checks: [
+      { name: 'frontend_invoke_count', pass: true, detail: '107 commands' },
+      { name: 'aligned', pass: true, detail: '107 对齐' },
+    ],
+  }),
 };
 
 const rootEl = document.getElementById('root');

@@ -474,6 +474,25 @@ pub async fn eval_platform_e2e(
 }
 
 // ===========================================================================
+// P4·调整 platform-coverage eval — 反刷分自审：dev workbench 自己的前端 invoke
+// 集合（F）vs 后端 generate_handler! 注册集合（B）。F\B=死按钮（FAIL），B\F=死代码
+// （WARN）。两集合独立 grep 客观事实，无手工契约，不可自我标榜。详见 platform_coverage。
+// ===========================================================================
+
+/// Run the IPC self-audit: pass the frontend's invoked-command set (from the
+/// build-time manifest `src/generated/invoked-commands.ts`) and diff it against
+/// the backend's registered set (parsed from lib.rs). No IO, no LLM, no DB —
+/// the verdict is a deterministic fact. The P4 "平台-自审" object calls this.
+#[tauri::command]
+pub async fn eval_platform_coverage(
+    frontend_invokes: Vec<String>,
+) -> Result<crate::eval::platform_coverage::CoverageVerdict, AppError> {
+    Ok(crate::eval::platform_coverage::run_platform_coverage(
+        &frontend_invokes,
+    ))
+}
+
+// ===========================================================================
 // P4 platform-enablement eval — does enabling a DW feature (skills) actually
 // improve the agent's tool-choice? Runs the case twice (feature OFF vs ON) and
 // diffs the trajectories via L4 compare_paired. Needs a live provider key (two

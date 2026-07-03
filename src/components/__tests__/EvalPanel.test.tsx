@@ -21,6 +21,7 @@ vi.mock('../../utils/evalApi', () => ({
     runPlatformMechanism: vi.fn(),
     runPlatformE2e: vi.fn(),
     runEnablement: vi.fn(),
+    runPlatformCoverage: vi.fn(),
   },
 }));
 
@@ -130,6 +131,19 @@ function mockAll(p: { cases?: EvalCaseRow[]; verdicts?: VerdictRow[]; trend?: un
     on_score: 0.9,
     reason: 'ON 闭合了到 expected 的缺口',
   });
+  // SA 平台自审 default: 零死按钮 PASS，少量死代码 WARN（事件/内部 command）。
+  vi.mocked(evalApi.runPlatformCoverage).mockResolvedValue({
+    pass: true,
+    frontend_count: 107,
+    backend_count: 110,
+    aligned_count: 107,
+    dead_buttons: [],
+    dead_code: ['list_llm_traces', 'prune_llm_traces_now'],
+    checks: [
+      { name: 'frontend_invoke_count', pass: true, detail: '107 commands' },
+      { name: 'aligned', pass: true, detail: '107 commands 对齐' },
+    ],
+  });
 }
 
 describe('EvalPanel', () => {
@@ -191,6 +205,50 @@ describe('EvalPanel', () => {
     fireEvent.change(screen.getByDisplayValue('全部 gate'), { target: { value: 'honesty' } });
     expect(within(table).queryByText('eval')).not.toBeInTheDocument();
     expect(within(table).getByText('honesty')).toBeInTheDocument();
+  });
+
+  it('SA 平台自审: 零死按钮 → PASS + 死代码 WARN 区可见', async () => {
+    mockAll({ cases: [case_()] });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-SA'));
+    expect(screen.getByTestId('eval-feature-title')).toHaveTextContent('IPC 接线自审');
+    await waitFor(() => {
+      expect(screen.getByTestId('coverage-verdict')).toHaveTextContent('PASS');
+    });
+    // 真调了 IPC，传入了构建期 manifest 的前端 invoke 集合。
+    expect(evalApi.runPlatformCoverage).toHaveBeenCalled();
+    // 零死按钮 → 不渲染死按钮区。
+    expect(screen.queryByTestId('coverage-dead-buttons')).toBeNull();
+    // 死代码区（WARN）渲染并列出未调用的 command。
+    expect(screen.getByTestId('coverage-dead-code')).toHaveTextContent('list_llm_traces');
+  });
+
+  it('SA 平台自审: 有死按钮 → FAIL + 逐个列出死按钮（前端调了后端没注册）', async () => {
+    mockAll({ cases: [case_()] });
+    vi.mocked(evalApi.runPlatformCoverage).mockResolvedValue({
+      pass: false,
+      frontend_count: 108,
+      backend_count: 110,
+      aligned_count: 107,
+      dead_buttons: ['definitely_not_registered_xyz'],
+      dead_code: [],
+      checks: [
+        {
+          name: 'dead_button:definitely_not_registered_xyz',
+          pass: false,
+          detail: '前端 invoke 但后端 generate_handler! 未注册（死按钮）',
+        },
+      ],
+    });
+    render(<EvalPanel />);
+    fireEvent.click(screen.getByTestId('eval-nav-SA'));
+    await waitFor(() => {
+      expect(screen.getByTestId('coverage-verdict')).toHaveTextContent('FAIL');
+    });
+    // 死按钮逐个列出——反刷分抓造假的核心信号。
+    expect(screen.getByTestId('coverage-dead-buttons')).toHaveTextContent(
+      'definitely_not_registered_xyz',
+    );
   });
 
   it('F2 flywheel surfaces real counts + broken-chain state when no failures', async () => {

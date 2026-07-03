@@ -149,6 +149,27 @@ export interface E2EVerdict {
   mismatches: string[];
 }
 
+// ── P4·调整 平台-自审 eval（IPC 接线完整性：前端 invoke 集 vs 后端注册集）──
+/** 单条自审断言（UI 展示哪个维度过/挂）。镜像 E2ECheck。 */
+export interface CoverageCheck {
+  name: string;
+  pass: boolean;
+  detail: string;
+}
+/** 平台-自审判决。pass=零死按钮。两集合独立 grep 客观事实，无手工契约——
+ *  F（前端 invoke，构建期 manifest）vs B（后端 generate_handler! 注册）。 */
+export interface CoverageVerdict {
+  pass: boolean;
+  frontend_count: number;
+  backend_count: number;
+  aligned_count: number;
+  /** F\B：前端 invoke 但后端未注册 → 死按钮（FAIL）。用户点了无反应=造假。 */
+  dead_buttons: string[];
+  /** B\F：后端注册但前端未调用 → 死代码（WARN，不 fail）。事件/内部/未接线。 */
+  dead_code: string[];
+  checks: CoverageCheck[];
+}
+
 // ── P4 平台-加持 eval（开/关 DW 功能 → agent 轨迹增量）──
 /** enablement 跑的 off→on 结果（镜像 L4 PairedOutcome）。 */
 export type EnablementOutcome = 'improvement' | 'regression' | 'no_change';
@@ -346,4 +367,12 @@ export const evalApi = {
    *  增益须闭合到 expected 缺口才算 CLEAR，否则 BRAKE。需 live provider key。 */
   runEnablement: (caseId: string, workingDir: string, matcher: Matcher, model?: string) =>
     invoke<EnablementVerdict>('run_eval_enablement', { caseId, workingDir, matcher, model }),
+
+  // ----- P4·调整 平台-自审 eval（IPC 接线）-----
+  /** 自审 dev workbench 自身：前端 invoke 集合（构建期 manifest 传入）vs 后端
+   *  generate_handler! 注册集合（后端 include_str! lib.rs 解析）。dead_buttons
+   *  （前端调了后端没注册）= FAIL；dead_code（后端注册前端没调）= WARN。反刷分
+   *  自审——评测系统用它审计 dev workbench 自身不造假。 */
+  runPlatformCoverage: (frontendInvokes: string[]) =>
+    invoke<CoverageVerdict>('eval_platform_coverage', { frontendInvokes }),
 };

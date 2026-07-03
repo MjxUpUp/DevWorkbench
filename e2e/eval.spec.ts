@@ -103,4 +103,16 @@ test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, 
   await expect(page.getByText('manual intervention ⚠硬门')).toBeVisible();
   await expect(page.getByText('harness-pattern')).toBeVisible();
   await expect(page.getByText('dryrun pass')).toBeVisible();
+
+  // ── SA 平台自审: F (前端 invoke 集合) vs B (后端 generate_handler! 注册) 对齐。
+  //    CoverageSelfAudit 把构建期生成的 INVOKED_COMMANDS manifest 真展开传入 IPC ——
+  //    这是单测 mock evalApi 拿不到的信号（单测不验证 manifest 内容真接线）。零死按钮
+  //    → PASS；死代码（后端注册前端没调）→ WARN 区可见。死按钮 FAIL 形态由单测覆盖。 ──
+  await page.getByTestId('eval-nav-SA').click();
+  await expect(page.getByTestId('eval-feature-title')).toContainText('IPC 接线自审');
+  await expect(page.getByTestId('coverage-verdict')).toContainText('PASS');
+  // 死代码 WARN 区渲染（后端注册了前端没调的 command）。
+  await expect(page.getByTestId('coverage-dead-code')).toBeVisible();
+  // 零死按钮 → 死按钮 FAIL 区不渲染。
+  await expect(page.getByTestId('coverage-dead-buttons')).toHaveCount(0);
 });
