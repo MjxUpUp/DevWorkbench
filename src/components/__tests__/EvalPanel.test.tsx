@@ -240,6 +240,51 @@ describe('EvalPanel', () => {
     expect(screen.queryByText(/回归 · 拦/)).not.toBeInTheDocument();
   });
 
+  it('P5 __all__ aggregate surfaces 分歧 (split) when cases mix improve + regress', async () => {
+    // 反刷分 mixed 场景：c1 提升 / c2 回归并存 → 不简单放/拦，标分歧待人审。
+    // 回归守卫：split 分支曾被 regresses>0 三元首分支吞掉（死代码），mixed 永远
+    // 显示"回归·拦"。修复后 split 优先，mixed 走分歧。
+    mockAll({
+      cases: [case_(), case_({ id: 'c2', name: 'case 2' })],
+      verdicts: [
+        // c1: new(0.9) > old(0.5) → improve
+        verdict({ id: 'c1-new', case_id: 'c1', verdict: 'PASS', report: '{"score":0.9}', created_at: '2026-07-02T14:02:00Z' }),
+        verdict({ id: 'c1-old', case_id: 'c1', verdict: 'FAIL', report: '{"score":0.5}', created_at: '2026-07-01T14:02:00Z' }),
+        // c2: new(0.5) < old(0.9) → regress
+        verdict({ id: 'c2-new', case_id: 'c2', verdict: 'FAIL', report: '{"score":0.5}', created_at: '2026-07-02T14:02:00Z' }),
+        verdict({ id: 'c2-old', case_id: 'c2', verdict: 'PASS', report: '{"score":0.9}', created_at: '2026-07-01T14:02:00Z' }),
+      ],
+    });
+    render(<EvalPanel />);
+    await waitFor(() => expect(evalApi.listVerdicts).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('eval-nav-P5'));
+    expect(screen.getByText(/分歧 · 待判/)).toBeInTheDocument();
+    // split 优先于纯 regresses>0：mixed 不一刀切拦。
+    expect(screen.queryByText(/回归 · 拦/)).not.toBeInTheDocument();
+  });
+
+  it('P5 __all__ aggregate surfaces 持平 when every case is same (no improve, no regress)', async () => {
+    // 反刷分诚实信号：全 same 不该标"净提升"——曾落入净提升分支显示
+    // "净提升·可准入（0/N）"，标签撒谎（无提升却说净提升）。应标"持平·待判"。
+    mockAll({
+      cases: [case_(), case_({ id: 'c2', name: 'case 2' })],
+      verdicts: [
+        // c1: new(0.9) == old(0.9) → same
+        verdict({ id: 'c1-new', case_id: 'c1', verdict: 'PASS', report: '{"score":0.9}', created_at: '2026-07-02T14:02:00Z' }),
+        verdict({ id: 'c1-old', case_id: 'c1', verdict: 'PASS', report: '{"score":0.9}', created_at: '2026-07-01T14:02:00Z' }),
+        // c2: new(0.5) == old(0.5) → same
+        verdict({ id: 'c2-new', case_id: 'c2', verdict: 'FAIL', report: '{"score":0.5}', created_at: '2026-07-02T14:02:00Z' }),
+        verdict({ id: 'c2-old', case_id: 'c2', verdict: 'FAIL', report: '{"score":0.5}', created_at: '2026-07-01T14:02:00Z' }),
+      ],
+    });
+    render(<EvalPanel />);
+    await waitFor(() => expect(evalApi.listVerdicts).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('eval-nav-P5'));
+    expect(screen.getByText(/持平 · 待判/)).toBeInTheDocument();
+    // 全 same 不该标"净提升"。
+    expect(screen.queryByText(/净提升 · 可准入/)).not.toBeInTheDocument();
+  });
+
   it('P2 detail saves the edited contract via updateCase (input_prompt stays locked)', async () => {
     const c = case_();
     mockAll({ cases: [c] });

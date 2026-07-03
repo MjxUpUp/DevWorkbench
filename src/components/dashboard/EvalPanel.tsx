@@ -1152,8 +1152,9 @@ function PairedCompare({
   const [caseId, setCaseId] = useState('__all__');
 
   // 单 case 视图：取该 case 的 eval verdicts 新旧各一（list_verdicts new-first：
-  // [0]=新, [1]=旧）。'__all__' 视图：聚合每个 ready case 的净判定 → 全 improve=
-  // 准入 / 有 regress=拦 / 提升与回归并存=split 分歧待人审。
+  // [0]=新, [1]=旧）。'__all__' 视图：聚合每个 ready case 的净判定，按反刷分保守序
+  // 判定——split（提升+回归并存）=分歧待人审（不简单放/拦）/ 纯 regress=拦 /
+  // 全 same（无提升无回归）=持平待判 / 否则全 improve=净提升可准入。
   const caseOptions = (
     <>
       <option value="__all__">全部 case（聚合准入判定）</option>
@@ -1186,12 +1187,14 @@ function PairedCompare({
           <p className="eval-empty">无 case 有 ≥2 次 eval verdict。至少回放两次（P4）才能配对。</p>
         ) : (
           <div className="eval-compare-summary">
-            {regresses > 0 ? (
-              <span className="eval-badge eval-badge-brake">回归 · 拦（{regresses}/{judged.length} case 倒退）</span>
-            ) : split ? (
+            {split ? (
               <span className="eval-badge eval-badge-unclear">
-                分歧 · 待判（{improves} 提升 / {judged.length - improves} 持平，人审）
+                分歧 · 待判（{improves} 提升 / {regresses} 回归 / {judged.length - improves - regresses} 持平，人审）
               </span>
+            ) : regresses > 0 ? (
+              <span className="eval-badge eval-badge-brake">回归 · 拦（{regresses}/{judged.length} case 倒退）</span>
+            ) : improves === 0 ? (
+              <span className="eval-badge eval-badge-muted">持平 · 待判（0/{judged.length} case 无变化）</span>
             ) : (
               <span className="eval-badge eval-badge-clear">净提升 · 可准入（{improves}/{judged.length}）</span>
             )}
