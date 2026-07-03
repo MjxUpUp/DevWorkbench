@@ -69,6 +69,91 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* B1：plan stepper——tool 步骤可视化（轴线A 执行可见）。
+ *   Chat 模式 plan∈LLM context 隐式，stepper 只展示已发起的 tool 调用（done✓ / active
+ *   脉冲 / error✗），末尾「未来∈LLM」标注告知边界——不造 pending 假步骤（反刷分）。 */
+.planStepper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+.step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  max-width: 160px;
+}
+.stepDot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.stepName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stepDone .stepDot {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  color: #fff;
+}
+.stepDone {
+  color: var(--text-secondary);
+}
+.stepActive .stepDot {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+  animation: stepPulse 1.8s ease-in-out infinite;
+}
+.stepActive {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.stepError .stepDot {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+.stepError {
+  color: var(--color-error);
+}
+.stepLine {
+  flex-shrink: 0;
+  width: 16px;
+  height: 1px;
+  background: var(--border);
+}
+.stepLineDone {
+  background: var(--color-success);
+}
+.stepFuture {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  padding: 2px 6px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+@keyframes stepPulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--accent-muted); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
 /* === 轴线 B：Stage === */
 .stage {
   grid-area: stage;

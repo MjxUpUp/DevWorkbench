@@ -127,6 +127,50 @@ describe('PlanBar — plan 进度派生（轴线A·执行可见，块2）', () =
     render(<PlanBar />);
     expect(screen.getByTestId('plan-progress')).toHaveTextContent('未加载工作流');
   });
+
+  it('B1: task 视图 tool 步骤 stepper——done/active dots + 未来∈LLM 边界标注', () => {
+    // Chat 模式 plan∈LLM context 隐式，stepper 只展示已发起 tool 调用：有 tool_result
+    // 的 done(✓)、无 tool_result 的 active（序号）。不造 pending 假步骤（反刷分）。
+    useNavigationStore.setState({ activeView: 'task', selectedConversationId: 'c1' });
+    useAgentStore.setState({
+      sessions: [
+        mkSession('running', {
+          id: 's-run',
+          conversationId: 'c1',
+          blocks: [
+            toolUse('read_file'),
+            { kind: 'tool_result', content: 'ok', is_error: false },
+            toolUse('write_file'), // active（无配对 tool_result，session 仍 running）
+          ],
+        }),
+      ],
+    });
+    render(<PlanBar />);
+    const stepper = screen.getByTestId('plan-stepper');
+    // 两个 tool 步骤名都渲染（done 的 read_file + active 的 write_file）
+    expect(stepper).toHaveTextContent('read_file');
+    expect(stepper).toHaveTextContent('write_file');
+    // 边界标注：未来步骤 ∈ LLM context（诚实告知，非 pending 假步骤）
+    expect(stepper).toHaveTextContent(/未来/);
+    // plan-progress 汇总仍保留（a11y + 兼容现有断言）
+    expect(screen.getByTestId('plan-progress')).toHaveTextContent('步骤 2');
+  });
+
+  it('B1: 无 tool_use 的 session → 不渲染 stepper（仅汇总）', () => {
+    useNavigationStore.setState({ activeView: 'task', selectedConversationId: 'c1' });
+    useAgentStore.setState({
+      sessions: [
+        mkSession('running', {
+          id: 's-text',
+          conversationId: 'c1',
+          blocks: [{ kind: 'text', content: '只想了想，没调工具' }],
+        }),
+      ],
+    });
+    render(<PlanBar />);
+    expect(screen.queryByTestId('plan-stepper')).toBeNull();
+    expect(screen.getByTestId('plan-progress')).toHaveTextContent('步骤 0');
+  });
 });
 
 describe('GateBar — 运行态派生（门控层）', () => {

@@ -1,7 +1,8 @@
+import { Fragment } from 'react';
 import { useNavigationStore, type ViewId } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { useOrchestrateStore } from '../../stores/orchestrateStore';
-import type { SessionStatus } from '../../types';
+import type { Session, SessionStatus } from '../../types';
 import styles from './workbench.module.css';
 
 /**
@@ -61,6 +62,32 @@ const STATUS_ZH: Record<SessionStatus, string> = {
   cancelled: '取消',
 };
 
+type ToolStepStatus = 'done' | 'active' | 'error';
+interface ToolStep {
+  name: string;
+  status: ToolStepStatus;
+}
+
+/** B1：从 session.blocks 派生 tool 步骤（与 BlocksView.groupByStep 同语义——tool_use
+ *  起步，配对 tool_result 标记 done/error，否则 active）。Chat 模式 plan∈LLM context
+ *  隐式，前端只看得见已发起的 tool 调用：done/active 是事后/进行中信号，未来步骤不
+ *  在其中（stepper 末尾标注「未来∈LLM context」诚实告知边界，不造 pending 假步骤）。 */
+function deriveToolSteps(blocks: Session['blocks']): ToolStep[] {
+  if (!blocks || blocks.length === 0) return [];
+  const steps: ToolStep[] = [];
+  for (const b of blocks) {
+    if (b.kind === 'tool_use') {
+      steps.push({ name: b.name, status: 'active' });
+    } else if (b.kind === 'tool_result' && steps.length > 0) {
+      const last = steps[steps.length - 1];
+      if (last.status === 'active') {
+        last.status = b.is_error ? 'error' : 'done';
+      }
+    }
+  }
+  return steps;
+}
+
 export function PlanBar() {
   const activeView = useNavigationStore((s) => s.activeView);
   const project = useNavigationStore((s) => s.activeProject);
@@ -70,15 +97,20 @@ export function PlanBar() {
   const mode = modeForView(activeView);
 
   // plan 进度派生（轴线A 的「执行可见」补充「位置可见」）。
-  let progress: string;
-  if (activeView === 'task') {
-    const convTurns = conversationId
+  // current 提到顶层：B1 stepper 也需要 current.blocks 派生 tool 步骤。
+  const convTurns =
+    activeView === 'task' && conversationId
       ? sessions.filter((s) => s.conversationId === conversationId)
       : [];
-    // running 优先（正在跑的 turn 即当前 plan）；否则取 startedAt 最新。
-    const current =
-      convTurns.find((s) => s.status === 'running') ??
-      [...convTurns].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))[0];
+  // running 优先（正在跑的 turn 即当前 plan）；否则取 startedAt 最新。
+  const current =
+    convTurns.find((s) => s.status === 'running') ??
+    [...convTurns].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))[0];
+  // B1：tool 步骤可视化（done/active dots），仅 task 视图有 current session 时渲染。
+  const toolSteps = current ? deriveToolSteps(current.blocks) : [];
+
+  let progress: string;
+  if (activeView === 'task') {
     const steps = current?.blocks?.filter((b) => b.kind === 'tool_use').length ?? 0;
     progress = current
       ? `步骤 ${steps} · ${STATUS_ZH[current.status]}`
@@ -103,6 +135,46 @@ export function PlanBar() {
         <span className={styles.planMeta}>
           {mode.planLoc} · {mode.resultsLoc}
         </span>
+        {toolSteps.length > 0 && (
+          <div
+            className={styles.planStepper}
+            data-testid="plan-stepper"
+            aria-label={`plan 进度 ${progress}`}
+          >
+            {toolSteps.map((s, i) => (
+              <Fragment key={i}>
+                <span
+                  className={`${styles.step} ${
+                    s.status === 'done'
+                      ? styles.stepDone
+                      : s.status === 'active'
+                        ? styles.stepActive
+                        : styles.stepError
+                  }`}
+                  title={s.name}
+                >
+                  <span className={styles.stepDot} aria-hidden="true">
+                    {s.status === 'done' ? '✓' : s.status === 'error' ? '✗' : i + 1}
+                  </span>
+                  <span className={styles.stepName}>{s.name}</span>
+                </span>
+                {i < toolSteps.length - 1 && (
+                  <span
+                    className={`${styles.stepLine} ${
+                      s.status === 'done' ? styles.stepLineDone : ''
+                    }`}
+                  />
+                )}
+              </Fragment>
+            ))}
+            <span
+              className={styles.stepFuture}
+              title="Chat 模式 plan ∈ LLM context，未来步骤对前端不可见"
+            >
+              未来 ∈ LLM
+            </span>
+          </div>
+        )}
         <span className={styles.planProgress} data-testid="plan-progress">
           {progress}
         </span>
