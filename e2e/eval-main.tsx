@@ -3,6 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { EvalPanel } from '../src/components/dashboard/EvalPanel';
 import { useNavigationStore } from '../src/stores/navigationStore';
 import { useAgentStore } from '../src/stores/agentStore';
+// Pull in the app's full stylesheet so the harness page isn't unstyled when a
+// human opens /eval.html (E2E asserts only on text/testids, so the missing
+// import went unnoticed — same fix orchestrate-main.tsx already has).
+import '../src/styles/index.css';
 import cases from './fixtures/eval-cases.json';
 import verdicts from './fixtures/eval-verdicts.json';
 import trend from './fixtures/eval-trend.json';

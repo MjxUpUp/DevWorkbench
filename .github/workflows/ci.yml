@@ -41,6 +41,15 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # 反刷分自审硬执行：P4 的 F 集合（前端 invoke 清单）必须与 src/ 同步。
+      # 重新生成 manifest 并要求 git diff 为空——任何漏跑 vite 就提交新 invoke 的
+      # 变更会让 manifest 漂移（死按钮审计的真相源失准），CI 直接 FAIL。这条校验是
+      # "双集合独立 grep" 立场的硬底，把"开发者自觉同步"升级为"CI 强制"。
+      - name: Verify invoke-commands manifest is in sync
+        run: |
+          node scripts/gen-invoked-commands.mjs
+          git diff --exit-code -- src/generated/invoked-commands.ts
+
       - name: Type-check frontend
         run: npx tsc --noEmit
 

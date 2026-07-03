@@ -75,16 +75,27 @@ pub struct CoverageVerdict {
 /// reports backend_count=0, which fails loudly — a missing handler registry is
 /// itself a catastrophic finding, never silently green).
 pub fn extract_registered_commands() -> Vec<String> {
+    extract_registered_commands_in(BACKEND_LIB_SRC)
+}
+
+/// Parameterized core of [`extract_registered_commands`] — takes the lib.rs
+/// source as an argument so a test can feed an empty / malformed registry and
+/// exercise the "backend parses to empty → fail loudly" guard (the const
+/// `include_str!` is never empty in production, so the delegating wrapper alone
+/// could never reach that branch). Pure + deterministic: same src ⇒ same set.
+pub fn extract_registered_commands_in(lib_src: &str) -> Vec<String> {
     let key = "generate_handler![";
     let mut out: Vec<String> = Vec::new();
-    let Some(start) = BACKEND_LIB_SRC.find(key) else {
+    let Some(start) = lib_src.find(key) else {
         return out; // verdict will flag backend_count=0.
     };
     let body_start = start + key.len();
-    let rest = &BACKEND_LIB_SRC[body_start..];
+    let rest = &lib_src[body_start..];
     // generate_handler! has no nested `[…]` in this codebase, so the first `]`
-    // closes the macro. (If one is ever introduced, this parse must widen — and
-    // a test below asserts the parsed count is non-zero as a tripwire.)
+    // closes the macro. Bracket-depth counting would be more general but offers
+    // no extra safety today (verified: the macro body has no `]`); instead the
+    // tripwire test asserts the parsed count is ≥100, so any premature truncation
+    // that drops the set into the tens trips before a verdict can silently shrink.
     let body = match rest.find(']') {
         Some(end) => &rest[..end],
         None => rest,
@@ -113,7 +124,17 @@ pub fn extract_registered_commands() -> Vec<String> {
 /// no LLM, no DB — so the result is a deterministic fact about the two source
 /// trees (反刷分 #1).
 pub fn run_platform_coverage(frontend_invokes: &[String]) -> CoverageVerdict {
-    let backend = extract_registered_commands();
+    coverage_verdict(frontend_invokes, &extract_registered_commands())
+}
+
+/// Parameterized core of [`run_platform_coverage`] — takes the backend command
+/// set as an argument so a test can feed an empty backend and prove the
+/// "missing registry ⇒ fail loudly" guard actually fires (the production path
+/// embeds lib.rs via `include_str!`, which is never empty, so the guard's
+/// `!backend.is_empty()` half could never be exercised through the wrapper).
+/// Pure — no IO, no LLM, no DB — so the result is a deterministic fact about
+/// the two sets (反刷分 #1).
+pub fn coverage_verdict(frontend_invokes: &[String], backend: &[String]) -> CoverageVerdict {
     let f: BTreeSet<&String> = frontend_invokes.iter().collect();
     let b: BTreeSet<&String> = backend.iter().collect();
 
@@ -186,11 +207,16 @@ mod tests {
     /// lib.rs registers >100 commands today; a non-zero parse proves the
     /// `include_str!` + macro-parse path still resolves. If lib.rs moves or the
     /// handler macro changes shape, this trips before any verdict can silently
-    /// report backend_count=0.
+    /// report backend_count=0. The ≥100 threshold (not just non-empty) catches a
+    /// premature `]` truncation that would shrink the parsed set into the tens.
     #[test]
     fn backend_registry_parses_nonempty() {
         let b = extract_registered_commands();
-        assert!(!b.is_empty(), "generate_handler! must parse to a non-empty set");
+        assert!(
+            b.len() >= 100,
+            "generate_handler! must parse to ≥100 commands, got {} — macro shape may have changed/truncated",
+            b.len()
+        );
         // A few commands known to be in lib.rs:300-413 — anchors that survive
         // refactors and prove names (not just counts) parse correctly.
         for anchor in ["spawn_agent_session", "load_projects", "list_eval_cases", "eval_platform_e2e"] {
@@ -199,6 +225,16 @@ mod tests {
                 "anchor command {anchor:?} missing from parsed backend set"
             );
         }
+    }
+
+    /// The `extract_registered_commands_in` core parses an empty / handler-less
+    /// source to an empty set — the precondition the empty-backend guard below
+    /// relies on. (The const `include_str!` wrapper is never empty in production,
+    /// so this branch can only be hit through the parameterized core.)
+    #[test]
+    fn extract_empty_when_no_handler_macro() {
+        let b = extract_registered_commands_in("fn main() {} // no generate_handler! here");
+        assert!(b.is_empty(), "a source with no generate_handler! must parse to empty");
     }
 
     #[test]
@@ -232,13 +268,23 @@ mod tests {
 
     #[test]
     fn empty_backend_registry_fails_loudly() {
-        // If generate_handler! ever disappears / unparseable, backend_count=0
-        // must FAIL — never silently green on a missing registry.
-        let v = run_platform_coverage(&["some_cmd".to_string()]);
-        // With a real lib.rs the backend set is non-empty, so this asserts the
-        // guard logic: if backend WERE empty, the unknown frontend cmd is a dead
-        // button AND pass is false. Here it's false because of the dead button.
-        assert!(!v.pass);
-        assert!(v.dead_buttons.iter().any(|c| c == "some_cmd"));
+        // If generate_handler! ever disappears / becomes unparseable, backend
+        // parses to empty → pass MUST be false — never silently green on a
+        // missing registry. This feeds an empty backend set directly through the
+        // parameterized core (the production wrapper embeds lib.rs via
+        // include_str!, which is never empty, so this guard could not otherwise
+        // be reached). `pass = dead_buttons.is_empty() && !backend.is_empty()`
+        // — the !backend.is_empty() half is the guard under test here.
+        let empty_backend: Vec<String> =
+            extract_registered_commands_in("fn main() {} // no generate_handler!");
+        assert!(empty_backend.is_empty());
+        let v = coverage_verdict(&["some_cmd".to_string()], &empty_backend);
+        assert!(!v.pass, "empty backend registry must FAIL, never silently green");
+        assert_eq!(v.backend_count, 0);
+        // The backend_register_count check is the explicit, named FAIL signal.
+        assert!(v
+            .checks
+            .iter()
+            .any(|c| c.name == "backend_register_count" && !c.pass));
     }
 }

@@ -38,15 +38,28 @@ function walk(dir) {
 export function collectInvokedCommands() {
   const cmds = new Set();
   for (const file of walk(SRC_ROOT)) {
-    const src = readFileSync(file, 'utf8');
-    for (const line of src.split('\n')) {
-      // 跳注释行（//、*、/*）——JSDoc 里提及 invoke('xxx') 不是真实调用点。
-      const t = line.trim();
-      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue;
-      RE.lastIndex = 0;
-      let m;
-      while ((m = RE.exec(line))) cmds.add(m[1]);
-    }
+    let src = readFileSync(file, 'utf8');
+    // 1) 剥离块注释（含跨行 JSDoc /** ... */）——注释里举例的 invoke('xxx') 不是
+    //    真实调用点，不能进 F 集合污染比对。
+    src = src.replace(/\/\*[\s\S]*?\*\//g, '');
+    // 2) 丢掉整行注释（//、*、/* 开头）。注意：只丢【整行】注释，保留行内 // ——
+    //    因为 invoke 的 command 名是 snake_case 标识符，永不含 //；而 `'http://…'`
+    //    这类含 // 的字符串字面量若被 //.*$ 截断会把同行的真 invoke 一起吞掉（回归）。
+    //    整行注释开头判断与原逐行逻辑等价，不回归行内场景。
+    const kept = src
+      .split('\n')
+      .filter((line) => {
+        const t = line.trim();
+        return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+      })
+      .join('\n');
+    // 3) 整体匹配（不逐行）：RE 里 \s* 跨行，能捕获 invoke( 与字符串字面量分布在不同
+    //    行的多行调用（如 skillsStore.ts 的 invoke<T>(\n  'skill_catalog',\n)）。
+    //    逐行扫描正是反刷分自审的破洞：多行 invoke 被静默漏采 → F 缺该命令 → 即便
+    //    后端从 generate_handler! 删了它，F\B 也为空，审计假性 PASS。整体匹配闭合该缺口。
+    RE.lastIndex = 0;
+    let m;
+    while ((m = RE.exec(kept))) cmds.add(m[1]);
   }
   return [...cmds].sort();
 }
