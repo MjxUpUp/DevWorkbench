@@ -30,7 +30,14 @@ export default defineConfig({
     command: 'npx vite',
     url: 'http://localhost:5174',
     cwd: here,
-    reuseExistingServer: true,
+    // false on purpose. reuseExistingServer:true would silently adopt ANY
+    // process already bound to 5174 — including an unrelated project's dev
+    // server (we hit E:\AgentWorld\frontend's vite here), which then serves its
+    // own app at /eval.html and every spec fails with a wrong title / router
+    // "No routes matched" while looking like an EvalPanel bug. strictPort (see
+    // vite.config.ts) + reuse:false turn a port conflict into a fail-fast boot
+    // error instead of a silent wrong-server adoption.
+    reuseExistingServer: false,
     timeout: 60_000,
   },
   projects: [
