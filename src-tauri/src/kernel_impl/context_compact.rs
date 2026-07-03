@@ -251,6 +251,79 @@ pub async fn summarize_middle(
 /// calls that never succeed). At the cap we stop re-attempting.
 pub const MAX_CONSECUTIVE_COMPACT_FAILURES: u32 = 3;
 
+// ---- B5: proactive trigger + dynamic keep_recent + hard-truncate fallback ----
+
+/// Proactive compaction trigger (B5). Compaction starts when estimated tokens
+/// reach 60% of the hard max — NOT 100%. Waiting until overflow leaves no
+/// headroom: a single large tool result between turns can blow past the ceiling
+/// and 400 the model call before the next compaction even runs. 60% catches
+/// growth early, while there's still room to summarize gracefully instead of
+/// hard-truncating under panic. CCB / Claude Code compact in this 60–80% band
+/// for the same reason.
+pub const COMPACT_TRIGGER_RATIO_PERCENT: usize = 60;
+
+/// The soft trigger threshold below which compaction never fires.
+/// `max_tokens * 60 / 100`. Kept as a fn (not inlined) so tests can pin the
+/// ratio in one place.
+pub fn trigger_threshold(max_tokens: usize) -> usize {
+    max_tokens * COMPACT_TRIGGER_RATIO_PERCENT / 100
+}
+
+/// Dynamic keep_recent (B5): cap the verbatim tail to what the budget can
+/// afford. A fixed `keep_recent=6` on a small context window (e.g. an 8k model)
+/// would reserve most of the window for the tail, leaving no room for the system
+/// prompt + summary and forcing compaction every turn. This scales the tail
+/// DOWN on small budgets and leaves the full configured base on large ones.
+///
+/// Reserve ~half the budget for the tail (the rest for system + summary + the
+/// incoming turn), at a coarse ~500 tokens/message → `affordable` messages.
+/// Floor 1 (a tail of zero leaves the model with no live tool results to react
+/// to). Pure function of the budget + configured base; deterministic, testable.
+pub fn dynamic_keep_recent(max_tokens: usize, base: usize) -> usize {
+    let tail_budget = max_tokens / 2;
+    let affordable = (tail_budget / 500).max(1);
+    base.min(affordable).max(1)
+}
+
+/// Hard-truncate fallback (B5): the summarizer is suspended (breaker tripped)
+/// and the history is STILL over the hard ceiling, so the next model call would
+/// 400. Drop the oldest middle messages outright — no summary, pure data loss —
+/// to keep the run going. Reuses [`summarize_middle_end`] to find a safe tail
+/// boundary (never starts the tail on an orphan Tool result, preserving the
+/// tool_use/tool_result pairing the Anthropic API enforces). Returns the dropped
+/// middle so the caller can archive it; empty if no safe boundary exists or the
+/// history is already as small as system + tail.
+///
+/// If the tail ALONE exceeds `max_tokens` this can't help further — the run will
+/// still overflow on the next call. That's an honest limit; we don't break
+/// pairing to force-fit.
+pub fn hard_truncate_middle(
+    history: &mut Vec<Message>,
+    max_tokens: usize,
+    keep_recent: usize,
+) -> Vec<Message> {
+    // Need a safe boundary that leaves a whole tail. summarize_middle_end walks
+    // back through leading Tool results so the tail starts on an assistant.
+    let boundary = match summarize_middle_end(history, keep_recent) {
+        Some(b) if b > 1 => b,
+        _ => return Vec::new(),
+    };
+    let dropped: Vec<Message> = history[1..boundary].to_vec();
+    history.drain(1..boundary);
+    // Log if STILL over budget after dropping the whole middle (tail too big).
+    if estimate_tokens(history) > max_tokens && !dropped.is_empty() {
+        log::error!(
+            "[context-compact] hard-truncate dropped {} middle messages but history is still \
+             over the hard ceiling ({} tokens > {}); the tail itself is too large — next model \
+             call may overflow",
+            dropped.len(),
+            estimate_tokens(history),
+            max_tokens
+        );
+    }
+    dropped
+}
+
 /// Which compaction strategy dropped this chunk (drives the UI card label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +341,16 @@ pub enum ArchivedKind {
     /// user. Pushed exactly once at the trip moment (not on every subsequent
     /// over-threshold call, which short-circuits at the top of `maybe_compact`).
     BreakerTripped,
+    /// Hard-truncate fallback (B5) — the summarizer is already suspended (breaker
+    /// tripped) AND the history is STILL over the hard ceiling, so the next model
+    /// call would 400 on context overflow. As a last resort the oldest middle
+    /// messages are dropped OUTRIGHT (no summary — pure data loss) to keep the
+    /// run going degraded. The dropped middle is snapshotted here so the user can
+    /// still recover it from the archive; the card surfaces as `is_error: true`.
+    /// Distinct from [`ArchivedKind::Summarize`] (lossy but blended into a
+    /// summary the model still sees) and [`ArchivedKind::MicroClear`] (only bulky
+    /// tool output, slots kept): this loses whole turns the model never sees again.
+    HardTruncate,
 }
 
 /// A snapshot of what one compaction pass removed from the history, handed to
@@ -326,7 +409,15 @@ pub async fn maybe_compact(
     consecutive_failures: &mut u32,
     archive_buffer: Option<Arc<Mutex<Vec<ArchivedChunk>>>>,
 ) -> Result<bool, Error> {
-    if estimate_tokens(history) <= max_tokens {
+    // B5: proactive trigger — compact at 60% of the hard max, not at 100%.
+    // `max_tokens` is the HARD ceiling the model call must stay under; the soft
+    // trigger fires earlier so there's headroom to summarize gracefully.
+    let soft_trigger = trigger_threshold(max_tokens);
+    // B5: dynamic keep_recent — cap the verbatim tail to what this budget can
+    // afford. Computed once and used by both micro_compact and summarize_middle
+    // so they agree on the tail boundary (a mismatch would orphan tool results).
+    let keep_recent = dynamic_keep_recent(max_tokens, keep_recent);
+    if estimate_tokens(history) <= soft_trigger {
         return Ok(false);
     }
     // D1(c) micro-compact FIRST (LLM-free): clear stale bulky tool results,
@@ -357,7 +448,10 @@ pub async fn maybe_compact(
             }
         }
         *history = micro;
-        if estimate_tokens(history) <= max_tokens {
+        // B5: short-circuit only if micro brought us back under the SOFT trigger
+        // (60%), not merely under the hard ceiling — proactive compaction aims
+        // to clear the 60% band, not just dodge overflow.
+        if estimate_tokens(history) <= soft_trigger {
             return Ok(true);
         }
     }
@@ -365,6 +459,30 @@ pub async fn maybe_compact(
     // rounds running. Without this, a persistent LLM error makes compaction a
     // per-turn infinite retry (history grows → over threshold → retry → fail).
     if *consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES {
+        // B5 fallback: summarizer is suspended, but if we're STILL over the HARD
+        // ceiling the next model call 400s on context overflow. Hard-truncate the
+        // oldest middle (data loss, no summary) so the run can continue degraded
+        // instead of crashing. Surface as one HardTruncate error chunk so the
+        // user knows turns were dropped. If we're only over the soft trigger but
+        // under the hard ceiling, there's no crash risk — just suspend quietly.
+        if estimate_tokens(history) > max_tokens {
+            let dropped = hard_truncate_middle(history, max_tokens, keep_recent);
+            if !dropped.is_empty() {
+                if let Some(buf) = archive_buffer.as_ref() {
+                    if let Ok(mut g) = buf.lock() {
+                        g.push(ArchivedChunk {
+                            kind: ArchivedKind::HardTruncate,
+                            dropped_messages: dropped,
+                            summary: Some(
+                                "压缩已暂停且仍超上下文上限，紧急丢弃最早的历史以保证运行（数据有损）"
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
+                return Ok(true);
+            }
+        }
         log::warn!(
             "[context-compact] summarizer failed {}× consecutively; suspending compaction for this run",
             *consecutive_failures
@@ -753,8 +871,10 @@ mod tests {
     async fn maybe_compact_compacts_when_over_threshold() {
         let model = SummaryChatModel::new("压缩结果");
         let mut hist = vec![msg(Role::System, "sys")];
-        // ~20kb of content → ~5000 tokens, threshold 100 → over
-        for i in 0..20 {
+        // B5: realistic budget (50k) so dynamic_keep_recent keeps the full
+        // configured tail (max/2=25k → affordable 50 → min(4,50)=4). ~31500
+        // tokens of content clears the 60% soft trigger (30000) → summarize.
+        for i in 0..420 {
             hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
         }
         let mut fails = 0u32;
@@ -762,7 +882,7 @@ mod tests {
             &mut hist,
             &model,
             &ModelOptions::default(),
-            100,
+            50_000,
             4,
             &mut fails,
             None,
@@ -1112,6 +1232,216 @@ mod tests {
             trip.summary.as_ref().map(|s| s.contains("已暂停")).unwrap_or(false),
             "trip summary tells the user compaction is suspended: {:?}",
             trip.summary
+        );
+    }
+
+    // ---- B5: proactive 60% trigger + dynamic keep_recent + hard-truncate fallback ----
+
+    #[test]
+    fn trigger_threshold_is_60_percent_of_hard_max() {
+        // B5: the soft trigger fires at 60% of the hard max, not at 100%. This
+        // is the headroom that lets compaction summarize gracefully instead of
+        // hard-truncating under overflow panic.
+        assert_eq!(trigger_threshold(100), 60);
+        assert_eq!(trigger_threshold(8192), 4915); // 8192*60/100 = 4915.2 → 4915
+        assert_eq!(trigger_threshold(200_000), 120_000);
+    }
+
+    #[test]
+    fn dynamic_keep_recent_scales_with_budget_and_floors_at_one() {
+        // B5: a small context window can't afford a large verbatim tail — cap it
+        // to what the budget holds. A large window keeps the full configured base.
+        // Floor 1 (a zero-tail leaves the model with no live tool results).
+        // Small budget (8k): tail_budget=4000 → affordable 8 → min(6,8)=6.
+        assert_eq!(dynamic_keep_recent(8_000, 6), 6);
+        // Tiny budget (1k): tail_budget=500 → affordable 1 → min(6,1)=1.
+        assert_eq!(dynamic_keep_recent(1_000, 6), 1);
+        // Large budget (200k): affordable 200 → min(6,200)=6 (full base).
+        assert_eq!(dynamic_keep_recent(200_000, 6), 6);
+        // Floor: base 0 must still yield 1, never 0.
+        assert_eq!(dynamic_keep_recent(500, 0), 1);
+        // Base larger than affordable is capped (8k, base 20 → 8).
+        assert_eq!(dynamic_keep_recent(8_000, 20), 8);
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_proactive_trigger_fires_below_hard_max() {
+        // B5: compaction must fire at the 60% soft trigger, NOT wait until 100%.
+        // A history sitting at ~70% of the hard max compacts; the old 100%-only
+        // gate would have skipped it and let it grow into overflow.
+        let model = SummaryChatModel::new("摘要");
+        let mut hist = vec![msg(Role::System, "sys")];
+        // ~7000 tokens, hard max 10000 → 70% > 60% trigger (6000) → compacts.
+        for i in 0..93 {
+            hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
+        }
+        let before_tokens = estimate_tokens(&hist);
+        assert!(
+            before_tokens > trigger_threshold(10_000) && before_tokens <= 10_000,
+            "fixture must be over the 60% trigger but under the hard max: {before_tokens}"
+        );
+        let mut fails = 0u32;
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            10_000,
+            4,
+            &mut fails,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(did, "70%-full history must compact under the proactive 60% trigger");
+        assert_eq!(model.calls().len(), 1, "summarize fired once");
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_skips_when_under_60_percent_trigger() {
+        // B5 mirror: a history under the 60% soft trigger (even if it would have
+        // tripped a naive 100% gate... well, under 60% is under 100% too) skips.
+        let model = SummaryChatModel::new("s");
+        let mut hist = vec![msg(Role::System, "sys"), msg(Role::User, "hi")];
+        let mut fails = 0u32;
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            10_000,
+            4,
+            &mut fails,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!did);
+        assert!(model.calls().is_empty());
+    }
+
+    #[test]
+    fn hard_truncate_middle_drops_middle_keeps_system_and_tail() {
+        // B5 fallback: drop the oldest middle outright (no summary), preserving
+        // system[0] + the most recent tail verbatim. The tail boundary must not
+        // start on an orphan Tool result (reuses summarize_middle_end's walk).
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..8 {
+            hist.push(msg(Role::User, &format!("middle {i} ").repeat(50)));
+        }
+        hist.push(msg(Role::Assistant, "tail-a"));
+        hist.push(msg(Role::User, "tail-u"));
+        let len_before = hist.len();
+        // keep_recent=2 → tail is the last 2; middle[1..len-2] is dropped.
+        let dropped = hard_truncate_middle(&mut hist, 10_000, 2);
+        assert_eq!(hist.len(), 3, "system + 2 tail preserved");
+        assert_eq!(hist[0].role, Role::System);
+        assert_eq!(hist[1].content, "tail-a");
+        assert_eq!(hist[2].content, "tail-u");
+        assert_eq!(dropped.len(), len_before - 3, "everything between system and tail dropped");
+        // The dropped middle is real content (not the placeholders) — recoverable
+        // from the archive.
+        assert!(dropped.iter().any(|m| m.content.contains("middle 0")));
+        assert!(dropped.iter().any(|m| m.content.contains("middle 7")));
+    }
+
+    #[test]
+    fn hard_truncate_middle_preserves_tool_pair_boundary() {
+        // B5: if the naive tail boundary would land on a Tool result, the paired
+        // assistant tool_use must move into the kept tail (not get dropped) so the
+        // tool_use/tool_result pairing survives — same regression guard as
+        // summarize_middle, applied to the hard-truncate path.
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..4 {
+            hist.push(msg(Role::User, &format!("m{i} ").repeat(50)));
+        }
+        hist.push(assistant_with_tool("call", "tid", "read_file"));
+        hist.push(tool_msg("tid", "the result"));
+        hist.push(msg(Role::User, "tail-user"));
+        let dropped = hard_truncate_middle(&mut hist, 10_000, 2);
+        // tail leads with the assistant (not an orphan tool result).
+        assert_eq!(hist[1].role, Role::Assistant, "tail must not lead with an orphan Tool msg");
+        assert!(
+            hist[1].tool_calls.iter().any(|tc| tc.id == "tid"),
+            "assistant tool_use preserved in the kept tail"
+        );
+        assert_eq!(hist[2].role, Role::Tool);
+        assert_eq!(hist[2].tool_call_id.as_deref(), Some("tid"));
+        // The pre-pair middle was dropped; the pair itself was NOT.
+        assert!(dropped.iter().all(|m| !m.tool_calls.iter().any(|tc| tc.id == "tid")));
+    }
+
+    #[test]
+    fn hard_truncate_middle_returns_empty_when_no_safe_boundary() {
+        // B5: when the history is already as small as system + tail, there's no
+        // middle to drop — return empty (caller suspends quietly, no false chunk).
+        let mut hist = vec![msg(Role::System, "sys"), msg(Role::User, "only turn")];
+        let dropped = hard_truncate_middle(&mut hist, 10_000, 2);
+        assert!(dropped.is_empty());
+        assert_eq!(hist.len(), 2, "nothing dropped when there's no middle");
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_hard_truncates_when_breaker_tripped_and_over_hard_max() {
+        // B5 fallback integration: summarizer is suspended (breaker tripped) AND
+        // history is still over the HARD ceiling → hard-truncate the middle so
+        // the next model call doesn't 400, surfacing one HardTruncate error chunk
+        // carrying the dropped turns. Without this the run degrades into overflow.
+        let model = FailingChatModel::new();
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..20 {
+            hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
+        }
+        // Pre-trip the breaker: 3 summarize failures → suspended.
+        let mut fails = 0u32;
+        let archived: Arc<Mutex<Vec<ArchivedChunk>>> = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..3 {
+            let _ = maybe_compact(
+                &mut hist,
+                &model,
+                &ModelOptions::default(),
+                100,
+                4,
+                &mut fails,
+                None,
+            )
+            .await;
+        }
+        assert_eq!(fails, MAX_CONSECUTIVE_COMPACT_FAILURES);
+        // History is unchanged (summarizer always failed) → still over hard max.
+        assert!(estimate_tokens(&hist) > 100);
+        // Now the 4th call hits the breaker short-circuit + hard-truncate fallback.
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            100,
+            4,
+            &mut fails,
+            Some(Arc::clone(&archived)),
+        )
+        .await
+        .unwrap();
+        assert!(did, "hard-truncate fallback must report it acted");
+        let archived = archived.lock().unwrap();
+        let hard: Vec<&ArchivedChunk> = archived
+            .iter()
+            .filter(|c| c.kind == ArchivedKind::HardTruncate)
+            .collect();
+        assert_eq!(hard.len(), 1, "exactly one HardTruncate chunk");
+        assert!(
+            !hard[0].dropped_messages.is_empty(),
+            "dropped middle snapshotted for archive recovery"
+        );
+        assert!(
+            hard[0].summary.as_ref().map(|s| s.contains("数据有损")).unwrap_or(false),
+            "hard-truncate card must flag data loss: {:?}",
+            hard[0].summary
+        );
+        // Summarizer was never called on this fallback pass (only the 3 pre-trip calls).
+        assert_eq!(model.call_count(), MAX_CONSECUTIVE_COMPACT_FAILURES);
+        // History shrank below the hard ceiling (system + dynamic tail).
+        assert!(
+            estimate_tokens(&hist) <= 100 || hist.len() <= 1 + dynamic_keep_recent(100, 4),
+            "history reduced; if tail alone is still over, no safe further truncate exists"
         );
     }
 }

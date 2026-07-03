@@ -1516,6 +1516,12 @@ impl kernel_core::Agent for ReactAgent {
                                     }),
                                     true,
                                 ),
+                                context_compact::ArchivedKind::HardTruncate => (
+                                    chunk.summary.clone().unwrap_or_else(|| {
+                                        "压缩已暂停且仍超上限，紧急丢弃最早历史（数据有损）".to_string()
+                                    }),
+                                    true,
+                                ),
                                 context_compact::ArchivedKind::MicroClear => (
                                     chunk.summary.clone().unwrap_or_else(|| {
                                         format!("已压缩 {} 条陈旧工具输出", dropped_count)
@@ -1531,11 +1537,13 @@ impl kernel_core::Agent for ReactAgent {
                             };
                             // Archive dropped原文 to disk (best-effort; the
                             // returned path becomes the card's archived_at —
-                            // the UI's expand view keys off its presence). Skip
-                            // for BreakerTripped: nothing was compacted, so there
-                            // is no original to archive (and an empty JSONL line
-                            // would only pollute the audit log).
-                            let archived_at = if is_error {
+                            // the UI's expand view keys off its presence). The
+                            // gate is "was anything dropped", NOT is_error:
+                            // BreakerTripped carries no dropped content (skip —
+                            // an empty JSONL line only pollutes the audit log),
+                            // but HardTruncate is an error card that DID drop
+                            // real turns — those must be recoverable from disk.
+                            let archived_at = if chunk.dropped_messages.is_empty() {
                                 None
                             } else {
                                 crate::agents::pty::append_compact_archive(sid, &chunk)
