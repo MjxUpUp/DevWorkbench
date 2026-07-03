@@ -10,6 +10,7 @@ interface KnowledgeState {
   search: (query: string, limit?: number) => Promise<void>;
   loadForProject: (projectPath: string) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
+  updateEntry: (id: string, title: string, content: string) => Promise<void>;
 }
 
 export const useKnowledgeStore = create<KnowledgeState>((set) => {
@@ -59,6 +60,17 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => {
     set((s) => ({
       entries: s.entries.filter((e) => e.id !== id),
       searchResults: s.searchResults.filter((e) => e.id !== id),
+    }));
+  },
+
+  updateEntry: async (id, title, content) => {
+    await invoke('update_knowledge_entry', { id, title, content });
+    // Patch in place (both lists) so the card re-renders with the corrected
+    // text without a refetch — matches deleteEntry's local-state contract.
+    const patch = (e: KnowledgeEntry) => (e.id === id ? { ...e, title, content } : e);
+    set((s) => ({
+      entries: s.entries.map(patch),
+      searchResults: s.searchResults.map(patch),
     }));
   },
 };

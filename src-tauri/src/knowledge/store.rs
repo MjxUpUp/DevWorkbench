@@ -378,6 +378,47 @@ pub fn delete_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppErro
     Ok(())
 }
 
+/// Update a knowledge entry's title + content (the user-editable fields) and
+/// keep the FTS index in sync so the edited text is searchable. User-facing
+/// reason this exists (C1): a mislearned lesson — wrong root cause, stale
+/// convention — gets re-injected into every future session's prompt until fixed;
+/// before this the only remedy was delete-and-lose. Edit lets the user correct
+/// the lesson in place. Other fields (category/confidence/sources) are structural
+/// and stay unchanged. Bumps `updated_at` so the edit sorts as recent.
+pub fn update_entry(
+    conn: &rusqlite::Connection,
+    id: &str,
+    title: &str,
+    content: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Local::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    // Verify the row exists (mirrors delete_entry's NotFound contract) — a miss
+    // is a programming error, not a silent no-op.
+    let rowid: i64 = tx
+        .query_row(
+            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", id)))?;
+    tx.execute(
+        "UPDATE knowledge_entries SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
+        params![title, content, now, id],
+    )?;
+    // Keep FTS in sync within the same transaction (same consistency contract as
+    // add_entry): delete the old indexed row, insert the new title/content. If
+    // this were skipped the main row would show the edit but search would still
+    // match the old text — an invisible lie about what the prompt injects.
+    tx.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rowid])?;
+    tx.execute(
+        "INSERT INTO knowledge_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
+        params![rowid, title, content],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Set the confidence of a knowledge entry and bump `updated_at` (D6 improvement
 /// tracking). Resolved-but-not-accepted reviews decay their lessons' confidence
 /// instead of deleting them, so the experience flywheel keeps a traceable record
@@ -803,5 +844,42 @@ mod tests {
             "title capped at 120: {}",
             e.title.chars().count()
         );
+    }
+
+    #[test]
+    fn update_entry_persists_and_keeps_fts_in_sync() {
+        // C1: editing a mislearned lesson must (a) persist the new title/content
+        // and (b) keep the FTS index in sync — the old text must stop matching
+        // and the new text must start matching, or the prompt would still inject
+        // the corrected-away lesson (an invisible lie about what's injected).
+        let db = TempDb::new();
+        let e = make_entry("k1", "proj_a", "old title", "old content about rust async");
+        add_entry(&db.conn, &e).unwrap();
+        // Sanity: the original term is searchable before the edit.
+        assert!(search_entries(&db.conn, "rust", 10)
+            .unwrap()
+            .iter()
+            .any(|x| x.id == "k1"));
+
+        update_entry(&db.conn, "k1", "corrected title", "corrected content about python").unwrap();
+
+        // Old term no longer matches (FTS row replaced).
+        assert!(
+            !search_entries(&db.conn, "rust", 10)
+                .unwrap()
+                .iter()
+                .any(|x| x.id == "k1"),
+            "old term must stop matching after edit"
+        );
+        // New term now matches.
+        assert!(search_entries(&db.conn, "python", 10)
+            .unwrap()
+            .iter()
+            .any(|x| x.id == "k1"));
+        // Row persisted with the new title/content + bumped updated_at.
+        let entries = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        let updated = entries.iter().find(|x| x.id == "k1").expect("entry survived edit");
+        assert_eq!(updated.title, "corrected title");
+        assert_eq!(updated.content, "corrected content about python");
     }
 }

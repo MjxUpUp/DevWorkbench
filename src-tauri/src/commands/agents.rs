@@ -823,6 +823,17 @@ pub fn delete_knowledge_entry(db: State<'_, DbState>, id: String) -> Result<(), 
     crate::knowledge::store::delete_entry(&conn, &id)
 }
 
+#[tauri::command]
+pub fn update_knowledge_entry(
+    db: State<'_, DbState>,
+    id: String,
+    title: String,
+    content: String,
+) -> Result<(), AppError> {
+    let conn = db.get()?;
+    crate::knowledge::store::update_entry(&conn, &id, &title, &content)
+}
+
 // Config commands
 #[tauri::command]
 pub fn load_mcp_config(project_path: String) -> Result<crate::models::McpConfigFile, AppError> {

@@ -100,4 +100,36 @@ describe('MemorySection', () => {
     // Card removed from view after the store filters it out.
     expect(screen.queryByText('stale lesson')).not.toBeInTheDocument();
   });
+
+  it('edits a memory via update_knowledge_entry and updates the card', async () => {
+    // C1: a mislearned lesson is corrected in place (not delete-and-lose) — the
+    // edit round-trips through update_knowledge_entry and the card re-renders
+    // with the corrected title/content.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_knowledge_for_project')
+        return Promise.resolve([makeEntry('k1', 'wrong lesson')]);
+      if (cmd === 'update_knowledge_entry') return Promise.resolve();
+      return Promise.reject(new Error(`unexpected ${cmd}`));
+    });
+    render(<MemorySection />);
+    await screen.findByText('wrong lesson');
+
+    fireEvent.click(screen.getByRole('button', { name: /编辑记忆 wrong lesson/ }));
+
+    // Editing surfaces the title + content as labeled inputs pre-filled with
+    // the current values.
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'corrected lesson' } });
+    fireEvent.change(screen.getByLabelText('内容'), { target: { value: 'fixed content' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => expect(toastSpies.success).toHaveBeenCalledWith('记忆已更新'));
+    expect(mockInvoke).toHaveBeenCalledWith('update_knowledge_entry', {
+      id: 'k1',
+      title: 'corrected lesson',
+      content: 'fixed content',
+    });
+    // Card re-rendered with the corrected title (store patched it in place).
+    expect(screen.getByText('corrected lesson')).toBeInTheDocument();
+  });
 });

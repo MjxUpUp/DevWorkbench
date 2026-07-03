@@ -360,6 +360,7 @@ pub fn run() {
             commands::agents::search_knowledge,
             commands::agents::get_knowledge_for_project,
             commands::agents::delete_knowledge_entry,
+            commands::agents::update_knowledge_entry,
             commands::agents::load_mcp_config,
             commands::agents::save_mcp_config,
             commands::agents::apply_mcp_config,
