@@ -50,7 +50,7 @@ interface SectionDef {
 
 const SECTIONS: SectionDef[] = [
   // 智能体
-  { id: 'agent-tools', label: '智能体工具', Icon: IconTerminal, Component: AgentSection, group: '智能体' },
+  { id: 'agent-tools', label: '工作流外部节点', Icon: IconTerminal, Component: AgentSection, group: '智能体' },
   { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection, group: '智能体' },
   { id: 'capability', label: '能力总览', Icon: IconInbox, Component: CapabilitySection, group: '智能体' },
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, Component: SubAgentsSection, group: '智能体' },
