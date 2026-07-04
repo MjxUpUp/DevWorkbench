@@ -4,9 +4,9 @@
    ============================================= */
 
 .settings-view {
-  /* Full-viewport overlay covering left-column + main-stage + status-bar.
+  /* Full-viewport overlay covering activity + main-stage + workspace-tabs + status-bar.
    * TitleBar stays visible above (top = --title-bar-height) so window controls
-   * and the sidebar toggle remain usable. Clicking 设置 lifts this above the
+   * and the brand (return-to-task) button remain usable. Clicking 设置 lifts this above the
    * normal view grid instead of rendering inside the main stage. */
   position: fixed;
   top: var(--title-bar-height);

@@ -21,7 +21,7 @@
   min-width: 0;
 }
 
-/* Brand mark — always-visible app icon, doubles as the left-column toggle.
+/* Brand mark — always-visible app icon, returns to the task view (logo-as-home).
  * pi.dev 签名：衡线斜体品牌标（非粗体 sans）。 */
 .title-bar-brand {
   display: flex;

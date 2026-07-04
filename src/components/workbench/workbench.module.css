@@ -36,7 +36,7 @@
   font-size: var(--text-sm);
   min-width: 0;
 }
-/* mode-segmented：运行模式切换器（task/orchestrate/trace，对齐原型 385-389）。 */
+/* mode-segmented：运行模式切换器（task/trace，对齐原型 385-389）。 */
 .modeSegmented {
   display: inline-flex;
   align-items: center;

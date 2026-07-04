@@ -65,7 +65,7 @@ export function ActivityBar() {
         onClick={() => setActiveView('task')}
         title="Task · 轴线化工作面"
         aria-label="Task 视图"
-        aria-selected={activeView === 'task'}
+        aria-pressed={activeView === 'task'}
         type="button"
         data-testid="ab-task"
       >
@@ -76,7 +76,7 @@ export function ActivityBar() {
         onClick={() => setActiveView('trace')}
         title="Trace · 可观测"
         aria-label="Trace 视图"
-        aria-selected={activeView === 'trace'}
+        aria-pressed={activeView === 'trace'}
         type="button"
         data-testid="ab-trace"
       >
@@ -104,7 +104,7 @@ export function ActivityBar() {
         onClick={() => setActiveView('settings')}
         title="设置"
         aria-label="设置"
-        aria-selected={activeView === 'settings'}
+        aria-pressed={activeView === 'settings'}
         type="button"
         data-testid="ab-settings"
       >
