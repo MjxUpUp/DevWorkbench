@@ -14,6 +14,8 @@ const baseProps = {
   attachedFiles: [],
   onAttachFile: noop,
   onRemoveFile: noop,
+  selectedModel: 'default',
+  onModelChange: noop,
 };
 
 describe('Composer', () => {

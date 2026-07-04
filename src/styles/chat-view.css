@@ -1,9 +1,9 @@
 /* Chat View 样式已按组件拆分（class 名不变，零视觉/e2e 风险）：
  *   - ChatView.css        容器 + 消息列表 + 空态 + 用户消息 + turn 编辑
- *   - ChatHeader.css      头部 + 清空按钮 + agent 选择
  *   - AgentMessage.css    agent 消息 + 结构化块 + decision chain + markdown
  *   - BlocksView.css      text/tool/result/thinking 卡片
- *   - Composer.css        输入框 + 触发器 + 发送/停止
+ *   - Composer.css        输入框 + 触发器 + 发送/停止 + ModelSelector（下沉自 ChatHeader）
  *
- * 这些组件 CSS 在 src/styles/index.css 末尾 import（全局作用域，class 名不变）。
- * 本文件保留为占位，避免引用断裂；如需新增 chat 相关样式，优先放对应组件 CSS。 */
+ * 顶部会话切换由 ConversationBookmarks（自身 .module.css，局部作用域）承接，
+ * 原 ChatHeader 已随 ModelSelector 下沉 Composer 后移除。这些全局组件 CSS 在
+ * src/styles/index.css 末尾 import；本文件保留为占位，避免引用断裂。 */

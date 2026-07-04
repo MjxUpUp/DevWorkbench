@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { IconPlay, IconStop } from '../Icons';
 import { TriggerMenu } from '../TriggerMenu';
 import { Button } from '../ui/Button/Button';
+import { ModelSelector, type ModelOption } from '../ModelSelector';
 
 interface AttachedFile {
   path: string;
@@ -18,6 +19,11 @@ interface ComposerProps {
   attachedFiles: AttachedFile[];
   onAttachFile: (file: AttachedFile) => void;
   onRemoveFile: (path: string) => void;
+  /** 模型选择器（从 ChatHeader 下沉到 Composer 左下 action bar）。selectedModel
+   *  是 ChatView 持有的组件 local state；modelOptions 来自 providers.toml。 */
+  selectedModel: string;
+  onModelChange: (model: string) => void;
+  modelOptions?: ModelOption[];
   placeholder?: string;
   /** Steering 模式（Cursor 3.0 / Codex app 范式）：
    * 运行中时允许输入插话/排队消息。true 时显示双行提示 + 不禁用 textarea。
@@ -37,6 +43,9 @@ export function Composer({
   attachedFiles,
   onAttachFile,
   onRemoveFile,
+  selectedModel,
+  onModelChange,
+  modelOptions,
   placeholder,
   steering = false,
   onSteer,
@@ -190,7 +199,9 @@ export function Composer({
 
       {/* Bottom action bar: 发送 / 停止（模式选择器已移除，破坏性操作走 ApprovalModal）*/}
       <div className="composer-actions">
-        <div className="composer-actions-left"></div>
+        <div className="composer-actions-left">
+          <ModelSelector value={selectedModel} onChange={onModelChange} models={modelOptions} />
+        </div>
         {isRunning ? (
           <button className="composer-send-btn stop" onClick={onStop} title="停止" data-testid="composer-send-btn">
             <IconStop size={16} />

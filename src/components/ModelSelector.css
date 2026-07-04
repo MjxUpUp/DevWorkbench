@@ -1,0 +1,110 @@
+/* ModelSelector — Composer 左下角的模型/供应商选择器。
+ * 历史根因：4 个 className 此前从未在任何 CSS 定义过（不是丢失，是从未存在），
+ * 组件只靠内联 style 撑几何，所以一直呈现裸文本。这里补齐完整视觉。 */
+
+.model-selector {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.model-selector-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease,
+    background var(--duration-fast) ease;
+}
+
+.model-selector-trigger:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.model-selector.open .model-selector-trigger {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.model-selector-label {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.model-selector-name {
+  font-weight: 500;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-selector-caret {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+/* 弹层向上展开（ModelSelector 落在 Composer 底部 action bar，向下会遮挡输入框）。 */
+.model-selector-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+}
+
+.model-selector-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-primary);
+  transition: background var(--duration-fast) ease;
+}
+
+.model-selector-item:hover {
+  background: var(--surface-2);
+}
+
+.model-selector-item.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.model-selector-item-label {
+  flex: 1;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-selector-item-provider {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}

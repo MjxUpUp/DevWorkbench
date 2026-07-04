@@ -50,7 +50,7 @@ describe('TraceView', () => {
   it('renders the empty-state hint when no session is selected', () => {
     useNavigationStore.setState({ traceSessionId: null });
     render(<TraceView />);
-    expect(screen.getByText('LLM Trace')).toBeInTheDocument();
+    expect(screen.getByText('会话 Trace')).toBeInTheDocument();
     // The hint points the user to the per-turn entry button.
     expect(screen.getByText(/🔍 Trace/)).toBeInTheDocument();
   });
@@ -66,7 +66,9 @@ describe('TraceView', () => {
     expect(screen.getByText('400')).toBeInTheDocument();
     expect(screen.getByText('200')).toBeInTheDocument();
     expect(screen.getByText('8ms')).toBeInTheDocument();
-    expect(screen.getByText('10/5 tok')).toBeInTheDocument();
+    // 10/5 tok shows in BOTH the 概要 summary and the row (summary is new in the
+    // Langfuse-style view) — assert presence, not uniqueness.
+    expect(screen.getAllByText('10/5 tok').length).toBeGreaterThanOrEqual(1);
   });
 
   it('expands a row to reveal the error response body (the diagnostic payload)', async () => {
@@ -85,7 +87,7 @@ describe('TraceView', () => {
     vi.mocked(invoke).mockResolvedValue([]);
     render(<TraceView />);
     await waitFor(() => expect(useTraceStore.getState().traces).toEqual([]));
-    expect(screen.getByText(/没有 LLM 调用记录/)).toBeInTheDocument();
+    expect(screen.getByText(/没有可追溯的链路数据/)).toBeInTheDocument();
   });
 
   it('surfaces a load failure as an error message', async () => {

@@ -1,0 +1,157 @@
+/* ConversationBookmarks — 常驻顶部的会话书签栏（替代被下沉的 ModelSelector 位）。
+ * 横向单行 + 横向滚动；每条书签 hover 露出 ×；末尾虚线 + 新建。 */
+
+.bookmarks {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-0);
+  flex-shrink: 0;
+  min-height: 40px;
+}
+
+.list {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.bookmark {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.bookmark:hover {
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
+.bookmark.active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.bookmarkBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 3px 4px 3px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bookmark.active .bookmarkBtn {
+  color: var(--accent);
+}
+
+.pin {
+  font-size: 10px;
+}
+
+.title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) ease, background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+/* 活动态常显 ×（不依赖 hover，触屏可达）；非活态 hover 才露。 */
+.bookmark.active .close {
+  opacity: 1;
+}
+
+.bookmark:hover .close {
+  opacity: 1;
+}
+
+.close:hover {
+  background: var(--color-error);
+  color: var(--always-white);
+}
+
+.add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease,
+    background var(--duration-fast) ease;
+}
+
+.add:hover {
+  border-color: var(--accent);
+  border-style: solid;
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+/* requestId + LiveDot（从 ChatHeader.css 迁来，原 .chat-header-requestid/livedot）。
+ * Cursor 3.0 范式：成本透明/排查的 mono 小标签。 */
+.meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+
+.livedot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: crt-blink 1.25s steps(1, end) infinite;
+}
+
+.requestId {
+  font-family: var(--font-mono);
+  font-size: var(--text-xxs);
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}

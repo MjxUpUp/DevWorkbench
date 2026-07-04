@@ -23,7 +23,9 @@ test('TraceView renders a failed turn and reveals its error response body', asyn
   await expect(page.getByText('200')).toBeVisible();
   // Latency + token columns render (812ms for the failed call, 120/45 tok clean).
   await expect(page.getByText('812ms')).toBeVisible();
-  await expect(page.getByText('120/45 tok')).toBeVisible();
+  // 120/45 tok shows in both the 概要 summary (session totals) and the clean
+  // call's row — the Langfuse-style summary is new; assert visibility via first.
+  await expect(page.getByText('120/45 tok').first()).toBeVisible();
 
   // The error response body is hidden until the 400 row expands — then the real
   // 400 reason renders into the DOM (the payload that was previously discarded

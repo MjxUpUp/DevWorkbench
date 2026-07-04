@@ -1,21 +1,203 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { useTraceStore } from '../../stores/traceStore';
-import type { LlmTrace } from '../../types';
+import type { ChatStreamEvent, LlmTrace } from '../../types';
 
 /**
- * LLM HTTP call timeline for one session (turn). Each row is one
- * GlmChatModel stream/generate call: # | model | status | latency | tokens |
- * error_kind. Click a row to expand the truncated request body and the
- * provider's real response body — for errors the diagnostic reason a turn
- * failed, for a clean 2xx the full assistant output (persisted symmetric with
- * errors per the 2026-06-19 trace observability research).
+ * 完整会话链路观察 — Langfuse 式 trace 视图。一个 turn（session）展开成三段：
  *
- * This is the observability payoff: a 0.8s "GLM stream failed: 400" turn is
- * now diagnosable end-to-end without guessing. Reuses the agent-block card +
- * collapse idiom from AgentMessage. All color tokens fall back so a missing theme var never
- * blanks the row.
+ *   1. 概要：提问、模型、LLM 调用次数、token、人工审批计数。
+ *   2. 决策链路（DecisionFlow）：从 session.blocks 还原 agent 的时序——
+ *      💭思考 → 🔧工具选用 → 📤执行结果 → 📁文件变更 → 🗜压缩 → ✅/❌结束。
+ *      每个节点可展开看 thinking 全文 / tool input / result content。
+ *   3. LLM 调用明细：每一次 ChatModel HTTP 调用（A1 span 树组织），req/resp
+ *      body + status + latency + token，是 0.8s "400 失败" turn 的端到端诊断。
+ *
+ * 数据源（零后端改动）：
+ *   - blocks 来自 agentStore.sessions[id].blocks（traceSessionId 永远对应一个当前
+ *     turn，前端已有，无需新 IPC）。
+ *   - LLM 明细来自 traceStore.fetchTraces（list_llm_traces）。
+ *   - 审批节点来自 traceStore.fetchVerdicts（list_verdicts gate='human-gate'）——
+ *     approval_required 在 react_chat.rs 被过滤出 blocks 流，verdicts 表是审批的
+ *     唯一真相源，所以这里独立成段，不强行穿插进 blocks 时序（blocks 无时间戳，
+ *     无法精确对齐审批的触发位置——穿插会伪造时序）。
  */
+
+// ---- 决策链路节点共享样式 ----
+
+const nodeHeadStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '7px 12px',
+  background: 'transparent',
+  border: 'none',
+  textAlign: 'left',
+  font: 'inherit',
+  color: 'inherit',
+  cursor: 'pointer',
+};
+const nodeRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '7px 12px',
+  borderBottom: '1px solid var(--border)',
+};
+const nodeIconStyle: CSSProperties = { width: 20, textAlign: 'center', flexShrink: 0 };
+const nodeLabelStyle: CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--text-xs)',
+  color: 'var(--text-secondary)',
+  flexShrink: 0,
+};
+const nodeSummaryStyle: CSSProperties = {
+  color: 'var(--text-tertiary)',
+  fontSize: 'var(--text-xs)',
+  flex: 1,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
+const nodeDetailStyle: CSSProperties = {
+  margin: 0,
+  padding: '8px 12px 12px 40px',
+  background: 'var(--surface-2)',
+  color: 'var(--text-secondary)',
+  fontSize: 'var(--text-xs)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  maxHeight: 300,
+  overflow: 'auto',
+};
+
+const truncate = (s: string, n: number): string => (s.length > n ? s.slice(0, n) + '…' : s);
+
+/** tool_use.input 是 unknown；安全序列化，循环引用/BigInt 不崩。 */
+const safeStringify = (input: unknown): string => {
+  try {
+    return typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+  } catch {
+    return String(input);
+  }
+};
+
+/** 段落小标题（概要/决策链路/审批/LLM 明细共用）。 */
+function SectionHeader({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        padding: '6px 12px',
+        background: 'var(--surface-1)',
+        fontSize: 'var(--text-xs)',
+        color: 'var(--text-tertiary)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.06em',
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** 决策链路的一个节点：一种 block kind 对应一种行。可展开的（思考/工具/结果/
+ *  回答）用 button + aria-expanded；不可展开的（文件变更/压缩/结束）用静态行。
+ *  error 态（tool_result.is_error / compact.is_error）用红色 label 标记。 */
+function DecisionNode({ block }: { block: ChatStreamEvent }) {
+  const [open, setOpen] = useState(false);
+  switch (block.kind) {
+    case 'thinking':
+      return (
+        <div style={{ borderBottom: '1px solid var(--border)' }}>
+          <button type="button" style={nodeHeadStyle} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            <span style={nodeIconStyle}>💭</span>
+            <span style={nodeLabelStyle}>思考</span>
+            <span style={nodeSummaryStyle}>{truncate(block.content, 100)}</span>
+            <span style={{ color: 'var(--text-tertiary)' }}>{open ? '▾' : '▸'}</span>
+          </button>
+          {open && <pre style={nodeDetailStyle}>{block.content}</pre>}
+        </div>
+      );
+    case 'tool_use':
+      return (
+        <div style={{ borderBottom: '1px solid var(--border)' }}>
+          <button type="button" style={nodeHeadStyle} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            <span style={nodeIconStyle}>🔧</span>
+            <span style={nodeLabelStyle}>{block.name}</span>
+            <span style={nodeSummaryStyle}>{truncate(safeStringify(block.input), 100)}</span>
+            <span style={{ color: 'var(--text-tertiary)' }}>{open ? '▾' : '▸'}</span>
+          </button>
+          {open && <pre style={nodeDetailStyle}>{safeStringify(block.input)}</pre>}
+        </div>
+      );
+    case 'tool_result':
+      return (
+        <div style={{ borderBottom: '1px solid var(--border)' }}>
+          <button type="button" style={nodeHeadStyle} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            <span style={nodeIconStyle}>{block.is_error ? '⛔' : '📤'}</span>
+            <span style={{ ...nodeLabelStyle, color: block.is_error ? 'var(--danger)' : 'var(--text-secondary)' }}>
+              {block.is_error ? '工具错误' : '工具结果'}
+            </span>
+            <span style={nodeSummaryStyle}>{truncate(block.content, 100)}</span>
+            <span style={{ color: 'var(--text-tertiary)' }}>{open ? '▾' : '▸'}</span>
+          </button>
+          {open && <pre style={nodeDetailStyle}>{block.content}</pre>}
+        </div>
+      );
+    case 'text':
+      return (
+        <div style={{ borderBottom: '1px solid var(--border)' }}>
+          <button type="button" style={nodeHeadStyle} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            <span style={nodeIconStyle}>💬</span>
+            <span style={nodeLabelStyle}>回答</span>
+            <span style={nodeSummaryStyle}>{truncate(block.content, 100)}</span>
+            <span style={{ color: 'var(--text-tertiary)' }}>{open ? '▾' : '▸'}</span>
+          </button>
+          {open && <pre style={nodeDetailStyle}>{block.content}</pre>}
+        </div>
+      );
+    case 'file_changed':
+      return (
+        <div style={nodeRowStyle}>
+          <span style={nodeIconStyle}>📁</span>
+          <span style={nodeLabelStyle}>文件变更</span>
+          <span style={{ ...nodeSummaryStyle, color: 'var(--text-secondary)' }}>{block.path}</span>
+        </div>
+      );
+    case 'compact':
+      return (
+        <div style={{ ...nodeRowStyle, background: block.is_error ? 'rgba(255,0,0,0.04)' : 'transparent' }}>
+          <span style={nodeIconStyle}>🗜</span>
+          <span style={{ ...nodeLabelStyle, color: block.is_error ? 'var(--danger)' : 'var(--text-secondary)' }}>
+            {block.is_error ? '压缩失败' : '上下文压缩'}
+          </span>
+          <span style={nodeSummaryStyle}>
+            {block.summary}
+            {block.dropped_count > 0 ? `（丢弃 ${block.dropped_count} 条）` : ''}
+          </span>
+        </div>
+      );
+    case 'result':
+      return (
+        <div style={{ ...nodeRowStyle, fontWeight: 600 }}>
+          <span style={nodeIconStyle}>{block.is_error ? '❌' : '✅'}</span>
+          <span style={{ color: block.is_error ? 'var(--danger)' : 'var(--success)' }}>
+            {block.is_error ? '失败' : '完成'} · {block.secs.toFixed(1)}s
+          </span>
+        </div>
+      );
+    case 'approval_required':
+      // react_chat 过滤掉 approval_required（verdicts 表是审批真相源）；防御性 null。
+      return null;
+    default:
+      return null;
+  }
+}
+
+// ---- LLM 调用明细（HTTP 级）----
 
 type Badge = { label: string; color: string };
 
@@ -327,39 +509,80 @@ export function TraceView() {
   const traceSessionId = useNavigationStore((s) => s.traceSessionId);
   const setActiveView = useNavigationStore((s) => s.setActiveView);
   const traces = useTraceStore((s) => s.traces);
+  const verdicts = useTraceStore((s) => s.verdicts);
   const loading = useTraceStore((s) => s.loading);
   const error = useTraceStore((s) => s.error);
   const fetchTraces = useTraceStore((s) => s.fetchTraces);
+  const fetchVerdicts = useTraceStore((s) => s.fetchVerdicts);
+  // blocks 源：traceSessionId 对应的 session（前端已有，无需新 IPC）。session 可能在
+  // refreshSessions 间短暂为 null（刚切到 trace、sessions 还没 reload）——hasBlocks 守卫。
+  const session = useAgentStore((s) =>
+    traceSessionId ? s.sessions.find((x) => x.id === traceSessionId) ?? null : null,
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
-    if (traceSessionId) void fetchTraces(traceSessionId);
-  }, [traceSessionId, fetchTraces]);
+    if (traceSessionId) {
+      void fetchTraces(traceSessionId);
+      void fetchVerdicts(traceSessionId);
+    }
+    // 切 session 重置展开态：trace.id 是 uuid 碰撞几乎不可能，但 expanded 语义应
+    // 跟随当前 session，避免残留上次的展开行。
+    setExpanded(null);
+  }, [traceSessionId, fetchTraces, fetchVerdicts]);
 
   if (!traceSessionId) {
     return (
       <div className="chat-view">
         <div className="chat-empty">
-          <h2>LLM Trace</h2>
+          <h2>会话 Trace</h2>
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>
-            从某个会话的「🔍 Trace」按钮进入，查看该 turn 的每一次 LLM HTTP 调用。
+            从某个会话的「🔍 Trace」按钮进入，查看该 turn 的完整链路：思考 → 工具选用 → 执行结果 → 决策，以及每一次 LLM HTTP 调用的明细。
           </p>
         </div>
       </div>
     );
   }
 
+  const llmCalls = traces ?? [];
+  const totalIn = llmCalls.reduce((s, t) => s + (t.input_tokens ?? 0), 0);
+  const totalOut = llmCalls.reduce((s, t) => s + (t.output_tokens ?? 0), 0);
+  const modelSet = new Set(llmCalls.map((t) => t.model));
+  const blocks = session?.blocks ?? null;
+  const humanGates = verdicts.filter((v) => v.gate === 'human-gate');
+  const hasLlm = llmCalls.length > 0;
+  const hasBlocks = !!blocks && blocks.length > 0;
+
   return (
     <div className="chat-view">
       <div className="agent-message">
         <div className="agent-message-header">
-          <span className="agent-block-title">LLM Trace</span>
+          <span className="agent-block-title">会话 Trace</span>
           <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
             session: {traceSessionId.slice(0, 8)}
           </span>
           <button type="button" className="agent-message-copy-id" onClick={() => setActiveView('task')}>
             ← 返回对话
           </button>
+        </div>
+
+        {/* 概要 */}
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {session?.prompt && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+              <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)', flexShrink: 0 }}>📥 提问</span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', whiteSpace: 'pre-wrap', display: 'block', maxHeight: 60, overflow: 'auto' }}>{session.prompt}</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)', fontVariantNumeric: 'tabular-nums' }}>
+            {modelSet.size > 0 && <span>{[...modelSet].join(' · ')}</span>}
+            {hasLlm && <span>{llmCalls.length} 次 LLM 调用</span>}
+            {(totalIn > 0 || totalOut > 0) && <span>{totalIn}/{totalOut} tok</span>}
+            {session?.model && <span>model: {session.model}</span>}
+            {humanGates.length > 0 && (
+              <span style={{ color: 'var(--warning)' }}>⚠ {humanGates.length} 次人工审批</span>
+            )}
+          </div>
         </div>
 
         {loading && (
@@ -372,33 +595,76 @@ export function TraceView() {
             <span style={{ color: 'var(--danger)' }}>加载失败: {error}</span>
           </div>
         )}
-        {!loading && !error && traces && traces.length === 0 && (
+
+        {/* 决策链路（blocks 主线） */}
+        {!loading && !error && blocks && blocks.length > 0 && (
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <SectionHeader>决策链路 · {blocks.length} 步</SectionHeader>
+            {blocks.map((b, i) => (
+              <DecisionNode key={`${i}-${b.kind}`} block={b} />
+            ))}
+          </div>
+        )}
+
+        {/* 人工审批记录 */}
+        {!loading && !error && humanGates.length > 0 && (
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <SectionHeader>人工审批 · {humanGates.length} 次</SectionHeader>
+            {humanGates.map((v) => {
+              const approved = v.verdict.toLowerCase().includes('approv');
+              return (
+                <div key={v.id} style={nodeRowStyle}>
+                  <span style={nodeIconStyle}>⚠</span>
+                  <span style={{ ...nodeLabelStyle, color: approved ? 'var(--success)' : 'var(--danger)' }}>
+                    {v.verdict}
+                  </span>
+                  {v.report && <span style={nodeSummaryStyle}>{v.report}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* LLM 调用明细 */}
+        {!loading && !error && hasLlm && (
+          <div>
+            <SectionHeader>LLM 调用明细 · {llmCalls.length} 次</SectionHeader>
+            <div className="agent-block-body" style={{ padding: 0 }}>
+              {hasSpans(llmCalls) ? (
+                <SpanForest
+                  traces={llmCalls}
+                  expanded={expanded}
+                  onToggle={(id) => setExpanded(expanded === id ? null : id)}
+                />
+              ) : (
+                llmCalls.map((t, i) => (
+                  <TraceRow
+                    key={t.id}
+                    trace={t}
+                    index={i}
+                    expanded={expanded === t.id}
+                    onToggle={() => setExpanded(expanded === t.id ? null : t.id)}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 无任何可追溯数据 */}
+        {!loading && !error && !hasLlm && !hasBlocks && (
           <div className="agent-block-body">
             <span style={{ color: 'var(--text-tertiary)' }}>
-              该会话没有 LLM 调用记录。可能在首次请求前就失败，或为非内核 agent（CLI 路径不接 trace sink）。
+              该会话没有可追溯的链路数据。可能在首次请求前就失败，或为非内核 agent（CLI 路径不接 trace sink，blocks 也未持久化）。
             </span>
           </div>
         )}
 
-        {!loading && !error && traces && traces.length > 0 && (
-          <div className="agent-block-body" style={{ padding: 0 }}>
-            {hasSpans(traces) ? (
-              <SpanForest
-                traces={traces}
-                expanded={expanded}
-                onToggle={(id) => setExpanded(expanded === id ? null : id)}
-              />
-            ) : (
-              traces.map((t, i) => (
-                <TraceRow
-                  key={t.id}
-                  trace={t}
-                  index={i}
-                  expanded={expanded === t.id}
-                  onToggle={() => setExpanded(expanded === t.id ? null : t.id)}
-                />
-              ))
-            )}
+        {/* blocks 未持久化的诚实提示 */}
+        {!loading && !error && !hasBlocks && session && (
+          <div className="agent-block-body" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+            注：该会话的决策链路（思考/工具/结果 blocks）未持久化——可能是流式会话尚未 finalize，或为历史会话。
+            {hasLlm ? '上方仍可见 LLM HTTP 调用明细。' : ''}
           </div>
         )}
       </div>

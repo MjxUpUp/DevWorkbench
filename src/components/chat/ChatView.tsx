@@ -2,12 +2,11 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
 import type { AgentType, BranchNode, Session } from '../../types';
-import { ChatHeader } from './ChatHeader';
+import { ConversationBookmarks } from './ConversationBookmarks';
 import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { Composer } from './Composer';
-import { SessionStartCards } from './SessionStartCards';
 import { ApprovalModal } from './ApprovalModal';
 import { shouldFollowLatest } from './turnFollow';
 import { useProvidersStore } from '../../stores/providersStore';
@@ -298,14 +297,6 @@ export function ChatView() {
     try { await stopAgent(runningSession.id); } catch (e) { console.error('Failed to stop:', e); toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`); }
   }, [runningSession, stopAgent, toast]);
 
-  const handleClear = useCallback(() => {
-    // "New conversation" intent — drop the selection so the empty-state shows
-    // and the next send starts a fresh container. Does NOT delete history.
-    selectConversation(null);
-    setPrompt('');
-    setAttachedFiles([]);
-  }, [selectConversation]);
-
   const handleAttachFile = useCallback((file: AttachedFile) => {
     setAttachedFiles((prev) => [...prev, file]);
   }, []);
@@ -348,18 +339,15 @@ export function ChatView() {
   // surface. Keying off turns (actual content), NOT activeConversationId:
   // selectProject clears the selection on every project switch, so a project
   // with history would otherwise flash the empty state when revisited.
+  // 会话切换/新增/删除由常驻顶部的 ConversationBookmarks 承接（替代旧 SessionStartCards
+  // 两张卡片 + ChatHeader 的清空按钮——书签栏的 + 新建 = selectConversation(null)）。
   if (!runningSession && turns.length === 0) {
     return (
       <div className="chat-view">
-        <ChatHeader
-          selectedModel={selectedModel}
-          onModelChange={setSelectedModel}
-          modelOptions={modelOptions}
-          onClear={handleClear}
-          requestId={activeConversationId ?? undefined}
-          running={false}
-        />
-        <SessionStartCards project={project} />
+        <ConversationBookmarks project={project} requestId={activeConversationId ?? undefined} running={false} />
+        <div style={{ padding: 'var(--space-4) var(--space-6)', color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }} data-testid="session-new-hint">
+          在下方输入需求或指令开始新会话，或点上方书签继续旧会话
+        </div>
         <Composer
           prompt={prompt}
           onPromptChange={setPrompt}
@@ -370,6 +358,9 @@ export function ChatView() {
           attachedFiles={attachedFiles}
           onAttachFile={handleAttachFile}
           onRemoveFile={handleRemoveFile}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
+          modelOptions={modelOptions}
           placeholder="提出后续修改要求... @ 文件 / 命令 $ 技能"
         />
       </div>
@@ -379,14 +370,7 @@ export function ChatView() {
   // Active conversation — show its turn stream
   return (
     <div className="chat-view">
-      <ChatHeader
-        selectedModel={selectedModel}
-        onModelChange={setSelectedModel}
-        modelOptions={modelOptions}
-        onClear={handleClear}
-        requestId={runningSession?.id ?? activeConversationId ?? undefined}
-        running={!!runningSession}
-      />
+      <ConversationBookmarks project={project} requestId={runningSession?.id ?? activeConversationId ?? undefined} running={!!runningSession} />
       <SubagentBoard
         events={
           visibleTurns.length
@@ -495,6 +479,9 @@ export function ChatView() {
         attachedFiles={attachedFiles}
         onAttachFile={handleAttachFile}
         onRemoveFile={handleRemoveFile}
+        selectedModel={selectedModel}
+        onModelChange={setSelectedModel}
+        modelOptions={modelOptions}
         steering={!!runningSession}
         onSteer={() => toast.info('Steering 消息发送待后端支持（当前会继续运行）')}
         placeholder={isContinuing ? '提出后续修改要求... @ 文件 / 命令 $ 技能' : '输入需求或指令... @ 文件 / 命令 $ 技能'}

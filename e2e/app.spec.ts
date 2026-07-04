@@ -47,10 +47,10 @@ test.describe('Full App interaction E2E', () => {
     await page.goto('/app.html');
 
     // 1. App mounted → load_projects → WorkspaceTabs shows the seeded workspace.
-    //    Click → selectProject → ChatView mounts in empty-state, SessionStartCards
-    //    renders the new/old session choice.
+    //    Click → selectProject → ChatView mounts in empty-state, the 常驻
+    //    ConversationBookmarks bar renders at the top.
     await page.getByTestId('ws-tab').first().click();
-    await expect(page.getByTestId('session-start-cards')).toBeVisible();
+    await expect(page.getByTestId('conversation-bookmarks')).toBeVisible();
 
     // 2. Type a prompt. canSend also needs selectedAgent, which ChatView's
     //    recommend-effect sets async after discover_agents_cmd resolves. Wait

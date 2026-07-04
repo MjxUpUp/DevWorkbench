@@ -45,7 +45,7 @@ code, pre, kbd, .font-mono, [data-tabular] {
 
 /* === App Layout — TitleBar on top, then 2 cols: ActivityBar | MainStage ===
  * 工作区重构（方案 B）：48px activity-bar 常驻最左；项目/会话管理迁出侧栏——工作区走
- * 底部 Excel-sheet tab（WorkspaceTabs），会话走工作区顶部卡片（SessionStartCards）。
+ * 底部 Excel-sheet tab（WorkspaceTabs），会话走 ChatView 顶部 ConversationBookmarks 书签栏。
  * 无 left-column 二级面板。 */
 .app {
   display: grid;

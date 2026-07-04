@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import './ModelSelector.css';
 
 export interface ModelOption {
   id: string;
@@ -20,11 +21,17 @@ interface ModelSelectorProps {
   models?: ModelOption[];
 }
 
+/**
+ * ModelSelector — 模型/供应商选择器。原为顶端 ChatHeader 内的裸文本触发器
+ * (div onClick + 4 个从未定义的 className → 渲染成无样式纯文本)。下沉到 Composer
+ * 左下 action bar 时一并补齐 CSS（见 ModelSelector.css）并把触发器改成 button
+ * (a11y：原 div onClick 违反键盘可达红线)。弹层向上展开（Composer 在底部）。
+ */
 export function ModelSelector({ value, onChange, models = DEFAULT_MODELS }: ModelSelectorProps) {
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const current = models.find(m => m.id === value) ?? models[0];
+  const current = models.find((m) => m.id === value) ?? models[0];
 
   useEffect(() => {
     if (!open) return;
@@ -38,28 +45,32 @@ export function ModelSelector({ value, onChange, models = DEFAULT_MODELS }: Mode
   }, [open]);
 
   return (
-    <div className="model-selector" style={{ position: 'relative' }} ref={dropdownRef}>
-      <div
+    <div className={`model-selector${open ? ' open' : ''}`} ref={dropdownRef}>
+      <button
+        type="button"
+        className="model-selector-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
-        style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', padding: '2px 6px' }}
       >
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>模型</span>
+        <span className="model-selector-label">模型</span>
         <span className="model-selector-name">{current.label}</span>
-        <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>▾</span>
-      </div>
+        <span className="model-selector-caret" aria-hidden="true">▾</span>
+      </button>
       {open && (
-        <div className="model-selector-dropdown">
-          {models.map(model => (
+        <div className="model-selector-dropdown" role="listbox">
+          {models.map((model) => (
             <button
               key={model.id}
-              className={`model-selector-item ${value === model.id ? 'active' : ''}`}
+              type="button"
+              role="option"
+              aria-selected={value === model.id}
+              className={`model-selector-item${value === model.id ? ' active' : ''}`}
               onClick={() => { onChange(model.id); setOpen(false); }}
             >
-              <span>{model.label}</span>
+              <span className="model-selector-item-label">{model.label}</span>
               {model.provider && (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>
-                  {model.provider}
-                </span>
+                <span className="model-selector-item-provider">{model.provider}</span>
               )}
             </button>
           ))}

@@ -21,6 +21,10 @@ useNavigationStore.getState().setTrace('sess-41f2ddca');
 // status / latency / token / example-error fields).
 (window as any).__MOCK_INVOKE__ = {
   list_llm_traces: () => realTraces,
+  // TraceView also fetches the human-gate verdict ledger; this fixture turn has
+  // no destructive ops, so the ledger is empty (still must be mocked — the IPC
+  // shim returns null for unmocked cmds and TraceView coerces that to [] anyway).
+  list_verdicts: () => [],
 };
 
 const rootEl = document.getElementById('root');

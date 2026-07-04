@@ -2,7 +2,7 @@
  *
  * 工作区重构（方案 B）：视图导航（Task/Trace/搜索/设置）独立成 VS Code 式 48px
  * activity-bar 常驻最左列。项目/会话管理迁出侧栏——工作区走底部 WorkspaceTabs，
- * 会话走 ChatView 顶部 SessionStartCards。无 left-column 二级面板。
+ * 会话走 ChatView 顶部 ConversationBookmarks 书签栏。无 left-column 二级面板。
  */
 .activity-bar {
   grid-area: activity;
