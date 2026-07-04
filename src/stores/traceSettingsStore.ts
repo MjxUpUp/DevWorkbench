@@ -8,8 +8,7 @@ import type { TraceSettings } from '../types';
  * Trace section: load the retention window, change it (null = infinite, per the
  * 2026-06-19 trace observability research), and trigger a manual prune + VACUUM.
  * The defaults live in the DB (`trace_settings` row); this store just loads and
- * mutates them via commands. Mirrors the orchestrateStore / traceStore invoke
- * pattern.
+ * mutates them via commands. Mirrors the traceStore invoke pattern.
  */
 interface TraceSettingsState {
   settings: TraceSettings | null;

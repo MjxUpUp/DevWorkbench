@@ -137,7 +137,7 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   mcp_catalog: () => [],
   mcp_servers: () => [],
   // D5: workflow template starters + MCP fine-grained CRUD / live-reconnect.
-  // list_workflow_templates returns demo templates so the OrchestrateView chips
+  // list_workflow_templates returns demo templates so workflow template chips
   // render in plain-browser dev mode; the mcp_* stubs are best-effort no-ops
   // (stateful — the real backend owns them).
   list_workflow_templates: () => [

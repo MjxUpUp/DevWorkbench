@@ -13,8 +13,8 @@ import styles from './SessionStartCards.module.css';
  *  - 开始新会话（默认 active）：下方 Composer 即输入入口，卡片只是切换器
  *  - 选择旧会话：展开该工作区的会话列表，点一条 → selectConversation → 进对话态
  *
- * 旧会话列表复用 Sidebar.ConversationList 的数据逻辑（refreshConversations + 按
- * projectPath 过滤 + pinned 优先 / 最近活动排序），承载在工作区顶部而非侧栏。
+ * 旧会话列表复用原侧栏会话列表的数据逻辑（refreshConversations + 按 projectPath
+ * 过滤 + pinned 优先 / 最近活动排序），承载在工作区顶部而非侧栏。
  */
 export function SessionStartCards({ project }: { project: Project }) {
   const [mode, setMode] = useState<'new' | 'old'>('new');
@@ -35,11 +35,10 @@ export function SessionStartCards({ project }: { project: Project }) {
 
   return (
     <div className={styles.wrap} data-testid="session-start-cards">
-      <div className={styles.cards} role="tablist" aria-label="会话入口">
+      <div className={styles.cards} role="group" aria-label="会话入口">
         <button
           type="button"
-          role="tab"
-          aria-selected={mode === 'new'}
+          aria-pressed={mode === 'new'}
           className={`${styles.card} ${mode === 'new' ? styles.cardActive : ''}`}
           onClick={() => setMode('new')}
           data-testid="session-card-new"
@@ -50,8 +49,7 @@ export function SessionStartCards({ project }: { project: Project }) {
         </button>
         <button
           type="button"
-          role="tab"
-          aria-selected={mode === 'old'}
+          aria-pressed={mode === 'old'}
           className={`${styles.card} ${mode === 'old' ? styles.cardActive : ''}`}
           onClick={() => setMode('old')}
           data-testid="session-card-old"

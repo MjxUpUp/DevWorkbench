@@ -13,8 +13,7 @@ import type { LlmTrace } from '../../types';
  *
  * This is the observability payoff: a 0.8s "GLM stream failed: 400" turn is
  * now diagnosable end-to-end without guessing. Reuses the agent-block card +
- * collapse idiom from AgentMessage and the inline-timeline layout from
- * OrchestrateView. All color tokens fall back so a missing theme var never
+ * collapse idiom from AgentMessage. All color tokens fall back so a missing theme var never
  * blanks the row.
  */
 

@@ -6,8 +6,7 @@ import type { LlmTrace } from '../types';
  * Read side of the LLM trace observability layer. The write side is
  * `trace::sink::DbTraceSink`, fire-and-forget from GlmChatModel; this store
  * pulls the persisted rows for ONE session so TraceView can render every LLM
- * HTTP call (req/resp body + status + latency) the turn made. Mirrors the
- * orchestrateStore invoke pattern.
+ * HTTP call (req/resp body + status + latency) the turn made.
  */
 interface TraceState {
   /** Traces for the currently-selected session (oldest-first). null = not yet

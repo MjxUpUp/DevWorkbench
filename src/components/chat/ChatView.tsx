@@ -154,7 +154,6 @@ export function ChatView() {
 
   const displaySession = runningSession ?? turns[turns.length - 1] ?? null;
 
-  // Auto-select agent on mount
   const installedAgents = useMemo(() => agents.filter((a) => a.installed), [agents]);
 
   // Map an agent type to its display name (falls back to the raw type). Used by
@@ -214,7 +213,7 @@ export function ChatView() {
     } catch (e) {
       console.error('Failed to regenerate:', e);
     }
-  }, [project, editPrompt, runningSession, editAndRegenerate, sessionById]);
+  }, [project, editPrompt, runningSession, editAndRegenerate]);
 
   // Branch switching: jump to the next sibling's deepest leaf. Bounded walk
   // with a visited guard so a malformed cycle can't hang the render.
@@ -336,7 +335,7 @@ export function ChatView() {
           </p>
           {installedAgents.length > 0 && (
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-              已检测 Agent：{installedAgents.map((a) => a.displayName).join('、')}
+              内核 Agent 已就绪：{installedAgents.map((a) => a.displayName).join('、')}
             </p>
           )}
         </div>

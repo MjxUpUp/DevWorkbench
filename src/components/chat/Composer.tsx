@@ -52,7 +52,7 @@ export function Composer({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Steering 模式：运行中时 Enter 插话（不走默认 CTRL+Enter 发送）
+    // Steering 模式：运行中时 Enter 插话（不走默认 Ctrl+Enter 发送）
     if (steering && isRunning && e.key === 'Enter' && !e.shiftKey && prompt.trim() && onSteer) {
       e.preventDefault();
       onSteer();

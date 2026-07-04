@@ -231,7 +231,7 @@ function BlockCard({ event, running, sessionId, stepStatus }: { event: ChatStrea
     default: {
       // 穷尽检查：未来新增 ChatStreamEvent kind 时 TS 在此编译报错，强制显式
       // 处理，修现状「新事件种类静默丢」脆弱性（groundup-refactor-direction:36）。
-      // 对齐 OrchestrateView.formatEvent 的 never default 模式。运行时兜底只在
+      // 对齐 never default 穷尽模式。运行时兜底只在
       // 后端发了前端未声明的 kind（类型撒谎）时到达——渲染可见占位，不静默丢。
       const kindStr = (event as { kind: string }).kind;
       const _exhaustive: never = event;

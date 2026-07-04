@@ -27,7 +27,7 @@ type ModeInfo = {
   resultsLoc: string;
 };
 
-const MODE_BY_VIEW: Partial<Record<ViewId, ModeInfo>> = {
+const MODE_BY_VIEW: Record<Exclude<ViewId, 'search' | 'settings'>, ModeInfo> = {
   task: {
     planLoc: 'plan ∈ LLM context',
     resultsLoc: 'results ∈ 对话历史',
@@ -46,7 +46,7 @@ const MODE_SEGMENTS: { id: 'task' | 'trace'; label: string }[] = [
 
 /** settings 是全屏 overlay（其下 Stage 仍渲染 ChatView）、search 是独立检索——皆按 task 展示。 */
 function modeForView(view: ViewId): ModeInfo {
-  return MODE_BY_VIEW[view] ?? MODE_BY_VIEW.task!;
+  return view === 'trace' ? MODE_BY_VIEW.trace : MODE_BY_VIEW.task;
 }
 
 const STATUS_ZH: Record<SessionStatus, string> = {
@@ -85,15 +85,14 @@ export function PlanBar() {
   return (
     <header className={styles.planBar} data-testid="plan-bar">
       <div className={styles.planBarInner}>
-        <div className={styles.modeSegmented} role="tablist" aria-label="运行模式">
+        <div className={styles.modeSegmented} role="group" aria-label="运行模式">
           {MODE_SEGMENTS.map((seg) => {
             const active = activeView === seg.id;
             return (
               <button
                 key={seg.id}
                 type="button"
-                role="tab"
-                aria-selected={active}
+                aria-pressed={active}
                 data-testid={active ? 'plan-mode' : `mode-seg-${seg.id}`}
                 className={`${styles.modeBtn} ${active ? styles.modeBtnActive : ''}`}
                 onClick={() => setActiveView(seg.id)}

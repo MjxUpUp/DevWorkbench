@@ -4,7 +4,6 @@
  *   - AgentMessage.css    agent 消息 + 结构化块 + decision chain + markdown
  *   - BlocksView.css      text/tool/result/thinking 卡片
  *   - Composer.css        输入框 + 触发器 + 发送/停止
- *   - ModeSelector.css    模式/模型下拉
  *
  * 这些组件 CSS 在 src/styles/index.css 末尾 import（全局作用域，class 名不变）。
  * 本文件保留为占位，避免引用断裂；如需新增 chat 相关样式，优先放对应组件 CSS。 */

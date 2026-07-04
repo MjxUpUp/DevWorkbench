@@ -18,15 +18,14 @@ export function WorkspaceTabs() {
   const setAddProjectOpen = useNavigationStore((s) => s.setAddProjectOpen);
 
   return (
-    <div className="workspace-tabs" role="tablist" aria-label="工作区切换" data-testid="workspace-tabs">
+    <div className="workspace-tabs" role="group" aria-label="工作区切换" data-testid="workspace-tabs">
       {projects.map((p) => {
         const active = activeProject?.path === p.path;
         return (
           <button
             key={p.path}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             className={`ws-tab${active ? ' ws-tab-active' : ''}`}
             onClick={() => selectProject(p)}
             title={p.path}

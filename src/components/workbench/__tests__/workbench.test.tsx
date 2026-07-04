@@ -60,7 +60,7 @@ describe('PlanBar — 视图→运行模式派生（轴线A·位置可见）', (
     render(<PlanBar />);
     const chatBtn = screen.getByTestId('plan-mode');
     expect(chatBtn).toHaveTextContent('Chat');
-    expect(chatBtn.getAttribute('aria-selected')).toBe('true');
+    expect(chatBtn.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('plan-bar')).toHaveTextContent(/plan ∈ LLM context/);
   });
 
@@ -69,7 +69,7 @@ describe('PlanBar — 视图→运行模式派生（轴线A·位置可见）', (
     render(<PlanBar />);
     const traceBtn = screen.getByTestId('plan-mode');
     expect(traceBtn).toHaveTextContent('Trace');
-    expect(traceBtn.getAttribute('aria-selected')).toBe('true');
+    expect(traceBtn.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('mode-segmented 点击 → 切换 activeView', () => {
