@@ -1291,3 +1291,28 @@
   font-style: italic;
   color: var(--accent);
 }
+
+/* === Info banner — settings page 退役说明（CLI 路径退役，此页非默认 agent 选择） === */
+.settings-info-banner {
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.settings-info-banner strong {
+  color: var(--accent);
+}
+
+.settings-info-banner code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 1px 4px;
+  background: var(--surface-2);
+  border-radius: 3px;
+}

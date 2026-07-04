@@ -6,7 +6,7 @@ import { useAgentStore } from '../../stores/agentStore';
 import { Button } from '../ui/Button/Button';
 import { McpServerList, ALL_AGENTS } from '../McpServerList';
 import { McpRuntimePanel } from './McpRuntimePanel';
-import type { McpServerConfig, AgentType } from '../../types';
+import type { McpServerConfig } from '../../types';
 
 const EMPTY_SERVER: Omit<McpServerConfig, 'name'> = {
   command: '',
@@ -118,15 +118,9 @@ export function McpSection() {
     setServers(servers.map((s, i) => i === idx ? { ...s, enabled: !s.enabled } : s));
   };
 
-  const updateServerTarget = (idx: number, agent: AgentType, checked: boolean) => {
-    setServers(servers.map((s, i) => {
-      if (i !== idx) return s;
-      const targets = checked
-        ? [...s.targetAgents, agent]
-        : s.targetAgents.filter((a) => a !== agent);
-      return { ...s, targetAgents: targets.length > 0 ? targets : [agent] };
-    }));
-  };
+  // CLI 路径退役后，"目标 Agent" UI 已隐藏（见 McpServerList.tsx）——
+  // targetAgents schema 字段保留兼容已存配置，不再写变更。onUpdateTarget handler
+  // 因此连同函数一并删除；现存 server 配置保留，旧 targetAgents 值存数据库。
 
   if (!activeProject) {
     return (
@@ -152,7 +146,6 @@ export function McpSection() {
         onToggle={toggleServer}
         onRemove={removeServer}
         onEdit={(idx) => setEditIdx(editIdx === idx ? null : idx)}
-        onUpdateTarget={updateServerTarget}
       />
 
       {/* Add server form */}

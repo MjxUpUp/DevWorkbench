@@ -12,7 +12,7 @@ const NON_AGENT_TOOLS = ['code', 'git'];
  *
  * CLI 默认执行路径已退役（起底重构：ReactKernel 唯一执行路径），但下列工具配置仍有
  * 真实消费链，故保留：
- *  - 工具状态（detect_tools + tool_paths 自定义路径）：OpaqueAgent 桥（workflow 节点
+ *  - OpaqueAgent 二进制路径（detect_tools + tool_paths 自定义）：workflow 节点
  *    接外部 CLI）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制；editor.rs 用
  *    它打开 VS Code；code/git 检测服务项目页 ToolButton。
  *  - 终端偏好（preferred_terminal）：open_terminal 经 terminal.rs:163 读它选终端 app，
@@ -89,10 +89,21 @@ export function AgentSection() {
       {error && <div className="error-banner" style={{ margin: 0, marginBottom: 16 }}>{error}</div>}
       {loading && <div className="config-center-loading" style={{ padding: 40, textAlign: 'center' }}>检测工具与终端中...</div>}
 
-      {/* Tool status — zcode card list */}
+      {/* CLI 退役说明 — settings 页设置的是 OpaqueAgent 桥二进制路径（cli 已退役） */}
+      <div className="settings-info-banner" role="note">
+        <strong>ℹ️ CLI 默认执行路径已退役。</strong>
+        此页配置的是<strong>工作流外部节点（OpaqueAgent 桥）</strong>调用的 CLI 二进制路径，
+        并非默认执行 agent —— ReactKernel 是唯一执行路径（不可在 settings 选 CLI 作为默认）。
+        此页一般用户无需配置，保留仅为兼容已存 <code>tool_paths</code>。
+      </div>
+
+      {/* Tool status — renamed: OpaqueAgent 二进制路径（高级）+ desc 强调"非默认选择" */}
       <div className="settings-section">
-        <h3 className="settings-section-title">工具状态</h3>
-        <p className="settings-section-desc">检测系统中已安装的 Agent 和工具。</p>
+        <h3 className="settings-section-title">OpaqueAgent 二进制路径（高级）</h3>
+        <p className="settings-section-desc">
+          列出 workflow 外部节点接 CLI 时需要定位的二进制。
+          <strong>CLI agent 执行路径已退役 —— 此处不是默认 agent 选择</strong>，仅供自定义二进制位置（<code>tool_paths</code>）。
+        </p>
         <div className="settings-card-list">
           {allToolEntries.map(entry => (
             <div key={entry.key} className="settings-tool-card">
@@ -120,10 +131,13 @@ export function AgentSection() {
         </div>
       </div>
 
-      {/* Terminal preference — zcode settings rows */}
+      {/* Terminal preference — 仅 GitPanel「打开终端做 git commit」消费，与 CLI agent 执行无关 */}
       <div className="settings-section">
         <h3 className="settings-section-title">终端偏好</h3>
-        <p className="settings-section-desc">选择 Agent 任务使用的终端。</p>
+        <p className="settings-section-desc">
+          选择 GitPanel「打开终端做 git commit」时启动的终端应用。
+          <strong>与 CLI agent 执行无关</strong>（CLI 路径已退役）—— 终端偏好保留供工具按钮使用。
+        </p>
 
         <div className="settings-card-list">
           {terminals.length === 0 && (

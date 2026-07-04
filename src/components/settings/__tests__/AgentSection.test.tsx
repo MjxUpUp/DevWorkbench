@@ -44,7 +44,7 @@ describe('AgentSection crash defense', () => {
     // Must not throw during render or effect flush.
     expect(() => render(<AgentSection />)).not.toThrow();
 
-    expect(await screen.findByText('工具状态')).toBeInTheDocument();
+    expect(await screen.findByText('OpaqueAgent 二进制路径（高级）')).toBeInTheDocument();
     expect(screen.getByText('终端偏好')).toBeInTheDocument();
     expect(screen.queryByText('CLI 启动参数')).toBeNull(); // CLI 取消后已移除
     expect(mockInvoke).toHaveBeenCalledWith('detect_tools');
@@ -59,7 +59,7 @@ describe('AgentSection crash defense', () => {
     });
 
     expect(() => render(<AgentSection />)).not.toThrow();
-    expect(await screen.findByText('工具状态')).toBeInTheDocument();
+    expect(await screen.findByText('OpaqueAgent 二进制路径（高级）')).toBeInTheDocument();
   });
 
   it('does not crash when detect_tools returns a non-array object', async () => {
@@ -72,6 +72,6 @@ describe('AgentSection crash defense', () => {
     });
 
     expect(() => render(<AgentSection />)).not.toThrow();
-    expect(await screen.findByText('工具状态')).toBeInTheDocument();
+    expect(await screen.findByText('OpaqueAgent 二进制路径（高级）')).toBeInTheDocument();
   });
 });
