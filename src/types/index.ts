@@ -523,16 +523,6 @@ export interface BudgetInfo {
   percentage: number;
 }
 
-export interface QualityEntry {
-  sessionId: string;
-  sessionNumber: number;
-  score: number;
-  total: number;
-  agent: string;
-  tokens: number;
-  status: 'pass' | 'warn' | 'fail';
-}
-
 // ---- Workflow types ----
 
 export interface Workflow {

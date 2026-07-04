@@ -1,13 +1,12 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { CostSummary, CostTrendPoint, BudgetSettings, QualityReport, DashboardStats, BudgetInfo, QualityEntry } from '../types';
+import type { CostSummary, CostTrendPoint, BudgetSettings, DashboardStats, BudgetInfo } from '../types';
 import { useAgentStore } from './agentStore';
 
 interface DashboardState {
   stats: DashboardStats;
   costTrend: CostTrendPoint[];
   budget: BudgetInfo;
-  qualityHistory: QualityEntry[];
   /** B5: raw CostSummary kept so the transparent-cost card can show the
    *  per-tier (input/output/cache) USD + token split, which DashboardStats
    *  collapses away. null until the first successful fetch. */
@@ -43,24 +42,27 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   stats: EMPTY_STATS,
   costTrend: [],
   budget: EMPTY_BUDGET,
-  qualityHistory: [],
   costSummary: null,
   loading: false,
 
   fetchDashboard: async () => {
     set({ loading: true });
     try {
-      const [summary, trend, budgetSettings, reports] = await Promise.all([
+      // 注：quality_history 段（multiple-session summary list）已删除 ——
+      // 唯一数据写入路径 `save_report` 来自已退役的 CLI agent PTY 路径
+      // （src-tauri/src/agents/pty.rs:2340），ReactKernel 用户视角下表基本空；
+      // 实际 quality 信息请看 EvalPanel P5/V1/F1（per-session 详情）和
+      // AgentMessage.qualityReport（单 session gate 展示）。
+      const [summary, trend, budgetSettings] = await Promise.all([
         invoke<CostSummary>('get_cost_summary'),
         invoke<CostTrendPoint[]>('get_cost_trend', { days: 7 }),
         invoke<BudgetSettings>('load_budget'),
-        invoke<QualityReport[]>('get_quality_reports'),
       ]);
 
       // null 防御：get_cost_summary 等在无数据/E2E shim 场景可能返回 null，原代码
       // 直接解引用 summary.totalInputTokens 会抛（latent bug——GateBar 块4 挂载
       // fetchDashboard 暴露之）。任一为 null 时早返回保留空默认，不冒泡为 console.error。
-      if (!summary || !trend || !budgetSettings || !reports) {
+      if (!summary || !trend || !budgetSettings) {
         set({ loading: false });
         return;
       }
@@ -82,35 +84,8 @@ export const useDashboardStore = create<DashboardState>((set) => ({
         totalTokens,
         tokenTrend: tokenTrendPct,
         activeSessions: runningSessions,
-        qualityRate: 0, // computed below
+        qualityRate: 0, // quality_history 段删除后无来源；保留字段供未来用
       };
-
-      // Map QualityReport[] → QualityEntry[]
-      const qualityHistory: QualityEntry[] = reports
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, 20)
-        .map((report, idx) => {
-          const passed = report.checks.filter(c => c.status === 'passed').length;
-          const total = report.checks.length;
-          const overall = report.overallStatus;
-          const status: QualityEntry['status'] =
-            overall === 'passed' ? 'pass' : overall === 'failed' ? 'fail' : 'warn';
-          return {
-            sessionId: report.sessionId,
-            sessionNumber: reports.length - idx,
-            score: passed,
-            total,
-            agent: report.sessionId.split('-')[0] || 'unknown',
-            tokens: 0,
-            status,
-          };
-        });
-
-      // Compute quality rate from reports
-      if (reports.length > 0) {
-        const passedCount = reports.filter(r => r.overallStatus === 'passed').length;
-        stats.qualityRate = Math.round((passedCount / reports.length) * 100);
-      }
 
       // Map BudgetSettings → BudgetInfo
       const budgetTotal = budgetSettings.monthlyBudgetUsd ?? 0;
@@ -125,7 +100,6 @@ export const useDashboardStore = create<DashboardState>((set) => ({
         stats,
         costTrend: trend,
         budget,
-        qualityHistory,
         costSummary: summary,
         loading: false,
       });

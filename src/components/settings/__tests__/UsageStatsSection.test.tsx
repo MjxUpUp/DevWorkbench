@@ -29,7 +29,6 @@ describe('UsageStatsSection — fetchDashboard wiring', () => {
       },
       costTrend: [],
       budget: { spent: 0, total: 0, percentage: 0 },
-      qualityHistory: [],
       loading: false,
     });
     useAgentStore.setState({ sessions: [] });
@@ -48,16 +47,6 @@ describe('UsageStatsSection — fetchDashboard wiring', () => {
         ]);
       if (cmd === 'load_budget')
         return Promise.resolve({ monthlyBudgetUsd: 10, alertThreshold: 0.8 });
-      if (cmd === 'get_quality_reports')
-        return Promise.resolve([
-          {
-            id: 'q1',
-            sessionId: 'react-1',
-            checks: [{ name: 'c', status: 'passed', message: null }],
-            overallStatus: 'passed',
-            createdAt: '2026-06-19T00:00:00Z',
-          },
-        ]);
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
   });

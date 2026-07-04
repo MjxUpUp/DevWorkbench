@@ -51,7 +51,6 @@ describe('dashboardStore.fetchDashboard — field mapping', () => {
         ]);
       if (cmd === 'load_budget')
         return Promise.resolve({ monthlyBudgetUsd: 500, alertThreshold: 0.8 });
-      if (cmd === 'get_quality_reports') return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
   });
@@ -76,7 +75,6 @@ describe('dashboardStore.fetchDashboard — field mapping', () => {
         ]);
       if (cmd === 'load_budget')
         return Promise.resolve({ monthlyBudgetUsd: null, alertThreshold: 0.8 });
-      if (cmd === 'get_quality_reports') return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
     await useDashboardStore.getState().fetchDashboard();
@@ -98,7 +96,6 @@ describe('dashboardStore.fetchDashboard — field mapping', () => {
       if (cmd === 'get_cost_trend') return Promise.resolve([]);
       if (cmd === 'load_budget')
         return Promise.resolve({ monthlyBudgetUsd: null, alertThreshold: 0.8 });
-      if (cmd === 'get_quality_reports') return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
     await useDashboardStore.getState().fetchDashboard();
