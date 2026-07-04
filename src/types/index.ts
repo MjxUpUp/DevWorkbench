@@ -405,7 +405,6 @@ export interface McpServerConfig {
   args: string[];
   env: Record<string, string>;
   enabled: boolean;
-  targetAgents: AgentType[];
 }
 
 export interface McpConfigFile {

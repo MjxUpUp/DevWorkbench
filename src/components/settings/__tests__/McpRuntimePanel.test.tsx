@@ -18,7 +18,6 @@ function makeServer(name: string): McpServerConfig {
     args: ['-y', `@mcp/${name}`],
     env: { API_KEY: 'secret' },
     enabled: true,
-    targetAgents: [],
   };
 }
 

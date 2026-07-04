@@ -49,34 +49,12 @@ pub fn parse_mcp_config(content: &str) -> Result<McpConfigFile, AppError> {
             .and_then(|e| e.as_bool())
             .unwrap_or(true);
 
-        let target_agents = table
-            .get("target_agents")
-            .and_then(|a| a.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        v.as_str().and_then(|s| match s {
-                            "claude" => Some(crate::models::AgentType::ClaudeCode),
-                            "codex" => Some(crate::models::AgentType::Codex),
-                            "cursor" => Some(crate::models::AgentType::CursorAgent),
-                            "gemini" => Some(crate::models::AgentType::GeminiCli),
-                            "copilot" => Some(crate::models::AgentType::Copilot),
-                            "qwen" => Some(crate::models::AgentType::QwenCode),
-                            "pi" => Some(crate::models::AgentType::Pi),
-                            _ => None,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(crate::models::AgentType::all);
-
         servers.push(crate::models::McpServerConfig {
             name: name.clone(),
             command,
             args,
             env,
             enabled,
-            target_agents,
         });
     }
 
@@ -106,27 +84,6 @@ pub fn save_mcp_config(config: &McpConfigFile, path: &Path) -> Result<(), AppErr
         if !server.enabled {
             toml_str.push_str("enabled = false\n");
         }
-
-        if server.target_agents.len() < crate::models::AgentType::all().len() {
-            let agents: Vec<String> = server
-                .target_agents
-                .iter()
-                .map(|a| match a {
-                    crate::models::AgentType::ClaudeCode => "\"claude\"".to_string(),
-                    crate::models::AgentType::Codex => "\"codex\"".to_string(),
-                    crate::models::AgentType::CursorAgent => "\"cursor\"".to_string(),
-                    crate::models::AgentType::GeminiCli => "\"gemini\"".to_string(),
-                    crate::models::AgentType::Copilot => "\"copilot\"".to_string(),
-                    crate::models::AgentType::QwenCode => "\"qwen\"".to_string(),
-                    crate::models::AgentType::Pi => "\"pi\"".to_string(),
-                    // ReactKernel is not a CLI — MCP translation is CLI-only, so
-                    // it never legitimately appears in target_agents. Empty
-                    // placeholder keeps the match exhaustive; unreachable.
-                    crate::models::AgentType::ReactKernel => "\"\"".to_string(),
-                })
-                .collect();
-            toml_str.push_str(&format!("target_agents = [{}]\n", agents.join(", ")));
-        }
     }
 
     if let Some(parent) = path.parent() {
@@ -155,8 +112,8 @@ pub fn set_server_enabled(config: &mut McpConfigFile, name: &str, enabled: bool)
     }
 }
 
-/// Replace a named server's `command`/`args`/`env` in-place, preserving its
-/// `enabled` and `target_agents`. Returns `false` if not found. Pure.
+/// Replace a named server's `command`/`args`/`env` in-place, preserving
+/// its `enabled` flag. Returns `false` if not found. Pure.
 pub fn update_server(
     config: &mut McpConfigFile,
     name: &str,
@@ -208,12 +165,14 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         assert_eq!(fs.command, "npx");
         assert_eq!(fs.args.len(), 3);
         assert!(fs.enabled);
-        assert_eq!(fs.target_agents.len(), 2);
+        // 老 toml 中 `target_agents = ["claude", "codex"]` 行被优雅忽略（parse
+        // 不再读此 key），等价迁移到"对所有 agent 生效"。此处不再断言
+        // target_agents.len() == 2。
 
         let gh = &config.servers[1];
         assert_eq!(gh.name, "github");
-        // default: all agents
-        assert_eq!(gh.target_agents.len(), AgentType::all().len());
+        assert_eq!(gh.command, "npx");
+        assert!(gh.enabled);
     }
 
     #[test]
@@ -228,7 +187,6 @@ args = ["-y", "@modelcontextprotocol/server-github"]
                 args: vec!["hello".to_string()],
                 env: std::collections::HashMap::new(),
                 enabled: true,
-                target_agents: vec![AgentType::ClaudeCode],
             }],
         };
 
@@ -256,7 +214,6 @@ args = ["-y", "@modelcontextprotocol/server-github"]
                 args: vec!["-y".to_string(), "@mcp/server-github".to_string()],
                 env,
                 enabled: true,
-                target_agents: vec![AgentType::ClaudeCode, AgentType::Codex],
             }],
         };
 
@@ -299,12 +256,11 @@ command = "y"
     }
 
     #[test]
-    fn update_server_replaces_fields_preserves_enabled_and_target_agents() {
+    fn update_server_replaces_fields_preserves_enabled() {
         let mut config = parse_mcp_config(
             r#"
 [servers.a]
 command = "old"
-target_agents = ["claude"]
 "#,
         )
         .unwrap();
@@ -322,7 +278,9 @@ target_agents = ["claude"]
         assert_eq!(s.args, vec!["--x".to_string()]);
         assert_eq!(s.env.get("K"), Some(&"v".to_string()));
         assert!(s.enabled, "enabled preserved across update");
-        assert_eq!(s.target_agents.len(), 1, "target_agents preserved");
+        // 老 .mcp.toml 中残留的 target_agents 行不再解析（parse_mcp_config 不再
+        // 读此 key），等价一次性迁移到"全部 agent 生效"。该测试用空 toml 输入
+        // 验证 baseline。
         assert!(
             !update_server(
                 &mut config,

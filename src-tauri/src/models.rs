@@ -337,8 +337,6 @@ pub struct McpServerConfig {
     pub env: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub target_agents: Vec<AgentType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

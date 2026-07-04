@@ -10,9 +10,6 @@ pub fn translate_for_claude(config: &McpConfigFile) -> serde_json::Value {
         if !server.enabled {
             continue;
         }
-        if !server.target_agents.contains(&AgentType::ClaudeCode) {
-            continue;
-        }
 
         let mut obj = serde_json::Map::new();
         obj.insert("command".to_string(), serde_json::Value::String(server.command.clone()));
@@ -33,7 +30,7 @@ pub fn translate_for_codex(config: &McpConfigFile) -> serde_json::Value {
     let servers: Vec<serde_json::Value> = config
         .servers
         .iter()
-        .filter(|s| s.enabled && s.target_agents.contains(&AgentType::Codex))
+        .filter(|s| s.enabled)
         .map(|s| {
             serde_json::json!({
                 "name": s.name,
@@ -56,7 +53,7 @@ pub fn translate_for_gemini(config: &McpConfigFile) -> serde_json::Value {
     let servers: Vec<serde_json::Value> = config
         .servers
         .iter()
-        .filter(|s| s.enabled && s.target_agents.contains(&AgentType::GeminiCli))
+        .filter(|s| s.enabled)
         .map(|s| {
             serde_json::json!({
                 "name": s.name,
@@ -74,7 +71,7 @@ pub fn translate_for_copilot(config: &McpConfigFile) -> serde_json::Value {
     let servers: Vec<serde_json::Value> = config
         .servers
         .iter()
-        .filter(|s| s.enabled && s.target_agents.contains(&AgentType::Copilot))
+        .filter(|s| s.enabled)
         .map(|s| {
             serde_json::json!({
                 "name": s.name,
@@ -160,7 +157,6 @@ mod tests {
                 args: vec!["-y".to_string(), "@mcp/server-filesystem".to_string()],
                 env: HashMap::new(),
                 enabled: true,
-                target_agents: AgentType::all(),
             }],
         }
     }

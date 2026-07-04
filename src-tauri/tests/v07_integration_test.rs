@@ -389,7 +389,6 @@ fn test_mcp_config_roundtrip() {
                 .into_iter()
                 .collect(),
             enabled: true,
-            target_agents: vec![app_lib::models::AgentType::ClaudeCode],
         }],
     };
 
@@ -427,7 +426,6 @@ fn test_mcp_translate_for_claude() {
                     .into_iter()
                     .collect(),
                 enabled: true,
-                target_agents: vec![app_lib::models::AgentType::ClaudeCode],
             },
             app_lib::models::McpServerConfig {
                 name: "disabled-server".to_string(),
@@ -435,7 +433,6 @@ fn test_mcp_translate_for_claude() {
                 args: vec![],
                 env: Default::default(),
                 enabled: false,
-                target_agents: vec![],
             },
         ],
     };

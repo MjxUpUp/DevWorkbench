@@ -4,7 +4,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { Button } from '../ui/Button/Button';
-import { McpServerList, ALL_AGENTS } from '../McpServerList';
+import { McpServerList } from '../McpServerList';
 import { McpRuntimePanel } from './McpRuntimePanel';
 import type { McpServerConfig } from '../../types';
 
@@ -13,7 +13,6 @@ const EMPTY_SERVER: Omit<McpServerConfig, 'name'> = {
   args: [],
   env: {},
   enabled: true,
-  targetAgents: ALL_AGENTS.map((a) => a.value),
 };
 
 export function McpSection() {
@@ -118,9 +117,9 @@ export function McpSection() {
     setServers(servers.map((s, i) => i === idx ? { ...s, enabled: !s.enabled } : s));
   };
 
-  // CLI 路径退役后，"目标 Agent" UI 已隐藏（见 McpServerList.tsx）——
-  // targetAgents schema 字段保留兼容已存配置，不再写变更。onUpdateTarget handler
-  // 因此连同函数一并删除；现存 server 配置保留，旧 targetAgents 值存数据库。
+  // target_agents / targetAgents 字段已彻底删除（schema + 后端过滤 + UI）。
+  // 老 .mcp.toml 中残留 `target_agents = [...]` 行被 parse_mcp_config 优雅忽略。
+  // 见 McpServerList.tsx（折叠后不再有 "目标 Agent" 区块）。
 
   if (!activeProject) {
     return (

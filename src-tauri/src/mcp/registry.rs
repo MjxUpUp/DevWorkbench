@@ -180,7 +180,6 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             enabled,
-            target_agents: vec![],
         }
     }
 
