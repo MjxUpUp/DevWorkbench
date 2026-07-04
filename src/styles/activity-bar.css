@@ -6,7 +6,7 @@
  */
 .activity-bar {
   grid-area: activity;
-  width: 48px;
+  width: var(--activity-bar-width);
   background: var(--surface-1);
   border-right: 1px solid var(--border-subtle);
   display: flex;
@@ -77,5 +77,5 @@
 
 .ab-icon.ab-new:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }

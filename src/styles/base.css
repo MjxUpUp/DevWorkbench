@@ -49,7 +49,7 @@ code, pre, kbd, .font-mono, [data-tabular] {
  * 无 left-column 二级面板。 */
 .app {
   display: grid;
-  grid-template-columns: 48px 1fr;
+  grid-template-columns: var(--activity-bar-width) 1fr;
   grid-template-rows: var(--title-bar-height) 1fr 28px var(--status-bar-height);
   grid-template-areas:
     "title-bar title-bar"
@@ -65,7 +65,7 @@ code, pre, kbd, .font-mono, [data-tabular] {
 /* Responsive — activity-bar (48px) stays on all widths. */
 @media (max-width: 899px) {
   .app {
-    grid-template-columns: 48px 1fr;
+    grid-template-columns: var(--activity-bar-width) 1fr;
   }
 }
 
