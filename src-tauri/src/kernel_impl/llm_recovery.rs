@@ -51,6 +51,11 @@ pub enum FatalReason {
     Auth,
     /// Anything else not worth retrying (4xx other than 429, decode errors...).
     Generic,
+    /// L1 truncation that arrived AFTER content was already streamed to the UI.
+    /// We can't cleanly retry (would duplicate the partial output already
+    /// shown), so degrade with an honest "stream interrupted" message rather
+    /// than pretend the turn succeeded with empty content.
+    StreamTruncated,
 }
 
 /// HTTP status codes treated as retriable. Kept in sync with
@@ -114,6 +119,22 @@ fn extract_status(msg: &str) -> Option<u16> {
         .filter(|&s| (100..600).contains(&s))
 }
 
+/// Whether `err` represents an upstream stream interruption — L1 truncation
+/// (no `message_stop`), L3 idle stall, or a network blip mid-stream. This is a
+/// UI-effect classification, NOT a retry classification: the run loop uses it
+/// to pick the honest "stream interrupted" degrade message over Generic **only
+/// when partial output was already shown**. Deliberately separate from
+/// [`classify_llm_error`]: the two overlap today (all three are Retryable) but
+/// express different concerns (user-facing message vs retry policy) and may
+/// evolve independently — a future decision to treat idle stalls as fatal for
+/// retry would not change that they were interrupts from the UI's view.
+pub fn is_stream_interrupt(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::StreamIncomplete { .. } | Error::StreamIdle { .. } | Error::Network(_)
+    )
+}
+
 /// Classify a kernel_core::Error produced by the model layer.
 pub fn classify_llm_error(err: &Error) -> LlmErrorKind {
     let msg = err.to_string();
@@ -132,6 +153,12 @@ pub fn classify_llm_error(err: &Error) -> LlmErrorKind {
     }
     // Network blips (connect/timeout/read) are always transient.
     if matches!(err, Error::Network(_)) {
+        return LlmErrorKind::Retryable;
+    }
+    // L1/L3 stream interruptions (truncation without message_stop, idle stall)
+    // are transient — the run loop retries the turn when nothing was emitted
+    // yet, and degrades to StreamTruncated when partial output is already shown.
+    if matches!(err, Error::StreamIdle { .. } | Error::StreamIncomplete { .. }) {
         return LlmErrorKind::Retryable;
     }
     // Status-bearing model errors: retry the transient codes, fail the rest.
@@ -183,6 +210,9 @@ pub fn fatal_user_message(reason: FatalReason) -> &'static str {
         }
         FatalReason::Generic => {
             "The model request failed and could not be recovered after retries. Please rephrase or retry."
+        }
+        FatalReason::StreamTruncated => {
+            "The model's response stream was interrupted mid-turn (upstream truncated or stalled after partial output was already shown). Retry to continue."
         }
     }
 }
@@ -266,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn stream_incomplete_is_retryable() {
+        // L1: truncation without message_stop is transient — the run loop
+        // retries the turn when no content was emitted yet.
+        assert_eq!(
+            classify_llm_error(&Error::StreamIncomplete { got_reason: false }),
+            LlmErrorKind::Retryable
+        );
+    }
+
+    #[test]
+    fn stream_idle_is_retryable() {
+        // L3: an idle stall is transient the same way a network blip is.
+        assert_eq!(
+            classify_llm_error(&Error::StreamIdle { secs: 90 }),
+            LlmErrorKind::Retryable
+        );
+    }
+
+    #[test]
     fn retry_delay_grows_then_caps() {
         assert_eq!(retry_delay(1), Duration::from_millis(1000));
         assert_eq!(retry_delay(2), Duration::from_millis(2000));
@@ -291,5 +340,6 @@ mod tests {
         assert!(fatal_user_message(FatalReason::Auth).contains("API key"));
         assert!(fatal_user_message(FatalReason::Circuit).contains("circuit breaker"));
         assert!(fatal_user_message(FatalReason::Generic).contains("retries"));
+        assert!(fatal_user_message(FatalReason::StreamTruncated).contains("interrupted"));
     }
 }

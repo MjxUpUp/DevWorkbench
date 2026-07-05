@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use kernel_core::{
@@ -53,6 +53,60 @@ fn prompt_caching_enabled() -> bool {
         Ok(v) => !matches!(v.as_str(), "disable" | "0" | "false"),
         Err(_) => true,
     })
+}
+
+/// L3 idle watchdog: max seconds the streaming body may go without delivering
+/// any bytes before we declare the upstream stalled. reqwest's per-request
+/// timeout gates the initial response, not an idle streaming body — a thinking
+/// model that never converges (or a proxy that silently drops bytes) would hang
+/// here forever without this gate. 90s mirrors claude-code-best's watchdog; the
+/// SSE protocol sends frequent deltas, so 90s of true silence is always a stall.
+pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
+
+/// L1 stream-completion signal pulled from a `data: <json>` SSE line. A clean
+/// Anthropic stream ALWAYS terminates with `message_stop` (preceded by a
+/// `message_delta` carrying the turn's `stop_reason`). Truncation — Ollama
+/// hitting `num_predict` mid-thinking, a proxy dropping the connection — leaves
+/// neither. We gate on `message_stop`; `stop_reason` is recorded only as a
+/// diagnostic field (some Anthropic-compatible gateways omit it, but a clean
+/// turn always reaches `message_stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopSignal {
+    MessageStop,
+    DeltaStopReason,
+}
+
+/// Decode one `data: <json>` SSE line into its parsed event value. Shared by
+/// [`parse_stop_signal`] / [`parse_usage`] / [`handle_sse_line`] so the wire
+/// decode (trim + prefix-strip + JSON parse) lives in one place — the three
+/// consumers look at disjoint event types, but a future SSE-frame change would
+/// otherwise touch three call sites.
+pub(crate) fn parse_sse_value(line: &str) -> Option<Value> {
+    let data = line.trim().strip_prefix("data: ")?;
+    serde_json::from_str(data).ok()
+}
+
+/// Peek one SSE line for a stream-termination signal. Independent of
+/// [`handle_sse_line`] (which owns block accumulation) so the run-completion
+/// tracking stays unit-testable without a tool_bufs harness.
+pub(crate) fn parse_stop_signal(line: &str) -> Option<StopSignal> {
+    let ev = parse_sse_value(line)?;
+    match ev.get("type").and_then(|t| t.as_str())? {
+        "message_stop" => Some(StopSignal::MessageStop),
+        "message_delta" => {
+            let has_reason = ev
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .map(|r| !r.is_null())
+                .unwrap_or(false);
+            if has_reason {
+                Some(StopSignal::DeltaStopReason)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 impl AnthropicChatModel {
@@ -497,11 +551,32 @@ impl ChatModel for AnthropicChatModel {
             let mut usage = pricing::TokenUsage::default();
             // stamp ttfb on the FIRST streamed byte chunk.
             let mut ttfb_at: Option<Instant> = None;
-            while let Some(chunk_res) = byte_stream.next().await {
+            let mut received_stop = false;
+            let mut received_stop_reason = false;
+            loop {
+                // L3 idle watchdog: gate the NEXT byte chunk, not just the
+                // initial response. A streaming body that goes silent mid-turn
+                // (thinking model that never converges, proxy dropping bytes)
+                // would otherwise hang until reqwest's connection-level timeout
+                // — or forever if TCP keepalive is generous.
+                let next_chunk = tokio::time::timeout(
+                    Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
+                    byte_stream.next(),
+                )
+                .await;
+                let chunk_res = match next_chunk {
+                    Err(_elapsed) => {
+                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("idle"), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
+                        if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
+                        Err(Error::StreamIdle { secs: STREAM_IDLE_TIMEOUT_SECS })?
+                    }
+                    Ok(None) => break, // HTTP EOF — fall through to the truncation gate.
+                    Ok(Some(chunk_res)) => chunk_res,
+                };
                 let bytes = match chunk_res {
                     Ok(b) => b,
                     Err(e) => {
-                        model_clone.shared.record_trace(&model_name, Some(status.as_u16()), Some("stream"), &req_body, None, t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64), ttfb_at.map(|t| t.elapsed().as_millis() as u64));
+                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("stream"), &req_body, None, t0, ttfb_at, usage);
                         if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
                         Err(Error::Network(e.to_string()))?
                     }
@@ -522,19 +597,36 @@ impl ChatModel for AnthropicChatModel {
                         // Anthropic (its message_delta carries no input field).
                         usage = usage.saturating_add(delta);
                     }
+                    // L1: track stream-completion signals independently of the
+                    // block accumulator. A clean turn always reaches message_stop.
+                    if let Some(sig) = parse_stop_signal(&line) {
+                        match sig {
+                            StopSignal::MessageStop => received_stop = true,
+                            StopSignal::DeltaStopReason => received_stop_reason = true,
+                        }
+                    }
                     if let Some(msg) = handle_sse_line(&line, &mut tool_bufs, &mut sig_buf) {
                         yield msg;
                     }
                 }
+            }
+            // L1 truncation gate: HTTP EOF without `message_stop` = upstream cut
+            // the stream mid-turn (Ollama num_predict, proxy drop, ...). Refuse
+            // to record this as a clean success — surfacing StreamIncomplete lets
+            // the run loop retry (if nothing was emitted yet) or degrade with an
+            // honest "stream interrupted" message instead of silently marking
+            // the turn completed with empty content.
+            if !received_stop {
+                record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("truncated"), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
+                if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
+                Err(Error::StreamIncomplete { got_reason: received_stop_reason })?;
             }
             // Stream consumed cleanly → upstream healthy + record the turn's cost.
             if let Some(cb) = &model_clone.shared.circuit { cb.record_success(&model_clone.shared.base_url); }
             if let Some(sink) = &model_clone.shared.cost_sink {
                 sink.record(&model_name, usage, 0.0);
             }
-            let ttfb_ms = ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64);
-            let stream_ms = ttfb_at.map(|t| t.elapsed().as_millis() as u64);
-            model_clone.shared.record_trace(&model_name, Some(status.as_u16()), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0.elapsed().as_millis() as u64, Some(usage.input), Some(usage.output), ttfb_ms, stream_ms);
+            record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), None, &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
         };
         Ok(Box::pin(s))
     }
@@ -595,9 +687,39 @@ pub fn shared_anthropic_circuit() -> Arc<CircuitBreaker> {
 /// the add is a no-op there. GLM's `message_delta` DOES carry input — that's
 /// the design hook this branch exists for; do not drop the input read or GLM
 /// billing under-counts.
+/// Stamp a streaming-turn outcome trace. Wraps the 10-arg `record_trace` call
+/// shared by the idle / truncated / stream-error / success exit paths so the
+/// two `ttfb_at.map` closures (TTFB = send→first-byte; stream = first-byte→done)
+/// live in exactly one place — the order of those closures is load-bearing for
+/// trace timing analytics, and copy-pasting them across 4 sites was an
+/// arg-drift hazard.
+fn record_stream_outcome(
+    shared: &ChatModelShared,
+    model: &str,
+    status: u16,
+    error_kind: Option<&str>,
+    req_body: &str,
+    resp_body: Option<&str>,
+    t0: Instant,
+    ttfb_at: Option<Instant>,
+    usage: pricing::TokenUsage,
+) {
+    shared.record_trace(
+        model,
+        Some(status),
+        error_kind,
+        req_body,
+        resp_body,
+        t0.elapsed().as_millis() as u64,
+        Some(usage.input),
+        Some(usage.output),
+        ttfb_at.map(|t| t.duration_since(t0).as_millis() as u64),
+        ttfb_at.map(|t| t.elapsed().as_millis() as u64),
+    );
+}
+
 pub(crate) fn parse_usage(line: &str) -> Option<pricing::TokenUsage> {
-    let data = line.trim().strip_prefix("data: ")?;
-    let ev: Value = serde_json::from_str(data).ok()?;
+    let ev = parse_sse_value(line)?;
     match ev.get("type").and_then(|t| t.as_str())? {
         "message_start" => {
             let usage = ev.get("message").and_then(|m| m.get("usage"));
@@ -727,8 +849,7 @@ pub(crate) fn handle_sse_line(
     tool_bufs: &mut HashMap<u64, (String, String, String)>,
     sig_buf: &mut String,
 ) -> Option<Message> {
-    let data = line.trim().strip_prefix("data: ")?;
-    let ev: Value = serde_json::from_str(data).ok()?;
+    let ev = parse_sse_value(line)?;
     match ev.get("type").and_then(|t| t.as_str())? {
         "content_block_start" => {
             if let Some(block) = ev.get("content_block") {
@@ -888,5 +1009,50 @@ mod gap2_prompt_cache_tests {
             "only the LAST tool carries cache_control"
         );
         assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
+    }
+}
+
+#[cfg(test)]
+mod stream_reliability_tests {
+    use super::*;
+
+    #[test]
+    fn parse_stop_signal_message_stop() {
+        let line = r#"data: {"type":"message_stop"}"#;
+        assert_eq!(parse_stop_signal(line), Some(StopSignal::MessageStop));
+    }
+
+    #[test]
+    fn parse_stop_signal_message_delta_with_reason() {
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#;
+        assert_eq!(parse_stop_signal(line), Some(StopSignal::DeltaStopReason));
+    }
+
+    #[test]
+    fn parse_stop_signal_message_delta_without_reason_is_none() {
+        // A message_delta that doesn't carry stop_reason (e.g. only usage) is
+        // NOT a terminal signal — only message_stop / a reason-bearing delta are.
+        let line = r#"data: {"type":"message_delta","delta":{},"usage":{"output_tokens":42}}"#;
+        assert_eq!(parse_stop_signal(line), None);
+    }
+
+    #[test]
+    fn parse_stop_signal_message_delta_null_reason_is_none() {
+        // Explicit null stop_reason (Anthropic sends this before the real one)
+        // is not a completion signal either.
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":null}}"#;
+        assert_eq!(parse_stop_signal(line), None);
+    }
+
+    #[test]
+    fn parse_stop_signal_non_data_line_is_none() {
+        assert_eq!(parse_stop_signal("event: message_stop"), None);
+        assert_eq!(parse_stop_signal(""), None);
+    }
+
+    #[test]
+    fn parse_stop_signal_other_event_is_none() {
+        let line = r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#;
+        assert_eq!(parse_stop_signal(line), None);
     }
 }

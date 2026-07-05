@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use crate::kernel_impl::hooks::HookManager;
 use crate::kernel_impl::llm_recovery::{
-    FatalReason, LlmErrorKind, MAX_ATTEMPTS, classify_llm_error, fatal_user_message, retry_delay,
-    should_retry,
+    FatalReason, LlmErrorKind, MAX_ATTEMPTS, classify_llm_error, fatal_user_message,
+    is_stream_interrupt, retry_delay, should_retry,
 };
 use crate::kernel_impl::context_compact::{self, ArchivedChunk};
 use crate::kernel_impl::human_gate::{HumanGateCtx, HumanGateOutcome};
@@ -1640,77 +1640,118 @@ impl kernel_core::Agent for ReactAgent {
                 // + input_json_delta events. Text + tool_calls are reassembled
                 // into one assistant Message for coherent next-turn history.
                 use futures::StreamExt;
-                // C7 tool-call recovery: retry transient LLM send failures
-                // (network/5xx/429) with exponential backoff; fatal errors
-                // (circuit open / quota / auth / 4xx) degrade at once. The
-                // breaker inside AnthropicChatModel records each attempt, so a run
-                // of retries naturally trips the circuit.
+                // C7 tool-call recovery + L1/L3 stream reliability: retry
+                // transient LLM failures — send errors (network/5xx/429) AND
+                // mid-stream truncation/idle-stall that arrive BEFORE any output
+                // — with exponential backoff; fatal errors (circuit open / quota
+                // / auth / 4xx) and stream truncation AFTER partial output was
+                // already shown degrade at once. The breaker inside
+                // AnthropicChatModel records each attempt, so a run of retries
+                // naturally trips the circuit. NOTE: both retry paths (stream
+                // establishment + mid-stream) share `attempt` — the total budget
+                // across them is MAX_ATTEMPTS, not MAX_ATTEMPTS each.
                 let mut attempt = 1u32;
-                let turn_stream = loop {
-                    match bound.stream(&history, &opts) {
-                        Ok(s) => break Ok(s),
-                        Err(e) => {
-                            let err = e;
-                            if should_retry(&err, attempt) {
-                                log::warn!(
-                                    "[ReactAgent] transient LLM error, retry {}/{}: {}",
-                                    attempt,
-                                    MAX_ATTEMPTS,
-                                    err
-                                );
-                                tokio::time::sleep(retry_delay(attempt)).await;
-                                attempt += 1;
-                                continue;
-                            }
-                            break Err(match classify_llm_error(&err) {
-                                LlmErrorKind::Fatal(r) => r,
-                                LlmErrorKind::Retryable => FatalReason::Generic,
-                            });
-                        }
-                    }
-                };
-                let mut turn_stream = match turn_stream {
-                    Ok(s) => s,
-                    Err(reason) => {
-                        degraded = Some(reason);
-                        break;
-                    }
-                };
                 let mut turn_text = String::new();
                 let mut turn_reasoning = String::new();
                 let mut turn_tool_calls: Vec<kernel_core::ToolCall> = Vec::new();
                 let mut turn_sig: Option<String> = None;
-                while let Some(msg_res) = turn_stream.next().await {
-                    let msg = match msg_res {
-                        Ok(m) => m,
+                'retry: loop {
+                    // Establish the stream — retry transient send failures.
+                    let mut turn_stream = match bound.stream(&history, &opts) {
+                        Ok(s) => s,
                         Err(e) => {
-                            // Mid-stream drop: tokens already emitted, can't
-                            // cleanly retry the partial turn → degrade.
-                            let err = e;
-                            degraded = Some(match classify_llm_error(&err) {
+                            if should_retry(&e, attempt) {
+                                log::warn!(
+                                    "[ReactAgent] transient LLM error, retry {}/{}: {}",
+                                    attempt,
+                                    MAX_ATTEMPTS,
+                                    e
+                                );
+                                tokio::time::sleep(retry_delay(attempt)).await;
+                                attempt += 1;
+                                continue 'retry;
+                            }
+                            degraded = Some(match classify_llm_error(&e) {
                                 LlmErrorKind::Fatal(r) => r,
                                 LlmErrorKind::Retryable => FatalReason::Generic,
                             });
-                            break;
+                            break 'retry;
                         }
                     };
-                    if !msg.content.is_empty() {
-                        turn_text.push_str(&msg.content);
-                        yield AgentEvent::Token(msg.content.clone());
+                    // Reset this turn's accumulators on every (re)entry so a
+                    // retried turn starts clean — partial output from a prior
+                    // failed attempt was never emitted to history.
+                    turn_text.clear();
+                    turn_reasoning.clear();
+                    turn_tool_calls.clear();
+                    turn_sig = None;
+                    while let Some(msg_res) = turn_stream.next().await {
+                        let msg = match msg_res {
+                            Ok(m) => m,
+                            Err(e) => {
+                                // L4: a stream interrupted (L1 truncation / L3
+                                // idle stall) BEFORE any content was emitted is
+                                // safe to retry — the UI has nothing to discard.
+                                // After partial output, retrying would duplicate
+                                // it, so degrade honestly as StreamTruncated.
+                                let emitted =
+                                    !turn_text.is_empty() || !turn_reasoning.is_empty();
+                                // is_interrupt = the error is an upstream stream
+                                // cut (L1 truncation / L3 idle stall / network
+                                // mid-stream). Computed independently of `emitted`:
+                                // a stream can be cut before ANY byte reaches the
+                                // wire (90s idle with nothing sent, or connection
+                                // reset on every attempt). Only when `is_interrupt
+                                // && emitted` — partial output really was shown —
+                                // do we use StreamTruncated's "interrupted after
+                                // partial output" message; otherwise fall through
+                                // to classify so a never-emitted turn doesn't
+                                // falsely claim partial output was shown.
+                                let is_interrupt = is_stream_interrupt(&e);
+                                if !emitted && should_retry(&e, attempt) {
+                                    // Any transient error (truncation/idle/network)
+                                    // before output is safe to retry — the UI has
+                                    // nothing to discard.
+                                    log::warn!(
+                                        "[ReactAgent] stream interrupted before output, retry {}/{}: {}",
+                                        attempt,
+                                        MAX_ATTEMPTS,
+                                        e
+                                    );
+                                    tokio::time::sleep(retry_delay(attempt)).await;
+                                    attempt += 1;
+                                    continue 'retry;
+                                }
+                                degraded = Some(if is_interrupt && emitted {
+                                    FatalReason::StreamTruncated
+                                } else {
+                                    match classify_llm_error(&e) {
+                                        LlmErrorKind::Fatal(r) => r,
+                                        LlmErrorKind::Retryable => FatalReason::Generic,
+                                    }
+                                });
+                                break 'retry;
+                            }
+                        };
+                        if !msg.content.is_empty() {
+                            turn_text.push_str(&msg.content);
+                            yield AgentEvent::Token(msg.content.clone());
+                        }
+                        // GLM Interleaved Thinking: stream the reasoning trace live
+                        // (each thinking_delta chunk), and reassemble the full trace
+                        // + its signature so the next turn can preserve the block.
+                        if let Some(r) = msg.reasoning.as_ref().filter(|s| !s.is_empty()) {
+                            turn_reasoning.push_str(r);
+                            yield AgentEvent::Reasoning(r.clone());
+                        }
+                        if !msg.tool_calls.is_empty() {
+                            turn_tool_calls = msg.tool_calls;
+                        }
+                        if let Some(s) = msg.reasoning_signature.as_ref().filter(|s| !s.is_empty()) {
+                            turn_sig = Some(s.clone());
+                        }
                     }
-                    // GLM Interleaved Thinking: stream the reasoning trace live
-                    // (each thinking_delta chunk), and reassemble the full trace
-                    // + its signature so the next turn can preserve the block.
-                    if let Some(r) = msg.reasoning.as_ref().filter(|s| !s.is_empty()) {
-                        turn_reasoning.push_str(r);
-                        yield AgentEvent::Reasoning(r.clone());
-                    }
-                    if !msg.tool_calls.is_empty() {
-                        turn_tool_calls = msg.tool_calls;
-                    }
-                    if let Some(s) = msg.reasoning_signature.as_ref().filter(|s| !s.is_empty()) {
-                        turn_sig = Some(s.clone());
-                    }
+                    break 'retry; // turn consumed cleanly
                 }
                 if degraded.is_some() {
                     break;
@@ -3566,6 +3607,48 @@ mod tests {
         }
     }
 
+    /// Mock that returns a stream emitting `emit` messages and then yielding
+    /// `trunc` mid-stream — drives the L1/L3 mid-stream truncation path that
+    /// a stream()-establishment mock (RetryingModel) can't reach. On the second
+    /// call (retry) it succeeds with `recover` if set, else truncates again.
+    #[derive(Clone)]
+    struct MidStreamTruncationModel {
+        emit: Vec<Message>,
+        make_trunc: Arc<dyn Fn() -> Error + Send + Sync>,
+        recover: Option<Message>,
+        call: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl ChatModel for MidStreamTruncationModel {
+        async fn generate(&self, _: &[Message], _: &ModelOptions) -> Result<Message, Error> {
+            Err(Error::Unsupported(
+                "MidStreamTruncationModel: drive via stream()".into(),
+            ))
+        }
+        fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
+            let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if idx == 0 {
+                // First attempt: emit partial output, then truncate mid-stream.
+                let emit = self.emit.clone();
+                let trunc = (self.make_trunc)();
+                Ok(Box::pin(async_stream::stream! {
+                    for m in emit {
+                        yield Ok(m);
+                    }
+                    yield Err(trunc);
+                }))
+            } else if let Some(ok) = self.recover.clone() {
+                Ok(Box::pin(futures::stream::once(async move { Ok(ok) })))
+            } else {
+                let trunc = (self.make_trunc)();
+                Ok(Box::pin(futures::stream::once(async move { Err(trunc) })))
+            }
+        }
+        fn with_tools(&self, _: &[ToolInfo]) -> Result<Box<dyn ChatModel>, Error> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
     /// Drain a run stream and return the terminal Done outcome.
     async fn collect_outcome<S>(mut s: S) -> Option<kernel_core::AgentOutcome>
     where
@@ -3578,6 +3661,31 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Drain a run stream, accumulating every non-terminal AgentEvent (Token /
+    /// Reasoning / ...) alongside the terminal Done outcome — so a test can
+    /// assert what was actually streamed to the UI (e.g. partial output before
+    /// a degrade), not just the terminal outcome. Done is extracted into the
+    /// second slot and kept OUT of the events vec so callers don't have to
+    /// filter it when asserting on streamed tokens.
+    async fn collect_events<S>(
+        mut s: S,
+    ) -> (Vec<kernel_core::AgentEvent>, Option<kernel_core::AgentOutcome>)
+    where
+        S: futures::Stream<Item = Result<kernel_core::AgentEvent, Error>> + Unpin,
+    {
+        use futures::StreamExt;
+        let mut events = Vec::new();
+        let mut outcome = None;
+        while let Some(ev) = s.next().await {
+            match ev {
+                Ok(kernel_core::AgentEvent::Done(o)) => outcome = Some(o),
+                Ok(e) => events.push(e),
+                Err(_) => {}
+            }
+        }
+        (events, outcome)
     }
 
     fn go_input() -> kernel_core::AgentInput {
@@ -3621,6 +3729,124 @@ mod tests {
         let outcome = collect_outcome(s).await.expect("must emit Done");
         assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
         assert_eq!(outcome.output_summary.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn run_retries_mid_stream_truncation_before_output() {
+        use kernel_core::Agent;
+        // L4: stream established OK but truncated (StreamIncomplete) BEFORE any
+        // content was emitted → safe to retry the whole turn. Second attempt
+        // succeeds. Proves mid-stream truncation with no emitted output is
+        // retried (not silently completed, not degraded) — the exact regression
+        // behind the 8f41b658 "only thinking, no reply" session.
+        let model = MidStreamTruncationModel {
+            emit: vec![], // nothing emitted before truncation
+            make_trunc: Arc::new(|| Error::StreamIncomplete { got_reason: false }),
+            recover: Some(Message::assistant("recovered after truncation")),
+            call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        assert_eq!(
+            outcome.output_summary.as_deref(),
+            Some("recovered after truncation")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_degrades_when_truncated_after_partial_output() {
+        use kernel_core::Agent;
+        // L5: stream emitted partial output, THEN truncated. Retrying would
+        // duplicate the partial output already shown, so the run degrades to
+        // Failed with the StreamTruncated message instead of pretending it
+        // completed. `recover` is configured to prove it is NOT used after emit.
+        // We collect the full event stream (not just the outcome) to assert the
+        // partial turn was actually streamed to the UI as a Token event BEFORE
+        // the degrade — that is the L5 contract ("show partial, then degrade").
+        let model = MidStreamTruncationModel {
+            emit: vec![Message::assistant("partial response")],
+            make_trunc: Arc::new(|| Error::StreamIncomplete { got_reason: false }),
+            recover: Some(Message::assistant("would-duplicate")),
+            call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let (events, outcome) = collect_events(s).await;
+        let outcome = outcome.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("degraded summary");
+        assert!(
+            summary.contains("interrupted"),
+            "StreamTruncated message: {summary}"
+        );
+        let streamed: Vec<String> = events
+            .into_iter()
+            .filter_map(|e| match e {
+                kernel_core::AgentEvent::Token(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            streamed.iter().any(|t| t.contains("partial response")),
+            "partial output must be streamed as a Token before degrade: {streamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_retries_mid_stream_idle_before_output() {
+        use kernel_core::Agent;
+        // L3 watchdog: stream established OK but went idle (StreamIdle) BEFORE
+        // any content was emitted → same retry path as truncation. Second
+        // attempt succeeds. Locks that StreamIdle shares the L4 mid-stream
+        // retry-before-emit path (is_stream_interrupt membership), so an idle
+        // stall never silently completes either.
+        let model = MidStreamTruncationModel {
+            emit: vec![],
+            make_trunc: Arc::new(|| Error::StreamIdle { secs: 90 }),
+            recover: Some(Message::assistant("recovered after idle")),
+            call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Completed);
+        assert_eq!(
+            outcome.output_summary.as_deref(),
+            Some("recovered after idle")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_degrades_after_attempt_exhaustion_with_no_output() {
+        use kernel_core::Agent;
+        // Locks the fix for the false "partial output already shown" message:
+        // the stream truncates on EVERY attempt with no content emitted, so
+        // retries exhaust (attempt 1→2→3) and the run degrades. Because nothing
+        // was ever shown, the degrade must take the generic path — NOT
+        // StreamTruncated's "after partial output" wording. Pre-fix this test
+        // would fail (degrade wrongly picked StreamTruncated because
+        // is_interrupt was true regardless of emitted).
+        let model = MidStreamTruncationModel {
+            emit: vec![],
+            make_trunc: Arc::new(|| Error::StreamIncomplete { got_reason: false }),
+            recover: None, // never recovers — every attempt truncates
+            call: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let agent = ReactAgent::new(model, ToolRegistry::new(), "sys");
+        let s = agent.run(go_input()).unwrap();
+        let outcome = collect_outcome(s).await.expect("must emit Done");
+        assert_eq!(outcome.status, kernel_core::AgentRunStatus::Failed);
+        let summary = outcome.output_summary.expect("degraded summary");
+        assert!(
+            !summary.contains("partial output"),
+            "must NOT claim partial output was shown (none was): {summary}"
+        );
+        assert!(
+            summary.contains("retries") || summary.contains("failed"),
+            "generic-fatal wording after retry exhaustion: {summary}"
+        );
     }
 
     #[tokio::test]
