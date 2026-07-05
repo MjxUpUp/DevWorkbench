@@ -990,6 +990,27 @@ impl ReactAgent {
         // missing HookManager (no hooks) skips straight to the plain prompt.
         let mut full_task = task.to_string();
         if let Some(hooks) = &self.hooks {
+            // D2 lifecycle: SessionStart fires once at run entry — stdout
+            // (exit 0) is injected as session-level context into the first
+            // turn's prompt. exit 2 is logged but cannot refuse a session.
+            match hooks
+                .dispatch_event(&crate::kernel_impl::hooks::HookEvent::SessionStart {
+                    task: task.to_string(),
+                })
+                .await
+            {
+                Ok(ctxs) if !ctxs.is_empty() => {
+                    full_task.push_str("\n\n[session-start context]\n");
+                    full_task.push_str(&ctxs.join("\n---\n"));
+                }
+                Ok(_) => {}
+                Err(reason) => {
+                    log::warn!(
+                        "[user-hook] SessionStart exit-2 ignored (session not refuseable): {}",
+                        reason.message
+                    );
+                }
+            }
             // D2 lifecycle: dispatch UserPromptSubmit BEFORE the user message
             // enters history. Ok(ctxs) → stdout injected as additional context
             // (claude-code additionalContext). Err → v2 exit-2 block: a user hook
@@ -1374,6 +1395,26 @@ impl kernel_core::Agent for ReactAgent {
             // as additional context (claude-code additionalContext injection).
             let mut full_task = task.clone();
             if let Some(h) = hooks.as_ref() {
+                // SessionStart: inject session-level context into the first
+                // turn. exit 2 logged but cannot refuse a session.
+                match h
+                    .dispatch_event(&crate::kernel_impl::hooks::HookEvent::SessionStart {
+                        task: task.clone(),
+                    })
+                    .await
+                {
+                    Ok(ctxs) if !ctxs.is_empty() => {
+                        full_task.push_str("\n\n[session-start context]\n");
+                        full_task.push_str(&ctxs.join("\n---\n"));
+                    }
+                    Ok(_) => {}
+                    Err(reason) => {
+                        log::warn!(
+                            "[user-hook] SessionStart exit-2 ignored (session not refuseable): {}",
+                            reason.message
+                        );
+                    }
+                }
                 // Ok(ctxs) → inject stdout as context. Err → v2 exit-2 block: a
                 // user hook refused the prompt; end the stream with the block
                 // reason (no turn entered, no model call).
@@ -1485,16 +1526,41 @@ impl kernel_core::Agent for ReactAgent {
                         (Some(_), Some(_)) => Some(Arc::clone(&archive_buf)),
                         _ => None,
                     };
-                    let _ = context_compact::maybe_compact(
-                        &mut history,
-                        model.as_ref(),
-                        &opts,
-                        max_tok,
-                        compact_keep_recent,
-                        &mut compact_consecutive_failures,
-                        archive_buf_for_call,
-                    )
-                    .await;
+                    // D2 lifecycle: PreCompact fires before compaction runs.
+                    // exit 2 blocks this round — history is left untouched and
+                    // the next turn retries. exit 0 stdout is logged (v1; v2 may
+                    // pass it as a keep-hint to the summarizer).
+                    let mut skip_compact = false;
+                    if let Some(h) = hooks.as_ref() {
+                        match h
+                            .dispatch_event(&crate::kernel_impl::hooks::HookEvent::PreCompact {
+                                current_tokens: context_compact::estimate_tokens(&history),
+                                max_tokens: max_tok,
+                            })
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(reason) => {
+                                log::info!(
+                                    "[user-hook] PreCompact blocked compaction this round: {}",
+                                    reason.message
+                                );
+                                skip_compact = true;
+                            }
+                        }
+                    }
+                    if !skip_compact {
+                        let _ = context_compact::maybe_compact(
+                            &mut history,
+                            model.as_ref(),
+                            &opts,
+                            max_tok,
+                            compact_keep_recent,
+                            &mut compact_consecutive_failures,
+                            archive_buf_for_call,
+                        )
+                        .await;
+                    }
                     // Drain + emit/persist OUTSIDE the maybe_compact borrow.
                     if let (Some(sid), Some(app), Some(driver_buf)) =
                         (sid_opt.as_ref(), app_opt.as_ref(), compaction_buf_opt.as_ref())

@@ -425,6 +425,10 @@ pub struct SlashCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UserHookEvent {
+    /// Fires when a new session is starting (first turn). The hook's stdout
+    /// (exit 0) is injected into the first turn's prompt as session-level
+    /// context. exit 2 is logged but cannot stop the session.
+    SessionStart,
     /// Fires when a new user prompt is about to be sent to the model. The
     /// hook's stdout (exit 0) is injected as additional context.
     UserPromptSubmit,
@@ -434,6 +438,11 @@ pub enum UserHookEvent {
     /// Fires after each tool returns. Observation only — exit 2 is logged but
     /// cannot retroactively un-execute the tool.
     PostToolUse,
+    /// Fires before context auto-compaction runs. Exit 2 BLOCKS this compaction
+    /// round (history left untouched; next turn retries). exit 0 stdout is
+    /// logged (v1 — a future revision may pass it as a keep-hint to the
+    /// summarizer).
+    PreCompact,
     /// Fires when the agent run stops (completed / failed / aborted). Output is
     /// ignored — the hook runs for its side effect (notifications, cleanup).
     Stop,
@@ -443,9 +452,11 @@ impl UserHookEvent {
     /// Persisted column value (snake_case), matching the DB seed/CRUD contract.
     pub fn as_db(&self) -> &'static str {
         match self {
+            UserHookEvent::SessionStart => "session_start",
             UserHookEvent::UserPromptSubmit => "user_prompt_submit",
             UserHookEvent::PreToolUse => "pre_tool_use",
             UserHookEvent::PostToolUse => "post_tool_use",
+            UserHookEvent::PreCompact => "pre_compact",
             UserHookEvent::Stop => "stop",
         }
     }
@@ -454,9 +465,11 @@ impl UserHookEvent {
     /// a corrupt row surfaces loudly instead of silently skipping.
     pub fn from_db(s: &str) -> Result<Self, String> {
         match s {
+            "session_start" => Ok(UserHookEvent::SessionStart),
             "user_prompt_submit" => Ok(UserHookEvent::UserPromptSubmit),
             "pre_tool_use" => Ok(UserHookEvent::PreToolUse),
             "post_tool_use" => Ok(UserHookEvent::PostToolUse),
+            "pre_compact" => Ok(UserHookEvent::PreCompact),
             "stop" => Ok(UserHookEvent::Stop),
             other => Err(format!("unknown user_hook event: {other}")),
         }

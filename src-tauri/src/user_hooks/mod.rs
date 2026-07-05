@@ -80,6 +80,8 @@ impl UserCommandHook {
             ) | (UserHookEvent::PreToolUse, HookEvent::PreToolUse { .. })
                 | (UserHookEvent::PostToolUse, HookEvent::PostToolUse { .. })
                 | (UserHookEvent::Stop, HookEvent::Stop { .. })
+                | (UserHookEvent::SessionStart, HookEvent::SessionStart { .. })
+                | (UserHookEvent::PreCompact, HookEvent::PreCompact { .. })
         )
     }
 
@@ -162,6 +164,14 @@ struct HookPayload<'a> {
 impl<'a> HookPayload<'a> {
     fn from_event(ev: &'a HookEvent) -> Self {
         match ev {
+            HookEvent::SessionStart { task } => HookPayload {
+                hook_event_name: "SessionStart",
+                prompt: Some(task),
+                summary: None,
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
+            },
             HookEvent::UserPromptSubmit { prompt } => HookPayload {
                 hook_event_name: "UserPromptSubmit",
                 prompt: Some(prompt),
@@ -189,6 +199,14 @@ impl<'a> HookPayload<'a> {
                 tool_name: Some(tool),
                 tool_input: Some(arguments),
                 tool_response: Some(result),
+            },
+            HookEvent::PreCompact { .. } => HookPayload {
+                hook_event_name: "PreCompact",
+                prompt: None,
+                summary: None,
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
             },
             HookEvent::Stop { summary } => HookPayload {
                 hook_event_name: "Stop",
@@ -372,7 +390,11 @@ impl Hook for UserCommandHook {
                 // Only UserPromptSubmit yields injectable context. Tool events'
                 // exit-0 stdout is intentionally NOT injected (v1 keeps the model
                 // clean; a tool hook's job is allow/refuse, not feed prose).
-                if matches!(self.event, UserHookEvent::UserPromptSubmit) && !ctx.is_empty() {
+                if matches!(
+                    self.event,
+                    UserHookEvent::UserPromptSubmit | UserHookEvent::SessionStart
+                ) && !ctx.is_empty()
+                {
                     Ok(vec![ctx])
                 } else {
                     Ok(Vec::new())
@@ -385,7 +407,9 @@ impl Hook for UserCommandHook {
                 // un-stop or un-execute) → log and no-op so a misconfigured hook
                 // never aborts an otherwise-finished run.
                 match self.event {
-                    UserHookEvent::UserPromptSubmit | UserHookEvent::PreToolUse => {
+                    UserHookEvent::UserPromptSubmit
+                    | UserHookEvent::PreToolUse
+                    | UserHookEvent::PreCompact => {
                         Err(BlockReason {
                             hook: format!("user-hook:{}", self.name),
                             message: if msg.is_empty() {
@@ -396,7 +420,9 @@ impl Hook for UserCommandHook {
                             severity: Severity::Block,
                         })
                     }
-                    UserHookEvent::Stop | UserHookEvent::PostToolUse => {
+                    UserHookEvent::Stop
+                    | UserHookEvent::PostToolUse
+                    | UserHookEvent::SessionStart => {
                         log::warn!(
                             "[user-hook:{}] exit-2 block ignored on {:?}: {}",
                             self.name,
@@ -459,6 +485,69 @@ mod tests {
         let err = h.on_event(&ev).await.expect_err("exit 2 must block Submit");
         assert_eq!(err.severity, Severity::Block);
         assert_eq!(err.hook, "user-hook:gate");
+    }
+
+    #[tokio::test]
+    async fn session_start_hook_exit0_injects_context() {
+        // SessionStart exit-0 stdout is injected as session-level context (same
+        // injection path as UserPromptSubmit), so a hook can seed the first turn
+        // with project conventions / env notes.
+        let h = UserCommandHook::new(
+            "session-ctx".into(),
+            UserHookEvent::SessionStart,
+            "echo SESSION-CTX".into(),
+            true,
+            10,
+            working_dir(),
+        );
+        let ev = HookEvent::SessionStart { task: "hi".into() };
+        let ctxs = h.on_event(&ev).await.unwrap();
+        assert_eq!(ctxs, vec!["SESSION-CTX".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn session_start_hook_exit2_is_ignored_not_block() {
+        // A session is not refuseable — exit 2 on SessionStart is logged and
+        // dropped (Ok empty), never Err, so a misconfigured hook can't stop the
+        // session from starting.
+        let h = UserCommandHook::new(
+            "session-gate".into(),
+            UserHookEvent::SessionStart,
+            "exit 2".into(),
+            true,
+            10,
+            working_dir(),
+        );
+        let ev = HookEvent::SessionStart { task: "hi".into() };
+        let ctxs = h
+            .on_event(&ev)
+            .await
+            .expect("SessionStart exit-2 must NOT block");
+        assert!(ctxs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_compact_hook_exit2_blocks_compaction() {
+        // PreCompact exit-2 → Err(BlockReason) so the run loop skips this
+        // compaction round (history untouched; next turn retries).
+        let h = UserCommandHook::new(
+            "no-compact".into(),
+            UserHookEvent::PreCompact,
+            "exit 2".into(),
+            true,
+            10,
+            working_dir(),
+        );
+        let ev = HookEvent::PreCompact {
+            current_tokens: 9000,
+            max_tokens: 8000,
+        };
+        let err = h
+            .on_event(&ev)
+            .await
+            .expect_err("exit 2 must block PreCompact");
+        assert_eq!(err.severity, Severity::Block);
+        assert_eq!(err.hook, "user-hook:no-compact");
     }
 
     #[tokio::test]

@@ -142,7 +142,6 @@ pub fn remove_server(config: &mut McpConfigFile, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::AgentType;
 
     #[test]
     fn test_parse_mcp_config() {

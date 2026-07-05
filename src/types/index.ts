@@ -215,7 +215,7 @@ export interface SlashCommand {
  *   - 'post_tool_use'   — after each tool returns; observation only (exit 2 logged)
  *   - 'stop' — runs for side effects at run end (output ignored)
  */
-export type UserHookEvent = 'user_prompt_submit' | 'pre_tool_use' | 'post_tool_use' | 'stop';
+export type UserHookEvent = 'session_start' | 'user_prompt_submit' | 'pre_tool_use' | 'post_tool_use' | 'pre_compact' | 'stop';
 
 /**
  * A user-configurable lifecycle hook (D2). One row = one shell command bound to

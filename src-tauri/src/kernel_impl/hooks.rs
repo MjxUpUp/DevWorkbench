@@ -300,6 +300,10 @@ impl PermissionMode {
 /// method has a default impl so existing hooks stay source-compatible.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
+    /// The agent run is starting (first turn). The hook's stdout (exit 0) is
+    /// injected into the first turn's prompt as session-level context. exit 2
+    /// is logged but cannot stop the session (a session is not refuseable).
+    SessionStart { task: String },
     /// A new user prompt is about to be sent to the model.
     UserPromptSubmit { prompt: String },
     /// A tool is about to be invoked. `tool` is the tool name; `arguments` is
@@ -314,6 +318,14 @@ pub enum HookEvent {
         tool: String,
         arguments: String,
         result: String,
+    },
+    /// Context auto-compaction is about to run. `Err` (a user hook's exit 2)
+    /// BLOCKS this compaction round — the history is left untouched and the
+    /// next turn retries. exit 0 stdout is logged (v1 — a future revision may
+    /// pass it as a keep-hint to the summarizer).
+    PreCompact {
+        current_tokens: usize,
+        max_tokens: usize,
     },
     /// The agent run is stopping (completed / failed / aborted).
     Stop { summary: String },
@@ -499,11 +511,57 @@ fn extract_command_from_args(args: &str) -> Option<String> {
 /// [`HookManager::before`] calls this BEFORE the per-mode `skips_guards`
 /// short-circuit, so it applies even under SkipPermissions.
 fn classify_catastrophe(command: &str) -> Option<BlockReason> {
+    // Pipe-aware: a catastrophe anywhere in a pipeline still destroys the
+    // system (`echo x | xargs rm -rf /`, `curl … | sh`, `rm -rf / | tee log`).
+    // Scan each stage independently; the first hit wins. Splitting on `|` is
+    // best-effort (a real shell parser would handle `||` / quoted pipes), but
+    // every segment is re-examined by the prefix-stripper below, so a hit in
+    // any segment still surfaces.
+    for stage in command.split('|') {
+        if let Some(reason) = classify_catastrophe_stage(stage) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn classify_catastrophe_stage(command: &str) -> Option<BlockReason> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return None;
     }
-    let prog = tokens[0].to_lowercase();
+    // Strip privilege/wrapper prefixes so `sudo rm -rf /`, `nohup rm -rf /`,
+    // `timeout 30 rm -rf /`, `env VAR= rm -rf /`, `xargs rm -rf /`,
+    // `command rm -rf /` are all caught the same as bare `rm -rf /`. Loop,
+    // since wrappers stack (`sudo timeout rm …`). Best-effort token scan, not a
+    // shell parser — the goal is the common obfuscations, not adversarial
+    // evasion; a missed obfuscation is mitigated by the substring floor below.
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let t = tokens[idx].to_lowercase();
+        if matches!(t.as_str(), "sudo" | "nohup" | "time" | "command" | "xargs") {
+            idx += 1;
+            continue;
+        }
+        if t == "timeout" {
+            // `timeout DURATION cmd` — skip the duration argument too.
+            idx += 2;
+            continue;
+        }
+        if t == "env" {
+            // `env VAR=val VAR2=val cmd` — skip all VAR=val assignments.
+            idx += 1;
+            while idx < tokens.len() && tokens[idx].contains('=') {
+                idx += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if idx >= tokens.len() {
+        return None;
+    }
+    let prog = tokens[idx].to_lowercase();
     let joined = command.to_lowercase();
 
     // rm with recursive-force targeting root or home root.
@@ -513,8 +571,8 @@ fn classify_catastrophe(command: &str) -> Option<BlockReason> {
             t.contains('r') && t.contains('f')
         });
         if has_rf {
-            // Find the path target (first non-flag token after flags).
-            let target = tokens.iter().skip(1).find(|t| !t.starts_with('-'));
+            // Find the path target (first non-flag token after the prog).
+            let target = tokens.iter().skip(idx + 1).find(|t| !t.starts_with('-'));
             if let Some(t) = target {
                 let t = t.trim_matches('"').trim_matches('\'');
                 // Block wiping root, home root, or system dirs.
@@ -540,15 +598,6 @@ fn classify_catastrophe(command: &str) -> Option<BlockReason> {
         }
     }
 
-    // Fork bomb variants.
-    if joined.contains(":(){") || joined.contains(": () {") {
-        return Some(BlockReason {
-            hook: "command_guard".into(),
-            message: "blocked fork bomb".into(),
-            severity: Severity::Block,
-        });
-    }
-
     // Filesystem format / disk wipe. `mkfs` and its typed variants
     // (mkfs.ext4 / mkfs.ntfs / mkfs.vfat / ...) all unconditionally format.
     if prog == "mkfs"
@@ -570,6 +619,31 @@ fn classify_catastrophe(command: &str) -> Option<BlockReason> {
             message: "blocked shutdown/poweroff".into(),
             severity: Severity::Block,
         });
+    }
+
+    // Fork bomb + last-resort substring floor for catastrophic patterns
+    // embedded in script payloads (`os.system("rm -rf /")`,
+    // `eval("mkfs.ext4 /dev/sda")`, `python -c "…rm -rf /…"`). The bare-prog
+    // checks above stay first so the precise reason is preferred; this sweep
+    // only catches what slips past them. Conservative — a false positive here
+    // only forces human approval, which is the safe side for an irreversible-op
+    // floor.
+    let catastrophic_substrings = [
+        ":(){",
+        ": () {",
+        "rm -rf /",
+        "rm -rf ~",
+        "rm -rf /*",
+        "mkfs.",
+    ];
+    for needle in catastrophic_substrings {
+        if joined.contains(needle) {
+            return Some(BlockReason {
+                hook: "command_guard".into(),
+                message: format!("blocked catastrophic pattern: {needle}"),
+                severity: Severity::Block,
+            });
+        }
     }
 
     None
@@ -621,7 +695,15 @@ impl Hook for CommandGuardHook {
             }
             Action::CallTool { tool, arguments } => {
                 // M7: also guard tool calls whose name suggests shell execution.
-                let dangerous_tools = ["exec", "shell", "bash", "cmd", "powershell", "sh"];
+                // The sh/bash/cmd/powershell entries also cover fish/zsh/csh via
+                // the substring match; python/node/nu/lua/perl/ruby are listed
+                // explicitly so an interpreter invoked with -c/-e inlined code
+                // still routes through classify_catastrophe (which sweeps the
+                // payload for embedded catastrophic substrings).
+                let dangerous_tools = [
+                    "exec", "shell", "bash", "cmd", "powershell", "sh", "python",
+                    "python3", "node", "nu", "lua", "perl", "ruby",
+                ];
                 let lower = tool.to_lowercase();
                 if dangerous_tools.iter().any(|dt| lower.contains(dt)) {
                     // Inspect arguments for dangerous commands.
@@ -852,6 +934,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catastrophe_strips_sudo_prefix() {
+        // `sudo rm -rf /` must hit the same floor as bare `rm -rf /` — without
+        // prefix-stripping the prog would be `sudo` and the wipe would slip past.
+        let h = CommandGuardHook::default();
+        let err = h.before(&cmd("sudo rm -rf /")).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Block);
+        assert!(err.message.contains("system path"), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn catastrophe_strips_wrapper_prefixes() {
+        // nohup / timeout / env / xargs / command wrappers all expose the same
+        // underlying destructive prog once the prefix is skipped.
+        let h = CommandGuardHook::default();
+        for c in [
+            "nohup rm -rf /",
+            "timeout 30 rm -rf /",
+            "env FOO=bar rm -rf /",
+            "xargs rm -rf /",
+            "command rm -rf /",
+            // Stacked wrappers (sudo timeout …) must also collapse.
+            "sudo timeout 10 rm -rf /",
+        ] {
+            let err = h.before(&cmd(c)).await.unwrap_err();
+            assert_eq!(err.severity, Severity::Block, "{c} should block: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn catastrophe_pipe_stage_xargs() {
+        // `echo x | xargs rm -rf /` — without pipe-splitting the prog is `echo`
+        // and the wipe escapes. Each stage is scanned independently.
+        let h = CommandGuardHook::default();
+        let err = h.before(&cmd("echo x | xargs rm -rf /"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.severity, Severity::Block, "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn catastrophe_pipe_stage_mkfs() {
+        // `yes | mkfs.ext4 /dev/sda1` — the destructive op lives in the right
+        // side of the pipe; pipe-splitting surfaces it.
+        let h = CommandGuardHook::default();
+        assert!(h.before(&cmd("yes | mkfs.ext4 /dev/sda1")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catastrophe_interpreter_inline_payload() {
+        // An interpreter invoked with -c inlines code; the destructive op lives
+        // in the argument, not the prog. The substring floor sweeps the payload.
+        let h = CommandGuardHook::default();
+        let action = Action::CallTool {
+            tool: "python".into(),
+            arguments: r#"{"command":"import os; os.system('rm -rf /')"}"#.into(),
+        };
+        assert!(h.before(&action).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catastrophe_substring_floor_embedded_mkfs() {
+        // eval("mkfs.ext4 /dev/sda") — the prog is the shell, but the
+        // catastrophic substring is embedded in the payload.
+        let h = CommandGuardHook::default();
+        assert!(h.before(&cmd(r#"bash -c 'mkfs.ext4 /dev/sda'"#)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn command_guard_no_false_positive_on_sudo_safe() {
+        // Prefix-stripping must not over-trigger: `sudo cargo build` strips to
+        // `cargo build` and stays allowed. Guards against the floor becoming a
+        // nuisance that trains users to click through approvals.
+        let h = CommandGuardHook::default();
+        assert!(h.before(&cmd("sudo cargo build")).await.is_ok());
+        assert!(h.before(&cmd("timeout 10 cargo test")).await.is_ok());
+        assert!(h.before(&cmd("env RUST_LOG=debug cargo build")).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn assertion_guard_reports_weakening_from_diff() {
         let h = AssertionGuardHook;
         let diff = "--- a/t.rs\n+++ b/t.rs\n-func()\n-t.Fatal(\"x\")\n+func()\n+t.Log(\"x\")\n";
@@ -1013,7 +1174,10 @@ mod tests {
                     HookEvent::UserPromptSubmit { .. } => {
                         self.submits.fetch_add(1, Ordering::SeqCst);
                     }
-                    HookEvent::PreToolUse { .. } | HookEvent::PostToolUse { .. } => {}
+                    HookEvent::SessionStart { .. }
+                    | HookEvent::PreToolUse { .. }
+                    | HookEvent::PostToolUse { .. }
+                    | HookEvent::PreCompact { .. } => {}
                     HookEvent::Stop { .. } => {
                         self.stops.fetch_add(1, Ordering::SeqCst);
                     }

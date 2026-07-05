@@ -99,6 +99,31 @@ impl Tool for ReadFileTool {
             .map(|n| n as usize);
         let path = resolve_path(&ctx.working_dir, &file_path);
 
+        // Project-sandbox containment: refuse reads that resolve outside the
+        // working directory subtree. The agent is meant to operate on the
+        // user's opened project; reading arbitrary system files
+        // (`~/.ssh/id_rsa`, `/etc/shadow`, browser profiles, …) is a
+        // data-exfiltration risk. Canonicalize-based so symlink escapes and
+        // `../../` traversals are caught — both collapse to a target outside
+        // the root. If canonicalization fails (file missing / perm denied) the
+        // read_to_string below surfaces the real error anyway, so containment
+        // only enforces when both paths actually resolve. No working_dir
+        // (test/eval path) → unconstrained.
+        if let Some(root_str) = &ctx.working_dir {
+            if let (Ok(root), Ok(p)) =
+                (std::fs::canonicalize(root_str), std::fs::canonicalize(&path))
+            {
+                if !p.starts_with(&root) {
+                    return Err(Error::Tool(format!(
+                        "read_file refused: '{}' resolves outside the project root ({}). \
+                         Read files within the opened project.",
+                        path.display(),
+                        root.display()
+                    )));
+                }
+            }
+        }
+
         let content = std::fs::read_to_string(&path)
             .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
 
@@ -344,6 +369,9 @@ impl Tool for BashTool {
     async fn invoke(&self, arguments: &str, ctx: &ToolContext) -> Result<String, Error> {
         let args = parse_args(arguments)?;
         let command = req_str(&args, "command")?;
+        // Audit timer — covers spawn + execute so the audit record reports
+        // wall-clock duration per invocation (see the audit log at the bottom).
+        let started = std::time::Instant::now();
 
         // Windows 锁 git-bash：之前用 cmd /C 导致 agent 发的 Unix 命令（ls/find）
         // 报"不是内部或外部命令"/exit 255，agent 盲切语法（find→dir→powershell→
@@ -409,12 +437,15 @@ impl Tool for BashTool {
         })
         .await;
 
-        match outcome {
+        let result = match outcome {
             Ok((so, se, Ok(status))) => {
                 let code = status.code().unwrap_or(-1);
                 let stdout = String::from_utf8_lossy(&so);
                 let stderr = String::from_utf8_lossy(&se);
-                Ok(format!("[exit {code}]\n{stdout}\n--- stderr ---\n{stderr}"))
+                Ok((
+                    code,
+                    format!("[exit {code}]\n{stdout}\n--- stderr ---\n{stderr}"),
+                ))
             }
             Ok((_, _, Err(e))) => Err(Error::Tool(format!("command wait: {e}"))),
             Err(_) => {
@@ -424,7 +455,35 @@ impl Tool for BashTool {
                 let _ = child.wait().await;
                 Err(Error::Tool("command timed out (30s, killed)".into()))
             }
-        }
+        };
+        // Structured audit trail (gap8): every bash invocation is logged with
+        // the command, exit code, duration, and conversation context — a
+        // tamper-evident record of what the agent executed. Routed through the
+        // `audit` log target so the app's log filter can split it into a
+        // dedicated audit.log (the log dir is documented in the session-
+        // diagnostics memory). This is a structured log, not a DB table, on
+        // purpose: ToolContext lives in the kernel_core crate and carries only
+        // working_dir + conversation_id (no DB handle), so a DB sink would
+        // mean a cross-crate change for a single-user local app where the
+        // existing Trace view already surfaces tool calls. A DB table can be
+        // layered on later by filtering this target without touching the tool
+        // — the write point is the contract. Newlines in the command are
+        // escaped to prevent a multi-line command from forging log lines.
+        let (audit_code, audit_ok) = match &result {
+            Ok((code, _)) => (*code, true),
+            Err(_) => (-1, false),
+        };
+        log::info!(
+            target: "audit",
+            "bash_invoke | conversation_id={} | working_dir={} | exit_code={} | ok={} | duration_ms={} | command={}",
+            ctx.conversation_id.as_deref().unwrap_or(""),
+            ctx.working_dir.as_deref().unwrap_or(""),
+            audit_code,
+            audit_ok,
+            started.elapsed().as_millis() as u64,
+            command.replace('\n', "\\n").replace('\r', "\\r"),
+        );
+        result.map(|(_, out)| out)
     }
 
     fn is_dangerous(&self) -> bool {
@@ -575,6 +634,41 @@ mod tests {
             .invoke(r#"{"file_path":"nope.txt"}"#, &ctx(dir.path()))
             .await;
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_file_refuses_outside_project_root() {
+        // Absolute path into a sibling tempdir must be refused — the agent's
+        // read surface is the opened project, not the filesystem at large.
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "private").unwrap();
+        let req = format!(
+            r#"{{"file_path":"{}"}}"#,
+            outside.path().join("secret.txt").to_string_lossy()
+        );
+        let err = ReadFileTool
+            .invoke(&req, &ctx(project.path()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Tool(ref m) if m.contains("outside the project root")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_allows_subdirectory_inside_project() {
+        // Containment must not over-trigger: a file in a nested project subdir
+        // is inside the root and reads normally.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src/deep")).unwrap();
+        std::fs::write(project.path().join("src/deep/mod.rs"), "fn main() {}\n").unwrap();
+        let out = ReadFileTool
+            .invoke(r#"{"file_path":"src/deep/mod.rs"}"#, &ctx(project.path()))
+            .await
+            .unwrap();
+        assert!(out.contains("fn main()"));
     }
 
     #[tokio::test]

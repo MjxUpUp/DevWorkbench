@@ -7,8 +7,10 @@
 //! `BoxStream`/`generate()` future inside it) mid-await.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+
+use crate::agents::pty::ChatStreamEvent;
 
 /// Active kernel agent tasks keyed by session ID. Inserted by the spawn driver
 /// right after `tokio::spawn`; removed by the driver when the run finishes, or
@@ -50,6 +52,59 @@ impl KernelTasks {
         } else {
             false
         }
+    }
+}
+
+/// Live chat-event buffer per running kernel session (gap4: interrupt
+/// persistence).
+///
+/// `final_blocks` — the driver's accumulated transcript — lives on the spawned
+/// task's stack, so it is dropped when [`KernelTasks::abort`] cancels the
+/// future. `stop_agent_session` (a separate Tauri command) therefore cannot
+/// read it, and a mid-run stop used to lose the entire streamed-so-far turn
+/// (status=cancelled, blocks=NULL). This map holds a parallel buffer the driver
+/// pushes every event into, so the stop command can drain it post-abort and
+/// persist the transcript — with a synthetic `tool_result` appended for any
+/// trailing unmatched `tool_use` — instead of dropping the whole turn.
+///
+/// Removed on normal completion (`remove`, after the driver has written its
+/// own `final_blocks`) and on stop (`take`). Mirrors the `compaction_blocks`
+/// pattern but lives in managed state because it crosses command boundaries.
+#[derive(Default)]
+pub struct KernelLiveBlocks(Mutex<HashMap<String, Arc<Mutex<Vec<ChatStreamEvent>>>>>);
+
+impl KernelLiveBlocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a live buffer for a session at spawn time. Replaces (and drops)
+    /// any stale entry for the same id; the matching `JoinHandle` is handled by
+    /// [`KernelTasks::insert`], which aborts the stale task.
+    pub fn insert(&self, session_id: &str, buf: Arc<Mutex<Vec<ChatStreamEvent>>>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), buf);
+    }
+
+    /// Remove and return the buffer. `None` if the session already finalized
+    /// (driver removed it on normal completion) or was never a kernel session.
+    pub fn take(&self, session_id: &str) -> Option<Arc<Mutex<Vec<ChatStreamEvent>>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id)
+    }
+
+    /// Drop the entry without returning the buffer — the driver's normal-
+    /// completion path already has its own `final_blocks` and doesn't need the
+    /// live copy. Keeps the map from leaking entries for finished sessions.
+    pub fn remove(&self, session_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
     }
 }
 
@@ -95,5 +150,40 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         // The replacement is still registered and removable.
         assert!(tasks.abort("s1"));
+    }
+
+    #[test]
+    fn live_blocks_insert_take_roundtrip() {
+        // gap4: the live mirror must hand back the exact Arc registered, and
+        // take() must remove the entry so a second take misses.
+        let lb = KernelLiveBlocks::new();
+        let buf = Arc::new(Mutex::new(vec![ChatStreamEvent::Text {
+            content: "x".into(),
+        }]));
+        lb.insert("s1", Arc::clone(&buf));
+        let got = lb
+            .take("s1")
+            .expect("inserted buffer must be retrievable");
+        assert!(Arc::ptr_eq(&got, &buf));
+        assert!(lb.take("s1").is_none(), "take removes the entry");
+    }
+
+    #[test]
+    fn live_blocks_take_unknown_session_none() {
+        let lb = KernelLiveBlocks::new();
+        assert!(lb.take("never-spawned").is_none());
+    }
+
+    #[test]
+    fn live_blocks_remove_drops_entry_without_returning_buffer() {
+        // The driver's normal-completion path calls remove (not take): it
+        // already has its own final_blocks and doesn't need the live copy.
+        let lb = KernelLiveBlocks::new();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        lb.insert("s1", Arc::clone(&buf));
+        lb.remove("s1");
+        assert!(lb.take("s1").is_none());
+        // The caller's Arc is unaffected — remove only drops the map entry.
+        assert_eq!(Arc::strong_count(&buf), 1);
     }
 }

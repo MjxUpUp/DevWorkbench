@@ -39,6 +39,22 @@ pub struct AnthropicChatModel {
     pub(crate) shared: ChatModelShared,
 }
 
+/// gap2: prompt-cache the stable system+tools prefix so long sessions reuse
+/// `cache_read_input_tokens` instead of paying full input cost every turn.
+/// `cache_control` is part of the Anthropic Messages contract — unsupported
+/// endpoints ignore the field rather than 400 on it, so default ON is safe
+/// even for non-Anthropic Anthropic-compatible gateways (GLM etc.). Set
+/// `DEVWORKBENCH_PROMPT_CACHING=disable` (|0|false) to opt out for a strict
+/// endpoint that rejects the field. Read once per process: env doesn't change
+/// mid-run, and re-reading std::env on every request adds latency to the hot path.
+fn prompt_caching_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("DEVWORKBENCH_PROMPT_CACHING") {
+        Ok(v) => !matches!(v.as_str(), "disable" | "0" | "false"),
+        Err(_) => true,
+    })
+}
+
 impl AnthropicChatModel {
     pub fn new(
         base_url: impl Into<String>,
@@ -216,7 +232,20 @@ impl AnthropicChatModel {
             "stream": stream,
         });
         if !system.is_empty() {
-            body["system"] = Value::String(system);
+            if prompt_caching_enabled() {
+                // gap2: mark the stable system prefix as a cache breakpoint so
+                // long sessions reuse it (cache_read) instead of repaying input
+                // cost every turn. System is a string → wrap as a single text
+                // block with cache_control (Anthropic accepts both shapes; the
+                // block form is required to attach cache_control).
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }]);
+            } else {
+                body["system"] = Value::String(system);
+            }
         }
         if let Some(tc) = opts.thinking {
             body["thinking"] = json!({"type":"enabled","budget_tokens": tc.budget_tokens});
@@ -225,7 +254,7 @@ impl AnthropicChatModel {
             body["temperature"] = json!(t);
         }
         if !self.shared.bound_tools.is_empty() {
-            let tools: Vec<Value> = self
+            let mut tools: Vec<Value> = self
                 .shared
                 .bound_tools
                 .iter()
@@ -237,6 +266,16 @@ impl AnthropicChatModel {
                     })
                 })
                 .collect();
+            if prompt_caching_enabled() {
+                // gap2: mark the LAST tool as the second cache breakpoint —
+                // tool schemas are stable across turns, so system+tools form a
+                // cacheable prefix reused via cache_read. Only the last element
+                // is marked (Anthropic caches the prefix up to & including the
+                // marked block; marking all tools would waste breakpoints).
+                if let Some(last) = tools.last_mut() {
+                    last["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
             body["tools"] = Value::Array(tools);
         }
         body
@@ -806,5 +845,48 @@ pub(crate) fn handle_sse_line(
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod gap2_prompt_cache_tests {
+    use super::*;
+    use kernel_core::{Message, ModelOptions, ToolInfo};
+
+    fn tip(name: &str) -> ToolInfo {
+        ToolInfo {
+            name: name.into(),
+            description: format!("{name} tool"),
+            parameters_schema: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    #[test]
+    fn build_body_marks_system_and_last_tool_with_cache_control() {
+        // gap2: with caching ON (the process default — DEVWORKBENCH_PROMPT_CACHING
+        // unset), the stable system+tools prefix must carry cache_control
+        // breakpoints so long sessions reuse cache_read instead of repaying
+        // input cost every turn.
+        let mut model = AnthropicChatModel::new("https://x", "k", "m");
+        model.shared.bound_tools = vec![tip("read_file"), tip("bash"), tip("grep")];
+        let msgs = vec![Message::system("you are an agent"), Message::user("hi")];
+        let body = model.build_body("m", &msgs, &ModelOptions::default(), false);
+        // system → single text block with cache_control (string form cannot
+        // attach the marker; the block form is required).
+        let sys = body["system"]
+            .as_array()
+            .expect("system is a block array when caching is on");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        // Only the LAST tool is the breakpoint (caching the prefix up to & incl.
+        // the marked block; marking all tools would waste breakpoints).
+        let tools = body["tools"].as_array().expect("tools present");
+        assert_eq!(tools.len(), 3);
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "only the LAST tool carries cache_control"
+        );
+        assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
     }
 }

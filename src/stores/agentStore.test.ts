@@ -248,6 +248,18 @@ describe('agentStore.spawnAgent — permission mode threading (v1.1 Task 5)', ()
     expect(payload).toMatchObject({ mode: null });
   });
 
+  it('forwards model=null when unset so backend __default__ resolves it (A2: model-less is the legal "use default" path, NOT blocked)', async () => {
+    // A2 contract: an unset model MUST reach the backend as null, not be
+    // hard-blocked at the front. build_react_agent maps None → '__default__'
+    // alias → resolve_provider expands to the user's configured default model,
+    // so "user picks no model → default" is a legitimate path. The doc's
+    // original "front-door block on empty model" would break it. Pinning
+    // payload.model=null guards against a future over-eager guard re-blocking.
+    await useAgentStore.getState().spawnAgent('/p', 'claude_code', 'hi');
+    const [, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(payload).toMatchObject({ model: null });
+  });
+
   it('upserts (not appends) when the session id already exists — regression: duplicate render + stream jitter', async () => {
     // react_chat_driver emits agent:started (→ refreshSessions loads the row
     // from DB) BEFORE spawn_agent_session resolves, so by the time spawnAgent's

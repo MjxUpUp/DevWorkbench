@@ -406,6 +406,9 @@ mod tests {
             output_tokens: None,
             ttfb_ms: None,
             stream_ms: None,
+            span_id: None,
+            parent_span_id: None,
+            span_name: None,
             created_at: "2026-07-02T00:00:00Z".into(),
         };
         let case = build_draft_case_from_trajectory(
@@ -451,6 +454,9 @@ mod tests {
             output_tokens: None,
             ttfb_ms: None,
             stream_ms: None,
+            span_id: None,
+            parent_span_id: None,
+            span_name: None,
             created_at: "2026-07-02T00:00:00Z".into(),
         };
         let case = build_draft_case_from_trajectory(

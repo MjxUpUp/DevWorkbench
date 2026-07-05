@@ -159,6 +159,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, mode) => {
+    // A2: `model || null` is intentional. The backend (build_react_agent) maps
+    // None → '__default__' alias, which resolve_provider expands to the user's
+    // configured default model — so an unset model is the LEGAL "use default"
+    // path, NOT an error to block at the front. Hard-blocking here (the doc's
+    // original A2 suggestion) would break that path. The historical
+    // model=None → compaction-death-loop (session a54cd557) is fixed at the
+    // backend: __default__ resolves a real model + its real ctx_window feeds
+    // compact_threshold, so the static-fallback mismatch can't recur.
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
       agentType,

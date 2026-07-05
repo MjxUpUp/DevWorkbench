@@ -381,6 +381,33 @@ fn git_head_sha(project: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// `git rev-parse --abbrev-ref HEAD` — the current branch name, for system-prompt
+/// context injection so the model knows which branch it is on WITHOUT running
+/// git itself (it lacks a shell-by-shell cwd guarantee and weak models fumble
+/// the invocation). Returns None on any failure (non-repo, detached HEAD `HEAD`,
+/// git missing); CREATE_NO_WINDOW on Windows so no console flashes (same idiom
+/// as `git_head_sha`).
+fn git_current_branch(project: &Path) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .current_dir(project);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        // Detached HEAD resolves to the literal "HEAD" — not a branch name, so
+        // omit it (the model would only be confused by "- Git branch: HEAD").
+        .filter(|s| !s.is_empty() && s != "HEAD")
+}
+
 /// Persist a gate verdict to the L1 ledger. Best-effort — a DB write failure is
 /// logged, never propagated (the verdict is a side-record; the gate's own
 /// result has already been computed). Runs in spawn_blocking (rusqlite is
@@ -532,6 +559,14 @@ pub(crate) fn build_react_agent(
     // skill__lark-doc exists until it scans every tool description) and leans on
     // raw bash for tasks a skill already covers — the lark-cli-vs-skill regression.
     let mut sys_prompt = String::from(BASE_SYSTEM_PROMPT);
+    // gap1: inject project context (name + cwd + git branch + stack fingerprint)
+    // right after the BASE identity/discipline so the agent knows WHERE it is
+    // working from turn 1. Regression: session 016ab47e — the prompt never
+    // named the project, so a weaker model replied "I can't see the current
+    // project" and burned 1953 blocks rediscovering its cwd via glob/read_file.
+    // Strong models had masked the gap by exploring; this fixes it for all
+    // tiers. Mirrors CCB's opening environment banner.
+    sys_prompt.push_str(&project_context_suffix(working_dir));
     if let Some(dbs) = db.as_ref() {
         if let Ok(conn) = dbs.get() {
             let hash = crate::activity::hash_project_path(working_dir);
@@ -873,19 +908,22 @@ pub(crate) fn build_react_agent(
         }
         _ => agent,
     };
-    // v2 Human Gate: wire the approval registry for the chat path in HumanGate
-    // mode. with_human_gate reuses the app/session_id just set by
-    // with_compaction_archive (the ctx built in run()/run_loop() becomes a no-op
-    // Allow when either is absent, so a workflow/test agent that sets approval
-    // but not session_id stays ungated). Only HumanGate mode suspends — every
-    // other mode (Default/Plan/DryRun/SkipPermissions) ignores the registry.
-    let agent = if mode.is_human_gate() {
-        match approval {
-            Some(ap) => agent.with_human_gate(ap),
-            None => agent,
-        }
-    } else {
-        agent
+    // v2 Human Gate: wire the approval registry for any path that supplies one
+    // and isn't in a guard-skipping mode. Chat path passes `approval` (the
+    // ApprovalMap from app state); replay/ACP/test paths pass None → ungated.
+    // The gate attaches in Default/Plan/DryRun/HumanGate so destructive ops
+    // (rm, git push --force, git reset --hard, shred, …) surface an
+    // ApprovalModal before running — closing the dead path where ChatView always
+    // sent mode=undefined → Default → the registry was never wired → the modal
+    // never fired (the "破坏性操作由 ApprovalModal 承接" comment was a wrong
+    // self-description). SkipPermissions (yolo) waives the INTERACTIVE approval;
+    // the CatastropheGuard hard floor in HookManager::before still blocks
+    // irreversible system-destruction regardless of mode. The HumanGate
+    // PermissionMode variant stays as an explicit declarator for a future
+    // stricter mode.
+    let agent = match approval {
+        Some(ap) if !mode.skips_guards() => agent.with_human_gate(ap),
+        _ => agent,
     };
     Ok(agent)
 }
@@ -948,6 +986,76 @@ const BASE_SYSTEM_PROMPT: &str = concat!(
     "(regression: a parent once dispatched 'evaluate the project' to the child, ",
     "which ran 8 steps and failed; the parent redid the work itself anyway).\n",
 );
+
+/// Project name = directory basename of the working dir. Falls back to the
+/// working_dir string itself when the basename is empty (root or trailing-sep
+/// path), so the prompt always carries SOMETHING. Pure over `&str`.
+fn project_name(working_dir: &str) -> String {
+    Path::new(working_dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| working_dir.to_string())
+}
+
+/// Detect the project's stack fingerprint by probing well-known manifests in
+/// the working directory (existence only — no parse, so it stays cheap and
+/// never panics on a malformed manifest). Order is specificity-first:
+/// `src-tauri/tauri.conf.json` wins over bare Cargo/package because a Tauri
+/// app is both Rust and web frontend, and that framing is the actionable bit.
+/// Returns None when no manifest is recognized. Pure over `&Path`.
+fn detect_project_stack(project: &Path) -> Option<String> {
+    let has_pkg = project.join("package.json").exists();
+    let has_cargo = project.join("Cargo.toml").exists();
+    if project.join("src-tauri/tauri.conf.json").exists() {
+        return Some("Tauri (Rust + web frontend)".to_string());
+    }
+    if has_cargo && has_pkg {
+        return Some("Rust + Node".to_string());
+    }
+    if has_cargo {
+        return Some("Rust".to_string());
+    }
+    if has_pkg {
+        return Some("Node".to_string());
+    }
+    if project.join("go.mod").exists() {
+        return Some("Go".to_string());
+    }
+    if project.join("pyproject.toml").exists() || project.join("requirements.txt").exists() {
+        return Some("Python".to_string());
+    }
+    if project.join("pom.xml").exists() || project.join("build.gradle").exists() {
+        return Some("JVM".to_string());
+    }
+    None
+}
+
+/// Build the project-context block injected into the system prompt so the agent
+/// knows WHERE it is working without probing (regression: session 016ab47e — a
+/// weaker model replied "I can't see the current project" because the prompt
+/// never named the project; strong models had masked the gap by glob/read_file
+/// exploration). Mirrors CCB's opening environment banner (working dir / git
+/// branch / platform). Every sub-field degrades to omission rather than failing
+/// agent build — a non-repo or unrecognized stack just yields a shorter block.
+/// No mutation; deterministic given the filesystem state (reads git/manifest
+/// but writes nothing), so the shape is unit-testable with a temp dir.
+fn project_context_suffix(working_dir: &str) -> String {
+    let project = Path::new(working_dir);
+    let mut lines: Vec<String> = vec![
+        "\n\nProject context (you are working inside THIS project):".to_string(),
+        format!("- Project: {}", project_name(working_dir)),
+        format!("- Current working directory: {working_dir}"),
+    ];
+    if let Some(branch) = git_current_branch(project) {
+        lines.push(format!("- Git branch: {branch}"));
+    }
+    if let Some(stack) = detect_project_stack(project) {
+        lines.push(format!("- Stack: {stack}"));
+    }
+    lines.join("\n")
+}
 
 /// Format the installed `skill__*` and `mcp__*` tools into a system-prompt
 /// appendix that names them up front. The model otherwise has to scan every
@@ -1128,6 +1236,78 @@ mod executor_tests {
         assert!(app.contains("- test-writer: Writes tests"));
         // multi-line description trimmed to the first non-empty line
         assert!(!app.contains("longer detail"));
+    }
+
+    #[test]
+    fn project_name_extracts_basename() {
+        assert_eq!(project_name("/home/u/my-project"), "my-project");
+        assert_eq!(project_name("/proj"), "proj");
+    }
+
+    #[test]
+    fn project_name_falls_back_to_full_path_when_no_basename() {
+        // Root "/" has no basename → fall back to the input rather than empty,
+        // so the prompt always carries SOMETHING in the Project line.
+        assert_eq!(project_name("/"), "/");
+        assert_eq!(project_name(""), "");
+    }
+
+    #[test]
+    fn detect_project_stack_tauri_wins_over_bare_manifests() {
+        // src-tauri/tauri.conf.json present alongside bare Cargo+package → the
+        // Tauri fingerprint wins (more specific, and the actionable framing).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src-tauri")).unwrap();
+        std::fs::write(root.join("src-tauri/tauri.conf.json"), "{}").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            detect_project_stack(root).as_deref(),
+            Some("Tauri (Rust + web frontend)")
+        );
+    }
+
+    #[test]
+    fn detect_project_stack_classifies_bare_manifests() {
+        fn stack(files: &[&str]) -> Option<String> {
+            let tmp = tempfile::TempDir::new().unwrap();
+            for f in files {
+                std::fs::write(tmp.path().join(f), "").unwrap();
+            }
+            detect_project_stack(tmp.path())
+        }
+        assert_eq!(stack(&["Cargo.toml"]).as_deref(), Some("Rust"));
+        assert_eq!(stack(&["package.json"]).as_deref(), Some("Node"));
+        assert_eq!(
+            stack(&["Cargo.toml", "package.json"]).as_deref(),
+            Some("Rust + Node")
+        );
+        assert_eq!(stack(&["go.mod"]).as_deref(), Some("Go"));
+        assert_eq!(stack(&["pyproject.toml"]).as_deref(), Some("Python"));
+        assert_eq!(stack(&["requirements.txt"]).as_deref(), Some("Python"));
+        assert_eq!(stack(&["pom.xml"]).as_deref(), Some("JVM"));
+    }
+
+    #[test]
+    fn detect_project_stack_unknown_for_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(detect_project_stack(tmp.path()), None);
+    }
+
+    #[test]
+    fn project_context_suffix_names_project_dir_and_stack() {
+        // The suffix MUST name the cwd + stack up front — the whole point of
+        // gap1. A temp dir is not a git repo, so the branch line is omitted
+        // rather than mislabelled "HEAD".
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
+        let working_dir = tmp.path().to_str().unwrap();
+        let suffix = project_context_suffix(working_dir);
+        assert!(suffix.contains("Project context"));
+        assert!(suffix.contains(&format!("- Current working directory: {working_dir}")));
+        assert!(suffix.contains("- Stack: Rust"));
+        assert!(!suffix.contains("Git branch"));
     }
 }
 

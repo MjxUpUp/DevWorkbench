@@ -491,7 +491,19 @@ pub async fn maybe_compact(
     }
     match summarize_middle(history, model, opts, keep_recent).await {
         Ok(Some(compacted)) => {
-            *consecutive_failures = 0;
+            // A1: a successful summarize_middle that DOESN'T relieve pressure
+            // (compacted still over the hard ceiling → the next model call
+            // 400s on overflow) is the "succeeded but ineffective" loop seen
+            // in session a54cd557 — 9 Ok rounds, blocks ballooned to 1437,
+            // breaker never tripped because the old code reset the counter to
+            // 0 on every Ok. Count it so the breaker can fire on the next
+            // round and hand off to the hard_truncate_middle fallback above.
+            let ineffective = estimate_tokens(&compacted) > max_tokens;
+            if ineffective {
+                *consecutive_failures += 1;
+            } else {
+                *consecutive_failures = 0;
+            }
             // Snapshot the middle slice that was blended into the summary.
             // `history` still holds the original (replacement is the line
             // below), and summarize_middle_end recomputes the exact boundary
@@ -511,6 +523,29 @@ pub async fn maybe_compact(
                 }
             }
             *history = compacted;
+            // A1: surface an Ok-but-ineffective breaker trip the same way the
+            // Err branch does — one-shot card so the user sees the run is
+            // stuck instead of silently looping until an external failure
+            // (which is what burnt a54cd557 to Failed). The summary text
+            // distinguishes this from the summarizer-error trip for diagnosis.
+            // Note: this round does NOT hard-truncate even though `compacted`
+            // still exceeds max_tokens — relief comes on the NEXT round via
+            // the `consecutive_failures >= MAX` short-circuit +
+            // hard_truncate_middle fallback above. By design; don't relocate
+            // hard-truncate into this branch.
+            if ineffective && *consecutive_failures == MAX_CONSECUTIVE_COMPACT_FAILURES {
+                if let Some(buf) = archive_buffer.as_ref() {
+                    if let Ok(mut g) = buf.lock() {
+                        g.push(ArchivedChunk {
+                            kind: ArchivedKind::BreakerTripped,
+                            dropped_messages: Vec::new(),
+                            summary: Some(format!(
+                                "上下文压缩连续 {MAX_CONSECUTIVE_COMPACT_FAILURES} 次未释放压力（压缩成功但仍超上限），已暂停自动压缩"
+                            )),
+                        });
+                    }
+                }
+            }
             Ok(true)
         }
         Ok(None) => Ok(false),
@@ -1068,14 +1103,47 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_compact_breaker_resets_on_success() {
-        // A success between failures resets the counter, so an intermittent
-        // error doesn't accumulate toward the cap.
+        // An EFFECTIVE success between failures resets the counter, so an
+        // intermittent error doesn't accumulate toward the cap. A1 narrowed
+        // "success" to mean "summarize relieved pressure (compacted under the
+        // ceiling)" — so the history + max_tokens here must leave the compacted
+        // result under max_tokens, otherwise the round counts as ineffective.
         let model = SummaryChatModel::new("摘要");
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..60 {
+            hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
+        }
+        let mut fails = 2u32; // below the cap (3) — prior failures, not yet suspended
+        let did = maybe_compact(
+            &mut hist,
+            &model,
+            &ModelOptions::default(),
+            5000,
+            4,
+            &mut fails,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(did);
+        assert_eq!(fails, 0, "effective success resets the failure counter");
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_ok_but_ineffective_counts_toward_breaker() {
+        // A1 regression guard: session a54cd557 — summarize_middle returned
+        // Ok(Some) 9×, but each compacted history was STILL over the hard
+        // ceiling (model=None → window mismatch → summary couldn't keep up),
+        // so blocks ballooned to 1437 and the breaker NEVER tripped (old code
+        // reset the counter to 0 on every Ok). An Ok round whose compacted
+        // history still exceeds max_tokens must count toward the breaker, not
+        // reset. Long reply keeps system + summary + tail over the tiny ceiling.
+        let model = SummaryChatModel::new(&"x".repeat(400));
         let mut hist = vec![msg(Role::System, "sys")];
         for i in 0..20 {
             hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
         }
-        let mut fails = 2u32; // below the cap (3) — prior failures, not yet suspended
+        let mut fails = 0u32;
         let did = maybe_compact(
             &mut hist,
             &model,
@@ -1087,8 +1155,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(did);
-        assert_eq!(fails, 0, "success resets the failure counter");
+        assert!(did, "compaction ran (history replaced with compacted)");
+        assert_eq!(
+            fails, 1,
+            "Ok-but-ineffective round (compacted still over ceiling) must count, not reset to 0"
+        );
     }
 
     #[tokio::test]

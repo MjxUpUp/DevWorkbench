@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{AgentType, McpConfigFile};
+use crate::models::McpConfigFile;
 use std::path::Path;
 
 /// Translate MCP config to Claude Code format (.claude/mcp.json).

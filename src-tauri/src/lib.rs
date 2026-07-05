@@ -301,6 +301,7 @@ pub fn run() {
         .manage(commands::workflows::ApprovalState::default())
         .manage(commands::agents::AgentApprovalState::default())
         .manage(agents::kernel_tasks::KernelTasks::new())
+        .manage(agents::kernel_tasks::KernelLiveBlocks::new())
         .invoke_handler(tauri::generate_handler![
             commands::tools::detect_tools,
             commands::terminal::open_terminal,

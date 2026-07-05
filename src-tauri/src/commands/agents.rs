@@ -1,5 +1,5 @@
 use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
-use crate::agents::kernel_tasks::KernelTasks;
+use crate::agents::kernel_tasks::{KernelLiveBlocks, KernelTasks};
 use crate::agents::pty;
 use crate::agents::react_chat;
 use crate::agents::session;
@@ -380,6 +380,15 @@ fn react_chat_driver(
     let approval_map = app
         .try_state::<AgentApprovalState>()
         .map(|s| std::sync::Arc::clone(&s.0));
+    // gap4: shared live transcript so `stop_agent_session` can persist the
+    // streamed-so-far turn when the user interrupts. The driver's own
+    // `final_blocks` lives on this task's stack and is dropped on abort; this
+    // mirror lives in managed state (inserted after spawn) so the stop command
+    // — a separate Tauri command — can drain it post-abort. `live_blocks_drv`
+    // is the clone moved into the spawn; `live_blocks` stays here for insert.
+    let live_blocks: std::sync::Arc<std::sync::Mutex<Vec<pty::ChatStreamEvent>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let live_blocks_drv = std::sync::Arc::clone(&live_blocks);
 
     let handle = tokio::spawn(async move {
         log::info!("[react_chat] task ENTERED sid={sid_drv}");
@@ -508,6 +517,12 @@ fn react_chat_driver(
                     serde_json::json!({ "sessionId": &sid_drv, "event": wire }),
                 );
             }
+            // gap4: mirror into the shared live buffer (clone) before
+            // final_blocks moves wires — stop_agent_session drains this on
+            // interrupt so the streamed-so-far transcript survives the abort.
+            if let Ok(mut g) = live_blocks_drv.lock() {
+                g.extend(wires.iter().cloned());
+            }
             final_blocks.extend(wires);
         }
 
@@ -533,6 +548,12 @@ fn react_chat_driver(
         );
         if let Some(kt) = app_drv.try_state::<KernelTasks>() {
             kt.remove(&sid_drv);
+        }
+        // gap4: normal completion — drop the live mirror. The driver persists
+        // its own `final_blocks` via finalize_session below; live_blocks is
+        // only the interrupt-path copy and must not linger past the run.
+        if let Some(lb) = app_drv.try_state::<KernelLiveBlocks>() {
+            lb.remove(&sid_drv);
         }
         let summary = if final_output.is_empty() {
             None
@@ -582,6 +603,12 @@ fn react_chat_driver(
     });
 
     kernel_tasks.insert(&session_id, handle);
+    // gap4: register the live transcript mirror so stop_agent_session can
+    // drain it. The spawn owns its clone (live_blocks_drv); this Arc is the
+    // registration handle (dropped right after insert).
+    if let Some(lb) = app.try_state::<KernelLiveBlocks>() {
+        lb.insert(&session_id, std::sync::Arc::clone(&live_blocks));
+    }
     Ok(session)
 }
 
@@ -720,20 +747,40 @@ pub fn stop_agent_session(
         // Best-effort PID kill; process may already be dead (stale session)
         let _ = pty::stop_agent(&state.0, &session_id);
     }
-    // Aborting a kernel task drops its future — the driver's own finalize does
-    // NOT run. So we always write the failed status + emit agent:completed
-    // here (same as the pty path), regardless of agent kind.
+    // gap4: persist the streamed-so-far transcript so a mid-run stop doesn't
+    // lose the whole turn. The driver's `final_blocks` was dropped with the
+    // aborted future; drain the live mirror (only kernel sessions register
+    // one), append a synthetic tool_result for any trailing tool_use whose
+    // result the interrupt pre-empted, and shape it the same way
+    // finalize_session would (merge consecutive runs + cap oversized inputs).
+    // Non-kernel (pty) sessions have no live mirror — None leaves blocks as-is.
+    let persisted_blocks: Option<Vec<pty::ChatStreamEvent>> = if was_kernel {
+        app.try_state::<KernelLiveBlocks>()
+            .and_then(|lb| lb.take(&session_id))
+            .and_then(|buf| buf.lock().ok().map(|mut g| std::mem::take(&mut *g)))
+            .map(synthesize_interrupt_tool_results)
+            .map(|events| {
+                pty::cap_blocks_for_persist(pty::merge_consecutive_runs(events), 8000)
+            })
+    } else {
+        None
+    };
 
     // Always update session status so UI reflects the stop immediately.
     // "cancelled" (not "failed") — the user deliberately stopped it, so the UI
     // renders "已取消" rather than "失败". AgentRunStatus::Cancelled exists for
     // this distinction but was never wired until now.
-    let patch = serde_json::json!({
+    let mut patch = serde_json::json!({
         "status": "cancelled",
         "finishedAt": chrono::Utc::now().to_rfc3339(),
         "exitCode": 0,
         "outputSummary": "Session cancelled by user"
     });
+    if let Some(blocks) = persisted_blocks {
+        if let Ok(val) = serde_json::to_value(blocks) {
+            patch["blocks"] = val;
+        }
+    }
     let won_race = {
         let conn = db.get()?;
         crate::agents::session::update_session_db(&conn, &session_id, patch)? > 0
@@ -756,6 +803,31 @@ pub fn stop_agent_session(
     }
 
     Ok(())
+}
+
+/// Append a synthetic error `tool_result` for every trailing `tool_use` that
+/// has no matching result — the interrupt pre-empted the tool mid-flight. The
+/// persisted transcript must stay internally consistent for BlocksView replay
+/// (a tool_use card with no result card looks stuck). Pairing is positional:
+/// a trailing run of `tool_use` blocks with no `tool_result` after them is the
+/// only orphan case; any other block ends the unmatched tail.
+fn synthesize_interrupt_tool_results(
+    mut events: Vec<pty::ChatStreamEvent>,
+) -> Vec<pty::ChatStreamEvent> {
+    let mut pending = 0usize;
+    for ev in events.iter().rev() {
+        match ev {
+            pty::ChatStreamEvent::ToolUse { .. } => pending += 1,
+            _ => break,
+        }
+    }
+    for _ in 0..pending {
+        events.push(pty::ChatStreamEvent::ToolResult {
+            content: "[已中断：用户停止了本次会话]".into(),
+            is_error: true,
+        });
+    }
+    events
 }
 
 #[tauri::command]
@@ -883,6 +955,83 @@ pub fn get_quality_report_for_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthesize_interrupt_appends_one_result_per_trailing_tool_use() {
+        // Two trailing tool_uses with no results → two synthetic error results.
+        let events = vec![
+            pty::ChatStreamEvent::Text { content: "thinking…".into() },
+            pty::ChatStreamEvent::ToolUse {
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            pty::ChatStreamEvent::ToolUse {
+                name: "read_file".into(),
+                input: serde_json::json!({"file_path": "a.rs"}),
+            },
+        ];
+        let out = synthesize_interrupt_tool_results(events);
+        assert_eq!(out.len(), 5, "3 originals + 2 synthetic results");
+        for ev in &out[3..] {
+            match ev {
+                pty::ChatStreamEvent::ToolResult { content, is_error } => {
+                    assert!(is_error, "synthetic result must be error");
+                    assert_eq!(content, "[已中断：用户停止了本次会话]");
+                }
+                _ => panic!("expected ToolResult, got {ev:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn synthesize_interrupt_noop_when_trailing_tool_use_already_matched() {
+        // tool_use immediately followed by tool_result → no orphan, no append.
+        let events = vec![
+            pty::ChatStreamEvent::ToolUse {
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            pty::ChatStreamEvent::ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            },
+        ];
+        let out = synthesize_interrupt_tool_results(events);
+        assert_eq!(out.len(), 2, "no synthetic result should be appended");
+    }
+
+    #[test]
+    fn synthesize_interrupt_only_orphans_tail() {
+        // A mid-list tool_use with its own result is fine; only the trailing
+        // unmatched one gets a synthetic result.
+        let events = vec![
+            pty::ChatStreamEvent::ToolUse {
+                name: "a".into(),
+                input: serde_json::json!({}),
+            },
+            pty::ChatStreamEvent::ToolResult {
+                content: "r1".into(),
+                is_error: false,
+            },
+            pty::ChatStreamEvent::ToolUse {
+                name: "b".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+        let out = synthesize_interrupt_tool_results(events);
+        assert_eq!(out.len(), 4);
+        assert!(matches!(
+            out.last(),
+            Some(pty::ChatStreamEvent::ToolResult { is_error: true, .. })
+        ));
+    }
+
+    #[test]
+    fn synthesize_interrupt_empty_and_text_only_noop() {
+        assert!(synthesize_interrupt_tool_results(vec![]).is_empty());
+        let events = vec![pty::ChatStreamEvent::Text { content: "hi".into() }];
+        assert_eq!(synthesize_interrupt_tool_results(events).len(), 1);
+    }
 
     /// The resume token embeds the session id as `approve__{sid}__{seq}` — the
     /// human-gate ledger write recovers the session from it. Pin the shape so

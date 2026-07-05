@@ -52,9 +52,11 @@ function toForm(h: UserHook): FormState {
 }
 
 const EVENT_LABEL: Record<UserHookEvent, string> = {
+  session_start: '会话开始',
   user_prompt_submit: '提交时',
   pre_tool_use: '工具调用前',
   post_tool_use: '工具调用后',
+  pre_compact: '压缩前',
   stop: '停止时',
 };
 
@@ -216,9 +218,11 @@ export function HooksSection() {
                   setForm({ ...form, event, matcher: isToolEvent(event) ? form.matcher : null });
                 }}
               >
+                <option value="session_start">会话开始（stdout 注入首轮上下文）</option>
                 <option value="user_prompt_submit">提交时（stdout 注入上下文）</option>
                 <option value="pre_tool_use">工具调用前（exit 2 阻断该工具）</option>
                 <option value="post_tool_use">工具调用后（观察，exit 2 仅记录）</option>
+                <option value="pre_compact">压缩前（exit 2 跳过本次压缩）</option>
                 <option value="stop">停止时（副作用）</option>
               </select>
             </label>
