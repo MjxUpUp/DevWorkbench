@@ -236,7 +236,14 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     effectiveness REAL NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge_entries(project_hash);
-CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_entries(status);
+-- NOTE: idx_knowledge_status is intentionally NOT in SCHEMA. `status` is added
+-- to legacy DBs by migrate_v23_to_v24 (it's a v24 column). SCHEMA's
+-- `CREATE TABLE IF NOT EXISTS knowledge_entries` is a no-op on an upgraded DB
+-- (table already exists, missing the column), so a `CREATE INDEX ... (status)`
+-- here would hit 'no such column: status' and abort init_db BEFORE the migrate
+-- chain runs — exactly the v1.0.6 upgrade failure (DevWorkbench.log). The index
+-- is created in migrate_v23_to_v24 right after the ALTER ADD COLUMN, covering
+-- both fresh installs (migrate still runs on a fresh DB) and upgrades.
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     title, content,
     tokenize='unicode61'

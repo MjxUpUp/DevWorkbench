@@ -1686,6 +1686,119 @@ mod tests {
         assert_eq!(rows[0].span_name.as_deref(), Some("subagent"));
     }
 
+    /// v1.0.6 regression guard. A v1.0.5 DB has knowledge_entries WITHOUT the
+    /// v24 `status`/`effectiveness` columns (schema_version pinned to 23). The
+    /// upgrade path runs init_db (full SCHEMA) THEN the migrate chain. SCHEMA's
+    /// `CREATE TABLE IF NOT EXISTS knowledge_entries` is a no-op on the legacy
+    /// table, so a `CREATE INDEX ... (status)` in SCHEMA would abort init_db
+    /// with "no such column: status" before migrate_v23_to_v24 can add the
+    /// column — exactly the v1.0.6 install failure. This pins that init_db
+    /// survives a legacy DB and migrate_v23_to_v24 then repairs it.
+    #[test]
+    fn init_db_then_migrate_v23_to_v24_repairs_legacy_db_without_status() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("legacy24.db");
+        {
+            // Build a v1.0.5-shape DB: knowledge_entries WITHOUT status/effectiveness,
+            // schema_version = 23 (pre-memory-system).
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);
+                 INSERT INTO schema_version (version, applied_at) VALUES (23, '2026-07-01T00:00:00Z');
+                 CREATE TABLE knowledge_entries (
+                     id TEXT PRIMARY KEY,
+                     project_hash TEXT NOT NULL,
+                     category TEXT NOT NULL,
+                     title TEXT NOT NULL,
+                     content TEXT NOT NULL,
+                     source_agent TEXT NOT NULL,
+                     source_session_id TEXT,
+                     source_type TEXT NOT NULL,
+                     confidence REAL NOT NULL DEFAULT 0.5,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL,
+                     access_count INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX idx_knowledge_project ON knowledge_entries(project_hash);",
+            )
+            .unwrap();
+            assert!(
+                conn.prepare("SELECT status FROM knowledge_entries LIMIT 0")
+                    .is_err(),
+                "legacy DB must lack the status column"
+            );
+        }
+
+        // Upgrade path: app opens the existing DB → init_db runs full SCHEMA.
+        // Must NOT abort on the legacy table (this is the v1.0.6 regression).
+        let conn = db::init_db(&path)
+            .expect("init_db must not abort on a legacy DB missing the status column");
+        migrate_v23_to_v24(&conn)
+            .expect("migrate_v23_to_v24 must add status/effectiveness + index");
+
+        // Columns now present.
+        assert!(
+            conn.prepare("SELECT status FROM knowledge_entries LIMIT 0")
+                .is_ok(),
+            "status column must exist after migrate"
+        );
+        assert!(
+            conn.prepare("SELECT effectiveness FROM knowledge_entries LIMIT 0")
+                .is_ok(),
+            "effectiveness column must exist after migrate"
+        );
+        // Index created by the migration (not by SCHEMA).
+        let idx_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_knowledge_status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_exists, 1, "idx_knowledge_status must be created by migrate");
+        // Version bumped.
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 24);
+        // Idempotent re-run.
+        migrate_v23_to_v24(&conn).expect("migrate_v23_to_v24 must be idempotent");
+    }
+
+    /// Fresh-install guard: a brand-new DB has an empty schema_version, so
+    /// MAX(version)=0 < 24 and migrate_v23_to_v24 still runs. SCHEMA already
+    /// created knowledge_entries WITH the status column, so the migration skips
+    /// the ALTER but MUST still create idx_knowledge_status (the index was
+    /// removed from SCHEMA to fix the upgrade abort). This pins that a fresh
+    /// install does not lose the index.
+    #[test]
+    fn migrate_v23_to_v24_on_fresh_db_creates_status_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh24.db");
+        let conn = db::init_db(&path).unwrap();
+        migrate_v23_to_v24(&conn).expect("fresh DB v24 migration must succeed");
+        let idx_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_knowledge_status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_exists, 1, "fresh install must still get idx_knowledge_status via migrate");
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 24);
+    }
+
     /// v14→v15 creates the trace_settings table + idx_llm_traces_created. On a
     /// fresh DB both already exist (static SCHEMA) — the migration's CREATE is a
     /// no-op but it must still record version 15 and leave a usable default row.
