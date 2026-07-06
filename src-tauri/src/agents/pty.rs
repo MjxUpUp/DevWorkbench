@@ -1003,6 +1003,16 @@ pub fn spawn_pty_agent(
         inject_knowledge_with_timeout(&db_conn, &agent_type, project_path, &injected_prompt);
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
+    // D3: resolve @memory:<title> explicit references against the project's
+    // active knowledge entries (after @file injection, before spawn). Best-effort:
+    // a DB error leaves the prompt untouched.
+    let injected_prompt = match db_conn.get() {
+        Ok(conn) => {
+            let hash = crate::activity::hash_project_path(project_path);
+            crate::knowledge::memory_ref::resolve_memory_refs(&injected_prompt, &conn, &hash)
+        }
+        Err(_) => injected_prompt,
+    };
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:

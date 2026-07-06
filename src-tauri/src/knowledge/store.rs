@@ -44,11 +44,28 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
         return Ok(());
     }
 
+    // D5 gate dedup: a re-learned lesson with the SAME title in this project
+    // supersedes the prior active entry — the old row is marked status=
+    // 'superseded' (kept for history; retrieve_relevant's status='active'
+    // filter excludes it from injection) and the new row inserts as the
+    // active one. Without this, re-running a task piles up N near-identical
+    // react_session/react_reflection rows that all match the same FTS query.
+    // Case-insensitive title match; blank titles skip (build_*_entry never
+    // emits blank, so this guards only against malformed callers).
+    if !entry.title.trim().is_empty() {
+        tx.execute(
+            "UPDATE knowledge_entries SET status = 'superseded' \
+             WHERE project_hash = ?1 AND lower(title) = lower(?2) AND status = 'active'",
+            params![entry.project_hash, entry.title],
+        )?;
+    }
+
     tx.execute(
         "INSERT INTO knowledge_entries
             (id, project_hash, category, title, content, source_agent,
-             source_session_id, source_type, confidence, created_at, updated_at, access_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             source_session_id, source_type, confidence, created_at, updated_at,
+             access_count, status, effectiveness)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             entry.id,
             entry.project_hash,
@@ -62,6 +79,8 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
             entry.created_at,
             entry.updated_at,
             entry.access_count,
+            entry.status,
+            entry.effectiveness,
         ],
     )?;
     // Keep FTS index in sync (same transaction — rolls back with the row above).
@@ -110,6 +129,8 @@ pub fn build_session_memory_entry(
         created_at: chrono::Local::now().to_rfc3339(),
         updated_at: chrono::Local::now().to_rfc3339(),
         access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
     }
 }
 
@@ -139,6 +160,8 @@ pub fn build_session_reflection_entry(
         created_at: chrono::Local::now().to_rfc3339(),
         updated_at: chrono::Local::now().to_rfc3339(),
         access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
     }
 }
 
@@ -190,12 +213,16 @@ pub fn search_entries(
     query: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeEntry>, AppError> {
+    // bm25 relevance ranking: JOIN the FTS table so bm25(knowledge_fts) is in
+    // scope (it isn't with the old `rowid IN (subquery)` form — that's why the
+    // doc claimed bm25 but the SQL sorted by updated_at, a doc/impl mismatch).
+    // bm25 returns negative values by convention; ASC puts the most relevant
+    // (most negative) first, updated_at as a tiebreaker.
     let mut stmt = conn.prepare(
-        "SELECT ke.* FROM knowledge_entries ke
-         WHERE ke.rowid IN (
-            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
-         )
-         ORDER BY ke.updated_at DESC
+        "SELECT ke.* FROM knowledge_fts
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
+         WHERE knowledge_fts MATCH ?1
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
          LIMIT ?2",
     )?;
 
@@ -208,7 +235,9 @@ pub fn search_entries(
     Ok(result)
 }
 
-/// FTS5 search scoped to a single project, filtered by confidence, ranked by bm25 relevance.
+/// FTS5 search scoped to a single project, filtered by confidence, ranked by
+/// bm25 relevance. Only `status = 'active'` entries are returned (I4: pending /
+/// superseded lessons are not injected).
 pub fn search_entries_for_project(
     conn: &rusqlite::Connection,
     project_hash: &str,
@@ -216,15 +245,17 @@ pub fn search_entries_for_project(
     confidence_min: f64,
     limit: usize,
 ) -> Result<Vec<KnowledgeEntry>, AppError> {
-    // Use subquery to avoid JOIN column ambiguity with FTS virtual table
+    // JOIN the FTS table so bm25(knowledge_fts) is in scope for relevance
+    // ranking (the old `rowid IN (subquery)` form could only sort by updated_at,
+    // not bm25 — the doc/impl mismatch this fixes).
     let mut stmt = conn.prepare(
-        "SELECT * FROM knowledge_entries
-         WHERE rowid IN (
-            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
-         )
-         AND project_hash = ?2
-         AND confidence >= ?3
-         ORDER BY updated_at DESC
+        "SELECT ke.* FROM knowledge_fts
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
+         WHERE knowledge_fts MATCH ?1
+         AND ke.project_hash = ?2
+         AND ke.confidence >= ?3
+         AND ke.status = 'active'
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
          LIMIT ?4",
     )?;
 
@@ -245,7 +276,8 @@ pub fn search_entries_for_project(
     Ok(result)
 }
 
-/// FTS5 search across all projects except the given one. Used for cross-project knowledge sharing.
+/// FTS5 search across all projects except the given one. Used for cross-project
+/// knowledge sharing. Only `status = 'active'` entries (I4), ranked by bm25.
 pub fn search_entries_cross_project(
     conn: &rusqlite::Connection,
     exclude_project_hash: &str,
@@ -254,13 +286,13 @@ pub fn search_entries_cross_project(
     limit: usize,
 ) -> Result<Vec<KnowledgeEntry>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM knowledge_entries
-         WHERE rowid IN (
-            SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?1
-         )
-         AND project_hash != ?2
-         AND confidence >= ?3
-         ORDER BY updated_at DESC
+        "SELECT ke.* FROM knowledge_fts
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
+         WHERE knowledge_fts MATCH ?1
+         AND ke.project_hash != ?2
+         AND ke.confidence >= ?3
+         AND ke.status = 'active'
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
          LIMIT ?4",
     )?;
 
@@ -280,6 +312,181 @@ pub fn search_entries_cross_project(
         result.push(e?);
     }
     Ok(result)
+}
+
+/// Increment `access_count` for the given entry IDs (I5: track which memories
+/// were actually injected so the effectiveness feedback loop can weight by
+/// reuse, and so access_count is no longer a write-never field). Best-effort:
+/// a DB error is propagated but callers gate injection on retrieval, not on
+/// this counter — a failed bump must not block memory injection.
+pub fn bump_access_counts(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+) -> Result<usize, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "UPDATE knowledge_entries SET access_count = access_count + 1 WHERE id IN ({})",
+        placeholders
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    conn.execute(&sql, params.as_slice()).map_err(AppError::from)
+}
+
+/// Increment `effectiveness` for the given entry IDs (I5 feedback loop). Unlike
+/// [`bump_access_counts`] (bumped on every injection), `effectiveness` reflects
+/// OUTCOME feedback. Best-effort — callers gate on retrieval, not this counter.
+pub fn bump_effectiveness(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+) -> Result<usize, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE knowledge_entries SET effectiveness = effectiveness + 1 WHERE id IN ({})",
+        placeholders
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    conn.execute(&sql, params.as_slice()).map_err(AppError::from)
+}
+
+/// Bump `effectiveness` for every entry a session PRODUCED (I5 self-feedback).
+/// A Completed session's `react_session`/`react_reflection` output is the most
+/// reliable signal a lesson is worth re-injecting, so the completion hook marks
+/// it effective +1 — and the next session's retrieval ranks it higher. This
+/// closes the loop from `source_session_id` alone, WITHOUT tracking which
+/// memories were injected into the run (that would need a per-injection ledger
+/// threaded across the kernel sys_prompt build AND the pty inject thread — high
+/// blast radius for marginal signal). Only `status='active'` rows are bumped;
+/// superseded history keeps its old score.
+pub fn bump_effectiveness_by_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<usize, AppError> {
+    conn.execute(
+        "UPDATE knowledge_entries SET effectiveness = effectiveness + 1 \
+         WHERE source_session_id = ?1 AND status = 'active'",
+        params![session_id],
+    )
+    .map_err(AppError::from)
+}
+
+// ---------------------------------------------------------------------------
+// I1: vector embeddings (FTS-confidence fallback storage)
+// ---------------------------------------------------------------------------
+
+/// Encode an embedding vector as little-endian f32 bytes for BLOB storage.
+/// `Vec<f32>` ↔ `&[u8]` round-trips losslessly; dim is stored separately so a
+/// read can validate length before casting.
+pub(crate) fn encode_embedding(vec: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vec.len() * 4);
+    for v in vec {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
+/// Decode a stored BLOB back into `Vec<f32>`. A length that isn't a multiple of
+/// 4 (corrupt/truncated row) yields a SHORTER vec via `chunks_exact` rather than
+/// panicking — a bad row is silently dropped at retrieval, never a hard crash.
+pub(crate) fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Upsert an embedding for a knowledge entry (I1). The completion hook embeds
+/// each newly-written entry's text and stores it, so the NEXT session's
+/// `retrieve_relevant_with_vector` can cosine-rank it when FTS confidence is
+/// low. `model` is the embedding model id (cache invalidation on a model swap);
+/// `dim` is derived from the vector length.
+pub fn upsert_embedding(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    embedding: &[f32],
+    model: &str,
+) -> Result<(), AppError> {
+    let bytes = encode_embedding(embedding);
+    let dim = embedding.len() as i64;
+    conn.execute(
+        "INSERT INTO knowledge_embeddings (entry_id, embedding, dim, model, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(entry_id) DO UPDATE SET \
+            embedding = excluded.embedding, \
+            dim = excluded.dim, \
+            model = excluded.model, \
+            created_at = excluded.created_at",
+        params![entry_id, bytes, dim, model, chrono::Local::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Return `(id, title, content)` for every ACTIVE entry a session PRODUCED —
+/// the I1 write-side input. The completion hook embeds `title + "\n" + content`
+/// for each row (same text shape a future retrieval query is embedded against,
+/// so doc/query live in one semantic space) and stores it via
+/// [`upsert_embedding`]. Best-effort: a DB error propagates and the caller
+/// skips the embed round (never blocks the completion path).
+pub fn entries_by_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<(String, String, String)>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content FROM knowledge_entries \
+         WHERE source_session_id = ?1 AND status = 'active'",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Load every ACTIVE entry's embedding for a project, filtered to the given
+/// embedding model id. A model swap ignores stale rows (different `model`)
+/// rather than cosine-ranking incomparable vectors — the next completion
+/// re-embeds under the new id. Returns `(entry_id, vector)`; the caller joins
+/// back to `knowledge_entries` for content + category gates. status='active' is
+/// filtered HERE so a pending/superseded row is never cosine-ranked.
+pub fn get_active_embeddings(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+    model: &str,
+) -> Result<Vec<(String, Vec<f32>)>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT ke.entry_id, ke.embedding \
+         FROM knowledge_embeddings ke \
+         JOIN knowledge_entries kn ON kn.id = ke.entry_id \
+         WHERE kn.project_hash = ?1 AND kn.status = 'active' AND ke.model = ?2",
+    )?;
+    let rows = stmt.query_map(params![project_hash, model], |row| {
+        let id: String = row.get(0)?;
+        let blob: Vec<u8> = row.get(1)?;
+        Ok((id, decode_embedding(&blob)))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 /// Delete knowledge entries older than `max_age_days`. Also cleans up FTS rows.
@@ -343,6 +550,29 @@ pub fn prune_old_entries(
     );
     tx.commit()?;
     Ok(count)
+}
+
+/// Look up a single active knowledge entry by exact (case-insensitive) title
+/// within a project. Used by the `@memory:<title>` explicit-reference feature
+/// (D3) — the user names a SPECIFIC memory to inject, as opposed to the
+/// implicit FTS retrieval in [`super::retrieval::retrieve_relevant`]. Only
+/// `status='active'` matches (pending/superseded are not referenceable). When
+/// several entries share a title, the most recently updated wins.
+pub fn get_entry_by_title_for_project(
+    conn: &rusqlite::Connection,
+    project_hash: &str,
+    title: &str,
+) -> Result<Option<KnowledgeEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM knowledge_entries
+         WHERE project_hash = ?1 AND lower(title) = lower(?2) AND status = 'active'
+         ORDER BY updated_at DESC LIMIT 1",
+    )?;
+    let mut entries = stmt.query_map(params![project_hash, title], row_to_entry)?;
+    match entries.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
 }
 
 /// Get all knowledge entries for a project.
@@ -455,6 +685,10 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Err
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
         access_count: row.get(11)?,
+        // unwrap_or 防御：显式 SELECT 列表(如 knowledge_prompt_suffix 只取 title,content
+        // 不走本函数)或未来回归少列时，回退到 schema 默认值而非整查询失败。
+        status: row.get(12).unwrap_or_else(|_| "active".to_string()),
+        effectiveness: row.get(13).unwrap_or(0.0),
     })
 }
 
@@ -512,6 +746,8 @@ mod tests {
             created_at: chrono::Local::now().to_rfc3339(),
             updated_at: chrono::Local::now().to_rfc3339(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         }
     }
 
@@ -881,5 +1117,197 @@ mod tests {
         let updated = entries.iter().find(|x| x.id == "k1").expect("entry survived edit");
         assert_eq!(updated.title, "corrected title");
         assert_eq!(updated.content, "corrected content about python");
+    }
+
+    #[test]
+    fn add_entry_supersedes_same_title_active() {
+        // D5: a re-learned lesson with the same title (case-insensitive) in the
+        // same project supersedes the prior active row — old → status=
+        // 'superseded' (kept for history, not injected), new → 'active'. Without
+        // this, re-running a task piles up N near-identical react_session rows.
+        let db = TempDb::new();
+        add_entry(
+            &db.conn,
+            &make_entry("k1", "proj", "Error handling", "use thiserror v1"),
+        )
+        .unwrap();
+        add_entry(
+            &db.conn,
+            &make_entry("k2", "proj", "error handling", "use thiserror v2 updated"),
+        )
+        .unwrap();
+
+        let all = get_entries_for_project(&db.conn, "proj").unwrap();
+        assert_eq!(all.len(), 2, "both rows kept (history)");
+        let active: Vec<_> = all.iter().filter(|e| e.status == "active").collect();
+        assert_eq!(active.len(), 1, "exactly one active");
+        assert_eq!(active[0].id, "k2", "newest stays active");
+        let old = all.iter().find(|e| e.id == "k1").unwrap();
+        assert_eq!(old.status, "superseded");
+    }
+
+    #[test]
+    fn add_entry_supersede_only_touches_active_same_title() {
+        // Only an ACTIVE same-title row is superseded; a different title is
+        // untouched, and an already-superseded row isn't re-touched.
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("k1", "proj", "Title A", "a1")).unwrap();
+        add_entry(&db.conn, &make_entry("k2", "proj", "Title A", "a2")).unwrap();
+        add_entry(&db.conn, &make_entry("k3", "proj", "Title B", "b1")).unwrap();
+        add_entry(&db.conn, &make_entry("k4", "proj", "Title A", "a3")).unwrap();
+
+        let all = get_entries_for_project(&db.conn, "proj").unwrap();
+        let active: Vec<_> = all.iter().filter(|e| e.status == "active").collect();
+        assert_eq!(active.len(), 2, "Title A newest + Title B");
+        assert!(active.iter().any(|e| e.id == "k4"), "k4 active: {:?}", active);
+        assert!(active.iter().any(|e| e.id == "k3"), "k3 active: {:?}", active);
+        // k1 + k2 both superseded (k2 was active when k4 landed).
+        assert_eq!(
+            all.iter().filter(|e| e.status == "superseded").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn bump_effectiveness_increments_named_entries() {
+        // I5: bump_effectiveness +1 the listed IDs only; unrelated entries stay.
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("e1", "proj", "Title 1", "c1")).unwrap();
+        add_entry(&db.conn, &make_entry("e2", "proj", "Title 2", "c2")).unwrap();
+        add_entry(&db.conn, &make_entry("e3", "proj", "Title 3", "c3")).unwrap();
+
+        let n = bump_effectiveness(&db.conn, &["e1".to_string(), "e3".to_string()]).unwrap();
+        assert_eq!(n, 2);
+
+        let all = get_entries_for_project(&db.conn, "proj").unwrap();
+        let by_id = |id: &str| {
+            all.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("missing {id}"))
+        };
+        assert_eq!(by_id("e1").effectiveness as i64, 1);
+        assert_eq!(by_id("e2").effectiveness as i64, 0, "e2 must stay untouched");
+        assert_eq!(by_id("e3").effectiveness as i64, 1);
+    }
+
+    #[test]
+    fn bump_effectiveness_empty_ids_is_noop() {
+        let db = TempDb::new();
+        add_entry(&db.conn, &make_entry("x1", "proj", "Title", "c")).unwrap();
+        let n = bump_effectiveness(&db.conn, &[]).unwrap();
+        assert_eq!(n, 0);
+        let all = get_entries_for_project(&db.conn, "proj").unwrap();
+        assert_eq!(all[0].effectiveness as i64, 0);
+    }
+
+    #[test]
+    fn bump_effectiveness_by_session_touches_only_active_owned() {
+        // I5: a Completed session bumps effectiveness on every ACTIVE entry it
+        // PRODUCED (source_session_id match). A superseded row from the same
+        // session keeps its old score; an entry from a different session is
+        // untouched.
+        let db = TempDb::new();
+        let mut a = make_entry("a1", "proj", "Active lesson", "active body");
+        a.source_session_id = Some("sess-99".into());
+        let mut b = make_entry("a2", "proj", "Superseded lesson", "old body");
+        b.source_session_id = Some("sess-99".into());
+        let mut c = make_entry("a3", "proj", "Other session lesson", "other body");
+        c.source_session_id = Some("sess-other".into());
+        add_entry(&db.conn, &a).unwrap();
+        add_entry(&db.conn, &b).unwrap();
+        add_entry(&db.conn, &c).unwrap();
+        // Force a2 into 'superseded' directly (add_entry inserts as 'active').
+        db.conn
+            .execute("UPDATE knowledge_entries SET status='superseded' WHERE id='a2'", [])
+            .unwrap();
+
+        let n = bump_effectiveness_by_session(&db.conn, "sess-99").unwrap();
+        assert_eq!(n, 1, "only the active sess-99 row (a1)");
+
+        let all = get_entries_for_project(&db.conn, "proj").unwrap();
+        let by_id = |id: &str| {
+            all.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("missing {id}"))
+        };
+        assert_eq!(by_id("a1").effectiveness as i64, 1, "active sess-99 row bumped");
+        assert_eq!(by_id("a2").effectiveness as i64, 0, "superseded row untouched");
+        assert_eq!(by_id("a3").effectiveness as i64, 0, "other-session row untouched");
+    }
+
+    #[test]
+    fn encode_decode_embedding_roundtrip() {
+        let v = vec![0.1_f32, -0.2, 0.3, 1.5, 0.0];
+        let bytes = encode_embedding(&v);
+        assert_eq!(bytes.len(), v.len() * 4);
+        let decoded = decode_embedding(&bytes);
+        assert_eq!(decoded.len(), v.len());
+        for (a, b) in v.iter().zip(&decoded) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn decode_embedding_ignores_trailing_garbage() {
+        // corrupt row (length not a multiple of 4) → chunks_exact drops the tail,
+        // never panics. A bad row is silently shortened at retrieval, not crashed.
+        let v = decode_embedding(&[0u8, 0, 0, 0, 99]);
+        assert_eq!(v, vec![0.0]);
+    }
+
+    #[test]
+    fn upsert_and_get_active_embeddings_filters_status_and_model() {
+        let db = TempDb::new();
+        let mut e1 = make_entry("em1", "proj", "Title 1", "content one");
+        e1.source_session_id = Some("sess".into());
+        let mut e2 = make_entry("em2", "proj", "Title 2", "content two");
+        e2.source_session_id = Some("sess".into());
+        add_entry(&db.conn, &e1).unwrap();
+        add_entry(&db.conn, &e2).unwrap();
+        // Force em2 superseded: get_active_embeddings must drop it.
+        db.conn
+            .execute("UPDATE knowledge_entries SET status='superseded' WHERE id='em2'", [])
+            .unwrap();
+
+        upsert_embedding(&db.conn, "em1", &[1.0, 0.0], "test-embed").unwrap();
+        upsert_embedding(&db.conn, "em2", &[0.0, 1.0], "test-embed").unwrap();
+
+        let got = get_active_embeddings(&db.conn, "proj", "test-embed").unwrap();
+        assert_eq!(got.len(), 1, "only active em1: {got:?}");
+        assert_eq!(got[0].0, "em1");
+        assert_eq!(got[0].1, vec![1.0, 0.0]);
+
+        // Different model id → empty (stale rows ignored on a model swap).
+        let stale = get_active_embeddings(&db.conn, "proj", "other-model").unwrap();
+        assert!(stale.is_empty(), "model swap ignores stale rows");
+    }
+
+    #[test]
+    fn upsert_embedding_overwrites_on_conflict() {
+        let db = TempDb::new();
+        let e = make_entry("ov1", "proj", "Title", "content");
+        add_entry(&db.conn, &e).unwrap();
+        upsert_embedding(&db.conn, "ov1", &[1.0, 0.0], "m1").unwrap();
+        upsert_embedding(&db.conn, "ov1", &[0.0, 1.0], "m2").unwrap();
+        let got = get_active_embeddings(&db.conn, "proj", "m2").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, vec![0.0, 1.0], "second upsert overwrites");
+    }
+
+    #[test]
+    fn entries_by_session_returns_active_only() {
+        let db = TempDb::new();
+        let mut a = make_entry("s1", "proj", "Active", "active body");
+        a.source_session_id = Some("sess-x".into());
+        let mut b = make_entry("s2", "proj", "Old", "old body");
+        b.source_session_id = Some("sess-x".into());
+        add_entry(&db.conn, &a).unwrap();
+        add_entry(&db.conn, &b).unwrap();
+        db.conn
+            .execute("UPDATE knowledge_entries SET status='superseded' WHERE id='s2'", [])
+            .unwrap();
+
+        let rows = entries_by_session(&db.conn, "sess-x").unwrap();
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["s1"], "only active sess-x row: {ids:?}");
+        // tuple shape (id, title, content)
+        assert_eq!(rows[0].1, "Active");
+        assert_eq!(rows[0].2, "active body");
     }
 }

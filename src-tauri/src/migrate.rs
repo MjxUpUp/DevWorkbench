@@ -965,6 +965,74 @@ pub fn migrate_v22_to_v23(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v23→v24: 记忆系统全面优化（D1-D5 + I1-I5）。
+/// - knowledge_entries 加 `status`(I4 门控 active/pending/superseded) +
+///   `effectiveness`(I5 反馈分) 两列。
+/// - 新建 knowledge_embeddings 表（I1 向量检索，FTS 置信度不足时 fallback）。
+/// ADD COLUMN 带 constant DEFAULT 是 SQLite instant 操作（不重写表，对照
+/// migrate_v16_to_v17 cache_* 列先例）。
+pub fn migrate_v23_to_v24(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 24 {
+        return Ok(());
+    }
+
+    let status_exists = conn
+        .prepare("SELECT status FROM knowledge_entries LIMIT 0")
+        .is_ok();
+    if !status_exists {
+        conn.execute(
+            "ALTER TABLE knowledge_entries ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            [],
+        )?;
+    }
+    let eff_exists = conn
+        .prepare("SELECT effectiveness FROM knowledge_entries LIMIT 0")
+        .is_ok();
+    if !eff_exists {
+        conn.execute(
+            "ALTER TABLE knowledge_entries ADD COLUMN effectiveness REAL NOT NULL DEFAULT 0.0",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+            entry_id TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            dim INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (entry_id) REFERENCES knowledge_entries(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model ON knowledge_embeddings(model)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_entries(status)",
+        [],
+    )?;
+
+    if !status_exists || !eff_exists {
+        log::info!("Migrated schema v23→v24: knowledge_entries status/effectiveness + knowledge_embeddings (memory system D/I)");
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (24, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

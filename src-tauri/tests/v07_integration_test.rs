@@ -38,6 +38,8 @@ fn test_knowledge_add_search_delete_flow() {
         created_at: chrono::Local::now().to_rfc3339(),
         updated_at: chrono::Local::now().to_rfc3339(),
         access_count: 0,
+        status: "active".to_string(),
+        effectiveness: 0.0,
     };
 
     // Add
@@ -551,5 +553,7 @@ fn make_knowledge_entry(
         created_at: chrono::Local::now().to_rfc3339(),
         updated_at: chrono::Local::now().to_rfc3339(),
         access_count: 0,
+        status: "active".to_string(),
+        effectiveness: 0.0,
     }
 }

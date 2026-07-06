@@ -4133,6 +4133,7 @@ mod tests {
             },
             &final_blocks,
             &crate::models::AgentType::ClaudeCode,
+            None,
         );
         assert_eq!(
             n, 2,

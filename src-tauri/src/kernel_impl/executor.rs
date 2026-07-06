@@ -88,7 +88,7 @@ fn build_chat_model(
 /// session row: the reviewer CANNOT mutate the project, only judge it. Cost +
 /// trace are attributed to `"gate-verify"` so reviewer LLM spend is visible on
 /// the cost board but doesn't masquerade as a worker agent's run.
-fn build_one_shot_chat(
+pub(crate) fn build_one_shot_chat(
     model: Option<&str>,
     db: &DbState,
     working_dir: &str,
@@ -129,6 +129,102 @@ fn build_one_shot_chat(
         // as an orchestrator/worker agent.
         "gate-verify",
     ))
+}
+
+/// Build a tool-less one-shot embedder for I1 vector memory fallback (FTS
+/// confidence too low → embed query → cosine rank stored document vectors).
+/// Shares `build_one_shot_chat`'s provider resolution (`__default__` alias,
+/// same config load) but returns `None` for non-OpenAI protocols — Anthropic
+/// exposes no embeddings API, so an Anthropic-resolved session degrades to
+/// FTS-only and I1 is silently opt-out for that protocol. No cost/trace sink:
+/// embeddings are cheap bulk calls and not worth a cost-board row.
+pub(crate) fn build_one_shot_embedder(
+    model: Option<&str>,
+) -> Option<std::sync::Arc<dyn kernel_core::EmbedModel>> {
+    use crate::config::providers::{ProtocolKind, load_providers_config, resolve_provider};
+    let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
+    let config = load_providers_config(&data_dir).ok()?;
+    let model_id = model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "__default__".to_string());
+    let resolved = resolve_provider(&config, &model_id)?;
+    // Only OpenAI-compatible endpoints expose POST /embeddings. Anthropic has
+    // no embeddings API → None → caller (memory_prompt_suffix) skips the vector
+    // supplement and stays FTS-only.
+    if resolved.protocol != ProtocolKind::OpenAI {
+        return None;
+    }
+    let model = crate::kernel_impl::openai_chat_model::OpenAIChatModel::new(
+        resolved.endpoint.clone(),
+        resolved.api_key.clone(),
+        resolved.model.clone(),
+    );
+    Some(std::sync::Arc::new(model))
+}
+
+/// I1 向量补全（kernel path 内联）：`memory_prompt_suffix` 在 FTS 召回不足时
+/// 调用。embed query → [`retrieval::vector_search`] cosine top-k → 合并去重 append
+/// 到 candidates。
+///
+/// 同步上下文调 async embed 的根难：ReactAgent 构造是同步 fn，无法 `.await`。解法
+/// 是独立 std::thread + 临时 current-thread runtime block_on——不依赖外层 runtime
+/// flavor（`block_in_place` 在 current-thread runtime 会 panic，而测试或自建 runtime
+/// 可能是 current-thread）。`reqwest::Client` runtime-agnostic，跨 runtime 调用安全。
+/// embed 失败/超时/无 OpenAI provider → 静默 no-op（candidates 不变，FTS-only），
+/// 永不阻塞主检索路径。
+fn supplement_with_vector(
+    conn: &rusqlite::Connection,
+    candidates: &mut Vec<crate::models::KnowledgeEntry>,
+    query: &str,
+    project_hash: &str,
+    is_continuation: bool,
+) {
+    if query.trim().is_empty() {
+        return;
+    }
+    let embedder = match build_one_shot_embedder(None) {
+        Some(e) => e,
+        None => return, // Anthropic provider / no config → FTS-only
+    };
+    let model_id = embedder.embed_model_id().to_string();
+    if model_id.is_empty() {
+        return;
+    }
+    // 独立线程 + 临时 current-thread runtime：避开外层 runtime flavor 判定。
+    // query owned move 进 thread；embedder Arc clone 跨线程共享。
+    let query_owned = query.to_string();
+    let join = std::thread::spawn(move || -> Option<Vec<f32>> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        let q: &str = &query_owned;
+        rt.block_on(embedder.embed(&[q]))
+            .ok()?
+            .into_iter()
+            .next()
+            .filter(|v| !v.is_empty())
+    });
+    let q_emb = match join.join().ok().flatten() {
+        Some(e) => e,
+        None => return, // embed errored / thread panicked → FTS-only
+    };
+    let vec_hits = crate::knowledge::retrieval::vector_search(
+        conn,
+        &q_emb,
+        project_hash,
+        &model_id,
+        &["quality_failure"],
+        is_continuation,
+        crate::knowledge::retrieval::VECTOR_FALLBACK_TRIGGER,
+    );
+    let mut seen: std::collections::HashSet<String> =
+        candidates.iter().map(|e| e.id.clone()).collect();
+    for (_, e) in vec_hits {
+        if seen.insert(e.id.clone()) {
+            candidates.push(e);
+        }
+    }
 }
 
 /// Read-only adversarial review lives in the crate layer
@@ -579,7 +675,17 @@ pub(crate) fn build_react_agent(
             // (see memory_prompt_suffix) so a continuation doesn't pull in OTHER
             // sessions' react_session/reflection output — the 互串 regression.
             let is_continuation = !history.is_empty();
-            sys_prompt.push_str(&memory_prompt_suffix(&conn, &hash, is_continuation));
+            // D1: retrieve memory by the current turn's prompt instead of全表
+            // loading. query = last user message in history (this turn's task);
+            // empty on turn 1 of a fresh session — retrieve_relevant then falls
+            // back to全表 (old kernel behavior) so memory still injects.
+            let query = history
+                .iter()
+                .rev()
+                .find(|m| m.role == kernel_core::Role::User)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            sys_prompt.push_str(&memory_prompt_suffix(&conn, &hash, is_continuation, query));
             sys_prompt.push_str(&experience_prompt_suffix(&conn, &hash));
             // Per-node knowledge injection: fetch specified knowledge entries
             // and append to the system prompt. Empty/missing = no injection.
@@ -588,6 +694,31 @@ pub(crate) fn build_react_agent(
             }
         }
     }
+
+    // D3: resolve @memory:<title> references in user messages against the
+    // project's active knowledge entries. Placed AFTER the sys_prompt memory
+    // block deliberately — that block's FTS query keys off the user's ORIGINAL
+    // words (the `query` extraction above), so replacing @memory with a content
+    // block here can't pollute the implicit-retrieval query. Best-effort: no DB
+    // (or get fails) → history passes through untouched.
+    let history = match db.as_ref().and_then(|dbs| dbs.get().ok()) {
+        Some(conn) => {
+            let hash = crate::activity::hash_project_path(working_dir);
+            history
+                .into_iter()
+                .map(|mut m| {
+                    if m.role == kernel_core::Role::User {
+                        m.content = crate::knowledge::memory_ref::resolve_memory_refs(
+                            &m.content, &conn, &hash,
+                        );
+                    }
+                    m
+                })
+                .collect::<Vec<kernel_core::Message>>()
+        }
+        None => history,
+    };
+
     // T10 cost budget hard limit: clone the pool before db moves into the cost
     // sink. Called at the top of every turn; if month-to-date spend has reached
     // the configured budget, the agent halts gracefully. A DB read failure is
@@ -1411,45 +1542,51 @@ fn experience_prompt_suffix(conn: &rusqlite::Connection, project_hash: &str) -> 
     )
 }
 
-/// Build the cross-session long-term-memory suffix (v1.3 T2): up to 5 high-
-/// confidence general entries from THIS project, so the self-built ReactAgent
-/// reuses what prior sessions (opaque CLIs AND earlier kernel runs) learned.
-/// Excludes `quality_failure` (that's [`experience_prompt_suffix`]'s lane) and
-/// keeps only confidence ≥ 0.6, ranked by confidence then recency. Empty → no
-/// prompt bloat.
+/// Build the cross-session long-term-memory suffix (v1.3 T2): high-confidence
+/// general entries from THIS project, so the self-built ReactAgent reuses what
+/// prior sessions (opaque CLIs AND earlier kernel runs) learned.
+///
+/// D1/D2/D4: retrieval is now unified through [`crate::knowledge::retrieval::retrieve_relevant`]
+/// (shared with the opaque path). No more全表 load + confidence/recency sort —
+/// FTS5 bm25 keyed off `query` (current turn's prompt), decay-softened, filtered
+/// to `status='active'`. Excludes `quality_failure` (that's
+/// [`experience_prompt_suffix`]'s lane); keeps `confidence_min=0.6` (the old
+/// memory-lane threshold; opaque path passes 0.5). Empty → no prompt bloat.
 fn memory_prompt_suffix(
     conn: &rusqlite::Connection,
     project_hash: &str,
     is_continuation: bool,
+    query: &str,
 ) -> String {
-    let entries =
-        crate::knowledge::store::get_entries_for_project(conn, project_hash).unwrap_or_default();
-    let mut mems: Vec<_> = entries
-        .iter()
-        // quality_failure is experience_prompt_suffix's lane; sub-threshold
-        // entries are noise. Both gates always apply.
-        .filter(|e| e.category != "quality_failure" && e.confidence >= 0.6)
-        // 互串修复 (session 369c0ee9): 续聊 turn 排除别的会话的产出/反思摘要
-        // (react_session / react_reflection)。这两类是其他会话的完整产出，注入
-        // 续聊会让 agent 误判"我前面做过"——续聊把评测会话的产出当成了自己的三轮
-        // 调研历史。续聊有自己的 history；这两类留给新会话首 turn 复用 flywheel。
-        .filter(|e| {
-            !is_continuation || !matches!(e.category.as_str(), "react_session" | "react_reflection")
-        })
-        .collect();
-    mems.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
-    // D6 token budget: pick memories front-to-back (after confidence/recency
+    let mut candidates = crate::knowledge::retrieval::retrieve_relevant(
+        conn,
+        query,
+        project_hash,
+        is_continuation,
+        &["quality_failure"],
+        0.6,
+    );
+
+    // I1: FTS 召回不足 → 向量 fallback。supplement_with_vector embeds query 并
+    // vector_search 补回语义相关但关键词漏召的条目（同义/改述）；无 OpenAI
+    // provider / embed 失败 → 静默 no-op（FTS-only）。
+    if candidates.len() < crate::knowledge::retrieval::VECTOR_FALLBACK_TRIGGER {
+        supplement_with_vector(conn, &mut candidates, query, project_hash, is_continuation);
+    }
+
+    if candidates.is_empty() {
+        return String::new();
+    }
+
+    // D6 token budget: pick memories front-to-back (after effective_score
     // ranking) while their rendered line — title + up to 200 chars of content —
-    // fits the budget (was a hardcoded take(5)).
+    // fits the budget (was a hardcoded take(5)). retrieve_relevant already
+    // filtered status='active' / confidence≥0.6 / decay>0 / continuation, so no
+    // extra gates here.
     let picked = crate::knowledge::budget::select_within_budget(
-        &mems,
+        &candidates,
         crate::knowledge::budget::MEMORY_BUDGET_TOKENS,
-        |e: &&crate::models::KnowledgeEntry| {
+        |e: &crate::models::KnowledgeEntry| {
             let c: String = e.content.chars().take(200).collect();
             format!("- {}: {}", e.title, c)
         },
@@ -1457,6 +1594,14 @@ fn memory_prompt_suffix(
     if picked.is_empty() {
         return String::new();
     }
+
+    // I5: bump access_count for the entries actually injected into this turn's
+    // system prompt, so the effectiveness feedback loop can weight by reuse and
+    // access_count is no longer write-never. Best-effort — a failed bump must
+    // not block memory injection.
+    let injected_ids: Vec<String> = picked.iter().map(|e| e.id.clone()).collect();
+    let _ = crate::knowledge::store::bump_access_counts(conn, &injected_ids);
+
     let body = picked
         .iter()
         .map(|e| {
@@ -1646,6 +1791,8 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         };
         add_entry(
             &conn,
@@ -1692,6 +1839,8 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         };
         add_entry(&conn, &mk("local", "h", "本项目短板")).unwrap();
         add_entry(&conn, &mk("glob", GLOBAL_PROJECT_HASH, "[通用] testing")).unwrap();
@@ -1726,6 +1875,8 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         };
         // High-confidence general insight → included.
         add_entry(&conn, &mk("k1", "insight", "项目用 thiserror", 0.8)).unwrap();
@@ -1733,7 +1884,7 @@ mod tests {
         add_entry(&conn, &mk("k2", "quality_failure", "断言被弱化", 0.9)).unwrap();
         // Low confidence → filtered out.
         add_entry(&conn, &mk("k3", "insight", "噪声条目", 0.4)).unwrap();
-        let suffix = memory_prompt_suffix(&conn, "h", false);
+        let suffix = memory_prompt_suffix(&conn, "h", false, "");
         assert!(suffix.contains("项目长期记忆"), "header present: {suffix}");
         assert!(
             suffix.contains("thiserror"),
@@ -1775,9 +1926,11 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         };
         add_entry(&conn, &e).unwrap();
-        assert_eq!(memory_prompt_suffix(&conn, "h", false), "");
+        assert_eq!(memory_prompt_suffix(&conn, "h", false, ""), "");
     }
 
     #[test]
@@ -1808,6 +1961,8 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
         };
         // react_session = another session's full output; react_reflection = its reflection.
         add_entry(&conn, &mk("s1", "react_session", 0.8)).unwrap();
@@ -1816,7 +1971,7 @@ mod tests {
         add_entry(&conn, &mk("i1", "insight", 0.9)).unwrap();
 
         // First turn of a NEW conversation: flywheel full strength — all three.
-        let first = memory_prompt_suffix(&conn, "h", false);
+        let first = memory_prompt_suffix(&conn, "h", false, "");
         assert!(
             first.contains("s1-title"),
             "new turn injects react_session: {first}"
@@ -1831,7 +1986,7 @@ mod tests {
         );
 
         // Continuation turn: drop other sessions' output/reflection, keep insight.
-        let cont = memory_prompt_suffix(&conn, "h", true);
+        let cont = memory_prompt_suffix(&conn, "h", true, "");
         assert!(
             !cont.contains("s1-title"),
             "continuation drops react_session: {cont}"

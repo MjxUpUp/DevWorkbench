@@ -231,13 +231,28 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     confidence REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    access_count INTEGER NOT NULL DEFAULT 0
+    access_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    effectiveness REAL NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge_entries(project_hash);
+CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_entries(status);
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     title, content,
     tokenize='unicode61'
 );
+-- knowledge_embeddings: 向量检索存储（I1，FTS 置信度不足时 fallback）。
+-- embedding 为序列化的 Vec<f32>（little-endian f32 字节流），dim 冗余存便于校验。
+-- 大多数 entry 无 embedding（FTS 足够时）——稀疏，故独立表不污染主表。
+CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+    entry_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    dim INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (entry_id) REFERENCES knowledge_entries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model ON knowledge_embeddings(model);
 
 CREATE TABLE IF NOT EXISTS activity_events (
     id TEXT PRIMARY KEY,

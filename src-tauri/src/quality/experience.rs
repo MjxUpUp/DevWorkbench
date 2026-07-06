@@ -178,6 +178,8 @@ pub fn replay_to_knowledge(
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
                 };
                 if crate::knowledge::store::add_entry(conn, &entry).is_ok() {
                     replayed += 1;
@@ -212,6 +214,8 @@ pub fn replay_to_knowledge(
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
                 };
                 let _ = crate::knowledge::store::add_entry(conn, &g_entry);
                 promoted_global += 1;

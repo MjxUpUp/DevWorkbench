@@ -298,6 +298,21 @@ fn react_chat_driver(
         log::warn!("[checkpoint] create failed for {session_id}: {e} (rollback disabled)");
     }
 
+    // D5 knowledge prune: lazily GC entries older than 90 days once per session
+    // start. prune_old_entries was previously defined but NEVER called (zero
+    // call sites), so the knowledge base accumulated indefinitely and only the
+    // per-prompt token budget front-truncated it. Best-effort — a DB error just
+    // logs (prune is hygiene, not a gate); count==0 returns early so this is
+    // cheap on a clean DB.
+    match db_conn.get() {
+        Ok(conn) => {
+            if let Err(e) = crate::knowledge::store::prune_old_entries(&conn, 90) {
+                log::warn!("[knowledge] prune failed for {session_id}: {e}");
+            }
+        }
+        Err(e) => log::debug!("[knowledge] prune skipped (no conn): {e}"),
+    }
+
     // T8 experience flywheel replay: pull Forge's pending *mandatory* reviews
     // (low-score, unresolved) into the knowledge base as quality_failure lessons,
     // which build_react_agent → experience_prompt_suffix (T7) surfaces in THIS
@@ -571,6 +586,58 @@ fn react_chat_driver(
         // driven from `cargo test`. Best-effort (a DB failure just logs). Only
         // on Completed so a Failed/degraded run doesn't pollute memory.
         if final_status == SessionStatus::Completed {
+            // I3 + I2: LLM-enhanced reflection, two layers deepening on success.
+            // Both reuse ONE one-shot ChatModel built from the SAME provider
+            // resolution as the main agent (__default__ + provider config), built
+            // OUTSIDE the db_drv.get() scope (chat construction needs &DbState).
+            //
+            // I3 first — fork a READ-ONLY subagent (CCB extractMemories analogue)
+            // to investigate the ACTUAL diff with read_file/grep and extract a
+            // deep lesson. Timeout-bounded (90s) so a stuck child never blocks
+            // finalize. The subagent RETURNS text; THIS hook owns the DB write,
+            // preserving the "子 agent 只读" invariant.
+            //
+            // On I3 timeout/failure → I2: a tool-less one-shot generate over the
+            // pure-rule stats + prose. I2 itself falls back to the pure rule on
+            // any error, so the write is never blocked by a flaky model.
+            let llm_reflection = match crate::kernel_impl::executor::build_one_shot_chat(
+                model_drv.as_deref(),
+                &db_drv,
+                &pp_drv,
+            ) {
+                Ok(chat) => {
+                    let i3 = tokio::time::timeout(
+                        std::time::Duration::from_secs(90),
+                        crate::kernel_impl::session_reflection::extract_lessons_via_subagent(
+                            std::sync::Arc::clone(&chat),
+                            &pp_drv,
+                            &sid_drv,
+                            &final_blocks,
+                            &prompt_drv,
+                            summary.as_deref(),
+                        ),
+                    )
+                    .await;
+                    match i3 {
+                        Ok(Some(r)) => Some(r),
+                        Ok(None) | Err(_) => {
+                            // I3 missed (no parse / dispatch error) or timed out
+                            // → I2 one-shot generate fallback.
+                            crate::kernel_impl::session_reflection::summarize_with_llm(
+                                &final_blocks,
+                                &prompt_drv,
+                                summary.as_deref(),
+                                chat.as_ref(),
+                            )
+                            .await
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("[react_chat] LLM reflection skipped ({e}) for {sid_drv}");
+                    None
+                }
+            };
             if let Ok(conn) = db_drv.get() {
                 let hash = crate::activity::hash_project_path(&pp_drv);
                 let written = crate::kernel_impl::session_reflection::persist_completion_memory(
@@ -581,9 +648,72 @@ fn react_chat_driver(
                     summary.as_deref(),
                     &final_blocks,
                     &at_drv,
+                    llm_reflection.as_ref(),
                 );
                 if written > 0 {
                     log::info!("[react_chat] {written} knowledge entries recorded for {sid_drv}");
+                }
+                // I5: mark this Completed session's produced entries
+                // (react_session/react_reflection) effective +1 — a successful
+                // run's lessons rank higher in the next session's retrieval via
+                // reuse_boost. Best-effort; a DB error just logs.
+                if let Err(e) =
+                    crate::knowledge::store::bump_effectiveness_by_session(&conn, &sid_drv)
+                {
+                    log::warn!("[react_chat] effectiveness bump failed for {sid_drv}: {e}");
+                }
+                // I1 write-side: embed this session's new entries (title+content)
+                // and upsert into knowledge_embeddings, populating the vector
+                // store so the NEXT session's retrieve_relevant_with_vector can
+                // cosine-rank them when FTS confidence is low. OpenAI-compatible
+                // providers only; embed failure/timeout → just logs (never blocks
+                // completion).
+                if written > 0 {
+                    if let Some(embedder) =
+                        crate::kernel_impl::executor::build_one_shot_embedder(model_drv.as_deref())
+                    {
+                        match crate::knowledge::store::entries_by_session(&conn, &sid_drv) {
+                            Ok(rows) if !rows.is_empty() => {
+                                let texts: Vec<String> = rows
+                                    .iter()
+                                    .map(|(_, t, c)| format!("{t}\n{c}"))
+                                    .collect();
+                                let refs: Vec<&str> =
+                                    texts.iter().map(|s| s.as_str()).collect();
+                                let mid = embedder.embed_model_id().to_string();
+                                let emb = tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    embedder.embed(&refs),
+                                )
+                                .await;
+                                match emb {
+                                    Ok(Ok(embs)) => {
+                                        let mut ok = 0;
+                                        for ((id, _, _), vec) in rows.iter().zip(embs) {
+                                            if crate::knowledge::store::upsert_embedding(
+                                                &conn, id, &vec, &mid,
+                                            )
+                                            .is_ok()
+                                            {
+                                                ok += 1;
+                                            }
+                                        }
+                                        log::info!(
+                                            "[react_chat] embedded {ok}/{} entries for {sid_drv}",
+                                            rows.len()
+                                        );
+                                    }
+                                    Ok(Err(e)) => log::warn!(
+                                        "[react_chat] embed batch failed for {sid_drv}: {e}"
+                                    ),
+                                    Err(_) => {
+                                        log::warn!("[react_chat] embed batch timed out for {sid_drv}")
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
