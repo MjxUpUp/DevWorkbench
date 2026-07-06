@@ -27,22 +27,75 @@ use kernel_core::{ChatModel, Error, Message, ModelOptions, Role};
 use std::sync::{Arc, Mutex};
 
 /// Rough token estimate for a history slice: ~4 chars per token, summing each
-/// message's content + tool-call name/arguments. CJK overestimates slightly,
-/// which compacts sooner — safe.
+/// message's content + reasoning(thinking) + tool-call name/arguments. CJK
+/// overestimates slightly, which compacts sooner — safe.
+///
+/// **Counts `reasoning` (thinking)** — CCB parity (`estimateMessageTokens`,
+/// microCompact.ts:183-187 counts `block.thinking`). content-only estimation
+/// missed this entirely: session 5d7479cf ran 30 thinking blocks, NONE counted,
+/// so the 60% trigger never fired (`estimate_tokens` said ~2.5k at step #3)
+/// while the real request was already 36k tokens — the sawtooth compact→forget
+/// →re-explore loop that burnt the run to `failed`. Thinking is model-tokenized
+/// content the wire request carries; the estimate must see it.
 pub fn estimate_tokens(history: &[Message]) -> usize {
     let chars: usize = history
         .iter()
         .map(|m| {
             let base = m.content.chars().count();
+            let reasoning = m
+                .reasoning
+                .as_ref()
+                .map(|r| r.chars().count())
+                .unwrap_or(0);
             let calls: usize = m
                 .tool_calls
                 .iter()
                 .map(|tc| tc.function.name.chars().count() + tc.function.arguments.chars().count())
                 .sum();
-            base + calls
+            base + reasoning + calls
         })
         .sum();
     chars / 4
+}
+
+/// Per-tool-result token cap (参考 CCB `POST_COMPACT_MAX_TOKENS_PER_FILE` = 5,000；
+/// DW 取 6,000，**非严格 parity**：默认窗口 32k 比 CCB 200k 小，单条预算占比
+/// 更高，6k ≈ 24k chars ≈ 600 行可覆盖典型源文件，比 CCB 松 ~20% 留 headroom).
+/// A single bulky result — reading a 5393-line source file (~50k chars) or a
+/// grep that floods — otherwise eats the whole window in ONE turn, before
+/// [`maybe_compact`] (which runs at turn boundaries) can react. That's the #4
+/// step in session 5d7479cf: 12 parallel tool_results turned a 2.5k history
+/// into a 36k request in a single turn. Cap each result as it enters history —
+/// keep head + tail verbatim (paths/signatures/imports up top, errors/summaries
+/// /return-values at the bottom — both are what the model reasons from) and
+/// replace the middle with a truncation marker so the model knows content was
+/// dropped. The FULL result still reaches the UI via `ToolCallEvent`; this
+/// only shapes what enters the LLM history.
+///
+/// **Scope** (code-review 闭环说明): 单条 cap 只防"单条巨 result 击穿"（如读
+/// 5393 行源文件）。它**单独不足以**阻止"多并行 result 累积击穿"—— 12 条 × 6k
+/// = 72k 仍超 32k 窗口；那个场景的根本修复是 [`estimate_tokens`] 计入 reasoning
+/// 后让 [`maybe_compact`] 在下一轮真正触发。两者闭环：cap 限单条上限，estimate
+/// + compact 处理累积。
+pub const MAX_TOOL_RESULT_TOKENS: usize = 6_000;
+
+/// Cap a single tool result string to [`MAX_TOOL_RESULT_TOKENS`] (×4 chars/
+/// token). Returns the original verbatim when under the cap. Pure function —
+/// unit-testable in isolation, called at the history.push site in `run`/`run_loop`.
+pub fn cap_tool_result(result: &str, max_tokens: usize) -> String {
+    let max_chars = max_tokens.saturating_mul(4);
+    let total = result.chars().count();
+    if total <= max_chars {
+        return result.to_string();
+    }
+    let dropped = total - max_chars;
+    let head = max_chars / 2;
+    let tail = max_chars - head;
+    let head_s: String = result.chars().take(head).collect();
+    let tail_s: String = result.chars().skip(total - tail).collect();
+    format!(
+        "{head_s}\n\n[... 截断 {dropped} 字符（共 {total} 字符）— 保留头尾，中段已省略 ...]\n\n{tail_s}"
+    )
 }
 
 /// Placeholder substituted for cleared tool results (CCB
@@ -771,6 +824,62 @@ mod tests {
         });
         // total chars = 40 + 6 = 46 -> 46/4 = 11
         assert_eq!(estimate_tokens(&[m]), 11);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_reasoning_thinking() {
+        // Regression for session 5d7479cf: content-only estimation missed the
+        // 30 thinking blocks, so the 60% trigger never fired while the real
+        // request was already 36k tokens. reasoning MUST be counted.
+        let with_reasoning = Message {
+            role: Role::Assistant,
+            content: "a".repeat(40),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: Some("b".repeat(40)),
+            reasoning_signature: None,
+        };
+        let without_reasoning = Message {
+            role: Role::Assistant,
+            content: "a".repeat(40),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_signature: None,
+        };
+        // 40 content chars → 10 tokens; adding 40 reasoning chars doubles it.
+        assert_eq!(estimate_tokens(&[without_reasoning]), 10);
+        assert_eq!(
+            estimate_tokens(&[with_reasoning]),
+            20,
+            "content + reasoning both counted (FAIL 5d7479cf regression)"
+        );
+    }
+
+    #[test]
+    fn cap_tool_result_keeps_short_results_verbatim() {
+        // Under the cap → returned as-is (no allocation churn for the common
+        // case: miss results like `(no matches)` are tiny).
+        assert_eq!(cap_tool_result("hello", 6_000), "hello");
+        // Boundary: exactly at the cap (max_tokens*4 chars) → unchanged.
+        let at_cap: String = "a".repeat(6_000 * 4);
+        assert_eq!(cap_tool_result(&at_cap, 6_000), at_cap);
+    }
+
+    #[test]
+    fn cap_tool_result_keeps_head_and_tail_drops_middle() {
+        // 8000 chars, cap=1 token (4 chars) → head=2, tail=2, drop 7996.
+        // Head and tail carry the signal (paths/errors); the middle is bulk.
+        let big = format!("{}{}{}", "H".repeat(3), "M".repeat(7994), "T".repeat(3));
+        let out = cap_tool_result(&big, 1);
+        assert!(out.starts_with("HH"), "head kept: {out}");
+        assert!(out.ends_with("TT"), "tail kept: {out}");
+        assert!(out.contains("截断"), "marker must signal truncation: {out}");
+        assert!(out.contains("8000"), "marker reports total chars: {out}");
+        assert!(
+            !out.contains("M"),
+            "middle bulk must be dropped, only the marker survives"
+        );
     }
 
     #[tokio::test]

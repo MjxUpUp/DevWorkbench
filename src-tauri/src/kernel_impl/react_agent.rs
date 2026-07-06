@@ -1095,7 +1095,10 @@ impl ReactAgent {
                         .await;
                     history.push(Message {
                         role: Role::Tool,
-                        content: result,
+                        content: context_compact::cap_tool_result(
+                            &result,
+                            context_compact::MAX_TOOL_RESULT_TOKENS,
+                        ),
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call.id.clone()),
                         reasoning: None,
@@ -1911,7 +1914,10 @@ impl kernel_core::Agent for ReactAgent {
                         }
                         history.push(Message {
                             role: Role::Tool,
-                            content: o.result.clone(),
+                            content: context_compact::cap_tool_result(
+                                &o.result,
+                                context_compact::MAX_TOOL_RESULT_TOKENS,
+                            ),
                             tool_calls: Vec::new(),
                             tool_call_id: Some(o.call_id.clone()),
                             reasoning: None,
@@ -1938,7 +1944,10 @@ impl kernel_core::Agent for ReactAgent {
                         }
                         history.push(Message {
                             role: Role::Tool,
-                            content: o.result.clone(),
+                            content: context_compact::cap_tool_result(
+                                &o.result,
+                                context_compact::MAX_TOOL_RESULT_TOKENS,
+                            ),
                             tool_calls: Vec::new(),
                             tool_call_id: Some(o.call_id.clone()),
                             reasoning: None,
