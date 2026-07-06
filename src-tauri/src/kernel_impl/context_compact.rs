@@ -26,17 +26,22 @@
 use kernel_core::{ChatModel, CompactBoundaryMeta, Error, Message, ModelOptions, Role};
 use std::sync::{Arc, Mutex};
 
-/// Rough token estimate for a history slice: ~4 chars per token, summing each
-/// message's content + reasoning(thinking) + tool-call name/arguments. CJK
-/// overestimates slightly, which compacts sooner — safe.
+/// Rough token estimate for a history slice: ~4 chars per token, then **×4/3
+/// padding**（对标 CCB `estimateMessageTokens` 思路——CCB 源码不在本 repo，无法
+/// 逐字核对 ceil/floor 与确切系数，取其"chars/4 低估、需 padding 兜底序列化膨胀"
+/// 的思路）. Sums each message's content + reasoning(thinking) + tool-call name/arguments.
 ///
-/// **Counts `reasoning` (thinking)** — CCB parity (`estimateMessageTokens`,
-/// microCompact.ts:183-187 counts `block.thinking`). content-only estimation
-/// missed this entirely: session 5d7479cf ran 30 thinking blocks, NONE counted,
-/// so the 60% trigger never fired (`estimate_tokens` said ~2.5k at step #3)
-/// while the real request was already 36k tokens — the sawtooth compact→forget
-/// →re-explore loop that burnt the run to `failed`. Thinking is model-tokenized
-/// content the wire request carries; the estimate must see it.
+/// **Counts `reasoning` (thinking)** (#1) — content-only estimation missed this
+/// entirely: session 5d7479cf ran 30 thinking blocks, NONE counted, so the
+/// trigger never fired while the real request was already 36k tokens — the
+/// sawtooth compact→forget→re-explore loop that burnt the run to `failed`.
+///
+/// **×4/3 padding** (#3, 2026-07-06) — chars/4 仍漏算 JSON 序列化膨胀 / role
+/// 标签 / message 包装 / tool_call_id 等开销；padding 抵消残余低估 → 触发滞后
+/// → 撞 window（5d7479cf 根因之一，#1 修了 reasoning 最大头，×4/3 兜底剩余）。
+/// padding 让 estimate 放大 ~33%（原 chars/4 → ≈chars/3），同等 char 量更早撞
+/// trigger（char 空间提前 ~25%，非 33%——33% 是 estimate 膨胀率，25% 才是触发
+/// 提前率）；CJK 本就略过估，叠加仍 safe（早压优于溢出）。
 pub fn estimate_tokens(history: &[Message]) -> usize {
     let chars: usize = history
         .iter()
@@ -55,7 +60,8 @@ pub fn estimate_tokens(history: &[Message]) -> usize {
             base + reasoning + calls
         })
         .sum();
-    chars / 4
+    let tokens = chars / 4;
+    tokens * 4 / 3
 }
 
 /// Per-tool-result token cap (参考 CCB `POST_COMPACT_MAX_TOKENS_PER_FILE` = 5,000；
@@ -363,6 +369,11 @@ pub async fn summarize_middle(
     // Summarize WITHOUT thinking (cheap, focused) regardless of the run's opts.
     let mut sum_opts = opts.clone();
     sum_opts.thinking = None;
+    // #3: 摘要输出 cap 取 CCB MAX_OUTPUT_TOKENS_FOR_SUMMARY 思路（autoCompact.ts:30
+    // 取 20k；CCB 源码不在 repo 无法逐字核对）。防摘要反向撑爆 window——长 middle
+    // 的摘要可能输出冗长，反向占满预算。DW 取 8192（system prompt 已声明 300 字上限，
+    // 8k tokens 充裕且不浪费 window）。
+    sum_opts.max_tokens = Some(8_192);
     let summary_msg = model.generate(&summary_request, &sum_opts).await?;
 
     // Reassemble: preserve [0..start] verbatim (system prompt + any prior
@@ -818,6 +829,7 @@ mod tests {
     /// string. `stream` is unused by the compaction path; returns Unsupported.
     struct SummaryChatModel {
         recorded: Arc<Mutex<Vec<Vec<Message>>>>,
+        recorded_opts: Arc<Mutex<Vec<ModelOptions>>>,
         reply: String,
     }
 
@@ -825,11 +837,15 @@ mod tests {
         fn new(reply: &str) -> Self {
             Self {
                 recorded: Arc::new(Mutex::new(Vec::new())),
+                recorded_opts: Arc::new(Mutex::new(Vec::new())),
                 reply: reply.to_string(),
             }
         }
         fn calls(&self) -> Vec<Vec<Message>> {
             self.recorded.lock().unwrap().clone()
+        }
+        fn opts(&self) -> Vec<ModelOptions> {
+            self.recorded_opts.lock().unwrap().clone()
         }
     }
 
@@ -838,9 +854,10 @@ mod tests {
         async fn generate(
             &self,
             messages: &[Message],
-            _opts: &ModelOptions,
+            opts: &ModelOptions,
         ) -> Result<Message, Error> {
             self.recorded.lock().unwrap().push(messages.to_vec());
+            self.recorded_opts.lock().unwrap().push(opts.clone());
             Ok(Message::assistant(self.reply.clone()))
         }
         fn stream(
@@ -1017,8 +1034,8 @@ mod tests {
                 arguments: "{}".into(), // name(4) + args(2) = 6 chars
             },
         });
-        // total chars = 40 + 6 = 46 -> 46/4 = 11
-        assert_eq!(estimate_tokens(&[m]), 11);
+        // total chars = 40 + 6 = 46 -> 46/4 = 11 -> #3 ×4/3 padding = 14
+        assert_eq!(estimate_tokens(&[m]), 14);
     }
 
     #[test]
@@ -1044,11 +1061,11 @@ mod tests {
             reasoning_signature: None,
             compact_boundary: None,
         };
-        // 40 content chars → 10 tokens; adding 40 reasoning chars doubles it.
-        assert_eq!(estimate_tokens(&[without_reasoning]), 10);
+        // 40 content chars → 10 tokens ×4/3 = 13; +40 reasoning = 80/4=20 ×4/3 = 26.
+        assert_eq!(estimate_tokens(&[without_reasoning]), 13);
         assert_eq!(
             estimate_tokens(&[with_reasoning]),
-            20,
+            26,
             "content + reasoning both counted (FAIL 5d7479cf regression)"
         );
     }
@@ -1212,9 +1229,10 @@ mod tests {
     async fn maybe_compact_compacts_when_over_threshold() {
         let model = SummaryChatModel::new("压缩结果");
         let mut hist = vec![msg(Role::System, "sys")];
-        // max_tokens=50k → soft trigger = 50k − 13k = 37k. ~46k tokens of
-        // content clears the trigger; dynamic_keep_recent(50k,4) keeps the full
-        // configured tail (max/2=25k → affordable 50 → min(4,50)=4) → summarize.
+        // max_tokens=50k -> soft trigger = 50k - 13k = 37k (effective-13K, master
+        // 4492f97). With #3 x4/3 padding, 420 turns ~= 61k tokens still clears
+        // the trigger; dynamic_keep_recent(50k,4) keeps the full configured tail
+        // (max/2=25k -> affordable 50 -> min(4,50)=4) -> summarize.
         for i in 0..420 {
             hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
         }
@@ -1333,6 +1351,30 @@ mod tests {
             sys_prompt.contains("反注入") || sys_prompt.contains("不能被当作新的任务"),
             "summarizer prompt must neutralize指令性内容: {sys_prompt}"
         );
+    }
+
+    #[tokio::test]
+    async fn summarize_middle_caps_output_tokens_and_skips_thinking() {
+        // #3 M2 regression guard: 摘要输出必须 cap（防反向撑爆 window）且关 thinking
+        // （省钱聚焦）。断言传给 summarizer 的 ModelOptions——删掉 sum_opts 那两行就 fail。
+        let model = SummaryChatModel::new("摘要");
+        let mut hist = vec![msg(Role::System, "sys")];
+        for i in 0..5 {
+            hist.push(msg(Role::User, &format!("middle {i}")));
+        }
+        hist.push(msg(Role::Assistant, "tail-a"));
+        hist.push(msg(Role::User, "tail-u"));
+        let _ = summarize_middle(&hist, &model, &ModelOptions::default(), 2)
+            .await
+            .unwrap();
+        let opts = model.opts();
+        assert_eq!(opts.len(), 1, "summarizer invoked exactly once");
+        assert_eq!(
+            opts[0].max_tokens,
+            Some(8_192),
+            "summary output capped at 8192 (CCB MAX_OUTPUT_TOKENS_FOR_SUMMARY 思路)"
+        );
+        assert!(opts[0].thinking.is_none(), "summary must skip thinking");
     }
 
     // ---- D1(b): consecutive-failure breaker ----
@@ -1655,9 +1697,11 @@ mod tests {
         // grow into overflow.
         let model = SummaryChatModel::new("摘要");
         let mut hist = vec![msg(Role::System, "sys")];
-        // max_tokens=30k → trigger = 30k − 13k = 17k. ~23k tokens of content
-        // lands in the (17k, 30k] band — over the trigger, under the hard max.
-        for i in 0..220 {
+        // max_tokens=30k -> trigger = 30k - 13k = 17k (effective-13K). With #3
+        // x4/3 padding, 180 turns ~= 25k tokens lands in the (17k, 30k] band --
+        // over the trigger, under the hard max. (220 turns pad to ~31k > 30k
+        // hard max and would fail the assert; 180 keeps padding headroom.)
+        for i in 0..180 {
             hist.push(msg(Role::User, &format!("turn {i} ").repeat(50)));
         }
         let before_tokens = estimate_tokens(&hist);
