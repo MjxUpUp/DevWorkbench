@@ -643,6 +643,45 @@ pub fn load_turn_chain_db(
     Ok(chain)
 }
 
+/// Load the prior-turn history a follow-up turn should see, keyed by its
+/// `parent_session_id`. Returns the parent's ancestors (oldest-first) **followed
+/// by the parent itself** — the parent's full chain.
+///
+/// This is the entry point `pty::load_prior_turns` uses for both continuation
+/// and fork paths. It differs from [`load_turn_chain_db`], which returns a
+/// descendant's ancestors *excluding* the descendant: there the caller passes
+/// the turn whose ancestors are wanted, whereas here the caller passes the
+/// parent whose *own* content must also be rebuilt into history.
+///
+/// Why the parent must be included (defect ⑤): a continuation sets
+/// `parent_session_id` = the last completed turn, and a fork sets it = the fork
+/// point. In both cases the parent's own turn is the most recent round of work
+/// and MUST appear in the rebuilt history. Reusing `load_turn_chain_db(parent)`
+/// alone returned only the parent's ancestors and dropped the parent itself, so
+/// model-switch / continue lost the latest turn's content.
+///
+/// Returns empty when `parent_id` doesn't exist (and thus has no chain).
+pub fn load_prior_turn_chain(
+    conn: &rusqlite::Connection,
+    parent_id: &str,
+) -> Result<Vec<Session>, AppError> {
+    // Ancestors of the parent (oldest-first), excluding the parent itself —
+    // exactly load_turn_chain_db's contract.
+    let mut chain = load_turn_chain_db(conn, parent_id)?;
+    // Append the parent's own row so the most recent round is rebuilt too.
+    // A missing parent row (bad ref) leaves just the ancestor chain, if any.
+    // Guard against self-referential corruption (id == parent_session_id):
+    // load_turn_chain_db's walk would already have pushed parent once before
+    // breaking the cycle, so appending again would duplicate it.
+    if let Some(parent) = get_session_by_id_db(conn, parent_id)? {
+        let already_last = chain.last().map(|s| s.id.as_str()) == Some(parent_id);
+        if !already_last {
+            chain.push(parent);
+        }
+    }
+    Ok(chain)
+}
+
 /// Return every turn of a conversation as flat [`BranchNode`]s (oldest-first),
 /// each carrying its `parent_session_id`. The frontend groups by parent to
 /// render the branch switcher. We deliberately do NOT assemble the tree server-
@@ -1031,6 +1070,52 @@ mod tests {
         // Root (no parent) and a missing id both yield empty.
         assert!(load_turn_chain_db(&conn, "root").unwrap().is_empty());
         assert!(load_turn_chain_db(&conn, "missing").unwrap().is_empty());
+    }
+
+    /// Defect ⑤: load_prior_turn_chain must INCLUDE the parent itself, not just
+    /// its ancestors. Continuation keys parent = last completed turn; fork keys
+    /// parent = fork point. In both, the parent's own content is the most recent
+    /// round and must be rebuilt into history (previously dropped → model-switch
+    /// / continue lost the latest turn).
+    #[test]
+    fn load_prior_turn_chain_includes_parent_itself() {
+        let _guard = TempDb::new();
+        let conn = test_conn();
+
+        // root → b1 → c1   (linear conversation)
+        //  └──→ b2         (fork under root)
+        let nodes = [
+            make_turn("root", "c1", None, "2026-01-01T00:00:00Z"),
+            make_turn("b1", "c1", Some("root"), "2026-01-02T00:00:00Z"),
+            make_turn("c1", "c1", Some("b1"), "2026-01-03T00:00:00Z"),
+            make_turn("b2", "c1", Some("root"), "2026-01-04T00:00:00Z"),
+        ];
+        for s in &nodes {
+            insert_session_db(&conn, s).unwrap();
+        }
+
+        // Continuation: parent = last completed turn (c1). History must include
+        // c1 itself — load_turn_chain_db(c1) alone returns [root, b1] and would
+        // drop the latest round.
+        let chain = load_prior_turn_chain(&conn, "c1").unwrap();
+        let ids: Vec<&str> = chain.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["root", "b1", "c1"]);
+
+        // Fork: parent = fork point (b1). History is b1 + its ancestors; the
+        // replaced sibling (c1) is NOT included (neither an ancestor of nor
+        // equal to the fork point).
+        let chain_b1 = load_prior_turn_chain(&conn, "b1").unwrap();
+        let ids_b1: Vec<&str> = chain_b1.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids_b1, vec!["root", "b1"]);
+
+        // Root as parent: just [root] (root has no ancestors, but is included
+        // itself — a fork directly under root still inherits root's content).
+        let chain_root = load_prior_turn_chain(&conn, "root").unwrap();
+        let ids_root: Vec<&str> = chain_root.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids_root, vec!["root"]);
+
+        // Missing parent: empty (no chain, no self row).
+        assert!(load_prior_turn_chain(&conn, "missing").unwrap().is_empty());
     }
 
     #[test]

@@ -1105,12 +1105,17 @@ pub(crate) fn load_prior_turns(
         return Vec::new();
     };
     match parent_session_id {
-        // Branch-pure: walk ONLY the ancestor chain of this turn's parent. This
-        // is what makes edit-and-regenerate fork safely — a forked turn's parent
-        // is the edited turn's own parent, so its history is exactly that
-        // parent's ancestors, never the sibling branches being replaced. Without
-        // this, the conversation-wide loader would leak the edited-out branch.
-        Some(pid) => crate::agents::session::load_turn_chain_db(&conn, pid).unwrap_or_default(),
+        // Parent-keyed history: the parent's full chain (its ancestors + the
+        // parent itself). Two callers share this path:
+        //  • continuation (ChatView sets parent = last completed turn) — the
+        //    parent IS the latest round, so it must be rebuilt into history or
+        //    model-switch/continue loses it (defect ⑤).
+        //  • edit-and-regenerate fork (parent = edited turn's own parent = the
+        //    fork point) — the fork point's content must be inherited too.
+        // load_prior_turn_chain appends the parent itself to load_turn_chain_db's
+        // ancestor-only result. The sibling branch being replaced is still
+        // excluded: it is neither an ancestor of, nor equal to, the fork point.
+        Some(pid) => crate::agents::session::load_prior_turn_chain(&conn, pid).unwrap_or_default(),
         // Flat: first turn, or a linear continue with no explicit parent (the
         // pipe path derives a parent afterwards). A linear conversation is its
         // own single branch, so conversation-wide loading == the ancestor chain.
