@@ -2924,6 +2924,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_claude_line_tool_use_with_id() {
+        // claude's tool_use carries an `id` (toolu_...) that the later
+        // tool_result's `tool_use_id` points back at. Surfacing it on the block
+        // lets the reverse map (chat_event_to_agent_events) pair by id instead
+        // of FIFO position (defect ① root cause). Mirrors the symmetric gemini
+        // `parse_gemini_*` id assertions; guards against wire schema drift
+        // (e.g. id nesting into a sub-field) that None-only tests would miss.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::ToolUse {
+                id: Some("toolu_abc".to_string()),
+                name: "Read".to_string(),
+                input: Some(serde_json::json!({"file_path":"src/main.rs"})),
+            }],
+        );
+    }
+
+    #[test]
     fn parse_claude_line_tool_result() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"42 lines","is_error":false}]}}"#;
         let blocks = parse_claude_line(line);
