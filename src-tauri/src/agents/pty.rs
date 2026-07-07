@@ -819,7 +819,7 @@ pub enum ChatStreamEvent {
     /// Context auto-compaction meta-event (v1.3 C2). NOT produced by a model
     /// turn — emitted by the compaction sink when `maybe_compact` replaces part
     /// of the history. A meta-event: it never enters the model's history
-    /// (dropped in turns_to_history / blocks_to_assistant_message), it only
+    /// (dropped in turns_to_history / blocks_to_history), it only
     /// tells the UI to render a "context compacted" summary card. Expand the
     /// card to read the archived原文 via `read_compact_archive_cmd`. `is_error`
     /// marks a breaker trip (summarizer failed repeatedly; compaction suspended

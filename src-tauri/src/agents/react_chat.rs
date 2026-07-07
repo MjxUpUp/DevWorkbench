@@ -16,10 +16,10 @@
 use crate::agents::pty::ChatStreamEvent;
 use crate::models::{Session, SessionStatus};
 use kernel_core::{
-    AgentEvent, AgentRunStatus, Message, Role, ToolCallEvent, ToolCallStatus,
+    AgentEvent, AgentRunStatus, FunctionCall, Message, Role, ToolCall, ToolCallEvent, ToolCallStatus,
 };
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 // ---------------------------------------------------------------------------
 // Defect ③: Pairing invariant check — orphans detected, not silently stripped.
@@ -343,6 +343,163 @@ pub const REACT_HISTORY_TOTAL_TEXT_CAP: usize = 12000;
 /// Hard cap on prior-turn messages before we start dropping whole turns.
 pub const REACT_HISTORY_TOTAL_MESSAGES: usize = 40;
 
+// ---------------------------------------------------------------------------
+// Defect ①/③: blocks_to_history — structured reconstruction from ChatStreamEvent
+// blocks that preserves tool_use/tool_result pairs instead of stripping them.
+// ---------------------------------------------------------------------------
+
+/// Convert a session's persisted `[ChatStreamEvent]` blocks into a sequence of
+/// kernel-core `Message`s that reconstructs the turn's STRUCTURE:
+///   user(prompt) + assistant(text+reasoning, with tool_calls) + [tool(result)]…
+///
+/// Emits proper `role::Tool` messages so the model sees exactly what happened
+/// in prior turns — same format as the live stream. (The legacy approach
+/// stripped all tool events to prose, which was defect ①'s root cause: each
+/// turn seen in isolation by a fresh agent.)
+///
+/// Meta-events (`Result`, `FileChanged`, `Compact`, `ApprovalRequired`) are
+/// dropped (they never entered the model's original history).
+pub(crate) fn blocks_to_history(
+    blocks: &[ChatStreamEvent],
+    turn_text_cap: usize,
+) -> Vec<Message> {
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut assistant_text = String::new();
+    let mut assistant_reasoning = String::new();
+
+    // Ordered record of every ToolUse in arrival order. Tuple:
+    //   (synth_id, name, input, matched_result)
+    // `synth_id` is the real id when the stream carried one, else a synthesized
+    // `__fifo_N__` so that (a) multiple id-less calls don't collide on one key
+    // (F3) and (b) provider-facing tool_call ids are never empty (F5).
+    let mut tool_uses: Vec<(String, String, serde_json::Value, Option<String>)> = Vec::new();
+    // id-first lookup: real id → index into tool_uses.
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+    // FIFO queue: indices of id-less ToolUses still awaiting a result, oldest first.
+    let mut pending_fifo: Vec<usize> = Vec::new();
+    let mut fifo_counter: usize = 0;
+
+    for ev in blocks {
+        match ev {
+            ChatStreamEvent::Text { content } => assistant_text.push_str(content),
+            ChatStreamEvent::Thinking { content } => assistant_reasoning.push_str(content),
+            ChatStreamEvent::ToolUse { id, name, input } => {
+                let idx = tool_uses.len();
+                match id {
+                    Some(real) => {
+                        tool_uses.push((real.clone(), name.clone(), input.clone(), None));
+                        id_to_index.insert(real.clone(), idx);
+                    }
+                    None => {
+                        let synth = format!("__fifo_{fifo_counter}__");
+                        fifo_counter += 1;
+                        tool_uses.push((synth, name.clone(), input.clone(), None));
+                        pending_fifo.push(idx);
+                    }
+                }
+            }
+            ChatStreamEvent::ToolResult { tool_use_id, content, is_error: _ } => {
+                // id-first: exact id match. FIFO: oldest pending id-less ToolUse.
+                let matched_idx = match tool_use_id {
+                    Some(tid) => id_to_index.get(tid).copied(),
+                    None => pending_fifo.first().copied(),
+                };
+                if let Some(idx) = matched_idx {
+                    tool_uses[idx].3 = Some(content.clone());
+                    if tool_use_id.is_none() {
+                        // FIFO-consumed: drop from pending queue.
+                        if let Some(pos) = pending_fifo.iter().position(|&i| i == idx) {
+                            pending_fifo.remove(pos);
+                        }
+                    }
+                }
+                // Dangling (no matching ToolUse): drop — validate_block_pairs
+                // upstream (session.rs) already warns on the same blocks.
+            }
+            // Meta-events never entered the model's original history.
+            ChatStreamEvent::Result { .. }
+            | ChatStreamEvent::FileChanged { .. }
+            | ChatStreamEvent::Compact { .. }
+            | ChatStreamEvent::ApprovalRequired { .. } => {}
+        }
+    }
+
+    // F1 fix: assistant.tool_calls carries EVERY ToolUse (matched + orphan),
+    // in arrival order. Previously matched ToolUses were dropped from tool_calls,
+    // so tool_result messages referenced ids no assistant.tool_calls held →
+    // provider 400 ("tool_use ids found without tool_result" / "tool_call_id
+    // does not match any tool_call").
+    let tool_calls: Vec<ToolCall> = tool_uses
+        .iter()
+        .map(|(synth_id, name, input, _)| ToolCall {
+            id: synth_id.clone(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: name.clone(),
+                arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string()),
+            },
+        })
+        .collect();
+
+    // F7 fix: content comes ONLY from assistant text — never fall back to
+    // reasoning. Reasoning already rides in its own field; duplicating it as
+    // text makes the provider emit identical thinking + text blocks.
+    let content = if !assistant_text.is_empty() {
+        tail(&assistant_text, turn_text_cap)
+    } else {
+        String::new()
+    };
+
+    let assistant_msg = Message {
+        role: Role::Assistant,
+        content,
+        tool_calls,
+        tool_call_id: None,
+        reasoning: if !assistant_reasoning.is_empty() {
+            Some(tail(&assistant_reasoning, turn_text_cap))
+        } else {
+            None
+        },
+        reasoning_signature: None,
+    };
+
+    let mut messages: Vec<Message> = Vec::new();
+    messages.push(assistant_msg);
+
+    // Tool result messages: one per matched ToolUse, in ToolUse arrival order
+    // (NOT result arrival order) — F4 fix: ordered iteration, so the
+    // assistant.tool_calls[i] ↔ tool(tool_call_id) correspondence is stable
+    // and deterministic (no HashMap randomization).
+    for (synth_id, _, _, result) in &tool_uses {
+        if let Some(result_content) = result {
+            messages.push(Message {
+                role: Role::Tool,
+                content: tail(result_content, turn_text_cap),
+                tool_calls: Vec::new(),
+                tool_call_id: Some(synth_id.clone()),
+                reasoning: None,
+                reasoning_signature: None,
+            });
+        }
+    }
+
+    // Turn produced zero reconstructable content (no text, no reasoning, no
+    // tool calls — blocks were entirely meta-events) → return empty so the
+    // caller falls back to output_summary. (F6: the old "drop empty assistant"
+    // branch is subsumed — with tool_calls always populated for any ToolUse,
+    // an all-tool turn keeps its assistant message rather than leaving a
+    // dangling tool_result.)
+    let a = &messages[0];
+    if a.content.is_empty() && a.reasoning.is_none() && a.tool_calls.is_empty() {
+        return Vec::new();
+    }
+
+    messages
+}
+
 /// Keep the tail of `s` up to `max` chars, snapped to a UTF-8 boundary and
 /// `...`-prefixed. Mirrors pty.rs's private `tail` — duplicated here to avoid
 /// widening the CLI module's visibility just for one helper.
@@ -360,15 +517,12 @@ fn tail(s: &str, max: usize) -> String {
 /// Convert prior conversation turns (ASC by started_at, as returned by
 /// `pty::load_prior_turns`) into kernel-core `Message`s for the ReactAgent's
 /// `run()` history. Each completed/failed turn expands to:
-///   user(prompt) + assistant(text+reasoning, tool calls STRIPPED)  (from blocks)
-///   user(prompt) + assistant(output_summary)                        (legacy fallback)
-///   user(prompt)                                                    (no output at all)
-/// Running turns are skipped (no finalized content yet). Tool calls and their
-/// raw results are NOT replayed into history (see blocks_to_assistant_message),
-/// so the model never copies a prior turn's tool choice by example. When the
-/// result exceeds the message or total-char caps, the OLDEST whole turns are
-/// dropped — turns are never split mid-way, so a prompt and its assistant reply
-/// always travel together.
+///   user(prompt) + assistant(text+reasoning, with tool_calls) + [tool(result)..]  (from blocks)
+///   user(prompt) + assistant(output_summary)                                    (legacy fallback)
+///   user(prompt)                                                                (no output at all)
+/// Running turns are skipped (no finalized content yet). When the result exceeds
+/// the message or total-char caps, the OLDEST whole turns are dropped — turns
+/// are never split mid-way, so a prompt and its assistant reply always travel together.
 pub fn turns_to_history(
     turns: &[Session],
     turn_text_cap: usize,
@@ -384,35 +538,39 @@ pub fn turns_to_history(
         if sess.status == SessionStatus::Running {
             continue;
         }
-        let mut group: Vec<Message> = Vec::with_capacity(2);
-        group.push(Message::user(sess.prompt.clone()));
-
-        let assistant_msg = sess
+        // F2 fix: the user prompt must lead every turn's group. Previously the
+        // success path shadowed the [user] group with blocks_to_history's output
+        // (which is only [assistant, tool..]), dropping the prompt and breaking
+        // the alternating-roles contract (history would start with assistant).
+        let reconstructed: Option<Vec<Message>> = sess
             .blocks
             .as_ref()
             .filter(|v| !v.is_null())
             .and_then(|v| serde_json::from_value::<Vec<ChatStreamEvent>>(v.clone()).ok())
-            .and_then(|blocks| {
-                if blocks.is_empty() {
-                    None
-                } else {
-                    blocks_to_assistant_message(&blocks, turn_text_cap)
-                }
-            })
-            .or_else(|| {
-                // No persisted blocks (raw agent, or pre-G1 session) → fall back
-                // to the text-only summary so the model at least sees the reply.
+            .map(|blocks| blocks_to_history(&blocks, turn_text_cap));
+
+        let group: Vec<Message> = match reconstructed {
+            Some(messages) if !messages.is_empty() => {
+                // user prompt + reconstructed [assistant, tool..]
+                let mut g = Vec::with_capacity(messages.len() + 1);
+                g.push(Message::user(sess.prompt.clone()));
+                g.extend(messages);
+                g
+            }
+            Some(_) => {
+                // blocks parsed but yielded nothing (all meta-events) → output_summary fallback
                 sess.output_summary
                     .as_deref()
                     .filter(|s| !s.is_empty())
-                    .map(|s| Message::assistant(tail(s, turn_text_cap)))
-            });
+                    .map(|s| vec![Message::user(sess.prompt.clone()), Message::assistant(tail(s, turn_text_cap))])
+                    .unwrap_or_else(|| vec![Message::user(sess.prompt.clone())])
+            }
+            None => {
+                // No persisted blocks at all → just the user prompt.
+                vec![Message::user(sess.prompt.clone())]
+            }
+        };
 
-        if let Some(msg) = assistant_msg {
-            group.push(msg);
-        }
-        // A turn with only a user prompt (no assistant reply recorded) is still
-        // useful context — the model learns the user asked this. Keep it.
         groups.push(group);
     }
 
@@ -443,75 +601,6 @@ pub fn turns_to_history(
         out.extend(group.iter().cloned());
     }
     out
-}
-
-/// Turn one prior session's persisted blocks back into a SINGLE assistant
-/// message — text + reasoning only. ToolUse/ToolResult are deliberately
-/// DROPPED from history for two reasons:
-///
-///   1. Context bloat — a raw tool result (a file body, a command's stdout) can
-///      be kilobytes; replaying every prior tool call+result across turns fills
-///      the window with content the model rarely needs verbatim.
-///   2. Tool-selection pollution — replaying a prior tool_call teaches the model
-///      "this is how we do X here" by example, so it re-plays the same command
-///      (e.g. claude_code's `bash lark-cli`) instead of routing through the
-///      matching skill abstraction (skill__lark-doc). The CLI path already
-///      avoids this — it carries only a text summary — so the kernel path now
-///      matches; the base system prompt reinforces it with explicit discipline.
-///
-/// A turn whose blocks are ALL tool calls (no assistant prose, no reasoning)
-/// yields None: nothing survives the strip, and emitting an empty assistant
-/// message would be vacuous (some providers reject empty assistant turns).
-fn blocks_to_assistant_message(
-    blocks: &[ChatStreamEvent],
-    text_cap: usize,
-) -> Option<Message> {
-    // Defect ③: validate pairing integrity before stripping tool_use/tool_result.
-    // Orphaned pairs indicate a cut-short stream (crash/interrupt); warn so the
-    // violation surfaces instead of being silently buried in the stripped output.
-    let violations = validate_block_pairs(blocks);
-    for v in &violations {
-        log::warn!(
-            "[blocks_to_assistant_message] pairing violation (session blocks): {}",
-            v.detail()
-        );
-    }
-
-    let mut text_chunks: Vec<&str> = Vec::new();
-    let mut reasoning_chunks: Vec<&str> = Vec::new();
-    for ev in blocks {
-        match ev {
-            ChatStreamEvent::Text { content } => text_chunks.push(content.as_str()),
-            ChatStreamEvent::Thinking { content } => reasoning_chunks.push(content.as_str()),
-            // Stripped from history — see the doc comment above.
-            ChatStreamEvent::ToolUse { .. } | ChatStreamEvent::ToolResult { .. } => {}
-            ChatStreamEvent::Result { .. } => {} // terminal marker, not history content
-            ChatStreamEvent::FileChanged { .. } => {} // per-write signal, not history prose
-            ChatStreamEvent::Compact { .. } => {} // compaction meta-event, not history prose
-            ChatStreamEvent::ApprovalRequired { .. } => {} // Human-Gate control signal, not history
-        }
-    }
-
-    let assistant_text = tail(&text_chunks.join(""), text_cap);
-    // Reassembled reasoning trace (opaque history that carried thinking blocks).
-    // No signature survives the wire round-trip, so a replayed thinking block is
-    // unsigned — only consequential once an opaque CLI actually emits thinking.
-    let assistant_reasoning = tail(&reasoning_chunks.join(""), text_cap);
-    if assistant_text.is_empty() && assistant_reasoning.is_empty() {
-        return None;
-    }
-    Some(Message {
-        role: Role::Assistant,
-        content: assistant_text,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        reasoning: if assistant_reasoning.is_empty() {
-            None
-        } else {
-            Some(assistant_reasoning)
-        },
-        reasoning_signature: None,
-    })
 }
 
 #[cfg(test)]
@@ -1036,7 +1125,9 @@ mod tests {
     }
 
     #[test]
-    fn single_turn_with_blocks_strips_tool_calls_keeps_assistant_text() {
+    fn single_turn_with_blocks_preserves_tool_pairs() {
+        // NEW: blocks_to_history preserves tool_use/tool_result pairing instead of
+        // stripping them. Each turn expands to user + assistant(with tool_calls) + [tool(result)..].
         let t = turn(
             "t0",
             "read the file",
@@ -1049,18 +1140,17 @@ mod tests {
             None,
         );
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        // user + assistant ONLY — ToolUse/ToolResult are stripped so the next run
-        // neither bloats context nor copies the prior tool call by example.
-        assert_eq!(out.len(), 2);
+        // user + assistant(with tool_calls) + tool(result) = 3 messages.
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].role, Role::User);
         assert_eq!(out[0].content, "read the file");
         assert_eq!(out[1].role, Role::Assistant);
-        // No tool_calls, no tool messages survive the strip.
-        assert!(out[1].tool_calls.is_empty());
-        assert!(out.iter().all(|m| m.role != Role::Tool));
-        // assistant text = merged text chunks (both kept; the tool block between
-        // them is dropped without splitting the surrounding text).
-        assert!(out[1].content.contains("reading now") && out[1].content.contains("done"));
+        // F1: the FIFO-matched ToolUse appears in assistant.tool_calls.
+        assert_eq!(out[1].tool_calls.len(), 1);
+        assert_eq!(out[2].role, Role::Tool);
+        assert_eq!(out[2].content, "file contents");
+        // tool_result references the same id as the assistant tool_call (F1 invariant).
+        assert_eq!(out[2].tool_call_id.as_deref(), Some(out[1].tool_calls[0].id.as_str()));
     }
 
     #[test]
@@ -1100,10 +1190,9 @@ mod tests {
     }
 
     #[test]
-    fn multiple_tool_uses_and_results_all_stripped() {
-        // With tool calls stripped, several ToolUse + ToolResult in one turn must
-        // collapse to a single assistant text message — no tool_calls, no tool
-        // messages, regardless of how many tools the prior turn ran.
+    fn multiple_tool_uses_and_results_preserves_pairs() {
+        // Two FIFO-matched pairs: assistant carries BOTH tool_calls (F1), and both
+        // results survive without overwriting each other (F3 — synthesized ids).
         let t = turn("t0", "do two things", Some(blocks_json(&[
             ChatStreamEvent::Text { content: "ok".into() },
             ChatStreamEvent::ToolUse { name: "A".into(), input: json!({}), id: None },
@@ -1112,11 +1201,17 @@ mod tests {
             ChatStreamEvent::ToolResult { content: "resB".into(), tool_use_id: None, is_error: false },
         ])), None);
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        assert_eq!(out.len(), 2); // user + assistant only
+        // user(1) + assistant(2 tool_calls)(1) + 2 tool_results = 4 messages.
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].role, Role::User);
         assert_eq!(out[1].role, Role::Assistant);
-        assert!(out[1].tool_calls.is_empty());
-        assert!(out.iter().all(|m| m.role != Role::Tool));
+        assert_eq!(out[1].tool_calls.len(), 2);
         assert_eq!(out[1].content, "ok");
+        assert_eq!(out[2].role, Role::Tool);
+        assert_eq!(out[3].role, Role::Tool);
+        // F3: both pairs survive in ToolUse arrival order (resA then resB).
+        assert_eq!(out[2].content, "resA");
+        assert_eq!(out[3].content, "resB");
     }
 
     #[test]
@@ -1138,6 +1233,7 @@ mod tests {
 
     #[test]
     fn message_count_cap_drops_oldest_whole_turns() {
+        // NEW: Each turn generates 3 messages (user + assistant with tool_calls + tool result).
         // Force the message-count cap by making many turns; assert we never
         // exceed REACT_HISTORY_TOTAL_MESSAGES and never split a turn.
         let turns: Vec<Session> = (0..30)
@@ -1148,8 +1244,7 @@ mod tests {
                     ChatStreamEvent::ToolResult { content: "z".into(), tool_use_id: None, is_error: false },
                 ])), None))
             .collect();
-        // 30 turns × 2 messages (tool calls stripped: user + assistant) = 60 > cap
-        // of 40. The kept prefix is newest.
+        // 30 turns × 3 messages (tool pairs preserved) = 90 > cap of 40.
         let out = turns_to_history(&turns, REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
         assert!(out.len() <= REACT_HISTORY_TOTAL_MESSAGES);
         // Newest turn's prompt must be present; oldest must be gone.
@@ -1159,18 +1254,23 @@ mod tests {
     }
 
     #[test]
-    fn turn_with_only_tool_calls_produces_no_assistant_message() {
-        // A turn whose blocks are entirely tool calls (no Text/Thinking) carries
-        // nothing after the strip → blocks_to_assistant_message returns None, so
-        // the turn keeps ONLY its user message (no fabricated empty assistant,
-        // which some providers reject).
+    fn turn_with_only_tool_calls_keeps_assistant_with_tool_calls() {
+        // F1 fix: a tool-only turn (no assistant text) STILL emits the assistant
+        // message carrying tool_calls — it is NOT dropped. Dropping it would
+        // orphan the tool_result (no preceding tool_use) → provider 400.
         let t = turn("t0", "ask", Some(blocks_json(&[
             ChatStreamEvent::ToolUse { name: "Read".into(), input: json!({}), id: None },
             ChatStreamEvent::ToolResult { content: "file contents".into(), tool_use_id: None, is_error: false },
         ])), None);
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
-        assert_eq!(out.len(), 1); // user only — no assistant message survives
+        // user + assistant(empty text, 1 tool_call) + tool = 3.
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].role, Role::User);
+        assert_eq!(out[1].role, Role::Assistant);
+        assert_eq!(out[1].content, "");
+        assert_eq!(out[1].tool_calls.len(), 1);
+        assert_eq!(out[2].role, Role::Tool);
+        assert_eq!(out[2].content, "file contents");
     }
 
     #[test]
@@ -1215,6 +1315,127 @@ mod tests {
         // Only the settled turn's 2 messages appear.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content, "settled prompt");
+    }
+
+    // ---- blocks_to_history specific unit tests ----
+
+    #[test]
+    fn blocks_to_history_empty_blocks() {
+        assert!(blocks_to_history(&[], REACT_HISTORY_TURN_TEXT_CAP).is_empty());
+    }
+
+    #[test]
+    fn blocks_to_history_text_only() {
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "hello world".into() },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[0].content, "hello world");
+    }
+
+    #[test]
+    fn blocks_to_history_id_matched_pairs() {
+        // Id-based pairing: tool_use_id matches ToolUse.id exactly.
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "processing".into() },
+            ChatStreamEvent::ToolUse { id: Some("t1".into()), name: "Read".into(), input: json!({"path":"x"}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("t1".into()), content: "file body".into(), is_error: false },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 2); // assistant + tool
+        assert_eq!(msgs[0].role, Role::Assistant);
+        // F1 invariant: matched ToolUse MUST appear in assistant.tool_calls —
+        // the tool_result below references "t1", so the assistant must carry it.
+        assert_eq!(msgs[0].tool_calls.len(), 1);
+        assert_eq!(msgs[0].tool_calls[0].id, "t1");
+        assert_eq!(msgs[0].tool_calls[0].function.name, "Read");
+        assert_eq!(msgs[1].role, Role::Tool);
+        assert_eq!(msgs[1].content, "file body");
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn blocks_to_history_fifo_match() {
+        // No ids → FIFO match: first ToolUse gets paired with first ToolResult.
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "ok".into() },
+            ChatStreamEvent::ToolUse { id: None, name: "Bash".into(), input: json!({"cmd":"ls"}) },
+            ChatStreamEvent::ToolResult { tool_use_id: None, content: "out1".into(), is_error: false },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 2); // assistant + tool
+        assert_eq!(msgs[0].role, Role::Assistant);
+        // F1+F5: the FIFO-matched ToolUse appears in tool_calls with a synthesized
+        // non-empty id (never ""), so the tool_result can link back to it.
+        assert_eq!(msgs[0].tool_calls.len(), 1);
+        assert_eq!(msgs[0].tool_calls[0].id, "__fifo_0__");
+        assert_eq!(msgs[1].role, Role::Tool);
+        assert_eq!(msgs[1].content, "out1");
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("__fifo_0__"));
+    }
+
+    #[test]
+    fn blocks_to_history_orphan_ending_in_tool_calls() {
+        // ToolUse without matching result → appears in assistant.tool_calls.
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "done".into() },
+            ChatStreamEvent::ToolUse { id: Some("t1".into()), name: "Write".into(), input: json!({"path":"f"}) },
+            // Missing ToolResult for t1.
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 1); // assistant only, no tool result message
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[0].tool_calls.len(), 1);
+        assert_eq!(msgs[0].tool_calls[0].id, "t1");
+    }
+
+    #[test]
+    fn blocks_to_history_meta_events_dropped() {
+        // Result, FileChanged, Compact, ApprovalRequired → dropped.
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "hi".into() },
+            ChatStreamEvent::Result { is_error: false, secs: 1 },
+            ChatStreamEvent::FileChanged { path: "/x".to_string() },
+            ChatStreamEvent::Compact { summary: "compacted".into(), archived_at: None, dropped_count: 5, is_error: false },
+            ChatStreamEvent::ApprovalRequired { tool: "bash".into(), arguments: "{}".into(), resume_token: "r1".into(), summary: "destr".into() },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 1); // only assistant text
+        assert_eq!(msgs[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn blocks_to_history_truncates_tool_result_content() {
+        let long_content = "x".repeat(5000);
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::ToolUse { id: Some("t1".into()), name: "Read".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("t1".into()), content: long_content, is_error: false },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 2);
+        // F1: matched ToolUse in tool_calls.
+        assert_eq!(msgs[0].tool_calls.len(), 1);
+        assert_eq!(msgs[0].tool_calls[0].id, "t1");
+        assert!(msgs[1].content.len() <= REACT_HISTORY_TURN_TEXT_CAP + 4); // "..." prefix
+    }
+
+    #[test]
+    fn blocks_to_history_preserves_multiple_pairs_order() {
+        // Multiple complete pairs: tool results should appear after assistant.
+        let msgs = blocks_to_history(&[
+            ChatStreamEvent::Text { content: "running".into() },
+            ChatStreamEvent::ToolUse { id: Some("a1".into()), name: "A".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("a1".into()), content: "ra".into(), is_error: false },
+            ChatStreamEvent::ToolUse { id: Some("b2".into()), name: "B".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("b2".into()), content: "rb".into(), is_error: false },
+        ], REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(msgs.len(), 3); // assistant + 2 tool results
+        assert_eq!(msgs[0].role, Role::Assistant);
+        // F1: both matched ToolUses in tool_calls, in arrival order.
+        assert_eq!(msgs[0].tool_calls.len(), 2);
+        assert_eq!(msgs[0].tool_calls[0].id, "a1");
+        assert_eq!(msgs[0].tool_calls[1].id, "b2");
+        // F4: tool results in ToolUse arrival order (a1 then b2).
+        assert_eq!(msgs[1].content, "ra");
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("a1"));
+        assert_eq!(msgs[2].content, "rb");
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("b2"));
     }
 
     // ---- Defect ③: Pairing invariant validation tests ----
