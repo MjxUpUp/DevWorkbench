@@ -14,6 +14,7 @@
 //! knows both sides.
 
 use crate::agents::pty::ChatStreamEvent;
+use crate::kernel_impl::context_compact::summary_with_fence;
 use crate::models::{Session, SessionStatus};
 use kernel_core::{
     AgentEvent, AgentRunStatus, CompactBoundaryMeta, FunctionCall, Message, Role, ToolCall,
@@ -376,11 +377,15 @@ pub(crate) fn blocks_to_history(
     let mut assistant_text = String::new();
     let mut assistant_reasoning = String::new();
 
-    // §4.2 缺项3: collect CompactBoundary markers seen in this turn's blocks.
-    // They're META events (never model history) but must survive into the
-    // rebuilt history as boundary Messages so maybe_compact's
-    // last_boundary_index can locate them on resume — see boundary_message.
-    let mut boundaries: Vec<CompactBoundaryMeta> = Vec::new();
+    // §4.2 缺项3 + resume Compact summary 重建: turn 末尾的 compaction meta
+    // events 按 blocks 出现顺序重建为 [summary(User+fence), boundary(System)] ——
+    // 与 live maybe_compact 的 history 顺序一致(summarize_middle: summary@start,
+    // 然后 maybe_compact insert boundary@start+1)。仅 Summarize path
+    // (is_error=false + 配对 boundary)的 summary 进 history;HardTruncate/
+    // BreakerTripped(is_error)是错误/暂停提示、MicroClear(无 boundary)是 UI
+    // 描述,都不进模型历史。
+    let mut compaction_tail: Vec<Message> = Vec::new();
+    let mut pending_summary: Option<String> = None;
 
     // Ordered record of every ToolUse in arrival order. Tuple:
     //   (synth_id, name, input, matched_result)
@@ -431,26 +436,37 @@ pub(crate) fn blocks_to_history(
                 // Dangling (no matching ToolUse): drop — validate_block_pairs
                 // upstream (session.rs) already warns on the same blocks.
             }
-            // §4.2 缺项3: CompactBoundary — collect the marker (don't drop it).
-            // It's emitted alongside Compact by the compaction sink draining
-            // ArchivedChunk.boundary; appending it to the rebuilt history tail
-            // places the boundary right where compaction happened, so the next
-            // resume's maybe_compact finds it via last_boundary_index.
+            // §4.2 缺项3 + resume summary 重建: CompactBoundary — pair with a
+            // pending Summarize summary (if any) so the rebuilt tail is
+            // [summary(User+fence), boundary(System)], matching live
+            // maybe_compact's history order (summary@start, boundary@start+1).
             ChatStreamEvent::CompactBoundary {
                 trigger,
                 pre_tokens,
                 preserved_count,
             } => {
-                boundaries.push(CompactBoundaryMeta {
+                if let Some(s) = pending_summary.take() {
+                    compaction_tail.push(summary_with_fence(&s));
+                }
+                compaction_tail.push(boundary_message(CompactBoundaryMeta {
                     trigger: trigger.clone(),
                     pre_tokens: *pre_tokens,
                     preserved_count: *preserved_count,
-                });
+                }));
+            }
+            // resume Compact summary 重建: a non-error Compact carries the
+            // Summarize path's summary text — stage it; the following
+            // CompactBoundary (same ArchivedChunk) pairs with it to emit
+            // [summary, boundary]. is_error=true (HardTruncate/BreakerTripped)
+            // is a compaction-failure/pause notice, NOT history — dropped.
+            ChatStreamEvent::Compact { summary, is_error, .. } => {
+                if !is_error {
+                    pending_summary = Some(summary.clone());
+                }
             }
             // Meta-events never entered the model's original history.
             ChatStreamEvent::Result { .. }
             | ChatStreamEvent::FileChanged { .. }
-            | ChatStreamEvent::Compact { .. }
             | ChatStreamEvent::ApprovalRequired { .. } => {}
         }
     }
@@ -524,18 +540,16 @@ pub(crate) fn blocks_to_history(
     // dangling tool_result.)
     let a = &messages[0];
     let vacuous = a.content.is_empty() && a.reasoning.is_none() && a.tool_calls.is_empty();
-    // §4.2 缺项3 exception: a vacuous turn that STILL carries a CompactBoundary
-    // must not collapse to empty — the boundary would vanish and the next resume
-    // would re-compact already-summarized history. Return ONLY the boundary
-    // marker(s); an empty assistant message would corrupt provider role-ordering,
-    // so we drop it and emit the markers alone (callers tolerate a marker-only
-    // turn). The common case (no boundary) still returns Vec::new() unchanged.
+    // §4.2 缺项3 exception + resume summary: a vacuous turn that STILL carries
+    // compaction meta (Compact+CompactBoundary from a Summarize, or a lone
+    // boundary) must not collapse to empty — the summary/boundary would vanish
+    // and the next resume would re-compact already-summarized history AND lose
+    // the prior summary. Return the compaction tail alone (callers tolerate a
+    // meta-only turn). The common case (no compaction) returns Vec::new().
     if vacuous {
-        return boundaries.into_iter().map(boundary_message).collect();
+        return compaction_tail;
     }
-    for meta in boundaries {
-        messages.push(boundary_message(meta));
-    }
+    messages.extend(compaction_tail);
 
     messages
 }
@@ -1582,6 +1596,135 @@ mod tests {
         assert_eq!(msgs.len(), 1, "boundary survives a vacuous turn");
         assert_eq!(msgs[0].role, Role::System);
         assert!(msgs[0].compact_boundary.is_some());
+    }
+
+    #[test]
+    fn blocks_to_history_compact_summary_rebuilds_as_fenced_user_message() {
+        // resume Compact summary 重建: Compact(is_error=false, Summarize path)
+        // + CompactBoundary → [summary(User+反注入围栏), boundary(System)],
+        // matching live maybe_compact's history order (summary@start, then
+        // boundary@start+1). Without this, a resumed session's blocks_to_history
+        // dropped the Compact event and the prior turn's compaction summary was
+        // lost entirely — resume saw the boundary but not what it summarized.
+        let msgs = blocks_to_history(
+            &[
+                ChatStreamEvent::Text { content: "assistant turn".into() },
+                ChatStreamEvent::Compact {
+                    summary: "用户问了 X，我读了 a.rs".into(),
+                    archived_at: None,
+                    dropped_count: 4,
+                    is_error: false,
+                },
+                ChatStreamEvent::CompactBoundary {
+                    trigger: "auto".into(),
+                    pre_tokens: 5000,
+                    preserved_count: 3,
+                },
+            ],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        // assistant + summary(User) + boundary(System); summary BEFORE boundary.
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[1].role, Role::User, "summary rebuilds as a User message");
+        assert!(
+            msgs[1].content.starts_with("[此前对话摘要"),
+            "summary must carry the anti-injection fence preamble; got: {}",
+            msgs[1].content,
+        );
+        assert!(
+            msgs[1].content.contains("用户问了 X，我读了 a.rs"),
+            "fenced summary must contain the original summary text; got: {}",
+            msgs[1].content,
+        );
+        assert_eq!(msgs[2].role, Role::System);
+        assert!(msgs[2].compact_boundary.is_some());
+    }
+
+    #[test]
+    fn blocks_to_history_compact_error_not_rebuilt_into_history() {
+        // is_error=true Compact (HardTruncate / BreakerTripped) carries a
+        // failure/pause notice, NOT a history summary — never rebuilt into the
+        // model's history. Only its paired boundary (if any) survives.
+        let msgs = blocks_to_history(
+            &[
+                ChatStreamEvent::Text { content: "work".into() },
+                ChatStreamEvent::Compact {
+                    summary: "压缩已暂停且仍超上限，紧急丢弃最早历史".into(),
+                    archived_at: None,
+                    dropped_count: 10,
+                    is_error: true,
+                },
+                ChatStreamEvent::CompactBoundary {
+                    trigger: "auto".into(),
+                    pre_tokens: 6000,
+                    preserved_count: 2,
+                },
+            ],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        // assistant + boundary only — the error notice is dropped.
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[1].role, Role::System);
+        assert!(msgs[1].compact_boundary.is_some());
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("紧急丢弃")),
+            "error notice must not enter history",
+        );
+    }
+
+    #[test]
+    fn blocks_to_history_microclear_compact_without_boundary_dropped() {
+        // MicroClear emits Compact(is_error=false) with NO CompactBoundary (no
+        // structural change). Its summary is a UI description ("已压缩 N 条"),
+        // not a history 摘要 — pending_summary never pairs with a boundary and
+        // is dropped at end-of-turn.
+        let msgs = blocks_to_history(
+            &[
+                ChatStreamEvent::Text { content: "turn".into() },
+                ChatStreamEvent::Compact {
+                    summary: "已压缩 3 条陈旧工具输出".into(),
+                    archived_at: None,
+                    dropped_count: 3,
+                    is_error: false,
+                },
+            ],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        // assistant only — the unpaired MicroClear summary is dropped.
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert!(!msgs[0].content.contains("陈旧工具输出"));
+    }
+
+    #[test]
+    fn blocks_to_history_vacuous_turn_compact_returns_summary_and_boundary() {
+        // A turn whose blocks are ONLY Compact+CompactBoundary (no assistant
+        // content) is vacuous but must still rebuild [summary, boundary] —
+        // collapsing to empty would lose both the prior summary AND the boundary
+        // anchor on resume.
+        let msgs = blocks_to_history(
+            &[
+                ChatStreamEvent::Compact {
+                    summary: "上轮摘要".into(),
+                    archived_at: None,
+                    dropped_count: 2,
+                    is_error: false,
+                },
+                ChatStreamEvent::CompactBoundary {
+                    trigger: "auto".into(),
+                    pre_tokens: 7000,
+                    preserved_count: 4,
+                },
+            ],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        assert_eq!(msgs.len(), 2, "vacuous turn returns [summary, boundary]");
+        assert_eq!(msgs[0].role, Role::User);
+        assert!(msgs[0].content.contains("上轮摘要"));
+        assert_eq!(msgs[1].role, Role::System);
+        assert!(msgs[1].compact_boundary.is_some());
     }
 
     #[test]
