@@ -333,6 +333,24 @@ impl Agent for OpaqueAgent {
                     }
                     AgentMsg::Completed { status, exit_code } => {
                         let audit_dir = working_dir.clone();
+
+                        // Defect ③: drain and report pending tool-call orphans before
+                        // emitting Done. Any ToolUse whose result never arrived means
+                        // the stream was cut short (crash/interrupt). Log the orphaned
+                        // pairs so the user sees which tools were not completed.
+                        {
+                            let mut guard = match pending.lock() {
+                                Ok(g) => g,
+                                Err(_) => break,
+                            };
+                            for v in crate::agents::react_chat::drain_pending_orphans(&mut *guard) {
+                                log::warn!(
+                                    "[opaque-agent] stream-end pairing violation: {}",
+                                    v.detail()
+                                );
+                            }
+                        }
+
                         let honesty = tokio::task::spawn_blocking(move || {
                             crate::kernel_impl::honesty::audit_project(
                                 std::path::Path::new(&audit_dir),

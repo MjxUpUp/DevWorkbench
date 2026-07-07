@@ -1,3 +1,4 @@
+use crate::agents::react_chat::validate_block_pairs;
 use crate::error::AppError;
 use crate::models::{AgentType, ContextSnapshot, Conversation, Session, SessionStatus};
 use rusqlite::{params, OptionalExtension};
@@ -497,6 +498,26 @@ pub fn load_turns_for_conversation_db(
     for s in sessions {
         out.push(s?);
     }
+
+    // Defect ③: validate pairing integrity across all loaded sessions' blocks.
+    // Sessions without blocks (raw agent, pre-G1) are skipped; only persisted
+    // structured turns are checked. Orphan pairs indicate a crash/interrupt that
+    // was not captured at stream end.
+    for sess in &out {
+        if let Some(raw_blocks) = &sess.blocks {
+            if let Ok(blocks) = serde_json::from_value::<Vec<crate::agents::pty::ChatStreamEvent>>(raw_blocks.clone()) {
+                let violations = validate_block_pairs(&blocks);
+                for v in &violations {
+                    log::warn!(
+                        "[load_turns_for_conversation_db] pairing violation (session {}): {}",
+                        sess.id,
+                        v.detail()
+                    );
+                }
+            }
+        }
+    }
+
     Ok(out)
 }
 

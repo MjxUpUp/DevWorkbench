@@ -21,6 +21,118 @@ use kernel_core::{
 use serde_json::Value;
 use std::collections::VecDeque;
 
+// ---------------------------------------------------------------------------
+// Defect ③: Pairing invariant check — orphans detected, not silently stripped.
+// ---------------------------------------------------------------------------
+
+/// Describes a tool-call pair violation found during validation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PairingViolation {
+    /// A ToolUse exists but its ToolResult never arrived (interrupt/crash).
+    OrphanToolCall { id: Option<String>, name: String },
+    /// A ToolResult has no matching ToolUse in the block list.
+    DanglingToolResult { id: Option<String> },
+}
+
+impl PairingViolation {
+    pub(crate) fn detail(&self) -> String {
+        match self {
+            Self::OrphanToolCall { id, name } => format!(
+                "Orphaned ToolUse(id={:?}, name=\"{}\"): no matching ToolResult arrived (stream cut short)",
+                id, name
+            ),
+            Self::DanglingToolResult { id } => format!(
+                "Dangling ToolResult(id={:?}): no matching ToolUse in blocks",
+                id
+            ),
+        }
+    }
+}
+
+/// Validate pairing integrity of a flat slice of `ChatStreamEvent` blocks.
+/// Returns any violations found (empty = all pairs balanced).
+///
+/// Two violation kinds:
+/// - OrphanToolCall: a ToolUse whose ToolResult never arrived (stream cut short)
+/// - DanglingToolResult: a ToolResult with no matching ToolUse before it in the sequence
+pub(crate) fn validate_block_pairs(blocks: &[ChatStreamEvent]) -> Vec<PairingViolation> {
+    // Track id → index mapping for fast lookup.
+    let mut tool_use_by_id: std::collections::HashMap<&str, (usize, Option<String>, String)> =
+        std::collections::HashMap::new();
+    let mut fifo_stack: Vec<(usize, String)> = Vec::new();
+    // ids of results that arrived without a prior ToolUse declaration.
+    let mut dangling_result_ids: Vec<Option<String>> = Vec::new();
+
+    for (i, ev) in blocks.iter().enumerate() {
+        match ev {
+            ChatStreamEvent::ToolUse { id, name, .. } => {
+                if let Some(tid) = id {
+                    tool_use_by_id.insert(tid.as_str(), (i, Some(tid.clone()), name.clone()));
+                } else {
+                    fifo_stack.push((i, name.clone()));
+                }
+            }
+            ChatStreamEvent::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
+                // Skip error results (is_error=true means stream was cut at this result)
+                if *is_error {
+                    continue;
+                }
+                match tool_use_id {
+                    Some(tid) => {
+                        // Was there a prior ToolUse with this id? Check only blocks before current position.
+                        let has_prior_decl = blocks[..i].iter().any(|b| matches!(b, ChatStreamEvent::ToolUse { id: Some(oid), .. } if oid.as_str() == tid));
+                        if has_prior_decl {
+                            tool_use_by_id.remove(tid.as_str());
+                        } else {
+                            // This result arrived before its ToolUse declaration.
+                            dangling_result_ids.push(Some(tid.clone()));
+                        }
+                    }
+                    None => {
+                        // FIFO: pop the oldest id-less ToolUse.
+                        if fifo_stack.remove(0).1.is_empty() {
+                            /* consumed */
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut violations: Vec<PairingViolation> = Vec::new();
+    // Remaining in tool_use_by_id → orphaned ToolCalls (no result arrived).
+    for (_id, (_, uid, name)) in tool_use_by_id {
+        violations.push(PairingViolation::OrphanToolCall { id: uid, name });
+    }
+    // FIFO stack remaining → also orphans.
+    for (_idx, name) in fifo_stack {
+        violations.push(PairingViolation::OrphanToolCall { id: None, name });
+    }
+    // Results that arrived without prior ToolUse declaration → dangling.
+    for rid in &dangling_result_ids {
+        violations.push(PairingViolation::DanglingToolResult { id: rid.clone() });
+    }
+
+    violations
+}
+
+/// Drain pending_tools and return descriptions of any orphaned entries.
+/// Call at end-of-stream (after the last ChatStreamEvent) to catch cuts-short pairs.
+pub(crate) fn drain_pending_orphans(
+    pending_tools: &mut VecDeque<(Option<String>, String, String)>,
+) -> Vec<PairingViolation> {
+    let mut orphans = Vec::new();
+    while let Some((id, name, _args)) = pending_tools.pop_front() {
+        orphans.push(PairingViolation::OrphanToolCall { id, name });
+    }
+    orphans
+}
+
 /// Map one kernel-core `AgentEvent` to zero or more chat wire events for the
 /// `agent:event` channel. Pure + testable: the caller passes `secs` (elapsed
 /// since the run started) so the Result block's duration is deterministic under
@@ -354,6 +466,17 @@ fn blocks_to_assistant_message(
     blocks: &[ChatStreamEvent],
     text_cap: usize,
 ) -> Option<Message> {
+    // Defect ③: validate pairing integrity before stripping tool_use/tool_result.
+    // Orphaned pairs indicate a cut-short stream (crash/interrupt); warn so the
+    // violation surfaces instead of being silently buried in the stripped output.
+    let violations = validate_block_pairs(blocks);
+    for v in &violations {
+        log::warn!(
+            "[blocks_to_assistant_message] pairing violation (session blocks): {}",
+            v.detail()
+        );
+    }
+
     let mut text_chunks: Vec<&str> = Vec::new();
     let mut reasoning_chunks: Vec<&str> = Vec::new();
     for ev in blocks {
@@ -1092,5 +1215,112 @@ mod tests {
         // Only the settled turn's 2 messages appear.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content, "settled prompt");
+    }
+
+    // ---- Defect ③: Pairing invariant validation tests ----
+
+    #[test]
+    fn validate_block_pairs_empty_is_clean() {
+        let blocks: Vec<ChatStreamEvent> = vec![ChatStreamEvent::Text { content: "hello".into() }];
+        let violations = validate_block_pairs(&blocks);
+        assert!(violations.is_empty(), "non-tool events do not trigger violations");
+    }
+
+    #[test]
+    fn validate_block_pairs_complete_pair_is_clean() {
+        let blocks = vec![
+            ChatStreamEvent::ToolUse { id: Some("u1".into()), name: "Read".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("u1".into()), content: "file body".into(), is_error: false },
+        ];
+        let violations = validate_block_pairs(&blocks);
+        assert!(violations.is_empty(), "complete pair must not trigger violations");
+    }
+
+    #[test]
+    fn validate_block_pairs_orphan_tool_call_detected() {
+        // ToolUse without matching result → orphan.
+        let blocks = vec![
+            ChatStreamEvent::ToolUse { id: Some("u1".into()), name: "Read".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("u2".into()), content: "ok".into(), is_error: false }, // matches nothing — dangling, not orphaned read
+            // u1 has no result → orphan
+        ];
+        let violations = validate_block_pairs(&blocks);
+        assert_eq!(violations.len(), 2, "expecting 1 orphan + 1 dangling");
+
+        let orphans: Vec<_> = violations.iter().filter_map(|v| match v {
+            PairingViolation::OrphanToolCall { .. } => Some(v),
+            _ => None,
+        }).collect();
+        assert_eq!(orphans.len(), 1);
+        match &orphans[0] {
+            PairingViolation::OrphanToolCall { id, name } => {
+                assert_eq!(id.as_deref(), Some("u1"));
+                assert_eq!(name.as_str(), "Read");
+            }
+            _ => panic!("expected OrphanToolCall"),
+        }
+
+        let dangling: Vec<_> = violations.iter().filter_map(|v| match v {
+            PairingViolation::DanglingToolResult { .. } => Some(v),
+            _ => None,
+        }).collect();
+        assert_eq!(dangling.len(), 1);
+    }
+
+    #[test]
+    fn validate_block_pairs_dangling_result_detected() {
+        // Result appears before its ToolUse → dangling.
+        let blocks = vec![
+            ChatStreamEvent::ToolResult { tool_use_id: Some("u1".into()), content: "ok".into(), is_error: false },
+            ChatStreamEvent::ToolUse { id: Some("u1".into()), name: "Read".into(), input: json!({}) },
+        ];
+        let violations = validate_block_pairs(&blocks);
+        assert_eq!(violations.len(), 1, "result before tool_use → dangling");
+        assert!(matches!(&violations[0], PairingViolation::DanglingToolResult { id: Some(id) } if id == "u1"));
+    }
+
+    #[test]
+    fn validate_block_pairs_fifo_orphan_detected() {
+        // FIFO path: id-less ToolUse without result.
+        let blocks = vec![
+            ChatStreamEvent::ToolUse { id: None, name: "Bash".into(), input: json!({}) },
+        ];
+        let violations = validate_block_pairs(&blocks);
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(&violations[0], PairingViolation::OrphanToolCall { id: None, name } if name == "Bash"));
+    }
+
+    #[test]
+    fn validate_block_pairs_error_result_ignored() {
+        // is_error=true results are skipped — they mark the cut point, not a dangling result.
+        let blocks = vec![
+            ChatStreamEvent::ToolUse { id: Some("u1".into()), name: "Read".into(), input: json!({}) },
+            ChatStreamEvent::ToolResult { tool_use_id: Some("u1".into()), content: "boom".into(), is_error: true },
+        ];
+        let violations = validate_block_pairs(&blocks);
+        assert!(violations.is_empty(), "error result does not create dangling or orphan");
+    }
+
+    #[test]
+    fn drain_pending_orphans_finds_all() {
+        let mut pending = VecDeque::new();
+        pending.push_back((Some("a".into()), "Read".to_string(), "{}".to_string()));
+        pending.push_back((None, "Bash".to_string(), "ls".to_string()));
+        pending.push_back((Some("b".into()), "Edit".to_string(), "{}".to_string()));
+
+        let violations = drain_pending_orphans(&mut pending);
+        assert_eq!(violations.len(), 3);
+        // All should be OrphanToolCall.
+        for v in &violations {
+            assert!(matches!(v, PairingViolation::OrphanToolCall { .. }));
+        }
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn drain_pending_orphans_empty_when_all_paired() {
+        let mut pending = VecDeque::new();
+        let violations = drain_pending_orphans(&mut pending);
+        assert!(violations.is_empty(), "empty queue → no orphans");
     }
 }
