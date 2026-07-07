@@ -88,6 +88,15 @@ pub struct ToolCallEvent {
     /// Raw arguments as observed (may be partial for opaque agents).
     pub arguments: String,
     pub status: ToolCallStatus,
+    /// tool_call_id pairing key. Populated when this event was reverse-mapped
+    /// from a wire that carried an id (OpaqueAgent path: claude stream-json
+    /// `tool_use.id` / gemini `tool_id`, preserved end-to-end via pty
+    /// `to_event`); `None` on the ReactKernel forward path (pairing happens
+    /// inside the kernel — the wire is UI-only there) and on ACP/protocol/test
+    /// construction. `map_agent_event` carries it back to the ChatStreamEvent
+    /// so persisted (DB) blocks keep the id for replay pairing instead of
+    /// degrading to FIFO (defect ① root cause).
+    pub id: Option<String>,
     /// The tool's output — the success payload on `Succeeded`, the error/block
     /// text on `Failed`. `None` for `Started`, or when the emitter reports only
     /// status (e.g. an opaque agent that doesn't parse tool output). The
@@ -174,15 +183,19 @@ mod tests {
             tool: "Read".into(),
             arguments: "{}".into(),
             status: ToolCallStatus::Succeeded,
+            id: None,
             result: Some("the file contents".into()),
         };
         assert_eq!(done.result.as_deref(), Some("the file contents"));
+        assert!(done.id.is_none());
         let started = ToolCallEvent {
             tool: "Read".into(),
             arguments: "{}".into(),
             status: ToolCallStatus::Started,
+            id: Some("toolu_x".into()),
             result: None,
         };
         assert!(started.result.is_none());
+        assert_eq!(started.id.as_deref(), Some("toolu_x"));
     }
 }

@@ -787,11 +787,13 @@ pub enum ChatStreamEvent {
     Thinking { content: String },
     #[serde(rename = "tool_use")]
     ToolUse {
-        /// tool_call_id pairing key. Populated on the OpaqueAgent path (claude
-        /// wire carries `id`); None on the ReactKernel forward path
-        /// (`ToolCallEvent` has no id — pairing happens inside the kernel, the
-        /// wire is UI-only there). `Option` + `skip_serializing_if` keeps the
-        /// wire clean and lets pre-id session blocks deserialize unchanged.
+        /// tool_call_id pairing key. Populated end-to-end on BOTH paths now:
+        /// OpaqueAgent (claude wire `id` / gemini `tool_id`, preserved via pty
+        /// `to_event`) AND ReactKernel (`ToolCall.id` — the LLM-issued
+        /// correlation id — forwarded into `ToolCallEvent.id` by react_agent,
+        /// so DB replay pairs by id instead of degrading to FIFO). `Option` +
+        /// `skip_serializing_if` keeps the wire clean and lets pre-id session
+        /// blocks deserialize unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,

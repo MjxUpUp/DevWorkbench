@@ -45,20 +45,24 @@ pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
         AgentEvent::Reasoning(s) => vec![ChatStreamEvent::Thinking { content: s }],
         AgentEvent::ToolCall(tc) => match tc.status {
             ToolCallStatus::Started => vec![ChatStreamEvent::ToolUse {
-                // ReactKernel forward path: ToolCallEvent carries no id (pairing
-                // is tracked inside the kernel). id stays None here — only the
-                // OpaqueAgent reverse path (to_event from claude wire) fills it.
-                id: None,
+                // id round-trips end-to-end on BOTH paths: OpaqueAgent (claude
+                // wire `id` / gemini `tool_id`, preserved via pty to_event →
+                // chat_event_to_agent_events → here) AND ReactKernel (ToolCall.id
+                // → ToolCallEvent.id, forwarded by react_agent). None only for
+                // legacy/pre-id wire or ACP/test construction. Carrying it here
+                // keeps persisted (DB) blocks pairable on replay by id instead
+                // of degrading to FIFO (defect ①).
+                id: tc.id.clone(),
                 name: tc.tool,
                 input: parse_tool_arguments(&tc.arguments),
             }],
             ToolCallStatus::Succeeded => vec![ChatStreamEvent::ToolResult {
-                tool_use_id: None,
+                tool_use_id: tc.id.clone(),
                 content: tc.result.unwrap_or_else(|| "(ok)".to_string()),
                 is_error: false,
             }],
             ToolCallStatus::Failed => vec![ChatStreamEvent::ToolResult {
-                tool_use_id: None,
+                tool_use_id: tc.id.clone(),
                 content: tc.result.unwrap_or_else(|| "(failed)".to_string()),
                 is_error: true,
             }],
@@ -135,6 +139,9 @@ pub fn chat_event_to_agent_events(
                 tool: name.clone(),
                 arguments: args,
                 status: ToolCallStatus::Started,
+                // Carry the wire id through so map_agent_event can re-emit it on
+                // the persisted ChatStreamEvent (DB replay pairs by id, not FIFO).
+                id: id.clone(),
                 result: None,
             })]
         }
@@ -153,8 +160,8 @@ pub fn chat_event_to_agent_events(
                 None => pending_tools.pop_front(),
             };
             match paired {
-                // Paired: restore name/arguments from the matched ToolUse.
-                Some((_id, name, args)) => {
+                // Paired: restore name/arguments/id from the matched ToolUse.
+                Some((id, name, args)) => {
                     let status = if *is_error {
                         ToolCallStatus::Failed
                     } else {
@@ -164,6 +171,9 @@ pub fn chat_event_to_agent_events(
                         tool: name,
                         arguments: args,
                         status,
+                        // The matched ToolUse's id — carried through so the
+                        // forward map re-emits tool_use_id on the persisted block.
+                        id,
                         // claude's ToolResult.content IS the real tool output —
                         // carry it through so downstream renders the actual result.
                         result: Some(content.clone()),
@@ -432,6 +442,7 @@ mod tests {
             tool: "Read".to_string(),
             arguments: r#"{"file_path":"/a.txt"}"#.to_string(),
             status: ToolCallStatus::Started,
+            id: None,
             result: None,
         });
         let out = map_agent_event(ev, 0);
@@ -446,11 +457,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_started_carries_id_to_tool_use() {
+        // The pairing key round-trips through the forward map: a Started event
+        // carrying an id (OpaqueAgent reverse-map path) must surface as the
+        // ToolUse wire block's id so persisted (DB) blocks stay pairable by id
+        // on replay instead of degrading to FIFO (defect ①). The id=None case
+        // (legacy/pre-id wire) still maps to None — covered by the test above.
+        let ev = AgentEvent::ToolCall(ToolCallEvent {
+            tool: "Read".to_string(),
+            arguments: "{}".to_string(),
+            status: ToolCallStatus::Started,
+            id: Some("toolu_abc".to_string()),
+            result: None,
+        });
+        let out = map_agent_event(ev, 0);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ChatStreamEvent::ToolUse { id, .. } => {
+                assert_eq!(id.as_deref(), Some("toolu_abc"));
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn tool_call_succeeded_maps_to_ok_result() {
         let ev = AgentEvent::ToolCall(ToolCallEvent {
             tool: "Bash".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Succeeded,
+            id: None,
             result: None,
         });
         let out = map_agent_event(ev, 0);
@@ -472,6 +508,7 @@ mod tests {
             tool: "Read".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Succeeded,
+            id: None,
             result: Some("the file contents".to_string()),
         });
         let out = map_agent_event(ev, 0);
@@ -491,6 +528,7 @@ mod tests {
             tool: "Read".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Failed,
+            id: None,
             result: Some("permission denied".to_string()),
         });
         let out = map_agent_event(ev, 0);
@@ -510,6 +548,7 @@ mod tests {
             tool: "Bash".to_string(),
             arguments: "{}".to_string(),
             status: ToolCallStatus::Failed,
+            id: None,
             result: None,
         });
         let out = map_agent_event(ev, 0);

@@ -938,22 +938,26 @@ pub fn stop_agent_session(
 /// Append a synthetic error `tool_result` for every trailing `tool_use` that
 /// has no matching result — the interrupt pre-empted the tool mid-flight. The
 /// persisted transcript must stay internally consistent for BlocksView replay
-/// (a tool_use card with no result card looks stuck). Pairing is positional:
-/// a trailing run of `tool_use` blocks with no `tool_result` after them is the
-/// only orphan case; any other block ends the unmatched tail.
+/// (a tool_use card with no result card looks stuck). Each synthesized result
+/// carries the SAME `tool_use_id` as its `tool_use` card (both paths fill id
+/// now — OpaqueAgent wire id and ReactKernel ToolCall.id); `None` only for
+/// legacy/pre-id wire. Preserves replay pairing by id instead of degrading to FIFO.
+/// The orphan tail is the only case: any non-`tool_use` block ends it.
 fn synthesize_interrupt_tool_results(
     mut events: Vec<pty::ChatStreamEvent>,
 ) -> Vec<pty::ChatStreamEvent> {
-    let mut pending = 0usize;
+    // Collect the trailing tool_use ids back-to-front, then reverse so the
+    // synthesized results align with their cards in original order.
+    let mut orphan_ids: Vec<Option<String>> = Vec::new();
     for ev in events.iter().rev() {
         match ev {
-            pty::ChatStreamEvent::ToolUse { .. } => pending += 1,
+            pty::ChatStreamEvent::ToolUse { id, .. } => orphan_ids.push(id.clone()),
             _ => break,
         }
     }
-    for _ in 0..pending {
+    for id in orphan_ids.into_iter().rev() {
         events.push(pty::ChatStreamEvent::ToolResult {
-            tool_use_id: None,
+            tool_use_id: id,
             content: "[已中断：用户停止了本次会话]".into(),
             is_error: true,
         });
@@ -1113,6 +1117,43 @@ mod tests {
                 }
                 _ => panic!("expected ToolResult, got {ev:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn synthesize_interrupt_carries_tool_use_id_when_present() {
+        // A trailing tool_use that CARRIED an id (OpaqueAgent path) must get a
+        // synthetic result with the SAME id — so replay pairing holds by id
+        // instead of degrading to FIFO (defect ①). Both OpaqueAgent (wire id)
+        // and ReactKernel (ToolCall.id) fill id now; None only for legacy/pre-id
+        // wire (covered by the test above). Order must align: the synthesized
+        // results mirror their tool_use cards positionally.
+        let events = vec![
+            pty::ChatStreamEvent::ToolUse {
+                id: Some("toolu_xyz".into()),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            pty::ChatStreamEvent::ToolUse {
+                id: Some("toolu_abc".into()),
+                name: "read_file".into(),
+                input: serde_json::json!({"file_path": "a.rs"}),
+            },
+        ];
+        let out = synthesize_interrupt_tool_results(events);
+        assert_eq!(out.len(), 4, "2 originals + 2 synthetic results");
+        match &out[2] {
+            pty::ChatStreamEvent::ToolResult { tool_use_id, is_error, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("toolu_xyz"));
+                assert!(is_error, "synthetic result must be error");
+            }
+            _ => panic!("expected ToolResult at [2], got {:?}", out[2]),
+        }
+        match &out[3] {
+            pty::ChatStreamEvent::ToolResult { tool_use_id, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("toolu_abc"));
+            }
+            _ => panic!("expected ToolResult at [3], got {:?}", out[3]),
         }
     }
 

@@ -2021,12 +2021,14 @@ mod tests {
                 tool: "Read".into(),
                 arguments: r#"{"file_path":"/x"}"#.into(),
                 status: ToolCallStatus::Started,
+                id: None,
                 result: None,
             })),
             Ok(AgentEvent::ToolCall(ToolCallEvent {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                id: None,
                 result: None,
             })),
         ])
@@ -2103,12 +2105,14 @@ mod tests {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Started,
+                id: None,
                 result: None,
             })),
             Ok(AgentEvent::ToolCall(ToolCallEvent {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                id: None,
                 result: None,
             })),
             Ok(AgentEvent::Done(AgentOutcome {

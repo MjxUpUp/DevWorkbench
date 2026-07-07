@@ -448,6 +448,7 @@ async fn execute_one_call(
                     tool: call.function.name.clone(),
                     arguments: call.function.arguments.clone(),
                     status: kernel_core::ToolCallStatus::Failed,
+                    id: Some(call.id.clone()),
                     result: Some(blocked_msg.clone()),
                 });
                 Some(blocked_msg)
@@ -496,6 +497,7 @@ async fn execute_one_call(
                     tool: call.function.name.clone(),
                     arguments: call.function.arguments.clone(),
                     status: kernel_core::ToolCallStatus::Failed,
+                    id: Some(call.id.clone()),
                     result: Some(g.clone()),
                 });
                 (g, None)
@@ -507,6 +509,7 @@ async fn execute_one_call(
                             tool: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                             status: kernel_core::ToolCallStatus::Succeeded,
+                            id: Some(call.id.clone()),
                             result: Some(out.clone()),
                         });
                         let fc = match &action {
@@ -523,6 +526,7 @@ async fn execute_one_call(
                             tool: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                             status: kernel_core::ToolCallStatus::Failed,
+                            id: Some(call.id.clone()),
                             result: Some(err.clone()),
                         });
                         (err, None)
@@ -1900,6 +1904,7 @@ impl kernel_core::Agent for ReactAgent {
                             tool: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                             status: kernel_core::ToolCallStatus::Started,
+                            id: Some(call.id.clone()),
                             result: None,
                         });
                     }
@@ -1932,6 +1937,7 @@ impl kernel_core::Agent for ReactAgent {
                             tool: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                             status: kernel_core::ToolCallStatus::Started,
+                            id: Some(call.id.clone()),
                             result: None,
                         });
                         let o =
