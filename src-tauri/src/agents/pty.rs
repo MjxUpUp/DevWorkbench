@@ -1147,30 +1147,46 @@ fn inject_conversation_context(
         return prompt.to_string();
     }
 
-    // Render each turn into a compact block, then trim from the front until the
-    // total fits the cap (keep the newest — the active thread of work).
+    // Defect ④ unified rebuild: reuse the central rebuilder
+    // (react_chat::rebuild_turn_messages → blocks_to_history — the SAME path
+    // ReactKernel's turns_to_history uses) instead of a separate
+    // output_summary-only branch. OpaqueAgent now inherits tool-call context
+    // from persisted blocks, not just the summary text tail. Each turn is
+    // rebuilt to Message[] then rendered to a compact text block.
     let blocks: Vec<String> = prior_turns
         .iter()
         .map(|t| {
-            let output = t
-                .output_summary
-                .as_deref()
-                .map(|s| tail(s, CONTEXT_BRIDGE_OUTPUT_MAX_CHARS))
-                .unwrap_or_default();
-            format!(
-                "[Turn — agent: {}]\nUser: {}\nAssistant:\n{}",
-                t.agent_type.display_name(),
-                t.prompt.trim(),
-                output.trim(),
-            )
+            let msgs = crate::agents::react_chat::rebuild_turn_messages(
+                t,
+                CONTEXT_BRIDGE_OUTPUT_MAX_CHARS,
+            );
+            render_turn_text(t, &msgs)
         })
+        .filter(|s| !s.is_empty())
         .collect();
 
+    if blocks.is_empty() {
+        return prompt.to_string();
+    }
+
+    // Trim until the total fits the cap, keeping the newest turns (the active
+    // thread of work). When only one turn remains and it STILL exceeds the cap
+    // (defect ④: a unified blocks rebuild can make a single turn large — a long
+    // prompt plus several tool results), tail-truncate that turn rather than
+    // hand the CLI a bloated prompt.
     let mut selected: Vec<String> = blocks.to_vec();
-    while selected.iter().map(|b| b.len()).sum::<usize>() > CONTEXT_BRIDGE_TOTAL_MAX_CHARS
-        && selected.len() > 1
-    {
-        selected.remove(0);
+    loop {
+        let total: usize = selected.iter().map(|b| b.len()).sum();
+        if total <= CONTEXT_BRIDGE_TOTAL_MAX_CHARS {
+            break;
+        }
+        if selected.len() > 1 {
+            selected.remove(0);
+        } else {
+            let only = selected.remove(0);
+            selected.push(tail(&only, CONTEXT_BRIDGE_TOTAL_MAX_CHARS));
+            break;
+        }
     }
 
     let history = selected.join("\n\n");
@@ -1179,8 +1195,45 @@ fn inject_conversation_context(
     )
 }
 
+/// Render one prior turn's rebuilt `Message[]` (from `rebuild_turn_messages`)
+/// into a compact text block for the CLI subprocess prompt. Messages are
+/// flattened by role (User/Assistant/Tool); assistant tool calls are noted by
+/// name so the CLI agent sees what was already tried. CompactBoundary System
+/// markers are META (they never reach the model) and are skipped here.
+fn render_turn_text(sess: &Session, msgs: &[kernel_core::Message]) -> String {
+    let mut body = String::new();
+    for m in msgs {
+        let line = match m.role {
+            kernel_core::Role::User => format!("User: {}", m.content.trim()),
+            kernel_core::Role::Assistant => {
+                let mut s = format!("Assistant: {}", m.content.trim());
+                if !m.tool_calls.is_empty() {
+                    let names: Vec<&str> =
+                        m.tool_calls.iter().map(|tc| tc.function.name.as_str()).collect();
+                    s.push_str(&format!("\n[tool calls: {}]", names.join(", ")));
+                }
+                s
+            }
+            kernel_core::Role::Tool => format!("Tool result: {}", m.content.trim()),
+            kernel_core::Role::System => continue, // CompactBoundary marker — META, skip.
+        };
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("[Turn — agent: {}]\n{}", sess.agent_type.display_name(), body)
+}
+
 /// Keep the tail of `s` up to `max` chars, snapped to a UTF-8 boundary and
 /// `...`-prefixed. Mirrors truncate_tail but operates on an already-decoded str.
+/// Used by `inject_conversation_context`'s single-turn over-cap guard: after
+/// defect ④ unified the rebuild, one turn (long prompt + several tool results)
+/// can exceed the total cap, so we tail-trim it rather than hand the CLI a
+/// bloated prompt.
 fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -2792,6 +2845,87 @@ mod tests {
         // The newest turn's marker must be present; the oldest should have been dropped.
         assert!(out.contains("marker-19"), "newest turn preserved: {out}");
         assert!(!out.contains("marker-0"), "oldest turn dropped to fit cap");
+    }
+
+    #[test]
+    fn inject_context_rebuilds_from_blocks_inheriting_tool_calls() {
+        // Defect ④: a prior turn WITH persisted blocks must be rebuilt via the
+        // shared central rebuilder (blocks_to_history, same as ReactKernel's
+        // turns_to_history) — so the OpaqueAgent CLI sees the tool call + result,
+        // not just a flat output_summary tail. mk_turn sets blocks=None; we
+        // override blocks to exercise the rebuild path.
+        let mut t = mk_turn(AgentType::ClaudeCode, "read config", None);
+        t.blocks = Some(serde_json::to_value(vec![
+            ChatStreamEvent::Text { content: "reading config".into() },
+            ChatStreamEvent::ToolUse {
+                id: None,
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "config.toml"}),
+            },
+            ChatStreamEvent::ToolResult {
+                content: "port = 8080".into(),
+                tool_use_id: None,
+                is_error: false,
+            },
+        ]).unwrap());
+        let out = inject_conversation_context("now change the port", &[t], &AgentType::ClaudeCode);
+        assert!(out.contains("read config"), "user prompt rebuilt from blocks: {out}");
+        assert!(out.contains("reading config"), "assistant text rebuilt from blocks: {out}");
+        assert!(
+            out.contains("[tool calls: Read]"),
+            "tool-call name inherited from blocks (not just summary): {out}",
+        );
+        assert!(out.contains("port = 8080"), "tool result inherited from blocks: {out}");
+        assert!(out.contains("now change the port"), "current request appended: {out}");
+    }
+
+    #[test]
+    fn render_turn_text_skips_compact_boundary_and_names_agent() {
+        // CompactBoundary is a System META marker (never reaches the model); the
+        // text render must skip it and keep the agent header + user/assistant.
+        use kernel_core::{Message, Role};
+        let sess = mk_turn(AgentType::Codex, "the prompt", None);
+        let msgs = vec![
+            Message::user("the prompt"),
+            Message::assistant("the reply"),
+            Message {
+                role: Role::System,
+                content: String::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_signature: None,
+                compact_boundary: Some(kernel_core::CompactBoundaryMeta {
+                    trigger: "auto".into(),
+                    pre_tokens: 1000,
+                    preserved_count: 2,
+                }),
+            },
+        ];
+        let out = render_turn_text(&sess, &msgs);
+        assert!(out.contains("[Turn — agent: Codex]"), "agent header present: {out}");
+        assert!(out.contains("User: the prompt"), "user role rendered: {out}");
+        assert!(out.contains("Assistant: the reply"), "assistant role rendered: {out}");
+        // No stray "Tool result" / boundary leak — System META is skipped.
+        assert!(!out.contains("Tool result"), "no tool line when none present: {out}");
+    }
+
+    #[test]
+    fn inject_context_single_turn_over_cap_is_tail_trimmed() {
+        // Defect ④ over-cap guard: when ONE prior turn's rebuilt text exceeds
+        // the total cap, it's tail-trimmed (keep the newest assistant tail)
+        // rather than handed to the CLI verbatim. mk_turn has no blocks so
+        // rebuild falls back to output_summary; make the PROMPT itself huge to
+        // push the single turn's rendered block over the cap.
+        let huge_prompt = "x".repeat(CONTEXT_BRIDGE_TOTAL_MAX_CHARS + 2000);
+        let t = mk_turn(AgentType::ClaudeCode, &huge_prompt, Some("short reply"));
+        let out = inject_conversation_context("current", &[t], &AgentType::ClaudeCode);
+        assert!(
+            out.len() < CONTEXT_BRIDGE_TOTAL_MAX_CHARS + 4096,
+            "single over-cap turn must be tail-trimmed; got {} bytes",
+            out.len(),
+        );
+        assert!(out.contains("current"), "current request survives trim: {out}");
     }
 
     #[test]

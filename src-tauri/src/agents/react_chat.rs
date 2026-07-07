@@ -575,6 +575,68 @@ fn tail(s: &str, max: usize) -> String {
     format!("...{}", &s[start..])
 }
 
+/// Rebuild ONE turn's message group from its persisted blocks (or
+/// output_summary fallback). Shared central rebuilder — used by both agent
+/// paths, which is the defect ④ unification point:
+///   • [`turns_to_history`] — ReactKernel path → structured `Message[]` for the
+///     API;
+///   • `pty::inject_conversation_context` — OpaqueAgent path → rendered to text
+///     for the CLI subprocess.
+/// Both now rebuild from the same `blocks_to_history` core, so OpaqueAgent
+/// inherits tool-call context too instead of only the output_summary text tail.
+///
+/// Returns:
+///   • empty `Vec` for a Running turn (no finalized reply) — callers filter it;
+///   • `[user(prompt), assistant(text+reasoning, tool_calls), tool(result)..]`
+///     when persisted blocks reconstruct successfully;
+///   • `[user(prompt), assistant(output_summary)]` when blocks are absent/empty
+///     but the turn has a finalized summary (legacy / OpaqueAgent turns, or
+///     all-meta blocks) — also fixes a prior hidden bug where the `None` arm
+///     returned only `[user]` and dropped the summary;
+///   • `[user(prompt)]` when there's nothing else to show.
+pub(crate) fn rebuild_turn_messages(sess: &Session, turn_text_cap: usize) -> Vec<Message> {
+    // Skip turns that haven't finalized — they have no assistant reply yet, and
+    // emitting a lone user message would hand the model an unanswered question.
+    if sess.status == SessionStatus::Running {
+        return Vec::new();
+    }
+    // F2 fix: the user prompt must lead every turn's group. blocks_to_history
+    // returns only [assistant, tool..]; we prepend the user prompt so roles
+    // alternate correctly.
+    let reconstructed: Option<Vec<Message>> = sess
+        .blocks
+        .as_ref()
+        .filter(|v| !v.is_null())
+        .and_then(|v| serde_json::from_value::<Vec<ChatStreamEvent>>(v.clone()).ok())
+        .map(|blocks| blocks_to_history(&blocks, turn_text_cap));
+
+    match reconstructed {
+        Some(messages) if !messages.is_empty() => {
+            // user prompt + reconstructed [assistant, tool..]
+            let mut g = Vec::with_capacity(messages.len() + 1);
+            g.push(Message::user(sess.prompt.clone()));
+            g.extend(messages);
+            g
+        }
+        // No usable blocks — None (never persisted), parse failure, or all-meta
+        // events. Fall back to output_summary (the finalized reply) when present;
+        // otherwise the lone user prompt. The `None` arm previously returned only
+        // [user] and dropped the summary — unified here so legacy / OpaqueAgent
+        // turns inherit their output text (matches blocks_none_falls_back...).
+        _ => sess
+            .output_summary
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                vec![
+                    Message::user(sess.prompt.clone()),
+                    Message::assistant(tail(s, turn_text_cap)),
+                ]
+            })
+            .unwrap_or_else(|| vec![Message::user(sess.prompt.clone())]),
+    }
+}
+
 /// Convert prior conversation turns (ASC by started_at, as returned by
 /// `pty::load_prior_turns`) into kernel-core `Message`s for the ReactAgent's
 /// `run()` history. Each completed/failed turn expands to:
@@ -591,49 +653,15 @@ pub fn turns_to_history(
 ) -> Vec<Message> {
     // Build per-turn message groups, oldest-first. Each group is a whole turn:
     // user + assistant (+ its tool messages). Caps operate on whole groups.
-    let mut groups: Vec<Vec<Message>> = Vec::new();
-    for sess in turns {
-        // Skip turns that haven't finalized — they have no assistant reply yet,
-        // and emitting a lone user message would hand the model an unanswered
-        // question as "history".
-        if sess.status == SessionStatus::Running {
-            continue;
-        }
-        // F2 fix: the user prompt must lead every turn's group. Previously the
-        // success path shadowed the [user] group with blocks_to_history's output
-        // (which is only [assistant, tool..]), dropping the prompt and breaking
-        // the alternating-roles contract (history would start with assistant).
-        let reconstructed: Option<Vec<Message>> = sess
-            .blocks
-            .as_ref()
-            .filter(|v| !v.is_null())
-            .and_then(|v| serde_json::from_value::<Vec<ChatStreamEvent>>(v.clone()).ok())
-            .map(|blocks| blocks_to_history(&blocks, turn_text_cap));
-
-        let group: Vec<Message> = match reconstructed {
-            Some(messages) if !messages.is_empty() => {
-                // user prompt + reconstructed [assistant, tool..]
-                let mut g = Vec::with_capacity(messages.len() + 1);
-                g.push(Message::user(sess.prompt.clone()));
-                g.extend(messages);
-                g
-            }
-            Some(_) => {
-                // blocks parsed but yielded nothing (all meta-events) → output_summary fallback
-                sess.output_summary
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| vec![Message::user(sess.prompt.clone()), Message::assistant(tail(s, turn_text_cap))])
-                    .unwrap_or_else(|| vec![Message::user(sess.prompt.clone())])
-            }
-            None => {
-                // No persisted blocks at all → just the user prompt.
-                vec![Message::user(sess.prompt.clone())]
-            }
-        };
-
-        groups.push(group);
-    }
+    // Each turn → its message group (user + assistant [+ tools]). Running turns
+    // yield an empty group (filtered out). Defect ④: rebuild_turn_messages is
+    // shared with pty::inject_conversation_context so both agent paths rebuild
+    // history identically from the same central blocks_to_history.
+    let groups: Vec<Vec<Message>> = turns
+        .iter()
+        .map(|sess| rebuild_turn_messages(sess, turn_text_cap))
+        .filter(|g| !g.is_empty())
+        .collect();
 
     // Greedily keep newest turns until we breach a cap; then stop adding older.
     // This preserves the most recent context (most relevant for a follow-up)
@@ -1231,6 +1259,48 @@ mod tests {
         let out = turns_to_history(&[t], REACT_HISTORY_TURN_TEXT_CAP, REACT_HISTORY_TOTAL_TEXT_CAP);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, Role::User);
+    }
+
+    #[test]
+    fn rebuild_turn_messages_running_empty_blocks_rebuild_none_fallback() {
+        // Defect ④: rebuild_turn_messages is the shared central rebuilder for
+        // both turns_to_history (ReactKernel) and inject_conversation_context
+        // (OpaqueAgent). Lock its three branches directly.
+
+        // Running turn → empty (caller filters). turn() defaults to Completed,
+        // so override to Running.
+        let mut running = turn("r", "p", None, None);
+        running.status = SessionStatus::Running;
+        assert!(rebuild_turn_messages(&running, REACT_HISTORY_TURN_TEXT_CAP).is_empty());
+
+        // Blocks with a tool pair → [user, assistant(tool_calls), tool(result)].
+        let t = turn(
+            "t0",
+            "read the file",
+            Some(blocks_json(&[
+                ChatStreamEvent::Text { content: "reading now".into() },
+                ChatStreamEvent::ToolUse { id: None, name: "Read".into(), input: json!({"file_path":"/x"}) },
+                ChatStreamEvent::ToolResult { content: "file contents".into(), tool_use_id: None, is_error: false },
+            ])),
+            None,
+        );
+        let out = rebuild_turn_messages(&t, REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].role, Role::User);
+        assert_eq!(out[1].role, Role::Assistant);
+        assert_eq!(out[1].tool_calls.len(), 1);
+        assert_eq!(out[2].role, Role::Tool);
+
+        // Bugfix: None blocks + summary → [user, assistant(summary)]. Previously
+        // the `None` arm returned only [user] and dropped the summary (the test
+        // binary's 0xc0000139 hid this — react_chat tests never ran). Unified
+        // here so legacy / OpaqueAgent turns inherit their output text.
+        let legacy = turn("l", "ask", None, Some("the answer is 42"));
+        let out2 = rebuild_turn_messages(&legacy, REACT_HISTORY_TURN_TEXT_CAP);
+        assert_eq!(out2.len(), 2);
+        assert_eq!(out2[0].role, Role::User);
+        assert_eq!(out2[1].role, Role::Assistant);
+        assert_eq!(out2[1].content, "the answer is 42");
     }
 
     #[test]
