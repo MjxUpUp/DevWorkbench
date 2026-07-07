@@ -834,6 +834,7 @@ pub(crate) fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
         } else {
             Some(signature_parts.join(""))
         },
+        compact_boundary: None,
     })
 }
 
@@ -906,6 +907,7 @@ pub(crate) fn handle_sse_line(
                         tool_call_id: None,
                         reasoning: Some(t.to_string()),
                         reasoning_signature: None,
+                        compact_boundary: None,
                     })
             } else if dt == Some("signature_delta") {
                 if let Some(s) = ev
@@ -936,6 +938,7 @@ pub(crate) fn handle_sse_line(
                     tool_call_id: None,
                     reasoning: None,
                     reasoning_signature: Some(s),
+                    compact_boundary: None,
                 });
             }
             let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
@@ -963,6 +966,7 @@ pub(crate) fn handle_sse_line(
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: sig,
+                compact_boundary: None,
             })
         }
         _ => None,

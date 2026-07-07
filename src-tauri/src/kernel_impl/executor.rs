@@ -1011,14 +1011,15 @@ pub(crate) fn build_react_agent(
     };
     let agent = agent
         .with_budget_check(budget_check)
-        // v1.3 C1 + v2.0 fix: summarize the conversation middle once it exceeds a
-        // threshold sized to the MODEL's declared context window (75%), keeping
-        // the last 8 turns verbatim. The old 24k constant only fit GLM-4.6's
-        // 128k window — for an 8k model it never fired (overflow), for a 200k
-        // model it fired far too early (wasted capacity). Window-relative sizing
-        // fixes both; unknown window → conservative 32k default (→ 24k,
-        // unchanged for configs that don't declare one). See `compact_threshold`.
-        .with_context_compaction(compact_threshold(context_window), 8)
+        // v1.3 C1 + B-plan §4.2 缺项4: the compaction hard ceiling is the
+        // model's EFFECTIVE context window — `window − reserved_output` (CCB
+        // `getEffectiveContextWindowSize`), NOT 75% of the window. The soft
+        // trigger then subtracts the 13k autocompact buffer (`trigger_threshold`
+        // in context_compact.rs). Old 75%-then-60% double-discounted to a 90k
+        // trigger on a 200k window (45% utilization); the flat-output-reserve
+        // model compacts at ~167k (84%), matching CCB's 80–92% band. Unknown
+        // window → 24k (legacy default). See `effective_context_window`.
+        .with_context_compaction(effective_context_window(context_window), 8)
         // max_steps 30 — override the ReactAgent default (12). 12 fit focused
         // code edits but starves exploration tasks: reading a PRIVATE Feishu
         // wiki via the authenticated `lark-cli`, the agent burned its whole
@@ -1442,50 +1443,73 @@ mod executor_tests {
     }
 }
 
-/// v2.0: size auto-compaction to the model's REAL context window, not a
-/// hardcoded constant. Returns 75% of the window — headroom for the system
-/// prompt (memory + experience suffix), the thinking budget, tool schemas, and
-/// the output. Unknown/zero window → conservative 32k default (→ 24k threshold,
-/// the old hardcoded value), so behaviour is unchanged for configs that don't
-/// declare a window and the compactor never overflows a small model.
-fn compact_threshold(context_window: Option<usize>) -> usize {
+/// CCB parity (`autoCompact.ts:getEffectiveContextWindowSize`): the model's
+/// declared context window MINUS the output tokens reserved for the model's own
+/// reply + compaction summary. This is the HARD ceiling passed to
+/// `maybe_compact` as `max_tokens`.
+///
+/// The old `75% of window` heuristic **double-discounted**: 200k → 150k hard
+/// ceiling, then `trigger_threshold` took another 60% → 90k soft trigger, so
+/// compaction fired at 45% window utilization. Reserving a flat output budget
+/// instead leaves the full input headroom: 200k − 20k output = **180k effective**
+/// (hard ceiling), then `trigger_threshold` subtracts the 13k autocompact buffer
+/// → **167k soft trigger** (84% utilization — matches CCB, which compacts in
+/// the 80–92% band).
+///
+/// `RESERVED_OUTPUT_TOKENS = 20_000` mirrors CCB `MAX_OUTPUT_TOKENS_FOR_SUMMARY`
+/// (p99.99 of compact-summary output is 17,387 tokens). CCB does
+/// `min(perModelMaxOutput, 20k)`; DW has no per-model maxOutput field, so the
+/// 20k ceiling IS the value. Small windows (no real model declares <40k, but
+/// misconfigs/guard against 0) cap the reserve at `window/4` so a tiny window
+/// isn't entirely eaten by the output reservation (8k → reserve 2k → 6k
+/// effective, vs the old 6k — unchanged for the small-model case). Unknown/zero
+/// window → 24k (the old hardcoded value, backward-compat for configs that
+/// declare no window).
+fn effective_context_window(context_window: Option<usize>) -> usize {
     const DEFAULT_WINDOW: usize = 32_000;
-    const FALLBACK_THRESHOLD: usize = 24_000;
+    const RESERVED_OUTPUT_TOKENS: usize = 20_000;
+    const FALLBACK_EFFECTIVE: usize = 24_000;
     let window = context_window.unwrap_or(DEFAULT_WINDOW);
     if window == 0 {
-        return FALLBACK_THRESHOLD;
+        return FALLBACK_EFFECTIVE;
     }
-    window.saturating_mul(3).saturating_div(4)
+    let reserved = RESERVED_OUTPUT_TOKENS.min(window / 4);
+    window.saturating_sub(reserved)
 }
 
 #[cfg(test)]
 mod compact_threshold_tests {
-    use super::compact_threshold;
+    use super::effective_context_window;
 
     #[test]
     fn unknown_window_falls_back_to_24k_legacy_default() {
         // A model that never declared a window must behave exactly as before —
         // the old hardcoded 24k constant. This is the backward-compat guarantee.
-        assert_eq!(compact_threshold(None), 24_000);
+        assert_eq!(effective_context_window(None), 24_000);
     }
 
     #[test]
-    fn declared_window_uses_75_percent() {
-        // 128k GLM → 96k. Under the old hardcoded 24k the agent compacted with
-        // 72k of unused capacity — the headroom this fix recovers.
-        assert_eq!(compact_threshold(Some(128_000)), 96_000);
-        // 200k Claude → 150k.
-        assert_eq!(compact_threshold(Some(200_000)), 150_000);
-        // 8k small model → 6k. Under the old 24k constant this threshold was
-        // unreachable, so an 8k model would overflow before compaction ever ran.
-        assert_eq!(compact_threshold(Some(8_000)), 6_000);
+    fn large_window_subtracts_flat_20k_output_reserve() {
+        // CCB parity: 200k Claude → 200k − 20k = 180k effective (hard ceiling).
+        // The old 75% gave 150k — this recovers 30k of input headroom.
+        assert_eq!(effective_context_window(Some(200_000)), 180_000);
+        // 128k GLM → 108k (was 96k under 75%).
+        assert_eq!(effective_context_window(Some(128_000)), 108_000);
+    }
+
+    #[test]
+    fn small_window_caps_reserve_at_quarter() {
+        // 8k model: reserve = min(20k, 8k/4=2k) = 2k → 6k effective. The flat
+        // 20k reserve would eat the whole window; the window/4 cap keeps 6k
+        // for input (unchanged from the old 75% = 6k for the small case).
+        assert_eq!(effective_context_window(Some(8_000)), 6_000);
     }
 
     #[test]
     fn zero_window_is_guarded_not_panic() {
-        // A misconfigured `context_window = 0` must not divide-by-zero; fall
-        // back to the legacy threshold rather than crashing the agent build.
-        assert_eq!(compact_threshold(Some(0)), 24_000);
+        // A misconfigured `context_window = 0` must not underflow; fall back to
+        // the legacy effective value rather than crashing the agent build.
+        assert_eq!(effective_context_window(Some(0)), 24_000);
     }
 }
 

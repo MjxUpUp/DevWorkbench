@@ -30,7 +30,7 @@ pub use agent::{
 };
 pub use document::Document;
 pub use error::Error;
-pub use schema::{FunctionCall, Message, Role, ToolCall};
+pub use schema::{CompactBoundaryMeta, FunctionCall, Message, Role, ToolCall};
 pub use traits::{
     ChatModel, CostAccumulator, CostTally, EmbedModel, MessageStream, ModelOptions,
     ThinkingConfig, Tool, ToolContext, ToolInfo,

@@ -1107,6 +1107,7 @@ impl ReactAgent {
                         tool_call_id: Some(call.id.clone()),
                         reasoning: None,
                         reasoning_signature: None,
+                        compact_boundary: None,
                     });
                 }
             }
@@ -1638,6 +1639,32 @@ impl kernel_core::Agent for ReactAgent {
                             if let Ok(mut g) = driver_buf.lock() {
                                 g.push(wire);
                             }
+                            // §4.2 缺项3: emit a CompactBoundary marker alongside
+                            // the Compact card when this chunk structurally changed
+                            // history (summarize / hard-truncate). The marker
+                            // persists into final_blocks so a resumed session's
+                            // blocks_to_history reconstructs a boundary Message and
+                            // maybe_compact skips re-compacting the already-compacted
+                            // segment. MicroClear / BreakerTripped carry no boundary
+                            // (no structural change) → skipped.
+                            if let Some(meta) = &chunk.boundary {
+                                let boundary_wire =
+                                    crate::agents::pty::ChatStreamEvent::CompactBoundary {
+                                        trigger: meta.trigger.clone(),
+                                        pre_tokens: meta.pre_tokens,
+                                        preserved_count: meta.preserved_count,
+                                    };
+                                let _ = app.emit(
+                                    "agent:event",
+                                    serde_json::json!({
+                                        "sessionId": sid,
+                                        "event": &boundary_wire
+                                    }),
+                                );
+                                if let Ok(mut g) = driver_buf.lock() {
+                                    g.push(boundary_wire);
+                                }
+                            }
                         }
                     }
                 }
@@ -1800,6 +1827,7 @@ impl kernel_core::Agent for ReactAgent {
                         Some(turn_reasoning.clone())
                     },
                     reasoning_signature: turn_sig.clone(),
+                    compact_boundary: None,
                 });
                 if turn_tool_calls.is_empty() {
                     final_output = turn_text;
@@ -1854,6 +1882,7 @@ impl kernel_core::Agent for ReactAgent {
                                     tool_call_id: None,
                                     reasoning: None,
                                     reasoning_signature: None,
+                                    compact_boundary: None,
                                 });
                                 // Don't set converged: continue the for-loop so
                                 // the next iteration re-streams with the fed-back
@@ -1927,6 +1956,7 @@ impl kernel_core::Agent for ReactAgent {
                             tool_call_id: Some(o.call_id.clone()),
                             reasoning: None,
                             reasoning_signature: None,
+                            compact_boundary: None,
                         });
                     }
                 } else {
@@ -1958,6 +1988,7 @@ impl kernel_core::Agent for ReactAgent {
                             tool_call_id: Some(o.call_id.clone()),
                             reasoning: None,
                             reasoning_signature: None,
+                            compact_boundary: None,
                         });
                     }
                 }
@@ -2158,6 +2189,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             })
         }
         fn stream(&self, _: &[Message], _: &ModelOptions) -> Result<MessageStream, Error> {
@@ -3078,6 +3110,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             });
             Ok(Box::pin(futures::stream::once(async move { Ok(msg) })))
         }
@@ -3545,6 +3578,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let end_msg = Message::assistant("done");
         let model = ScriptedModel::new(vec![call_msg, end_msg]);
@@ -3884,6 +3918,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let model = ScriptedModel::new(vec![loop_msg; 16]);
         let reg = ToolRegistry::new().with(EchoTool);
@@ -3937,6 +3972,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let model = ScriptedModel::new(vec![loop_msg; 16]);
         let reg = ToolRegistry::new().with(EchoTool);
@@ -3973,6 +4009,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let varied = vec![
             mk("c1", r#"{"text":"a"}"#),
@@ -4096,6 +4133,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             },
             Message::assistant("done, wrote src/a.rs"),
         ]);
@@ -4257,6 +4295,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
         let model = CapturingModel::new(vec![turn0, Message::assistant("done")], seen.clone());
@@ -4503,6 +4542,7 @@ mod tests {
             tool_call_id: None,
             reasoning: Some("thought".into()),
             reasoning_signature: Some("sig9".into()),
+            compact_boundary: None,
         }];
         let body2 = model.build_body("glm-4.6", &prior, &ModelOptions::default(), false);
         let assistant = &body2["messages"][0];
@@ -4556,6 +4596,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let tool_a = Message {
             role: Role::Tool,
@@ -4564,6 +4605,7 @@ mod tests {
             tool_call_id: Some("call_00".into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let tool_b = Message {
             role: Role::Tool,
@@ -4572,6 +4614,7 @@ mod tests {
             tool_call_id: Some("call_01".into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let history = vec![Message::user("list files"), assistant_turn, tool_a, tool_b];
         let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
@@ -4616,6 +4659,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let tool = Message {
             role: Role::Tool,
@@ -4624,6 +4668,7 @@ mod tests {
             tool_call_id: Some("call_00".into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let model = AnthropicChatModel::bigmodel("k", "glm-4.6");
         let body = model.build_body(
@@ -5148,6 +5193,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             },
             Message {
                 role: Role::Tool,
@@ -5156,6 +5202,7 @@ mod tests {
                 tool_call_id: Some("call_00".into()),
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             },
             Message {
                 role: Role::Tool,
@@ -5164,6 +5211,7 @@ mod tests {
                 tool_call_id: Some("call_01".into()),
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             },
         ];
         let glm = AnthropicChatModel::bigmodel(&key, "glm-4.6");

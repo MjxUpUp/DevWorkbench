@@ -832,6 +832,25 @@ pub enum ChatStreamEvent {
         dropped_count: usize,
         is_error: bool,
     },
+    /// Compact-boundary marker (B-plan §4.2 缺项3, CCB parity
+    /// `SystemCompactBoundaryMessage`). A META event emitted by the compaction
+    /// path alongside [`Compact`](Self::Compact): records WHERE a compaction
+    /// happened so that on resume, `blocks_to_history` reconstructs a boundary
+    /// `Message` and `maybe_compact` summarizes only what comes AFTER the last
+    /// boundary — avoiding re-compaction of already-summarized history (the
+    /// "summary of summary" drift). Like `Compact` it never enters the model's
+    /// history (filtered out in `blocks_to_history`, like the other meta-events).
+    /// `preserved_count` = how many trailing messages were kept verbatim (CCB
+    /// `preservedSegment`; DW records a count, not a uuid range).
+    #[serde(rename = "compact_boundary")]
+    CompactBoundary {
+        /// `"auto"` | `"manual"` — what triggered the compaction.
+        trigger: String,
+        /// Estimated tokens just before compaction ran.
+        pre_tokens: usize,
+        /// Trailing messages preserved verbatim across this compaction.
+        preserved_count: usize,
+    },
     /// Human-Gate approval request (Clutch #3). NOT a chat block — a control
     /// signal: emitted when a destructive action is about to land in
     /// `PermissionMode::HumanGate`, telling the UI to open an approval modal.
@@ -3421,6 +3440,7 @@ mod tests {
                 ChatStreamEvent::Result { .. } => "result",
                 ChatStreamEvent::FileChanged { .. } => "file_changed",
                 ChatStreamEvent::Compact { .. } => "compact",
+                ChatStreamEvent::CompactBoundary { .. } => "compact_boundary",
                 ChatStreamEvent::ApprovalRequired { .. } => "approval_required",
             })
             .collect();

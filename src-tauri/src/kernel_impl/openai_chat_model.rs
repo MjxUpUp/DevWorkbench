@@ -150,7 +150,15 @@ impl OpenAIChatModel {
         stream: bool,
     ) -> Value {
         let mut msgs: Vec<Value> = Vec::with_capacity(messages.len());
-        for m in messages {
+        // §4.2 缺项3: skip compact-boundary markers. They are System-role
+        // metadata with empty content reconstructed by blocks_to_history so
+        // maybe_compact can find the last compaction point; they must NEVER
+        // reach the model. Anthropic's build_body already drops all System
+        // messages; OpenAI keeps genuine system prompts but must drop these
+        // empty markers too — otherwise a compacted history leaks N empty
+        // `{role:"system",content:""}` entries into the wire, and strict
+        // OpenAI-compatible endpoints (DeepSeek/vLLM) may reject empty content.
+        for m in messages.iter().filter(|m| m.compact_boundary.is_none()) {
             match m.role {
                 Role::System => {
                     msgs.push(json!({ "role": "system", "content": m.content }));
@@ -674,6 +682,7 @@ pub(crate) fn decode_openai_message(v: &Value) -> Result<Message, Error> {
         tool_call_id: None,
         reasoning,
         reasoning_signature: None,
+        compact_boundary: None,
     })
 }
 
@@ -713,6 +722,7 @@ fn flush_tool_calls(tool_bufs: &mut HashMap<u64, (String, String, String)>) -> O
         tool_call_id: None,
         reasoning: None,
         reasoning_signature: None,
+        compact_boundary: None,
     })
 }
 
@@ -768,6 +778,7 @@ pub(crate) fn handle_openai_sse_line(
                 tool_call_id: None,
                 reasoning: Some(reasoning.to_string()),
                 reasoning_signature: None,
+                compact_boundary: None,
             });
         }
     }
@@ -838,6 +849,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 
@@ -849,6 +861,7 @@ mod tests {
             tool_call_id: Some(id.into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 

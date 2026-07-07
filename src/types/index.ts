@@ -619,6 +619,23 @@ export type ChatStreamEvent =
       is_error: boolean;
     }
   | {
+      /** §4.2 缺项3 / CCB `SystemCompactBoundaryMessage` parity: a META event
+       *  emitted alongside `compact` when compaction structurally changed the
+       *  model's history (summarize / hard-truncate). Never rendered as a chat
+       *  block — it's persisted into session.blocks so a resumed session's
+       *  blocks_to_history reconstructs a boundary Message, letting
+       *  maybe_compact summarize only what came AFTER the last boundary (avoiding
+       *  the resume×compact "summary of summary" fidelity drift). MicroClear /
+       *  BreakerTripped emit no boundary (no structural change). */
+      kind: 'compact_boundary';
+      /** "auto" | "manual" — what triggered the compaction. */
+      trigger: string;
+      /** Estimated tokens just before compaction ran. */
+      pre_tokens: number;
+      /** Trailing messages preserved verbatim across this compaction. */
+      preserved_count: number;
+    }
+  | {
       kind: 'approval_required';
       /** Tool name about to run (e.g. write_file / bash). */
       tool: string;

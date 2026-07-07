@@ -16,7 +16,8 @@
 use crate::agents::pty::ChatStreamEvent;
 use crate::models::{Session, SessionStatus};
 use kernel_core::{
-    AgentEvent, AgentRunStatus, FunctionCall, Message, Role, ToolCall, ToolCallEvent, ToolCallStatus,
+    AgentEvent, AgentRunStatus, CompactBoundaryMeta, FunctionCall, Message, Role, ToolCall,
+    ToolCallEvent, ToolCallStatus,
 };
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -317,6 +318,11 @@ pub fn chat_event_to_agent_events(
         // opaque CLI — kept exhaustive. It carries no kernel AgentEvent (it
         // never enters the model's stream, only the UI's block list).
         ChatStreamEvent::Compact { .. } => Vec::new(),
+        // §4.2 缺项3: CompactBoundary is the boundary-marker meta-event emitted
+        // alongside Compact. Never an AgentEvent — same bypass. It's
+        // reconstructed into a boundary Message by blocks_to_history (below),
+        // not mapped to a kernel event here.
+        ChatStreamEvent::CompactBoundary { .. } => Vec::new(),
         // Human-Gate control signal — UI-only (opens a modal); never an
         // AgentEvent, never model history. Same bypass as Compact.
         ChatStreamEvent::ApprovalRequired { .. } => Vec::new(),
@@ -370,6 +376,12 @@ pub(crate) fn blocks_to_history(
     let mut assistant_text = String::new();
     let mut assistant_reasoning = String::new();
 
+    // §4.2 缺项3: collect CompactBoundary markers seen in this turn's blocks.
+    // They're META events (never model history) but must survive into the
+    // rebuilt history as boundary Messages so maybe_compact's
+    // last_boundary_index can locate them on resume — see boundary_message.
+    let mut boundaries: Vec<CompactBoundaryMeta> = Vec::new();
+
     // Ordered record of every ToolUse in arrival order. Tuple:
     //   (synth_id, name, input, matched_result)
     // `synth_id` is the real id when the stream carried one, else a synthesized
@@ -419,6 +431,22 @@ pub(crate) fn blocks_to_history(
                 // Dangling (no matching ToolUse): drop — validate_block_pairs
                 // upstream (session.rs) already warns on the same blocks.
             }
+            // §4.2 缺项3: CompactBoundary — collect the marker (don't drop it).
+            // It's emitted alongside Compact by the compaction sink draining
+            // ArchivedChunk.boundary; appending it to the rebuilt history tail
+            // places the boundary right where compaction happened, so the next
+            // resume's maybe_compact finds it via last_boundary_index.
+            ChatStreamEvent::CompactBoundary {
+                trigger,
+                pre_tokens,
+                preserved_count,
+            } => {
+                boundaries.push(CompactBoundaryMeta {
+                    trigger: trigger.clone(),
+                    pre_tokens: *pre_tokens,
+                    preserved_count: *preserved_count,
+                });
+            }
             // Meta-events never entered the model's original history.
             ChatStreamEvent::Result { .. }
             | ChatStreamEvent::FileChanged { .. }
@@ -464,6 +492,7 @@ pub(crate) fn blocks_to_history(
             None
         },
         reasoning_signature: None,
+        compact_boundary: None,
     };
 
     let mut messages: Vec<Message> = Vec::new();
@@ -482,6 +511,7 @@ pub(crate) fn blocks_to_history(
                 tool_call_id: Some(synth_id.clone()),
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             });
         }
     }
@@ -493,11 +523,42 @@ pub(crate) fn blocks_to_history(
     // an all-tool turn keeps its assistant message rather than leaving a
     // dangling tool_result.)
     let a = &messages[0];
-    if a.content.is_empty() && a.reasoning.is_none() && a.tool_calls.is_empty() {
-        return Vec::new();
+    let vacuous = a.content.is_empty() && a.reasoning.is_none() && a.tool_calls.is_empty();
+    // §4.2 缺项3 exception: a vacuous turn that STILL carries a CompactBoundary
+    // must not collapse to empty — the boundary would vanish and the next resume
+    // would re-compact already-summarized history. Return ONLY the boundary
+    // marker(s); an empty assistant message would corrupt provider role-ordering,
+    // so we drop it and emit the markers alone (callers tolerate a marker-only
+    // turn). The common case (no boundary) still returns Vec::new() unchanged.
+    if vacuous {
+        return boundaries.into_iter().map(boundary_message).collect();
+    }
+    for meta in boundaries {
+        messages.push(boundary_message(meta));
     }
 
     messages
+}
+
+/// §4.2 缺项3 / CCB `createCompactBoundaryMessage` parity: rebuild a
+/// compact-boundary marker Message from a `ChatStreamEvent::CompactBoundary`'s
+/// metadata. System role + the meta. It never reaches the model:
+/// anthropic_chat_model filters ALL System messages, and openai_chat_model
+/// filters messages whose `compact_boundary` is set (keeping genuine system
+/// prompts). It exists so maybe_compact's `last_boundary_index` can find where
+/// the LAST compaction happened and summarize only what came after it, avoiding
+/// the double-compaction drift (see context_compact::last_boundary_index for
+/// the same-run vs resume distinction).
+fn boundary_message(meta: CompactBoundaryMeta) -> Message {
+    Message {
+        role: Role::System,
+        content: String::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        reasoning: None,
+        reasoning_signature: None,
+        compact_boundary: Some(meta),
+    }
 }
 
 /// Keep the tail of `s` up to `max` chars, snapped to a UTF-8 boundary and
@@ -1399,6 +1460,58 @@ mod tests {
         ], REACT_HISTORY_TURN_TEXT_CAP);
         assert_eq!(msgs.len(), 1); // only assistant text
         assert_eq!(msgs[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn blocks_to_history_compact_boundary_becomes_marker_message() {
+        // §4.2 缺项3: a CompactBoundary event is NOT dropped like the other
+        // meta-events — it's reconstructed into a System-role boundary Message
+        // carrying the compact_boundary meta, appended after the turn's real
+        // content. This is what lets maybe_compact's last_boundary_index find
+        // it on resume and avoid re-compacting already-summarized history.
+        let msgs = blocks_to_history(
+            &[
+                ChatStreamEvent::Text { content: "assistant work".into() },
+                ChatStreamEvent::CompactBoundary {
+                    trigger: "auto".into(),
+                    pre_tokens: 4500,
+                    preserved_count: 3,
+                },
+            ],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        // assistant text + the boundary marker.
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[0].content, "assistant work");
+        assert_eq!(msgs[1].role, Role::System);
+        let meta = msgs[1]
+            .compact_boundary
+            .as_ref()
+            .expect("boundary meta must be present on the marker");
+        assert_eq!(meta.trigger, "auto");
+        assert_eq!(meta.pre_tokens, 4500);
+        assert_eq!(meta.preserved_count, 3);
+    }
+
+    #[test]
+    fn blocks_to_history_boundary_survives_vacuous_turn() {
+        // §4.2 缺项3: a turn that is ONLY a CompactBoundary (no assistant
+        // content) must still emit the marker — returning empty would lose it
+        // and the next resume would re-compact already-summarized history. The
+        // empty assistant is dropped (would corrupt provider role-ordering);
+        // the marker stands alone.
+        let msgs = blocks_to_history(
+            &[ChatStreamEvent::CompactBoundary {
+                trigger: "auto".into(),
+                pre_tokens: 9000,
+                preserved_count: 2,
+            }],
+            REACT_HISTORY_TURN_TEXT_CAP,
+        );
+        assert_eq!(msgs.len(), 1, "boundary survives a vacuous turn");
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(msgs[0].compact_boundary.is_some());
     }
 
     #[test]
