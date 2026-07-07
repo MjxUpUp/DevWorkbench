@@ -581,8 +581,24 @@ export interface WorkflowProgressPayload {
 export type ChatStreamEvent =
   | { kind: 'text'; content: string }
   | { kind: 'thinking'; content: string }
-  | { kind: 'tool_use'; name: string; input: unknown }
-  | { kind: 'tool_result'; content: string; is_error: boolean }
+  | {
+      kind: 'tool_use';
+      name: string;
+      input: unknown;
+      /** tool_call_id pairing key. Present on the OpaqueAgent path (claude wire
+       *  carries `id`); absent on the ReactKernel forward path. Optional so
+       *  pre-id session blocks (no `id` field) still parse. */
+      id?: string | null;
+    }
+  | {
+      kind: 'tool_result';
+      /** Points back to the tool_use block this result answers. Present on the
+       *  OpaqueAgent path; absent on the ReactKernel forward path / legacy
+       *  blocks. Optional for backward compatibility. */
+      tool_use_id?: string | null;
+      content: string;
+      is_error: boolean;
+    }
   | { kind: 'result'; is_error: boolean; secs: number }
   | { kind: 'file_changed'; path: string }
   | {

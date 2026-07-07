@@ -953,6 +953,7 @@ fn synthesize_interrupt_tool_results(
     }
     for _ in 0..pending {
         events.push(pty::ChatStreamEvent::ToolResult {
+            tool_use_id: None,
             content: "[已中断：用户停止了本次会话]".into(),
             is_error: true,
         });
@@ -1092,10 +1093,12 @@ mod tests {
         let events = vec![
             pty::ChatStreamEvent::Text { content: "thinking…".into() },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "bash".into(),
                 input: serde_json::json!({"command": "ls"}),
             },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "read_file".into(),
                 input: serde_json::json!({"file_path": "a.rs"}),
             },
@@ -1104,7 +1107,7 @@ mod tests {
         assert_eq!(out.len(), 5, "3 originals + 2 synthetic results");
         for ev in &out[3..] {
             match ev {
-                pty::ChatStreamEvent::ToolResult { content, is_error } => {
+                pty::ChatStreamEvent::ToolResult { content, is_error, .. } => {
                     assert!(is_error, "synthetic result must be error");
                     assert_eq!(content, "[已中断：用户停止了本次会话]");
                 }
@@ -1118,10 +1121,12 @@ mod tests {
         // tool_use immediately followed by tool_result → no orphan, no append.
         let events = vec![
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "bash".into(),
                 input: serde_json::json!({}),
             },
             pty::ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "ok".into(),
                 is_error: false,
             },
@@ -1136,14 +1141,17 @@ mod tests {
         // unmatched one gets a synthetic result.
         let events = vec![
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "a".into(),
                 input: serde_json::json!({}),
             },
             pty::ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "r1".into(),
                 is_error: false,
             },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "b".into(),
                 input: serde_json::json!({}),
             },

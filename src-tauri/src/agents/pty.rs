@@ -391,6 +391,11 @@ pub enum ClaudeBlock {
     /// assistant tool_use: tool name + its raw input object. `None` when claude
     /// omits `input`, so render stays byte-identical to the legacy preview.
     ToolUse {
+        /// claude wire `tool_use` block id (`toolu_...`), used to pair the
+        /// later tool_result by id instead of FIFO position. None when claude
+        /// omits it or for synthetic blocks. Mirrors the symmetric
+        /// `ToolResult.tool_use_id` that points back here.
+        id: Option<String>,
         name: String,
         input: Option<serde_json::Value>,
     },
@@ -442,13 +447,17 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
                         }
                     }
                     "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string());
                         let name = block
                             .get("name")
                             .and_then(|s| s.as_str())
                             .unwrap_or("tool")
                             .to_string();
                         let input = block.get("input").cloned();
-                        blocks.push(ClaudeBlock::ToolUse { name, input });
+                        blocks.push(ClaudeBlock::ToolUse { id, name, input });
                     }
                     _ => {}
                 }
@@ -549,13 +558,21 @@ pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
             }
         }
         "tool_use" => {
+            // gemini's tool_use carries the pairing key as `tool_id` — the SAME
+            // field the tool_result arm below reads back. Surface it so the
+            // reverse map (chat_event_to_agent_events) pairs by id instead of
+            // FIFO, mirroring claude's `id` on the OpaqueAgent path.
+            let id = v
+                .get("tool_id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
             let name = v
                 .get("tool_name")
                 .and_then(|s| s.as_str())
                 .unwrap_or("tool")
                 .to_string();
             let input = v.get("parameters").cloned();
-            vec![ClaudeBlock::ToolUse { name, input }]
+            vec![ClaudeBlock::ToolUse { id, name, input }]
         }
         "tool_result" => {
             let tool_use_id = v
@@ -728,7 +745,7 @@ pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
                 out.push_str(content);
                 out.push('\n');
             }
-            ClaudeBlock::ToolUse { name, input } => {
+            ClaudeBlock::ToolUse { name, input, .. } => {
                 let preview = json_preview(input.as_ref(), 80);
                 out.push_str(&format!("\x1b[36m🔧 {} \x1b[90m{}\x1b[0m\n", name, preview));
             }
@@ -770,11 +787,23 @@ pub enum ChatStreamEvent {
     Thinking { content: String },
     #[serde(rename = "tool_use")]
     ToolUse {
+        /// tool_call_id pairing key. Populated on the OpaqueAgent path (claude
+        /// wire carries `id`); None on the ReactKernel forward path
+        /// (`ToolCallEvent` has no id — pairing happens inside the kernel, the
+        /// wire is UI-only there). `Option` + `skip_serializing_if` keeps the
+        /// wire clean and lets pre-id session blocks deserialize unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         name: String,
         input: serde_json::Value,
     },
     #[serde(rename = "tool_result")]
-    ToolResult { content: String, is_error: bool },
+    ToolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        content: String,
+        is_error: bool,
+    },
     #[serde(rename = "result")]
     Result { is_error: bool, secs: u64 },
     /// A file was changed on disk by the agent (a write_file/patch tool landed).
@@ -829,16 +858,22 @@ impl ClaudeBlock {
             ClaudeBlock::Text { content } => ChatStreamEvent::Text {
                 content: content.clone(),
             },
-            ClaudeBlock::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+            ClaudeBlock::ToolUse { id, name, input } => ChatStreamEvent::ToolUse {
+                id: id.clone(),
                 name: name.clone(),
                 input: input.clone().unwrap_or(serde_json::Value::Null),
             },
             // ToolResult: collapse the raw content value into a readable string.
             // Longer than the 120-char terminal preview — the chat card folds it,
-            // so give it more room to stay useful.
+            // so give it more room to stay useful. `tool_use_id` is carried
+            // through so the reverse map (chat_event_to_agent_events) can pair
+            // by id instead of FIFO position (defect ① root cause).
             ClaudeBlock::ToolResult {
-                content, is_error, ..
+                tool_use_id,
+                content,
+                is_error,
             } => ChatStreamEvent::ToolResult {
+                tool_use_id: tool_use_id.clone(),
                 content: json_preview(content.as_ref(), 500),
                 is_error: is_error.unwrap_or(false),
             },
@@ -921,7 +956,8 @@ pub(crate) fn cap_blocks_for_persist(
     events
         .into_iter()
         .map(|ev| match ev {
-            ChatStreamEvent::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+            ChatStreamEvent::ToolUse { id, name, input } => ChatStreamEvent::ToolUse {
+                id,
                 name,
                 input: cap_json_string_values(input, max_chars),
             },
@@ -2384,6 +2420,7 @@ mod tests {
                 content: "b".into(),
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "Read".into(),
                 input: serde_json::json!({"file_path": "/x"}),
             },
@@ -2425,10 +2462,12 @@ mod tests {
     fn merge_consecutive_runs_all_tool_use_unchanged() {
         let evs = vec![
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "A".into(),
                 input: serde_json::Value::Null,
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "B".into(),
                 input: serde_json::Value::Null,
             },
@@ -2464,6 +2503,7 @@ mod tests {
     fn cap_blocks_for_persist_truncates_long_tool_use_input_strings() {
         let big = "x".repeat(10_000);
         let evs = vec![ChatStreamEvent::ToolUse {
+            id: None,
             name: "Edit".into(),
             input: serde_json::json!({ "file_path": "/p", "new_string": big }),
         }];
@@ -2488,10 +2528,12 @@ mod tests {
                 content: "answer".into(),
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "Read".into(),
                 input: serde_json::json!({"file_path": "/short"}),
             },
             ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "ok".into(),
                 is_error: false,
             },
@@ -2849,6 +2891,7 @@ mod tests {
                     content: "reading".to_string()
                 },
                 ClaudeBlock::ToolUse {
+                    id: None,
                     name: "Read".to_string(),
                     input: Some(serde_json::json!({"file_path":"src/main.rs"})),
                 },
@@ -2873,6 +2916,7 @@ mod tests {
         assert_eq!(
             parse_claude_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: None,
                 name: "WebSearch".to_string(),
                 input: None,
             }],
@@ -2980,6 +3024,7 @@ mod tests {
         assert_eq!(
             parse_gemini_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: Some("t1".to_string()),
                 name: "read_file".to_string(),
                 input: Some(serde_json::json!({"path":"src/main.rs"})),
             }],
@@ -2994,6 +3039,7 @@ mod tests {
         assert_eq!(
             parse_gemini_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: Some("t2".to_string()),
                 name: "list_dir".to_string(),
                 input: None,
             }],
@@ -3268,6 +3314,7 @@ mod tests {
         assert_eq!(v["content"], "hi");
 
         let tool = ChatStreamEvent::ToolUse {
+            id: None,
             name: "Read".to_string(),
             input: serde_json::json!({"file_path":"a.rs"}),
         };

@@ -321,12 +321,14 @@ mod tests {
 
     fn tu(name: &str) -> ChatStreamEvent {
         ChatStreamEvent::ToolUse {
+            id: None,
             name: name.into(),
             input: json!({}),
         }
     }
     fn tr(err: bool) -> ChatStreamEvent {
         ChatStreamEvent::ToolResult {
+            tool_use_id: None,
             content: "x".into(),
             is_error: err,
         }
