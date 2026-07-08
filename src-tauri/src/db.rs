@@ -231,13 +231,35 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     confidence REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    access_count INTEGER NOT NULL DEFAULT 0
+    access_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    effectiveness REAL NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge_entries(project_hash);
+-- NOTE: idx_knowledge_status is intentionally NOT in SCHEMA. `status` is added
+-- to legacy DBs by migrate_v23_to_v24 (it's a v24 column). SCHEMA's
+-- `CREATE TABLE IF NOT EXISTS knowledge_entries` is a no-op on an upgraded DB
+-- (table already exists, missing the column), so a `CREATE INDEX ... (status)`
+-- here would hit 'no such column: status' and abort init_db BEFORE the migrate
+-- chain runs — exactly the v1.0.6 upgrade failure (DevWorkbench.log). The index
+-- is created in migrate_v23_to_v24 right after the ALTER ADD COLUMN, covering
+-- both fresh installs (migrate still runs on a fresh DB) and upgrades.
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     title, content,
     tokenize='unicode61'
 );
+-- knowledge_embeddings: 向量检索存储（I1，FTS 置信度不足时 fallback）。
+-- embedding 为序列化的 Vec<f32>（little-endian f32 字节流），dim 冗余存便于校验。
+-- 大多数 entry 无 embedding（FTS 足够时）——稀疏，故独立表不污染主表。
+CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+    entry_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    dim INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (entry_id) REFERENCES knowledge_entries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model ON knowledge_embeddings(model);
 
 CREATE TABLE IF NOT EXISTS activity_events (
     id TEXT PRIMARY KEY,
@@ -433,6 +455,28 @@ CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, crea
 -- created_at single-column index speeds the retention prune (DELETE WHERE
 -- created_at < cutoff); without it the prune full-scans llm_traces.
 CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
+
+-- block_finalize_log: per-session audit row written by
+-- agents::blocks_integrity::write_finalize_log. One row per session terminal
+-- write. Lets future diagnostics answer how many sessions needed repair, and
+-- what kind, without parsing the stream logs. Indexed by reason so a quality
+-- dashboard can group by FinalizeReason.
+CREATE TABLE IF NOT EXISTS block_finalize_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    input_blocks INTEGER NOT NULL,
+    output_blocks INTEGER NOT NULL,
+    stripped_orphan_use INTEGER NOT NULL,
+    synthesized_result INTEGER NOT NULL,
+    dropped_dangling_result INTEGER NOT NULL,
+    was_clean INTEGER NOT NULL,
+    stats_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_session ON block_finalize_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_reason ON block_finalize_log(reason);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_recorded ON block_finalize_log(recorded_at);
 
 -- Trace retention settings (single-row table, mirrors budget_settings). NULL or
 -- 0 retention_days = infinite (the default — Phoenix's

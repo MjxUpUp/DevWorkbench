@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use kernel_core::{
-    ChatModel, CostAccumulator, Error, Message, MessageStream, ModelOptions, Role,
+    ChatModel, CostAccumulator, EmbedModel, Error, Message, MessageStream, ModelOptions, Role,
 };
 use serde_json::{json, Value};
 
@@ -108,6 +108,26 @@ impl OpenAIChatModel {
         }
     }
 
+    /// Resolve the Embeddings POST URL from a base URL (I1). Same version-rule
+    /// as [`chat_completions_url`]: a base already ending in `/v<digits>`
+    /// (`/v1`, `/v4`) gets `/embeddings` appended; a bare host gets `/v1`
+    /// inserted. Centralized so GLM's `/paas/v4` base doesn't wrongly become
+    /// `/paas/v4/v1/embeddings` (the same 404 class bug chat_completions_url
+    /// fixed). OpenAI-compatible providers all expose this shape; Anthropic
+    /// has no embeddings API and never reaches this code.
+    pub fn embeddings_url(base: &str) -> String {
+        let trimmed = base.trim_end_matches('/');
+        let has_version = trimmed.rsplit_once('/').is_some_and(|(_, last)| {
+            last.strip_prefix('v')
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        });
+        if has_version {
+            format!("{trimmed}/embeddings")
+        } else {
+            format!("{trimmed}/v1/embeddings")
+        }
+    }
+
     /// Build the Chat Completions request body. Key shape differences vs the
     /// Anthropic Messages API:
     /// - `system` is a normal first message `{role:"system",content}`, NOT a
@@ -130,7 +150,15 @@ impl OpenAIChatModel {
         stream: bool,
     ) -> Value {
         let mut msgs: Vec<Value> = Vec::with_capacity(messages.len());
-        for m in messages {
+        // §4.2 缺项3: skip compact-boundary markers. They are System-role
+        // metadata with empty content reconstructed by blocks_to_history so
+        // maybe_compact can find the last compaction point; they must NEVER
+        // reach the model. Anthropic's build_body already drops all System
+        // messages; OpenAI keeps genuine system prompts but must drop these
+        // empty markers too — otherwise a compacted history leaks N empty
+        // `{role:"system",content:""}` entries into the wire, and strict
+        // OpenAI-compatible endpoints (DeepSeek/vLLM) may reject empty content.
+        for m in messages.iter().filter(|m| m.compact_boundary.is_none()) {
             match m.role {
                 Role::System => {
                     msgs.push(json!({ "role": "system", "content": m.content }));
@@ -214,6 +242,85 @@ impl OpenAIChatModel {
             body["tool_choice"] = json!("auto");
         }
         body
+    }
+}
+
+#[async_trait]
+impl EmbedModel for OpenAIChatModel {
+    fn embed_model_id(&self) -> &str {
+        &self.shared.model
+    }
+
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.shared.admit_or_err()?;
+        // Most OpenAI-compatible endpoints accept the chat model id for
+        // /embeddings and route internally (DeepSeek, OpenRouter, vLLM). If a
+        // provider needs a dedicated embedding id, bind a separate
+        // OpenAIChatModel with that id — this impl sends the bound model id.
+        let body = json!({
+            "model": self.shared.model,
+            "input": texts,
+        });
+        let url = Self::embeddings_url(&self.shared.base_url);
+        let resp = self
+            .shared
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.shared.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            if let Some(cb) = &self.shared.circuit {
+                cb.record_failure(&self.shared.base_url);
+            }
+            let err_body = redact_secrets(&resp.text().await.unwrap_or_default());
+            log::warn!(
+                "[llm-embed] {} {} -> {}: {}",
+                self.shared.model,
+                self.shared.base_url,
+                status,
+                truncate(&err_body, 500)
+            );
+            return Err(Error::Model(format!("embed call failed: {status}")));
+        }
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Model(format!("embed decode: {e}")))?;
+        // OpenAI shape: {data: [{embedding: [...], index: N}, ...]}. Sort by
+        // index — providers may return out of order; we must match input order.
+        let mut rows: Vec<(usize, Vec<f32>)> = v["data"]
+            .as_array()
+            .ok_or_else(|| Error::Model("embed response missing data[]".into()))?
+            .iter()
+            .filter_map(|d| {
+                let idx = d["index"].as_u64()? as usize;
+                let emb = d["embedding"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|x| x.as_f64().map(|f| f as f32))
+                    .collect::<Vec<f32>>();
+                Some((idx, emb))
+            })
+            .collect();
+        rows.sort_by_key(|(i, _)| *i);
+        if rows.len() != texts.len() {
+            return Err(Error::Model(format!(
+                "embed returned {} vectors for {} inputs",
+                rows.len(),
+                texts.len()
+            )));
+        }
+        if let Some(cb) = &self.shared.circuit {
+            cb.record_success(&self.shared.base_url);
+        }
+        Ok(rows.into_iter().map(|(_, e)| e).collect())
     }
 }
 
@@ -575,6 +682,7 @@ pub(crate) fn decode_openai_message(v: &Value) -> Result<Message, Error> {
         tool_call_id: None,
         reasoning,
         reasoning_signature: None,
+        compact_boundary: None,
     })
 }
 
@@ -614,6 +722,7 @@ fn flush_tool_calls(tool_bufs: &mut HashMap<u64, (String, String, String)>) -> O
         tool_call_id: None,
         reasoning: None,
         reasoning_signature: None,
+        compact_boundary: None,
     })
 }
 
@@ -669,6 +778,7 @@ pub(crate) fn handle_openai_sse_line(
                 tool_call_id: None,
                 reasoning: Some(reasoning.to_string()),
                 reasoning_signature: None,
+                compact_boundary: None,
             });
         }
     }
@@ -739,6 +849,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 
@@ -750,6 +861,7 @@ mod tests {
             tool_call_id: Some(id.into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 
@@ -789,6 +901,42 @@ mod tests {
         assert_eq!(
             OpenAIChatModel::chat_completions_url("https://open.bigmodel.cn/api/coding/paas/v4/"),
             "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
+    }
+
+    // ---- embeddings_url (I1) ----
+
+    #[test]
+    fn embeddings_url_inserts_v1_for_bare_base() {
+        assert_eq!(
+            OpenAIChatModel::embeddings_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/v1/embeddings"
+        );
+        assert_eq!(
+            OpenAIChatModel::embeddings_url("https://api.openai.com/"),
+            "https://api.openai.com/v1/embeddings"
+        );
+    }
+
+    #[test]
+    fn embeddings_url_appends_when_base_ends_with_v1() {
+        assert_eq!(
+            OpenAIChatModel::embeddings_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/embeddings"
+        );
+    }
+
+    #[test]
+    fn embeddings_url_appends_for_non_v1_version_segment() {
+        // GLM /paas/v4 → /v4/embeddings (NOT /v4/v1/embeddings → 404), same rule
+        // as chat_completions_url.
+        assert_eq!(
+            OpenAIChatModel::embeddings_url("https://open.bigmodel.cn/api/coding/paas/v4"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/embeddings"
+        );
+        assert_eq!(
+            OpenAIChatModel::embeddings_url("https://open.bigmodel.cn/api/coding/paas/v4/"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/embeddings"
         );
     }
 

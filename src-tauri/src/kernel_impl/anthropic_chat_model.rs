@@ -566,7 +566,21 @@ impl ChatModel for AnthropicChatModel {
                 .await;
                 let chunk_res = match next_chunk {
                     Err(_elapsed) => {
-                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("idle"), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
+                        // P2 (review C2): replace coarse "idle" label with a
+                        // structured RootCause from stream_health. The
+                        // classifier inspects status_code + bytes received
+                        // + idle_secs to label the failure mode; downstream
+                        // dashboards can group by RootCause.
+                        let root = crate::kernel_impl::stream_health::classify_stream_failure(
+                            &crate::kernel_impl::stream_health::StreamSignals {
+                                status_code: Some(status.as_u16()),
+                                idle_secs: Some(STREAM_IDLE_TIMEOUT_SECS),
+                                bytes_received: resp_body_buf.len(),
+                                saw_message_stop: received_stop_reason,
+                                context_overflow_hint: false,
+                            },
+                        );
+                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some(root.as_str()), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
                         if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
                         Err(Error::StreamIdle { secs: STREAM_IDLE_TIMEOUT_SECS })?
                     }
@@ -576,7 +590,20 @@ impl ChatModel for AnthropicChatModel {
                 let bytes = match chunk_res {
                     Ok(b) => b,
                     Err(e) => {
-                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("stream"), &req_body, None, t0, ttfb_at, usage);
+                        // P2 (review C2): network reset label. With zero bytes
+                        // received, classify_stream_failure falls into the
+                        // NetworkReset bucket (see stream_health.rs). Wire
+                        // error_kind with the structured label.
+                        let root = crate::kernel_impl::stream_health::classify_stream_failure(
+                            &crate::kernel_impl::stream_health::StreamSignals {
+                                status_code: Some(status.as_u16()),
+                                idle_secs: None,
+                                bytes_received: 0,
+                                saw_message_stop: false,
+                                context_overflow_hint: false,
+                            },
+                        );
+                        record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some(root.as_str()), &req_body, None, t0, ttfb_at, usage);
                         if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
                         Err(Error::Network(e.to_string()))?
                     }
@@ -617,7 +644,21 @@ impl ChatModel for AnthropicChatModel {
             // honest "stream interrupted" message instead of silently marking
             // the turn completed with empty content.
             if !received_stop {
-                record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some("truncated"), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
+                // P2 (review C2): replace coarse "truncated" label with a
+                // structured RootCause. classify_stream_failure inspects
+                // bytes + idle gap to pick ProxyBufferFull vs PrematureEof
+                // vs ModelTimeout. The classifier returns the same string
+                // passed to llm_traces.error_kind.
+                let root = crate::kernel_impl::stream_health::classify_stream_failure(
+                    &crate::kernel_impl::stream_health::StreamSignals {
+                        status_code: Some(status.as_u16()),
+                        idle_secs: Some(0),
+                        bytes_received: resp_body_buf.len(),
+                        saw_message_stop: false,
+                        context_overflow_hint: false,
+                    },
+                );
+                record_stream_outcome(&model_clone.shared, &model_name, status.as_u16(), Some(root.as_str()), &req_body, Some(&truncate(&resp_body_buf, 32_000)), t0, ttfb_at, usage);
                 if let Some(cb) = &model_clone.shared.circuit { cb.record_failure(&model_clone.shared.base_url); }
                 Err(Error::StreamIncomplete { got_reason: received_stop_reason })?;
             }
@@ -834,6 +875,7 @@ pub(crate) fn decode_anthropic_message(v: &Value) -> Result<Message, Error> {
         } else {
             Some(signature_parts.join(""))
         },
+        compact_boundary: None,
     })
 }
 
@@ -906,6 +948,7 @@ pub(crate) fn handle_sse_line(
                         tool_call_id: None,
                         reasoning: Some(t.to_string()),
                         reasoning_signature: None,
+                        compact_boundary: None,
                     })
             } else if dt == Some("signature_delta") {
                 if let Some(s) = ev
@@ -936,6 +979,7 @@ pub(crate) fn handle_sse_line(
                     tool_call_id: None,
                     reasoning: None,
                     reasoning_signature: Some(s),
+                    compact_boundary: None,
                 });
             }
             let mut idxs: Vec<u64> = tool_bufs.keys().copied().collect();
@@ -963,6 +1007,7 @@ pub(crate) fn handle_sse_line(
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: sig,
+                compact_boundary: None,
             })
         }
         _ => None,

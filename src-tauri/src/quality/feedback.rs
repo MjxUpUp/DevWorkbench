@@ -74,6 +74,8 @@ pub fn create_feedback(
                 created_at: chrono::Local::now().to_rfc3339(),
                 updated_at: chrono::Local::now().to_rfc3339(),
                 access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
             };
 
             let _ = crate::knowledge::store::add_entry(conn, &entry);
@@ -118,6 +120,8 @@ pub fn create_feedback(
                 created_at: chrono::Local::now().to_rfc3339(),
                 updated_at: chrono::Local::now().to_rfc3339(),
                 access_count: 0,
+            status: "active".to_string(),
+            effectiveness: 0.0,
             };
 
             let _ = crate::knowledge::store::add_entry(conn, &entry);

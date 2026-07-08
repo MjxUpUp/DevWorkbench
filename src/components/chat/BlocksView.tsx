@@ -68,6 +68,11 @@ function groupByStep(events: ChatStreamEvent[]): Step[] {
   let idx = 0;
 
   for (const ev of events) {
+    // §4.2 缺项3: compact_boundary is a META marker (paired with compact) —
+    // never a visible block, never part of any step. Skip it so it doesn't
+    // pollute tool/opening groups; it persists into session.blocks only so a
+    // resumed session can reconstruct a boundary Message.
+    if (ev.kind === 'compact_boundary') continue;
     if (ev.kind === 'result' || ev.kind === 'compact') {
       currentTool = null;
       steps.push({
@@ -224,6 +229,12 @@ function BlockCard({ event, running, sessionId, stepStatus }: { event: ChatStrea
       );
     case 'compact':
       return <CompactCard event={event} sessionId={sessionId} />;
+    case 'compact_boundary':
+      // §4.2 缺项3: META boundary marker — never a visible chat block. It's
+      // persisted into session.blocks so a resumed session reconstructs a
+      // boundary Message (see react_chat blocks_to_history); here it renders
+      // nothing (the paired `compact` card already shows the user-facing summary).
+      return null;
     case 'approval_required':
       // agentStore 短路 approval_required → ApprovalModal 弹窗（ApprovalModal.tsx:8），
       // 该块不进 blocks 数组，正常不可达。保留 case 仅为 switch 类型穷尽。

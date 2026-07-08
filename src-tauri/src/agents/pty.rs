@@ -391,6 +391,11 @@ pub enum ClaudeBlock {
     /// assistant tool_use: tool name + its raw input object. `None` when claude
     /// omits `input`, so render stays byte-identical to the legacy preview.
     ToolUse {
+        /// claude wire `tool_use` block id (`toolu_...`), used to pair the
+        /// later tool_result by id instead of FIFO position. None when claude
+        /// omits it or for synthetic blocks. Mirrors the symmetric
+        /// `ToolResult.tool_use_id` that points back here.
+        id: Option<String>,
         name: String,
         input: Option<serde_json::Value>,
     },
@@ -442,13 +447,17 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeBlock> {
                         }
                     }
                     "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string());
                         let name = block
                             .get("name")
                             .and_then(|s| s.as_str())
                             .unwrap_or("tool")
                             .to_string();
                         let input = block.get("input").cloned();
-                        blocks.push(ClaudeBlock::ToolUse { name, input });
+                        blocks.push(ClaudeBlock::ToolUse { id, name, input });
                     }
                     _ => {}
                 }
@@ -549,13 +558,21 @@ pub fn parse_gemini_line(line: &str) -> Vec<ClaudeBlock> {
             }
         }
         "tool_use" => {
+            // gemini's tool_use carries the pairing key as `tool_id` — the SAME
+            // field the tool_result arm below reads back. Surface it so the
+            // reverse map (chat_event_to_agent_events) pairs by id instead of
+            // FIFO, mirroring claude's `id` on the OpaqueAgent path.
+            let id = v
+                .get("tool_id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
             let name = v
                 .get("tool_name")
                 .and_then(|s| s.as_str())
                 .unwrap_or("tool")
                 .to_string();
             let input = v.get("parameters").cloned();
-            vec![ClaudeBlock::ToolUse { name, input }]
+            vec![ClaudeBlock::ToolUse { id, name, input }]
         }
         "tool_result" => {
             let tool_use_id = v
@@ -728,7 +745,7 @@ pub fn render_blocks(blocks: &[ClaudeBlock]) -> Option<String> {
                 out.push_str(content);
                 out.push('\n');
             }
-            ClaudeBlock::ToolUse { name, input } => {
+            ClaudeBlock::ToolUse { name, input, .. } => {
                 let preview = json_preview(input.as_ref(), 80);
                 out.push_str(&format!("\x1b[36m🔧 {} \x1b[90m{}\x1b[0m\n", name, preview));
             }
@@ -770,11 +787,25 @@ pub enum ChatStreamEvent {
     Thinking { content: String },
     #[serde(rename = "tool_use")]
     ToolUse {
+        /// tool_call_id pairing key. Populated end-to-end on BOTH paths now:
+        /// OpaqueAgent (claude wire `id` / gemini `tool_id`, preserved via pty
+        /// `to_event`) AND ReactKernel (`ToolCall.id` — the LLM-issued
+        /// correlation id — forwarded into `ToolCallEvent.id` by react_agent,
+        /// so DB replay pairs by id instead of degrading to FIFO). `Option` +
+        /// `skip_serializing_if` keeps the wire clean and lets pre-id session
+        /// blocks deserialize unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         name: String,
         input: serde_json::Value,
     },
     #[serde(rename = "tool_result")]
-    ToolResult { content: String, is_error: bool },
+    ToolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        content: String,
+        is_error: bool,
+    },
     #[serde(rename = "result")]
     Result { is_error: bool, secs: u64 },
     /// A file was changed on disk by the agent (a write_file/patch tool landed).
@@ -788,7 +819,7 @@ pub enum ChatStreamEvent {
     /// Context auto-compaction meta-event (v1.3 C2). NOT produced by a model
     /// turn — emitted by the compaction sink when `maybe_compact` replaces part
     /// of the history. A meta-event: it never enters the model's history
-    /// (dropped in turns_to_history / blocks_to_assistant_message), it only
+    /// (dropped in turns_to_history / blocks_to_history), it only
     /// tells the UI to render a "context compacted" summary card. Expand the
     /// card to read the archived原文 via `read_compact_archive_cmd`. `is_error`
     /// marks a breaker trip (summarizer failed repeatedly; compaction suspended
@@ -800,6 +831,25 @@ pub enum ChatStreamEvent {
         archived_at: Option<String>,
         dropped_count: usize,
         is_error: bool,
+    },
+    /// Compact-boundary marker (B-plan §4.2 缺项3, CCB parity
+    /// `SystemCompactBoundaryMessage`). A META event emitted by the compaction
+    /// path alongside [`Compact`](Self::Compact): records WHERE a compaction
+    /// happened so that on resume, `blocks_to_history` reconstructs a boundary
+    /// `Message` and `maybe_compact` summarizes only what comes AFTER the last
+    /// boundary — avoiding re-compaction of already-summarized history (the
+    /// "summary of summary" drift). Like `Compact` it never enters the model's
+    /// history (filtered out in `blocks_to_history`, like the other meta-events).
+    /// `preserved_count` = how many trailing messages were kept verbatim (CCB
+    /// `preservedSegment`; DW records a count, not a uuid range).
+    #[serde(rename = "compact_boundary")]
+    CompactBoundary {
+        /// `"auto"` | `"manual"` — what triggered the compaction.
+        trigger: String,
+        /// Estimated tokens just before compaction ran.
+        pre_tokens: usize,
+        /// Trailing messages preserved verbatim across this compaction.
+        preserved_count: usize,
     },
     /// Human-Gate approval request (Clutch #3). NOT a chat block — a control
     /// signal: emitted when a destructive action is about to land in
@@ -829,16 +879,22 @@ impl ClaudeBlock {
             ClaudeBlock::Text { content } => ChatStreamEvent::Text {
                 content: content.clone(),
             },
-            ClaudeBlock::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+            ClaudeBlock::ToolUse { id, name, input } => ChatStreamEvent::ToolUse {
+                id: id.clone(),
                 name: name.clone(),
                 input: input.clone().unwrap_or(serde_json::Value::Null),
             },
             // ToolResult: collapse the raw content value into a readable string.
             // Longer than the 120-char terminal preview — the chat card folds it,
-            // so give it more room to stay useful.
+            // so give it more room to stay useful. `tool_use_id` is carried
+            // through so the reverse map (chat_event_to_agent_events) can pair
+            // by id instead of FIFO position (defect ① root cause).
             ClaudeBlock::ToolResult {
-                content, is_error, ..
+                tool_use_id,
+                content,
+                is_error,
             } => ChatStreamEvent::ToolResult {
+                tool_use_id: tool_use_id.clone(),
                 content: json_preview(content.as_ref(), 500),
                 is_error: is_error.unwrap_or(false),
             },
@@ -921,7 +977,8 @@ pub(crate) fn cap_blocks_for_persist(
     events
         .into_iter()
         .map(|ev| match ev {
-            ChatStreamEvent::ToolUse { name, input } => ChatStreamEvent::ToolUse {
+            ChatStreamEvent::ToolUse { id, name, input } => ChatStreamEvent::ToolUse {
+                id,
                 name,
                 input: cap_json_string_values(input, max_chars),
             },
@@ -1003,6 +1060,16 @@ pub fn spawn_pty_agent(
         inject_knowledge_with_timeout(&db_conn, &agent_type, project_path, &injected_prompt);
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
+    // D3: resolve @memory:<title> explicit references against the project's
+    // active knowledge entries (after @file injection, before spawn). Best-effort:
+    // a DB error leaves the prompt untouched.
+    let injected_prompt = match db_conn.get() {
+        Ok(conn) => {
+            let hash = crate::activity::hash_project_path(project_path);
+            crate::knowledge::memory_ref::resolve_memory_refs(&injected_prompt, &conn, &hash)
+        }
+        Err(_) => injected_prompt,
+    };
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
@@ -1038,12 +1105,17 @@ pub(crate) fn load_prior_turns(
         return Vec::new();
     };
     match parent_session_id {
-        // Branch-pure: walk ONLY the ancestor chain of this turn's parent. This
-        // is what makes edit-and-regenerate fork safely — a forked turn's parent
-        // is the edited turn's own parent, so its history is exactly that
-        // parent's ancestors, never the sibling branches being replaced. Without
-        // this, the conversation-wide loader would leak the edited-out branch.
-        Some(pid) => crate::agents::session::load_turn_chain_db(&conn, pid).unwrap_or_default(),
+        // Parent-keyed history: the parent's full chain (its ancestors + the
+        // parent itself). Two callers share this path:
+        //  • continuation (ChatView sets parent = last completed turn) — the
+        //    parent IS the latest round, so it must be rebuilt into history or
+        //    model-switch/continue loses it (defect ⑤).
+        //  • edit-and-regenerate fork (parent = edited turn's own parent = the
+        //    fork point) — the fork point's content must be inherited too.
+        // load_prior_turn_chain appends the parent itself to load_turn_chain_db's
+        // ancestor-only result. The sibling branch being replaced is still
+        // excluded: it is neither an ancestor of, nor equal to, the fork point.
+        Some(pid) => crate::agents::session::load_prior_turn_chain(&conn, pid).unwrap_or_default(),
         // Flat: first turn, or a linear continue with no explicit parent (the
         // pipe path derives a parent afterwards). A linear conversation is its
         // own single branch, so conversation-wide loading == the ancestor chain.
@@ -1075,30 +1147,46 @@ fn inject_conversation_context(
         return prompt.to_string();
     }
 
-    // Render each turn into a compact block, then trim from the front until the
-    // total fits the cap (keep the newest — the active thread of work).
+    // Defect ④ unified rebuild: reuse the central rebuilder
+    // (react_chat::rebuild_turn_messages → blocks_to_history — the SAME path
+    // ReactKernel's turns_to_history uses) instead of a separate
+    // output_summary-only branch. OpaqueAgent now inherits tool-call context
+    // from persisted blocks, not just the summary text tail. Each turn is
+    // rebuilt to Message[] then rendered to a compact text block.
     let blocks: Vec<String> = prior_turns
         .iter()
         .map(|t| {
-            let output = t
-                .output_summary
-                .as_deref()
-                .map(|s| tail(s, CONTEXT_BRIDGE_OUTPUT_MAX_CHARS))
-                .unwrap_or_default();
-            format!(
-                "[Turn — agent: {}]\nUser: {}\nAssistant:\n{}",
-                t.agent_type.display_name(),
-                t.prompt.trim(),
-                output.trim(),
-            )
+            let msgs = crate::agents::react_chat::rebuild_turn_messages(
+                t,
+                CONTEXT_BRIDGE_OUTPUT_MAX_CHARS,
+            );
+            render_turn_text(t, &msgs)
         })
+        .filter(|s| !s.is_empty())
         .collect();
 
+    if blocks.is_empty() {
+        return prompt.to_string();
+    }
+
+    // Trim until the total fits the cap, keeping the newest turns (the active
+    // thread of work). When only one turn remains and it STILL exceeds the cap
+    // (defect ④: a unified blocks rebuild can make a single turn large — a long
+    // prompt plus several tool results), tail-truncate that turn rather than
+    // hand the CLI a bloated prompt.
     let mut selected: Vec<String> = blocks.to_vec();
-    while selected.iter().map(|b| b.len()).sum::<usize>() > CONTEXT_BRIDGE_TOTAL_MAX_CHARS
-        && selected.len() > 1
-    {
-        selected.remove(0);
+    loop {
+        let total: usize = selected.iter().map(|b| b.len()).sum();
+        if total <= CONTEXT_BRIDGE_TOTAL_MAX_CHARS {
+            break;
+        }
+        if selected.len() > 1 {
+            selected.remove(0);
+        } else {
+            let only = selected.remove(0);
+            selected.push(tail(&only, CONTEXT_BRIDGE_TOTAL_MAX_CHARS));
+            break;
+        }
     }
 
     let history = selected.join("\n\n");
@@ -1107,8 +1195,45 @@ fn inject_conversation_context(
     )
 }
 
+/// Render one prior turn's rebuilt `Message[]` (from `rebuild_turn_messages`)
+/// into a compact text block for the CLI subprocess prompt. Messages are
+/// flattened by role (User/Assistant/Tool); assistant tool calls are noted by
+/// name so the CLI agent sees what was already tried. CompactBoundary System
+/// markers are META (they never reach the model) and are skipped here.
+fn render_turn_text(sess: &Session, msgs: &[kernel_core::Message]) -> String {
+    let mut body = String::new();
+    for m in msgs {
+        let line = match m.role {
+            kernel_core::Role::User => format!("User: {}", m.content.trim()),
+            kernel_core::Role::Assistant => {
+                let mut s = format!("Assistant: {}", m.content.trim());
+                if !m.tool_calls.is_empty() {
+                    let names: Vec<&str> =
+                        m.tool_calls.iter().map(|tc| tc.function.name.as_str()).collect();
+                    s.push_str(&format!("\n[tool calls: {}]", names.join(", ")));
+                }
+                s
+            }
+            kernel_core::Role::Tool => format!("Tool result: {}", m.content.trim()),
+            kernel_core::Role::System => continue, // CompactBoundary marker — META, skip.
+        };
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("[Turn — agent: {}]\n{}", sess.agent_type.display_name(), body)
+}
+
 /// Keep the tail of `s` up to `max` chars, snapped to a UTF-8 boundary and
 /// `...`-prefixed. Mirrors truncate_tail but operates on an already-decoded str.
+/// Used by `inject_conversation_context`'s single-turn over-cap guard: after
+/// defect ④ unified the rebuild, one turn (long prompt + several tool results)
+/// can exceed the total cap, so we tail-trim it rather than hand the CLI a
+/// bloated prompt.
 fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -1248,6 +1373,12 @@ pub(crate) fn register_running_session(
 /// prepares `output_summary` + `context_snapshot`; this fn only persists the
 /// terminal state — so the ReactAgent driver can call it with the same shape the
 /// pipe wait-thread does.
+///
+/// `finalize_reason` controls how `blocks_integrity::finalize_for_storage`
+/// repairs the blocks before persisting. This is the SINGLE chokepoint that
+/// guarantees persisted sessions always satisfy the pairing invariant — the
+/// root cause of cfa53764 continuation HTTP 400 failures (orphan ToolUse on
+/// disk → next turn replays malformed history → upstream API rejects).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_session(
     db_conn: &crate::db::DbState,
@@ -1260,6 +1391,7 @@ pub(crate) fn finalize_session(
     output_summary: Option<String>,
     context_snapshot: Option<ContextSnapshot>,
     blocks: Option<Vec<ChatStreamEvent>>,
+    finalize_reason: crate::agents::blocks_integrity::FinalizeReason,
 ) {
     let files_for_activity = context_snapshot.as_ref().map(|s| s.files_changed.clone());
 
@@ -1277,13 +1409,42 @@ pub(crate) fn finalize_session(
         patch["outputSummary"] = serde_json::Value::String(summary);
     }
     if let Some(blocks) = blocks {
+        // ── P0: pairing-invariant repair BEFORE serialization ──
+        // This is the chokepoint that makes orphan ToolUse blocks impossible to
+        // persist. Continuation sessions no longer replay malformed history →
+        // no more HTTP 400 "tool call result does not follow tool call".
+        let (repaired, stats) = crate::agents::blocks_integrity::finalize_for_storage(
+            blocks,
+            finalize_reason,
+        );
+        if !stats.was_clean {
+            log::warn!(
+                "[blocks_integrity] session {} repaired: reason={:?} in={} out={} stripped_use={} synth_result={} drop_dangling={}",
+                session_id,
+                finalize_reason,
+                stats.input_blocks,
+                stats.output_blocks,
+                stats.stripped_orphan_use,
+                stats.synthesized_result,
+                stats.dropped_dangling_result,
+            );
+        }
         // Persist the chat blocks so a finalized session replays via BlocksView
         // instead of falling back to the raw terminal log. Merge consecutive
         // text deltas (match the live Map's shape) and cap giant ToolUse inputs
         // before serializing — live emit is untouched.
-        let persisted = cap_blocks_for_persist(merge_consecutive_runs(blocks), 8000);
+        let persisted = cap_blocks_for_persist(merge_consecutive_runs(repaired), 8000);
         if let Ok(val) = serde_json::to_value(persisted) {
             patch["blocks"] = val;
+        }
+        // Audit log — best-effort, never blocks the write.
+        if let Ok(conn) = db_conn.get() {
+            crate::agents::blocks_integrity::write_finalize_log(
+                &conn,
+                session_id,
+                finalize_reason,
+                &stats,
+            );
         }
     }
 
@@ -1777,6 +1938,18 @@ fn spawn_pipe_fallback(
                 Some(taken)
             }
         });
+        // P0: pipe path — decide repair strategy from exit shape.
+// MaxSteps / ForceStop (review C1) are not reachable from the pipe path
+// (the ReactAgent loop lives in the kernel/commands path). The
+        // `FinalizeReason` enum marks both with `#[allow(dead_code)]` so
+        // this match stays exhaustive without a `_ =>` arm.
+        let finalize_reason = if timed_out {
+            crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+        } else if matches!(session_status, SessionStatus::Completed) {
+            crate::agents::blocks_integrity::FinalizeReason::Normal
+        } else {
+            crate::agents::blocks_integrity::FinalizeReason::Crash
+        };
         finalize_session(
             &db_conn_exit,
             &app_exit,
@@ -1788,6 +1961,7 @@ fn spawn_pipe_fallback(
             output_summary,
             snapshot,
             blocks_snapshot,
+            finalize_reason,
         );
     });
 
@@ -2374,6 +2548,7 @@ mod tests {
                 content: "b".into(),
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "Read".into(),
                 input: serde_json::json!({"file_path": "/x"}),
             },
@@ -2415,10 +2590,12 @@ mod tests {
     fn merge_consecutive_runs_all_tool_use_unchanged() {
         let evs = vec![
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "A".into(),
                 input: serde_json::Value::Null,
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "B".into(),
                 input: serde_json::Value::Null,
             },
@@ -2454,6 +2631,7 @@ mod tests {
     fn cap_blocks_for_persist_truncates_long_tool_use_input_strings() {
         let big = "x".repeat(10_000);
         let evs = vec![ChatStreamEvent::ToolUse {
+            id: None,
             name: "Edit".into(),
             input: serde_json::json!({ "file_path": "/p", "new_string": big }),
         }];
@@ -2478,10 +2656,12 @@ mod tests {
                 content: "answer".into(),
             },
             ChatStreamEvent::ToolUse {
+                id: None,
                 name: "Read".into(),
                 input: serde_json::json!({"file_path": "/short"}),
             },
             ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "ok".into(),
                 is_error: false,
             },
@@ -2717,6 +2897,87 @@ mod tests {
     }
 
     #[test]
+    fn inject_context_rebuilds_from_blocks_inheriting_tool_calls() {
+        // Defect ④: a prior turn WITH persisted blocks must be rebuilt via the
+        // shared central rebuilder (blocks_to_history, same as ReactKernel's
+        // turns_to_history) — so the OpaqueAgent CLI sees the tool call + result,
+        // not just a flat output_summary tail. mk_turn sets blocks=None; we
+        // override blocks to exercise the rebuild path.
+        let mut t = mk_turn(AgentType::ClaudeCode, "read config", None);
+        t.blocks = Some(serde_json::to_value(vec![
+            ChatStreamEvent::Text { content: "reading config".into() },
+            ChatStreamEvent::ToolUse {
+                id: None,
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "config.toml"}),
+            },
+            ChatStreamEvent::ToolResult {
+                content: "port = 8080".into(),
+                tool_use_id: None,
+                is_error: false,
+            },
+        ]).unwrap());
+        let out = inject_conversation_context("now change the port", &[t], &AgentType::ClaudeCode);
+        assert!(out.contains("read config"), "user prompt rebuilt from blocks: {out}");
+        assert!(out.contains("reading config"), "assistant text rebuilt from blocks: {out}");
+        assert!(
+            out.contains("[tool calls: Read]"),
+            "tool-call name inherited from blocks (not just summary): {out}",
+        );
+        assert!(out.contains("port = 8080"), "tool result inherited from blocks: {out}");
+        assert!(out.contains("now change the port"), "current request appended: {out}");
+    }
+
+    #[test]
+    fn render_turn_text_skips_compact_boundary_and_names_agent() {
+        // CompactBoundary is a System META marker (never reaches the model); the
+        // text render must skip it and keep the agent header + user/assistant.
+        use kernel_core::{Message, Role};
+        let sess = mk_turn(AgentType::Codex, "the prompt", None);
+        let msgs = vec![
+            Message::user("the prompt"),
+            Message::assistant("the reply"),
+            Message {
+                role: Role::System,
+                content: String::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_signature: None,
+                compact_boundary: Some(kernel_core::CompactBoundaryMeta {
+                    trigger: "auto".into(),
+                    pre_tokens: 1000,
+                    preserved_count: 2,
+                }),
+            },
+        ];
+        let out = render_turn_text(&sess, &msgs);
+        assert!(out.contains("[Turn — agent: Codex]"), "agent header present: {out}");
+        assert!(out.contains("User: the prompt"), "user role rendered: {out}");
+        assert!(out.contains("Assistant: the reply"), "assistant role rendered: {out}");
+        // No stray "Tool result" / boundary leak — System META is skipped.
+        assert!(!out.contains("Tool result"), "no tool line when none present: {out}");
+    }
+
+    #[test]
+    fn inject_context_single_turn_over_cap_is_tail_trimmed() {
+        // Defect ④ over-cap guard: when ONE prior turn's rebuilt text exceeds
+        // the total cap, it's tail-trimmed (keep the newest assistant tail)
+        // rather than handed to the CLI verbatim. mk_turn has no blocks so
+        // rebuild falls back to output_summary; make the PROMPT itself huge to
+        // push the single turn's rendered block over the cap.
+        let huge_prompt = "x".repeat(CONTEXT_BRIDGE_TOTAL_MAX_CHARS + 2000);
+        let t = mk_turn(AgentType::ClaudeCode, &huge_prompt, Some("short reply"));
+        let out = inject_conversation_context("current", &[t], &AgentType::ClaudeCode);
+        assert!(
+            out.len() < CONTEXT_BRIDGE_TOTAL_MAX_CHARS + 4096,
+            "single over-cap turn must be tail-trimmed; got {} bytes",
+            out.len(),
+        );
+        assert!(out.contains("current"), "current request survives trim: {out}");
+    }
+
+    #[test]
     fn tail_keeps_suffix_and_snaps_to_char_boundary() {
         assert_eq!(tail("hello", 10), "hello");
         // 6 CJK chars = 18 bytes; tail to 4 bytes snaps to a char boundary.
@@ -2839,6 +3100,7 @@ mod tests {
                     content: "reading".to_string()
                 },
                 ClaudeBlock::ToolUse {
+                    id: None,
                     name: "Read".to_string(),
                     input: Some(serde_json::json!({"file_path":"src/main.rs"})),
                 },
@@ -2863,8 +3125,28 @@ mod tests {
         assert_eq!(
             parse_claude_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: None,
                 name: "WebSearch".to_string(),
                 input: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn parse_claude_line_tool_use_with_id() {
+        // claude's tool_use carries an `id` (toolu_...) that the later
+        // tool_result's `tool_use_id` points back at. Surfacing it on the block
+        // lets the reverse map (chat_event_to_agent_events) pair by id instead
+        // of FIFO position (defect ① root cause). Mirrors the symmetric gemini
+        // `parse_gemini_*` id assertions; guards against wire schema drift
+        // (e.g. id nesting into a sub-field) that None-only tests would miss.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
+        assert_eq!(
+            parse_claude_line(line),
+            vec![ClaudeBlock::ToolUse {
+                id: Some("toolu_abc".to_string()),
+                name: "Read".to_string(),
+                input: Some(serde_json::json!({"file_path":"src/main.rs"})),
             }],
         );
     }
@@ -2970,6 +3252,7 @@ mod tests {
         assert_eq!(
             parse_gemini_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: Some("t1".to_string()),
                 name: "read_file".to_string(),
                 input: Some(serde_json::json!({"path":"src/main.rs"})),
             }],
@@ -2984,6 +3267,7 @@ mod tests {
         assert_eq!(
             parse_gemini_line(line),
             vec![ClaudeBlock::ToolUse {
+                id: Some("t2".to_string()),
                 name: "list_dir".to_string(),
                 input: None,
             }],
@@ -3258,6 +3542,7 @@ mod tests {
         assert_eq!(v["content"], "hi");
 
         let tool = ChatStreamEvent::ToolUse {
+            id: None,
             name: "Read".to_string(),
             input: serde_json::json!({"file_path":"a.rs"}),
         };
@@ -3343,6 +3628,7 @@ mod tests {
                 ChatStreamEvent::Result { .. } => "result",
                 ChatStreamEvent::FileChanged { .. } => "file_changed",
                 ChatStreamEvent::Compact { .. } => "compact",
+                ChatStreamEvent::CompactBoundary { .. } => "compact_boundary",
                 ChatStreamEvent::ApprovalRequired { .. } => "approval_required",
             })
             .collect();

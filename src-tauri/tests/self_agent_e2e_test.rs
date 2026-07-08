@@ -61,6 +61,7 @@ impl ChatModel for MockChatModel {
                         tool_call_id: None,
                         reasoning: None,
                         reasoning_signature: None,
+                        compact_boundary: None,
                     }
                 } else {
                     g.remove(0)
@@ -195,6 +196,7 @@ async fn react_agent_runs_skill_and_builtin_tool_then_answers() {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         },
         Message {
             role: Role::Assistant,
@@ -203,6 +205,7 @@ async fn react_agent_runs_skill_and_builtin_tool_then_answers() {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         },
         Message::assistant("Done. Found 3 files using the counting procedure."),
     ];
@@ -346,6 +349,7 @@ async fn react_agent_streams_token_deltas_then_tool_calls_and_threads_ctx() {
                 tool_call_id: None,
                 reasoning: None,
                 reasoning_signature: None,
+                compact_boundary: None,
             },
         ],
         // Turn 2: text only → turn boundary.
@@ -460,6 +464,7 @@ async fn react_agent_injects_prior_history_between_system_and_current_task() {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         },
         Message {
             role: Role::Tool,
@@ -468,6 +473,7 @@ async fn react_agent_injects_prior_history_between_system_and_current_task() {
             tool_call_id: Some("turn0_call0".into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         },
     ];
     let agent = ReactAgent::new(model, registry, "SYS").with_history(prior);

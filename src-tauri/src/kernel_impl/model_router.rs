@@ -218,6 +218,7 @@ mod tests {
             tool_call_id: Some("call_1".into()),
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
     fn assistant_tool_call() -> Message {
@@ -235,6 +236,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 

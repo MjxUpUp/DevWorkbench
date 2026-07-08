@@ -42,6 +42,8 @@ fn make_entry(id: &str, project_hash: &str, title: &str, content: &str) -> Knowl
         created_at: chrono::Local::now().to_rfc3339(),
         updated_at: chrono::Local::now().to_rfc3339(),
         access_count: 0,
+        status: "active".into(),
+        effectiveness: 0.0,
     }
 }
 

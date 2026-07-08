@@ -39,6 +39,33 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
+/// Metadata on a compact-boundary marker message (CCB parity:
+/// `SystemCompactBoundaryMessage.compactMetadata`). Carried by a [`Message`]
+/// whose [`Message::compact_boundary`] is `Some(_)` and `role` is
+/// [`Role::System`]: it marks where an auto/manual compaction replaced part of
+/// the conversation history with a summary.
+///
+/// The boundary is a META message — wire serializers drop System-role messages
+/// (`anthropic_chat_model` / `openai_chat_model` filter them out), so it never
+/// reaches the model. It exists so `maybe_compact` can locate the LAST boundary
+/// and summarize only what came after it, avoiding re-compaction of already-
+/// summarized history on resume (the "summary of summary" drift — defect ③'s
+/// cousin). CCB does the same via `getMessagesAfterCompactBoundary`.
+///
+/// `preserved_count` is DW's adaptation of CCB `preservedSegment` (headUuid/
+/// tailUuid/anchorUuid): DW has no per-message uuids, so the verbatim-preserved
+/// tail is recorded as a count rather than a uuid range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactBoundaryMeta {
+    /// `"auto"` | `"manual"` — what triggered the compaction (CCB `trigger`).
+    pub trigger: String,
+    /// Estimated tokens just before compaction ran (CCB `preTokens`).
+    pub pre_tokens: usize,
+    /// How many trailing messages were preserved verbatim across this
+    /// compaction (CCB `preservedSegment` size; DW uses a count, not uuids).
+    pub preserved_count: usize,
+}
+
 /// A single chat message.
 ///
 /// `tool_calls` is present only on assistant messages.
@@ -61,6 +88,13 @@ pub struct Message {
     /// Present only when the model emitted one AND `reasoning` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_signature: Option<String>,
+    /// Compact-boundary marker. `Some(_)` ONLY on a System-role meta message
+    /// that marks a compaction boundary (see [`CompactBoundaryMeta`]). Wire
+    /// serializers filter System messages, so this never reaches the model;
+    /// it lets `maybe_compact` find the last boundary and skip already-summarized
+    /// history on resume. `None` for every real conversation message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_boundary: Option<CompactBoundaryMeta>,
 }
 
 impl Message {
@@ -72,6 +106,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 
@@ -83,6 +118,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 
@@ -94,6 +130,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         }
     }
 }
@@ -145,6 +182,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
             reasoning_signature: None,
+            compact_boundary: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();

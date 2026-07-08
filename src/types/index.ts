@@ -581,8 +581,24 @@ export interface WorkflowProgressPayload {
 export type ChatStreamEvent =
   | { kind: 'text'; content: string }
   | { kind: 'thinking'; content: string }
-  | { kind: 'tool_use'; name: string; input: unknown }
-  | { kind: 'tool_result'; content: string; is_error: boolean }
+  | {
+      kind: 'tool_use';
+      name: string;
+      input: unknown;
+      /** tool_call_id pairing key. Present on the OpaqueAgent path (claude wire
+       *  carries `id`); absent on the ReactKernel forward path. Optional so
+       *  pre-id session blocks (no `id` field) still parse. */
+      id?: string | null;
+    }
+  | {
+      kind: 'tool_result';
+      /** Points back to the tool_use block this result answers. Present on the
+       *  OpaqueAgent path; absent on the ReactKernel forward path / legacy
+       *  blocks. Optional for backward compatibility. */
+      tool_use_id?: string | null;
+      content: string;
+      is_error: boolean;
+    }
   | { kind: 'result'; is_error: boolean; secs: number }
   | { kind: 'file_changed'; path: string }
   | {
@@ -601,6 +617,23 @@ export type ChatStreamEvent =
       /** true on circuit-breaker trip (MAX_CONSECUTIVE_COMPACT_FAILURES) —
        *  renders an error card instead of an info card. */
       is_error: boolean;
+    }
+  | {
+      /** §4.2 缺项3 / CCB `SystemCompactBoundaryMessage` parity: a META event
+       *  emitted alongside `compact` when compaction structurally changed the
+       *  model's history (summarize / hard-truncate). Never rendered as a chat
+       *  block — it's persisted into session.blocks so a resumed session's
+       *  blocks_to_history reconstructs a boundary Message, letting
+       *  maybe_compact summarize only what came AFTER the last boundary (avoiding
+       *  the resume×compact "summary of summary" fidelity drift). MicroClear /
+       *  BreakerTripped emit no boundary (no structural change). */
+      kind: 'compact_boundary';
+      /** "auto" | "manual" — what triggered the compaction. */
+      trigger: string;
+      /** Estimated tokens just before compaction ran. */
+      pre_tokens: number;
+      /** Trailing messages preserved verbatim across this compaction. */
+      preserved_count: number;
     }
   | {
       kind: 'approval_required';

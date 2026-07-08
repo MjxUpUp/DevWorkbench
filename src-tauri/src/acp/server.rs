@@ -424,6 +424,7 @@ mod tests {
                 tool: "Read".into(),
                 arguments: r#"{"file_path":"/x"}"#.into(),
                 status: ToolCallStatus::Started,
+                id: None,
                 result: None,
             }))
             .expect("Started → Some");
@@ -450,6 +451,7 @@ mod tests {
             tool: "Read".into(),
             arguments: "{}".into(),
             status: ToolCallStatus::Started,
+            id: None,
             result: None,
         }));
         // Complete it → update referencing dw-1.
@@ -458,6 +460,7 @@ mod tests {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                id: None,
                 result: Some(r#"{"lines":42}"#.into()),
             }))
             .expect("Succeeded → Some");
@@ -482,6 +485,7 @@ mod tests {
             tool: "Bash".into(),
             arguments: "{}".into(),
             status: ToolCallStatus::Started,
+            id: None,
             result: None,
         }));
         let u = b
@@ -489,6 +493,7 @@ mod tests {
                 tool: "Bash".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Failed,
+                id: None,
                 result: Some("permission denied".into()),
             }))
             .expect("Failed → Some");
@@ -535,12 +540,14 @@ mod tests {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Started,
+                id: None,
                 result: None,
             }),
             AgentEvent::ToolCall(ToolCallEvent {
                 tool: "Read".into(),
                 arguments: "{}".into(),
                 status: ToolCallStatus::Succeeded,
+                id: None,
                 result: Some("ok".into()),
             }),
             AgentEvent::Done(AgentOutcome {
@@ -595,6 +602,7 @@ mod tests {
             tool: tool.into(),
             arguments: "{}".into(),
             status,
+            id: None,
             result: (status != ToolCallStatus::Started).then(|| "r".into()),
         })
     }

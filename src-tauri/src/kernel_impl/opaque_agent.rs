@@ -228,7 +228,7 @@ impl Agent for OpaqueAgent {
             // structured path does not exist, so they keep the text Token path.
             // `pending` pairs ToolUse↔ToolResult positionally (no tool_call_id
             // on the wire).
-            let pending: Arc<std::sync::Mutex<VecDeque<(String, String)>>> =
+            let pending: Arc<std::sync::Mutex<VecDeque<(Option<String>, String, String)>>> =
                 Arc::new(std::sync::Mutex::new(VecDeque::new()));
             let mut listener_ids: Vec<tauri::EventId> = Vec::new();
 
@@ -333,6 +333,24 @@ impl Agent for OpaqueAgent {
                     }
                     AgentMsg::Completed { status, exit_code } => {
                         let audit_dir = working_dir.clone();
+
+                        // Defect ③: drain and report pending tool-call orphans before
+                        // emitting Done. Any ToolUse whose result never arrived means
+                        // the stream was cut short (crash/interrupt). Log the orphaned
+                        // pairs so the user sees which tools were not completed.
+                        {
+                            let mut guard = match pending.lock() {
+                                Ok(g) => g,
+                                Err(_) => break,
+                            };
+                            for v in crate::agents::react_chat::drain_pending_orphans(&mut *guard) {
+                                log::warn!(
+                                    "[opaque-agent] stream-end pairing violation: {}",
+                                    v.detail()
+                                );
+                            }
+                        }
+
                         let honesty = tokio::task::spawn_blocking(move || {
                             crate::kernel_impl::honesty::audit_project(
                                 std::path::Path::new(&audit_dir),
@@ -405,7 +423,7 @@ fn read_session_files(app: &tauri::AppHandle, session_id: &str) -> Vec<String> {
 fn decode_agent_event_payload(
     payload: &serde_json::Value,
     session_id: &str,
-    pending: &mut VecDeque<(String, String)>,
+    pending: &mut VecDeque<(Option<String>, String, String)>,
 ) -> Vec<AgentEvent> {
     if payload.get("sessionId").and_then(|s| s.as_str()) != Some(session_id) {
         return Vec::new();
@@ -568,7 +586,7 @@ mod tests {
         // queue — otherwise a future refactor that moves pop_front above the sid
         // check silently steals ToolResult pairing across sessions.
         let mut pending = VecDeque::new();
-        pending.push_back(("A".to_string(), "{}".to_string()));
+        pending.push_back((None, "A".to_string(), "{}".to_string()));
         let payload = json!({
             "sessionId": "other-session",
             "event": { "kind": "tool_result", "content": "not ours", "is_error": false },
@@ -580,7 +598,8 @@ mod tests {
             1,
             "pending must be untouched for filtered events"
         );
-        assert_eq!(pending.front().unwrap().0, "A");
+        assert_eq!(pending.front().unwrap().0, None); // id (no id on this wire)
+        assert_eq!(pending.front().unwrap().1, "A"); // name
     }
 
     #[test]

@@ -298,6 +298,21 @@ fn react_chat_driver(
         log::warn!("[checkpoint] create failed for {session_id}: {e} (rollback disabled)");
     }
 
+    // D5 knowledge prune: lazily GC entries older than 90 days once per session
+    // start. prune_old_entries was previously defined but NEVER called (zero
+    // call sites), so the knowledge base accumulated indefinitely and only the
+    // per-prompt token budget front-truncated it. Best-effort — a DB error just
+    // logs (prune is hygiene, not a gate); count==0 returns early so this is
+    // cheap on a clean DB.
+    match db_conn.get() {
+        Ok(conn) => {
+            if let Err(e) = crate::knowledge::store::prune_old_entries(&conn, 90) {
+                log::warn!("[knowledge] prune failed for {session_id}: {e}");
+            }
+        }
+        Err(e) => log::debug!("[knowledge] prune skipped (no conn): {e}"),
+    }
+
     // T8 experience flywheel replay: pull Forge's pending *mandatory* reviews
     // (low-score, unresolved) into the knowledge base as quality_failure lessons,
     // which build_react_agent → experience_prompt_suffix (T7) surfaces in THIS
@@ -428,6 +443,7 @@ fn react_chat_driver(
                     Some(format!("Agent init failed: {e}")),
                     None,
                     None,
+                    crate::agents::blocks_integrity::FinalizeReason::Crash,
                 );
                 return;
             }
@@ -454,6 +470,7 @@ fn react_chat_driver(
                     Some(format!("Agent run failed: {e}")),
                     None,
                     None,
+                    crate::agents::blocks_integrity::FinalizeReason::Crash,
                 );
                 return;
             }
@@ -490,6 +507,13 @@ fn react_chat_driver(
                         summary,
                         None,
                         None,
+                        // Stream error after partial output = StreamTruncated,
+                        // before any output = Crash. Distinguish via final_output.
+                        if final_output.is_empty() {
+                            crate::agents::blocks_integrity::FinalizeReason::Crash
+                        } else {
+                            crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+                        },
                     );
                     return;
                 }
@@ -571,6 +595,58 @@ fn react_chat_driver(
         // driven from `cargo test`. Best-effort (a DB failure just logs). Only
         // on Completed so a Failed/degraded run doesn't pollute memory.
         if final_status == SessionStatus::Completed {
+            // I3 + I2: LLM-enhanced reflection, two layers deepening on success.
+            // Both reuse ONE one-shot ChatModel built from the SAME provider
+            // resolution as the main agent (__default__ + provider config), built
+            // OUTSIDE the db_drv.get() scope (chat construction needs &DbState).
+            //
+            // I3 first — fork a READ-ONLY subagent (CCB extractMemories analogue)
+            // to investigate the ACTUAL diff with read_file/grep and extract a
+            // deep lesson. Timeout-bounded (90s) so a stuck child never blocks
+            // finalize. The subagent RETURNS text; THIS hook owns the DB write,
+            // preserving the "子 agent 只读" invariant.
+            //
+            // On I3 timeout/failure → I2: a tool-less one-shot generate over the
+            // pure-rule stats + prose. I2 itself falls back to the pure rule on
+            // any error, so the write is never blocked by a flaky model.
+            let llm_reflection = match crate::kernel_impl::executor::build_one_shot_chat(
+                model_drv.as_deref(),
+                &db_drv,
+                &pp_drv,
+            ) {
+                Ok(chat) => {
+                    let i3 = tokio::time::timeout(
+                        std::time::Duration::from_secs(90),
+                        crate::kernel_impl::session_reflection::extract_lessons_via_subagent(
+                            std::sync::Arc::clone(&chat),
+                            &pp_drv,
+                            &sid_drv,
+                            &final_blocks,
+                            &prompt_drv,
+                            summary.as_deref(),
+                        ),
+                    )
+                    .await;
+                    match i3 {
+                        Ok(Some(r)) => Some(r),
+                        Ok(None) | Err(_) => {
+                            // I3 missed (no parse / dispatch error) or timed out
+                            // → I2 one-shot generate fallback.
+                            crate::kernel_impl::session_reflection::summarize_with_llm(
+                                &final_blocks,
+                                &prompt_drv,
+                                summary.as_deref(),
+                                chat.as_ref(),
+                            )
+                            .await
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("[react_chat] LLM reflection skipped ({e}) for {sid_drv}");
+                    None
+                }
+            };
             if let Ok(conn) = db_drv.get() {
                 let hash = crate::activity::hash_project_path(&pp_drv);
                 let written = crate::kernel_impl::session_reflection::persist_completion_memory(
@@ -581,13 +657,115 @@ fn react_chat_driver(
                     summary.as_deref(),
                     &final_blocks,
                     &at_drv,
+                    llm_reflection.as_ref(),
                 );
                 if written > 0 {
                     log::info!("[react_chat] {written} knowledge entries recorded for {sid_drv}");
                 }
+                // I5: mark this Completed session's produced entries
+                // (react_session/react_reflection) effective +1 — a successful
+                // run's lessons rank higher in the next session's retrieval via
+                // reuse_boost. Best-effort; a DB error just logs.
+                if let Err(e) =
+                    crate::knowledge::store::bump_effectiveness_by_session(&conn, &sid_drv)
+                {
+                    log::warn!("[react_chat] effectiveness bump failed for {sid_drv}: {e}");
+                }
+                // I1 write-side: embed this session's new entries (title+content)
+                // and upsert into knowledge_embeddings, populating the vector
+                // store so the NEXT session's retrieve_relevant_with_vector can
+                // cosine-rank them when FTS confidence is low. OpenAI-compatible
+                // providers only; embed failure/timeout → just logs (never blocks
+                // completion).
+                if written > 0 {
+                    if let Some(embedder) =
+                        crate::kernel_impl::executor::build_one_shot_embedder(model_drv.as_deref())
+                    {
+                        match crate::knowledge::store::entries_by_session(&conn, &sid_drv) {
+                            Ok(rows) if !rows.is_empty() => {
+                                let texts: Vec<String> = rows
+                                    .iter()
+                                    .map(|(_, t, c)| format!("{t}\n{c}"))
+                                    .collect();
+                                let refs: Vec<&str> =
+                                    texts.iter().map(|s| s.as_str()).collect();
+                                let mid = embedder.embed_model_id().to_string();
+                                let emb = tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    embedder.embed(&refs),
+                                )
+                                .await;
+                                match emb {
+                                    Ok(Ok(embs)) => {
+                                        let mut ok = 0;
+                                        for ((id, _, _), vec) in rows.iter().zip(embs) {
+                                            if crate::knowledge::store::upsert_embedding(
+                                                &conn, id, &vec, &mid,
+                                            )
+                                            .is_ok()
+                                            {
+                                                ok += 1;
+                                            }
+                                        }
+                                        log::info!(
+                                            "[react_chat] embedded {ok}/{} entries for {sid_drv}",
+                                            rows.len()
+                                        );
+                                    }
+                                    Ok(Err(e)) => log::warn!(
+                                        "[react_chat] embed batch failed for {sid_drv}: {e}"
+                                    ),
+                                    Err(_) => {
+                                        log::warn!("[react_chat] embed batch timed out for {sid_drv}")
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
 
+        // P0 (review M6): choose repair strategy from terminal shape.
+// had_partial_output now reads from `final_blocks` (Text/Thinking presence)
+// rather than `summary.is_some()` — summary only reflects TEXT accumulation,
+// so a session that emitted Thinking-only or hit max-steps with no text
+// would be wrongly classified as Crash. block-based check is the truthful
+// signal.
+        let had_partial_output = final_blocks.iter().any(|b| {
+            matches!(
+                b,
+                pty::ChatStreamEvent::Text { .. } | pty::ChatStreamEvent::Thinking { .. }
+            )
+        });
+        // P0 (review C1): MaxSteps detection via the ReactAgent error string.
+        // `react_agent.rs:1114-1117` returns
+        // `Error::Agent("ReactAgent exceeded N steps without a final answer")`
+        // when the budget is hit; surface it as `MaxSteps` so the audit log
+        // can distinguish "ran out of budget" from "stream truncated" /
+        // "crashed mid-flight" — the cfa53764 session 61070a4c failure mode
+        // used to be lost under a generic StreamTruncated label.
+        // TODO: replace string-match with a typed signal on the stream event
+        // once AgentRunStatus grows a HitMaxSteps variant.
+        let hit_max_steps = final_status == SessionStatus::Failed
+            && summary
+                .as_deref()
+                .map(|s| s.contains("exceeded") && s.contains("steps"))
+                .unwrap_or(false);
+        let finalize_reason = match final_status {
+            SessionStatus::Completed => crate::agents::blocks_integrity::FinalizeReason::Normal,
+            SessionStatus::Cancelled => crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+            SessionStatus::Failed if hit_max_steps => {
+                crate::agents::blocks_integrity::FinalizeReason::MaxSteps
+            }
+            SessionStatus::Failed if had_partial_output => {
+                crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+            }
+            SessionStatus::Failed => crate::agents::blocks_integrity::FinalizeReason::Crash,
+            // Running should not reach finalize; treat as Crash defensively.
+            SessionStatus::Running => crate::agents::blocks_integrity::FinalizeReason::Crash,
+        };
         pty::finalize_session(
             &db_drv,
             &app_drv,
@@ -599,6 +777,7 @@ fn react_chat_driver(
             summary,
             None,
             Some(final_blocks),
+            finalize_reason,
         );
     });
 
@@ -747,21 +926,32 @@ pub fn stop_agent_session(
         // Best-effort PID kill; process may already be dead (stale session)
         let _ = pty::stop_agent(&state.0, &session_id);
     }
-    // gap4: persist the streamed-so-far transcript so a mid-run stop doesn't
-    // lose the whole turn. The driver's `final_blocks` was dropped with the
-    // aborted future; drain the live mirror (only kernel sessions register
-    // one), append a synthetic tool_result for any trailing tool_use whose
-    // result the interrupt pre-empted, and shape it the same way
-    // finalize_session would (merge consecutive runs + cap oversized inputs).
-    // Non-kernel (pty) sessions have no live mirror — None leaves blocks as-is.
+    // gap4 + P0 (review C3): persist the streamed-so-far transcript so a mid-run
+    // stop doesn't lose the whole turn. The driver's `final_blocks` was
+    // dropped with the aborted future; drain the live mirror (only kernel
+    // sessions register one) and funnel it through
+    // blocks_integrity::finalize_for_storage(UserInterrupt) — replacing the
+    // previous in-line `synthesize_interrupt_tool_results`. This means
+    // stop-path now ALSO writes a row to `block_finalize_log` and respects
+    // the same pairing-invariant guarantees as finalize_session.
+    let mut finalize_stats_for_log: Option<crate::agents::blocks_integrity::FinalizeStats> = None;
     let persisted_blocks: Option<Vec<pty::ChatStreamEvent>> = if was_kernel {
-        app.try_state::<KernelLiveBlocks>()
+        let raw: Vec<pty::ChatStreamEvent> = app
+            .try_state::<KernelLiveBlocks>()
             .and_then(|lb| lb.take(&session_id))
             .and_then(|buf| buf.lock().ok().map(|mut g| std::mem::take(&mut *g)))
-            .map(synthesize_interrupt_tool_results)
-            .map(|events| {
-                pty::cap_blocks_for_persist(pty::merge_consecutive_runs(events), 8000)
-            })
+            .unwrap_or_default();
+        if raw.is_empty() {
+            None
+        } else {
+            let (repaired, stats) =
+                crate::agents::blocks_integrity::finalize_for_storage(
+                    raw,
+                    crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+                );
+            finalize_stats_for_log = Some(stats);
+            Some(pty::cap_blocks_for_persist(pty::merge_consecutive_runs(repaired), 8000))
+        }
     } else {
         None
     };
@@ -783,7 +973,19 @@ pub fn stop_agent_session(
     }
     let won_race = {
         let conn = db.get()?;
-        crate::agents::session::update_session_db(&conn, &session_id, patch)? > 0
+        let rows = crate::agents::session::update_session_db(&conn, &session_id, patch)?;
+        // Audit log row — best-effort. Only kernel stops have blocks worth
+        // logging; pty stops skip this branch (finalize_session in the pipe
+        // path already wrote its own row when the process exited).
+        if let Some(stats) = finalize_stats_for_log {
+            crate::agents::blocks_integrity::write_finalize_log(
+                &conn,
+                &session_id,
+                crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+                &stats,
+            );
+        }
+        rows > 0
     };
 
     // Only emit if this stop won the running→terminal race. If the agent had
@@ -808,21 +1010,35 @@ pub fn stop_agent_session(
 /// Append a synthetic error `tool_result` for every trailing `tool_use` that
 /// has no matching result — the interrupt pre-empted the tool mid-flight. The
 /// persisted transcript must stay internally consistent for BlocksView replay
-/// (a tool_use card with no result card looks stuck). Pairing is positional:
-/// a trailing run of `tool_use` blocks with no `tool_result` after them is the
-/// only orphan case; any other block ends the unmatched tail.
+/// (a tool_use card with no result card looks stuck). Each synthesized result
+/// carries the SAME `tool_use_id` as its `tool_use` card (both paths fill id
+/// now — OpaqueAgent wire id and ReactKernel ToolCall.id); `None` only for
+/// legacy/pre-id wire. Preserves replay pairing by id instead of degrading to FIFO.
+/// The orphan tail is the only case: any non-`tool_use` block ends it.
+///
+/// **DEPRECATED for new code** (review C3): kernel sessions now route through
+/// `blocks_integrity::finalize_for_storage(UserInterrupt)` in
+/// `stop_agent_session`, which has the same "synthesize error tool_result"
+/// effect AND also writes a `block_finalize_log` audit row. Calling this fn
+/// from a path that already fed its blocks through finalize_for_storage
+/// would synthesize a second tool_result on top of the first one. Kept only
+/// because its unit tests still cover the orphan-tail invariant directly.
+#[allow(dead_code)]
 fn synthesize_interrupt_tool_results(
     mut events: Vec<pty::ChatStreamEvent>,
 ) -> Vec<pty::ChatStreamEvent> {
-    let mut pending = 0usize;
+    // Collect the trailing tool_use ids back-to-front, then reverse so the
+    // synthesized results align with their cards in original order.
+    let mut orphan_ids: Vec<Option<String>> = Vec::new();
     for ev in events.iter().rev() {
         match ev {
-            pty::ChatStreamEvent::ToolUse { .. } => pending += 1,
+            pty::ChatStreamEvent::ToolUse { id, .. } => orphan_ids.push(id.clone()),
             _ => break,
         }
     }
-    for _ in 0..pending {
+    for id in orphan_ids.into_iter().rev() {
         events.push(pty::ChatStreamEvent::ToolResult {
+            tool_use_id: id,
             content: "[已中断：用户停止了本次会话]".into(),
             is_error: true,
         });
@@ -962,10 +1178,12 @@ mod tests {
         let events = vec![
             pty::ChatStreamEvent::Text { content: "thinking…".into() },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "bash".into(),
                 input: serde_json::json!({"command": "ls"}),
             },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "read_file".into(),
                 input: serde_json::json!({"file_path": "a.rs"}),
             },
@@ -974,7 +1192,7 @@ mod tests {
         assert_eq!(out.len(), 5, "3 originals + 2 synthetic results");
         for ev in &out[3..] {
             match ev {
-                pty::ChatStreamEvent::ToolResult { content, is_error } => {
+                pty::ChatStreamEvent::ToolResult { content, is_error, .. } => {
                     assert!(is_error, "synthetic result must be error");
                     assert_eq!(content, "[已中断：用户停止了本次会话]");
                 }
@@ -984,14 +1202,53 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_interrupt_carries_tool_use_id_when_present() {
+        // A trailing tool_use that CARRIED an id (OpaqueAgent path) must get a
+        // synthetic result with the SAME id — so replay pairing holds by id
+        // instead of degrading to FIFO (defect ①). Both OpaqueAgent (wire id)
+        // and ReactKernel (ToolCall.id) fill id now; None only for legacy/pre-id
+        // wire (covered by the test above). Order must align: the synthesized
+        // results mirror their tool_use cards positionally.
+        let events = vec![
+            pty::ChatStreamEvent::ToolUse {
+                id: Some("toolu_xyz".into()),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            pty::ChatStreamEvent::ToolUse {
+                id: Some("toolu_abc".into()),
+                name: "read_file".into(),
+                input: serde_json::json!({"file_path": "a.rs"}),
+            },
+        ];
+        let out = synthesize_interrupt_tool_results(events);
+        assert_eq!(out.len(), 4, "2 originals + 2 synthetic results");
+        match &out[2] {
+            pty::ChatStreamEvent::ToolResult { tool_use_id, is_error, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("toolu_xyz"));
+                assert!(is_error, "synthetic result must be error");
+            }
+            _ => panic!("expected ToolResult at [2], got {:?}", out[2]),
+        }
+        match &out[3] {
+            pty::ChatStreamEvent::ToolResult { tool_use_id, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("toolu_abc"));
+            }
+            _ => panic!("expected ToolResult at [3], got {:?}", out[3]),
+        }
+    }
+
+    #[test]
     fn synthesize_interrupt_noop_when_trailing_tool_use_already_matched() {
         // tool_use immediately followed by tool_result → no orphan, no append.
         let events = vec![
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "bash".into(),
                 input: serde_json::json!({}),
             },
             pty::ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "ok".into(),
                 is_error: false,
             },
@@ -1006,14 +1263,17 @@ mod tests {
         // unmatched one gets a synthetic result.
         let events = vec![
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "a".into(),
                 input: serde_json::json!({}),
             },
             pty::ChatStreamEvent::ToolResult {
+                tool_use_id: None,
                 content: "r1".into(),
                 is_error: false,
             },
             pty::ChatStreamEvent::ToolUse {
+                id: None,
                 name: "b".into(),
                 input: serde_json::json!({}),
             },

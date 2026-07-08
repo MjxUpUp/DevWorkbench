@@ -201,6 +201,14 @@ pub fn run() {
                     "v22→v23 llm_traces span columns migration",
                     migrate::migrate_v22_to_v23(&conn)
                 );
+                run_migrate!(
+                    "v23→v24 knowledge memory system migration",
+                    migrate::migrate_v23_to_v24(&conn)
+                );
+                run_migrate!(
+                    "v24→v25 block_finalize_log migration (P0 integrity audit)",
+                    migrate::migrate_v24_to_v25(&conn)
+                );
 
                 match knowledge::store::prune_old_entries(&conn, 180) {
                     Ok(count) => {

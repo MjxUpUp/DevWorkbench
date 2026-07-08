@@ -183,6 +183,35 @@ pub trait ChatModel: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// EmbedModel (I1 vector memory fallback)
+// ---------------------------------------------------------------------------
+
+/// A text-embedding model used as a FALLBACK when FTS bm25 confidence is too
+/// low (`retrieve_relevant_with_vector`). Keyword search misses synonyms and
+/// rephrasings; embedding the query and cosine-ranking stored document vectors
+/// recovers semantically-related memories the lexicon gap hid.
+///
+/// Only OpenAI-compatible providers implement this (POST `{base}/embeddings`).
+/// Anthropic exposes no embeddings API, so an Anthropic-resolved session simply
+/// gets `None` for its embedder and `retrieve_relevant_with_vector` degrades to
+/// the FTS-only [`ChatModel`] path — I1 is opt-in per protocol, never blocking.
+#[async_trait]
+pub trait EmbedModel: Send + Sync {
+    /// Embed a batch of texts. Returns one vector per input, in order. The SAME
+    /// model id must embed queries AND documents, or the vectors are not
+    /// comparable; callers thread [`EmbedModel::embed_model_id`] into storage so
+    /// a model change invalidates stale rows.
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error>;
+
+    /// The embedding model id sent in the request body. Stored alongside each
+    /// vector so a model swap can be detected (dim mismatch / re-embed). Default
+    /// `""` for test stubs that don't model a concrete id.
+    fn embed_model_id(&self) -> &str {
+        ""
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool
 // ---------------------------------------------------------------------------
 
