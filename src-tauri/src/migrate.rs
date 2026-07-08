@@ -1033,6 +1033,68 @@ pub fn migrate_v23_to_v24(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v24→v25: P0 Block Stream Integrity — add `block_finalize_log` audit table.
+///
+/// The table is already created via `CREATE TABLE IF NOT EXISTS` in db.rs's
+/// SCHEMA block (which runs on every open, fresh DB or upgraded). This
+/// migration exists ONLY to bump `schema_version` so downstream code that
+/// reads `schema_version` to decide which audit tables are available sees
+/// the upgrade. Mirrors the migrate_v14_to_v15 pattern for trace_settings.
+pub fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 25 {
+        return Ok(());
+    }
+
+    // Idempotent CREATE — the SCHEMA block in db.rs already creates this on
+    // every open. We re-run it here so a v24 DB that skipped the SCHEMA path
+    // (test DBs, restore-from-backup) also gets the table.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS block_finalize_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            input_blocks INTEGER NOT NULL,
+            output_blocks INTEGER NOT NULL,
+            stripped_orphan_use INTEGER NOT NULL,
+            synthesized_result INTEGER NOT NULL,
+            dropped_dangling_result INTEGER NOT NULL,
+            was_clean INTEGER NOT NULL,
+            stats_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_block_finalize_log_session ON block_finalize_log(session_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_block_finalize_log_reason ON block_finalize_log(reason)",
+        [],
+    )?;
+    // Composite index for the common diagnostic query
+    // "past N hours, sessions with reason=X" (M4 from review).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_block_finalize_log_reason_recorded
+         ON block_finalize_log(reason, recorded_at)",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (25, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    log::info!("Migrated schema v24→v25: block_finalize_log (P0 integrity audit)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1797,6 +1859,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, 24);
+    }
+
+    /// v24→v25 adds `block_finalize_log` (P0 Block Stream Integrity). On a
+    /// fresh DB the SCHEMA block already creates the table + indexes, so the
+    /// migration is a no-op for the schema but must still record version 25
+    /// and remain idempotent on re-run (review P2-1).
+    #[test]
+    fn migrate_v24_to_v25_on_fresh_db_bumps_version_and_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("fresh25.db");
+        let conn = db::init_db(&path).unwrap();
+
+        // First run — fresh install.
+        migrate_v24_to_v25(&conn).expect("first v25 migration must succeed");
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 25);
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_finalize_log'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "block_finalize_log must exist after migration");
+        let composite_idx_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_block_finalize_log_reason_recorded'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(composite_idx_exists, 1, "composite index must be created");
+
+        // Second run — idempotency check (re-run on a v25 DB must be a no-op
+        // and must NOT error from "table already exists" / duplicate schema_version
+        // insert). This is the regression P2-1 was guarding against.
+        migrate_v24_to_v25(&conn).expect("re-run on v25 DB must be a no-op");
+        let version_after_repeat: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_after_repeat, 25, "version must not double-bump");
     }
 
     /// v14→v15 creates the trace_settings table + idx_llm_traces_created. On a

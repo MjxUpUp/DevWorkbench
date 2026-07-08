@@ -1373,6 +1373,12 @@ pub(crate) fn register_running_session(
 /// prepares `output_summary` + `context_snapshot`; this fn only persists the
 /// terminal state — so the ReactAgent driver can call it with the same shape the
 /// pipe wait-thread does.
+///
+/// `finalize_reason` controls how `blocks_integrity::finalize_for_storage`
+/// repairs the blocks before persisting. This is the SINGLE chokepoint that
+/// guarantees persisted sessions always satisfy the pairing invariant — the
+/// root cause of cfa53764 continuation HTTP 400 failures (orphan ToolUse on
+/// disk → next turn replays malformed history → upstream API rejects).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_session(
     db_conn: &crate::db::DbState,
@@ -1385,6 +1391,7 @@ pub(crate) fn finalize_session(
     output_summary: Option<String>,
     context_snapshot: Option<ContextSnapshot>,
     blocks: Option<Vec<ChatStreamEvent>>,
+    finalize_reason: crate::agents::blocks_integrity::FinalizeReason,
 ) {
     let files_for_activity = context_snapshot.as_ref().map(|s| s.files_changed.clone());
 
@@ -1402,13 +1409,42 @@ pub(crate) fn finalize_session(
         patch["outputSummary"] = serde_json::Value::String(summary);
     }
     if let Some(blocks) = blocks {
+        // ── P0: pairing-invariant repair BEFORE serialization ──
+        // This is the chokepoint that makes orphan ToolUse blocks impossible to
+        // persist. Continuation sessions no longer replay malformed history →
+        // no more HTTP 400 "tool call result does not follow tool call".
+        let (repaired, stats) = crate::agents::blocks_integrity::finalize_for_storage(
+            blocks,
+            finalize_reason,
+        );
+        if !stats.was_clean {
+            log::warn!(
+                "[blocks_integrity] session {} repaired: reason={:?} in={} out={} stripped_use={} synth_result={} drop_dangling={}",
+                session_id,
+                finalize_reason,
+                stats.input_blocks,
+                stats.output_blocks,
+                stats.stripped_orphan_use,
+                stats.synthesized_result,
+                stats.dropped_dangling_result,
+            );
+        }
         // Persist the chat blocks so a finalized session replays via BlocksView
         // instead of falling back to the raw terminal log. Merge consecutive
         // text deltas (match the live Map's shape) and cap giant ToolUse inputs
         // before serializing — live emit is untouched.
-        let persisted = cap_blocks_for_persist(merge_consecutive_runs(blocks), 8000);
+        let persisted = cap_blocks_for_persist(merge_consecutive_runs(repaired), 8000);
         if let Ok(val) = serde_json::to_value(persisted) {
             patch["blocks"] = val;
+        }
+        // Audit log — best-effort, never blocks the write.
+        if let Ok(conn) = db_conn.get() {
+            crate::agents::blocks_integrity::write_finalize_log(
+                &conn,
+                session_id,
+                finalize_reason,
+                &stats,
+            );
         }
     }
 
@@ -1902,6 +1938,18 @@ fn spawn_pipe_fallback(
                 Some(taken)
             }
         });
+        // P0: pipe path — decide repair strategy from exit shape.
+// MaxSteps / ForceStop (review C1) are not reachable from the pipe path
+// (the ReactAgent loop lives in the kernel/commands path). The
+        // `FinalizeReason` enum marks both with `#[allow(dead_code)]` so
+        // this match stays exhaustive without a `_ =>` arm.
+        let finalize_reason = if timed_out {
+            crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+        } else if matches!(session_status, SessionStatus::Completed) {
+            crate::agents::blocks_integrity::FinalizeReason::Normal
+        } else {
+            crate::agents::blocks_integrity::FinalizeReason::Crash
+        };
         finalize_session(
             &db_conn_exit,
             &app_exit,
@@ -1913,6 +1961,7 @@ fn spawn_pipe_fallback(
             output_summary,
             snapshot,
             blocks_snapshot,
+            finalize_reason,
         );
     });
 

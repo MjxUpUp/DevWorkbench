@@ -443,6 +443,7 @@ fn react_chat_driver(
                     Some(format!("Agent init failed: {e}")),
                     None,
                     None,
+                    crate::agents::blocks_integrity::FinalizeReason::Crash,
                 );
                 return;
             }
@@ -469,6 +470,7 @@ fn react_chat_driver(
                     Some(format!("Agent run failed: {e}")),
                     None,
                     None,
+                    crate::agents::blocks_integrity::FinalizeReason::Crash,
                 );
                 return;
             }
@@ -505,6 +507,13 @@ fn react_chat_driver(
                         summary,
                         None,
                         None,
+                        // Stream error after partial output = StreamTruncated,
+                        // before any output = Crash. Distinguish via final_output.
+                        if final_output.is_empty() {
+                            crate::agents::blocks_integrity::FinalizeReason::Crash
+                        } else {
+                            crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+                        },
                     );
                     return;
                 }
@@ -718,6 +727,45 @@ fn react_chat_driver(
             }
         }
 
+        // P0 (review M6): choose repair strategy from terminal shape.
+// had_partial_output now reads from `final_blocks` (Text/Thinking presence)
+// rather than `summary.is_some()` — summary only reflects TEXT accumulation,
+// so a session that emitted Thinking-only or hit max-steps with no text
+// would be wrongly classified as Crash. block-based check is the truthful
+// signal.
+        let had_partial_output = final_blocks.iter().any(|b| {
+            matches!(
+                b,
+                pty::ChatStreamEvent::Text { .. } | pty::ChatStreamEvent::Thinking { .. }
+            )
+        });
+        // P0 (review C1): MaxSteps detection via the ReactAgent error string.
+        // `react_agent.rs:1114-1117` returns
+        // `Error::Agent("ReactAgent exceeded N steps without a final answer")`
+        // when the budget is hit; surface it as `MaxSteps` so the audit log
+        // can distinguish "ran out of budget" from "stream truncated" /
+        // "crashed mid-flight" — the cfa53764 session 61070a4c failure mode
+        // used to be lost under a generic StreamTruncated label.
+        // TODO: replace string-match with a typed signal on the stream event
+        // once AgentRunStatus grows a HitMaxSteps variant.
+        let hit_max_steps = final_status == SessionStatus::Failed
+            && summary
+                .as_deref()
+                .map(|s| s.contains("exceeded") && s.contains("steps"))
+                .unwrap_or(false);
+        let finalize_reason = match final_status {
+            SessionStatus::Completed => crate::agents::blocks_integrity::FinalizeReason::Normal,
+            SessionStatus::Cancelled => crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+            SessionStatus::Failed if hit_max_steps => {
+                crate::agents::blocks_integrity::FinalizeReason::MaxSteps
+            }
+            SessionStatus::Failed if had_partial_output => {
+                crate::agents::blocks_integrity::FinalizeReason::StreamTruncated
+            }
+            SessionStatus::Failed => crate::agents::blocks_integrity::FinalizeReason::Crash,
+            // Running should not reach finalize; treat as Crash defensively.
+            SessionStatus::Running => crate::agents::blocks_integrity::FinalizeReason::Crash,
+        };
         pty::finalize_session(
             &db_drv,
             &app_drv,
@@ -729,6 +777,7 @@ fn react_chat_driver(
             summary,
             None,
             Some(final_blocks),
+            finalize_reason,
         );
     });
 
@@ -877,21 +926,32 @@ pub fn stop_agent_session(
         // Best-effort PID kill; process may already be dead (stale session)
         let _ = pty::stop_agent(&state.0, &session_id);
     }
-    // gap4: persist the streamed-so-far transcript so a mid-run stop doesn't
-    // lose the whole turn. The driver's `final_blocks` was dropped with the
-    // aborted future; drain the live mirror (only kernel sessions register
-    // one), append a synthetic tool_result for any trailing tool_use whose
-    // result the interrupt pre-empted, and shape it the same way
-    // finalize_session would (merge consecutive runs + cap oversized inputs).
-    // Non-kernel (pty) sessions have no live mirror — None leaves blocks as-is.
+    // gap4 + P0 (review C3): persist the streamed-so-far transcript so a mid-run
+    // stop doesn't lose the whole turn. The driver's `final_blocks` was
+    // dropped with the aborted future; drain the live mirror (only kernel
+    // sessions register one) and funnel it through
+    // blocks_integrity::finalize_for_storage(UserInterrupt) — replacing the
+    // previous in-line `synthesize_interrupt_tool_results`. This means
+    // stop-path now ALSO writes a row to `block_finalize_log` and respects
+    // the same pairing-invariant guarantees as finalize_session.
+    let mut finalize_stats_for_log: Option<crate::agents::blocks_integrity::FinalizeStats> = None;
     let persisted_blocks: Option<Vec<pty::ChatStreamEvent>> = if was_kernel {
-        app.try_state::<KernelLiveBlocks>()
+        let raw: Vec<pty::ChatStreamEvent> = app
+            .try_state::<KernelLiveBlocks>()
             .and_then(|lb| lb.take(&session_id))
             .and_then(|buf| buf.lock().ok().map(|mut g| std::mem::take(&mut *g)))
-            .map(synthesize_interrupt_tool_results)
-            .map(|events| {
-                pty::cap_blocks_for_persist(pty::merge_consecutive_runs(events), 8000)
-            })
+            .unwrap_or_default();
+        if raw.is_empty() {
+            None
+        } else {
+            let (repaired, stats) =
+                crate::agents::blocks_integrity::finalize_for_storage(
+                    raw,
+                    crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+                );
+            finalize_stats_for_log = Some(stats);
+            Some(pty::cap_blocks_for_persist(pty::merge_consecutive_runs(repaired), 8000))
+        }
     } else {
         None
     };
@@ -913,7 +973,19 @@ pub fn stop_agent_session(
     }
     let won_race = {
         let conn = db.get()?;
-        crate::agents::session::update_session_db(&conn, &session_id, patch)? > 0
+        let rows = crate::agents::session::update_session_db(&conn, &session_id, patch)?;
+        // Audit log row — best-effort. Only kernel stops have blocks worth
+        // logging; pty stops skip this branch (finalize_session in the pipe
+        // path already wrote its own row when the process exited).
+        if let Some(stats) = finalize_stats_for_log {
+            crate::agents::blocks_integrity::write_finalize_log(
+                &conn,
+                &session_id,
+                crate::agents::blocks_integrity::FinalizeReason::UserInterrupt,
+                &stats,
+            );
+        }
+        rows > 0
     };
 
     // Only emit if this stop won the running→terminal race. If the agent had
@@ -943,6 +1015,15 @@ pub fn stop_agent_session(
 /// now — OpaqueAgent wire id and ReactKernel ToolCall.id); `None` only for
 /// legacy/pre-id wire. Preserves replay pairing by id instead of degrading to FIFO.
 /// The orphan tail is the only case: any non-`tool_use` block ends it.
+///
+/// **DEPRECATED for new code** (review C3): kernel sessions now route through
+/// `blocks_integrity::finalize_for_storage(UserInterrupt)` in
+/// `stop_agent_session`, which has the same "synthesize error tool_result"
+/// effect AND also writes a `block_finalize_log` audit row. Calling this fn
+/// from a path that already fed its blocks through finalize_for_storage
+/// would synthesize a second tool_result on top of the first one. Kept only
+/// because its unit tests still cover the orphan-tail invariant directly.
+#[allow(dead_code)]
 fn synthesize_interrupt_tool_results(
     mut events: Vec<pty::ChatStreamEvent>,
 ) -> Vec<pty::ChatStreamEvent> {

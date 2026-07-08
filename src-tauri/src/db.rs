@@ -456,6 +456,28 @@ CREATE INDEX IF NOT EXISTS idx_llm_traces_session ON llm_traces(session_id, crea
 -- created_at < cutoff); without it the prune full-scans llm_traces.
 CREATE INDEX IF NOT EXISTS idx_llm_traces_created ON llm_traces(created_at);
 
+-- block_finalize_log: per-session audit row written by
+-- agents::blocks_integrity::write_finalize_log. One row per session terminal
+-- write. Lets future diagnostics answer how many sessions needed repair, and
+-- what kind, without parsing the stream logs. Indexed by reason so a quality
+-- dashboard can group by FinalizeReason.
+CREATE TABLE IF NOT EXISTS block_finalize_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    input_blocks INTEGER NOT NULL,
+    output_blocks INTEGER NOT NULL,
+    stripped_orphan_use INTEGER NOT NULL,
+    synthesized_result INTEGER NOT NULL,
+    dropped_dangling_result INTEGER NOT NULL,
+    was_clean INTEGER NOT NULL,
+    stats_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_session ON block_finalize_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_reason ON block_finalize_log(reason);
+CREATE INDEX IF NOT EXISTS idx_block_finalize_log_recorded ON block_finalize_log(recorded_at);
+
 -- Trace retention settings (single-row table, mirrors budget_settings). NULL or
 -- 0 retention_days = infinite (the default — Phoenix's
 -- PHOENIX_DEFAULT_RETENTION_POLICY_DAYS=0 semantics, per the 2026-06-19 trace

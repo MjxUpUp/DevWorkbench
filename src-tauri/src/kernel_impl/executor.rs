@@ -617,6 +617,24 @@ pub(crate) fn build_react_agent(
     // `AgentApprovalState`; workflow/ACP/test agents leave it None. v2 Human Gate.
     approval: Option<crate::kernel_impl::human_gate::ApprovalMap>,
 ) -> Result<ReactAgent, String> {
+    // P1: snapshot the first user message BEFORE the method chain below, which
+    // moves `history` into the agent. The classifier needs the prompt text to
+    // pick a TaskKind-appropriate budget. See resource_budget.rs for the table.
+    let first_user_prompt: String = history
+        .iter()
+        .find(|m| matches!(m.role, kernel_core::Role::User))
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let budget_kind = crate::kernel_impl::resource_budget::classify_task_kind(&first_user_prompt);
+    let budget = crate::kernel_impl::resource_budget::ResourceBudget::for_kind(budget_kind);
+    log::info!(
+        "[executor] adaptive budget: kind={:?} max_steps={} max_input_tok={} wallclock={}s",
+        budget_kind,
+        budget.max_steps,
+        budget.max_input_tokens,
+        budget.max_wallclock_secs,
+    );
+
     let data_dir = crate::commands::projects::dirs_home().join(".dev-workbench");
     let config = crate::config::providers::load_providers_config(&data_dir).ok();
     // model=None → request the '__default__' alias; resolve_provider expands it
@@ -1009,6 +1027,8 @@ pub(crate) fn build_react_agent(
     } else {
         agent
     };
+    // P1: budget snapshot already taken at function top — see lines just below
+    // the signature. Here we only consume `budget.max_steps` inside the chain.
     let agent = agent
         .with_budget_check(budget_check)
         // v1.3 C1 + B-plan §4.2 缺项4: the compaction hard ceiling is the
@@ -1020,14 +1040,8 @@ pub(crate) fn build_react_agent(
         // model compacts at ~167k (84%), matching CCB's 80–92% band. Unknown
         // window → 24k (legacy default). See `effective_context_window`.
         .with_context_compaction(effective_context_window(context_window), 8)
-        // max_steps 30 — override the ReactAgent default (12). 12 fit focused
-        // code edits but starves exploration tasks: reading a PRIVATE Feishu
-        // wiki via the authenticated `lark-cli`, the agent burned its whole
-        // 12-step budget learning the CLI's flags (--doc/--scope/--format/…)
-        // and never reached the actual fetch → "Reached the 12-step tool-call
-        // limit". claude-code has no such hard ceiling; 30 leaves room to learn
-        // a tool AND finish. Sub-agent stays at 8 (focused investigation only).
-        .with_max_steps(30)
+        // P1: budget.max_steps replaces the old fixed-30. The 30-cap is gone.
+        .with_max_steps(budget.max_steps)
         .with_hooks(Arc::new(hooks));
     // v1.3 C2: wire the compaction archive sink for the chat path only. All
     // three (session_id + app + compaction_blocks) are present → the sink
@@ -1107,13 +1121,22 @@ const BASE_SYSTEM_PROMPT: &str = concat!(
     "- For code work: investigate with read_file/glob/grep before writing ",
     "(write_file/bash), then verify with the project's own tests/build.\n",
     "\n",
+    "Response length discipline (P2 source-level guard against stream truncation):\n",
+    "- Keep each reply under 600 tokens of plain prose. Long reasoning belongs in ",
+    "`thinking`, not in `text`.\n",
+    "- If a tool result is large, summarize it inline before continuing — don't ",
+    "echo 10k tokens of grep output back as text.\n",
+    "- Final answers should be a tight paragraph or a bullet list, not an essay. ",
+    "The session replays the last assistant text block; long blocks raise the ",
+    "odds of stream truncation and proxy buffer overflow.\n",
+    "\n",
     "Sub-agent delegation discipline (dispatch_subagent):\n",
     "- The child ReactAgent is capped at 8 steps for FOCUSED, bounded work only ",
     "(read a few files / answer one scoped question). It is NOT for broad ",
     "multi-source research or any task needing 5+ tool calls.\n",
     "- If a task is open-ended — '调研业界做法', '摸清整个项目', multi-file ",
     "synthesis, or you cannot name its single concrete deliverable — do it ",
-    "YOURSELF with your own 30-step budget. Handing such a task to the child ",
+    "YOURSELF with your own budget. Handing such a task to the child ",
     "exhausts its 8 steps without a final answer and wastes the whole turn ",
     "(regression: a parent once dispatched 'evaluate the project' to the child, ",
     "which ran 8 steps and failed; the parent redid the work itself anyway).\n",
