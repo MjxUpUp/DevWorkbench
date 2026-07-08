@@ -210,7 +210,10 @@ pub fn run() {
                     migrate::migrate_v24_to_v25(&conn)
                 );
 
-                match knowledge::store::prune_old_entries(&conn, 180) {
+                match knowledge::store::prune_old_entries(
+                    &conn,
+                    knowledge::budget::KNOWLEDGE_PRUNE_STARTUP_DAYS,
+                ) {
                     Ok(count) => {
                         if count > 0 {
                             log::info!("Pruned {} old knowledge entries", count);

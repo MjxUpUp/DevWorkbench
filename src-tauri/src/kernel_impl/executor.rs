@@ -1683,7 +1683,10 @@ fn knowledge_prompt_suffix(conn: &rusqlite::Connection, ids: &[String]) -> Strin
         ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
     let rows = conn.prepare(&sql).and_then(|mut stmt| {
         stmt.query_map(&params[..], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            // F4: named-column reads so a future schema add doesn't shift the
+            // positional indices and silently swap title/content. The SELECT
+            // is already explicit (`title, content`); pin the reads too.
+            Ok((row.get::<_, String>("title")?, row.get::<_, String>("content")?))
         })?
         .collect::<Result<Vec<_>, _>>()
     });

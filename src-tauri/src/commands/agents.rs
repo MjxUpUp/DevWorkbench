@@ -306,7 +306,10 @@ fn react_chat_driver(
     // cheap on a clean DB.
     match db_conn.get() {
         Ok(conn) => {
-            if let Err(e) = crate::knowledge::store::prune_old_entries(&conn, 90) {
+            if let Err(e) = crate::knowledge::store::prune_old_entries(
+                &conn,
+                crate::knowledge::budget::KNOWLEDGE_PRUNE_SESSION_DAYS,
+            ) {
                 log::warn!("[knowledge] prune failed for {session_id}: {e}");
             }
         }

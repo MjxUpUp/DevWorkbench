@@ -2,6 +2,50 @@ use crate::error::AppError;
 use crate::models::{AgentType, KnowledgeEntry};
 use rusqlite::params;
 
+/// FTS sync operation (F5: single helper, all FTS write paths funnel through here).
+/// `Insert` indexes `(rowid, title, content)`; `Delete` removes the FTS row by
+/// the main table's `rowid`. Both look up the rowid by `entry_id` so callers
+/// don't have to — only the rowid lookup is shared between the two ops; the
+/// main-table rowid is the cross-table join key for `JOIN knowledge_entries`.
+enum FtsOp {
+    Insert { title: String, content: String },
+    Delete,
+}
+
+/// F5: single FTS write helper. Resolves the main-table rowid by `entry_id`
+/// and applies `op` to `knowledge_fts`. Use within a `tx`/`Connection` that
+/// already holds the matching main-table mutation in the SAME transaction —
+/// rolling back the main row must roll back the FTS row too.
+///
+/// Errors:
+/// - `NotFound`: `entry_id` is not in `knowledge_entries` (caller error).
+/// - `rusqlite::Error`: bubbles up; transaction rolls back.
+fn sync_fts(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    op: FtsOp,
+) -> Result<(), AppError> {
+    let rowid: i64 = conn
+        .query_row(
+            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
+            params![entry_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", entry_id)))?;
+    match op {
+        FtsOp::Insert { title, content } => {
+            conn.execute(
+                "INSERT INTO knowledge_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
+                params![rowid, title, content],
+            )?;
+        }
+        FtsOp::Delete => {
+            conn.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rowid])?;
+        }
+    }
+    Ok(())
+}
+
 /// Add a knowledge entry to the database. Skips if a near-duplicate already exists
 /// (same project_hash and matching first 200 chars of content).
 pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<(), AppError> {
@@ -84,9 +128,13 @@ pub fn add_entry(conn: &rusqlite::Connection, entry: &KnowledgeEntry) -> Result<
         ],
     )?;
     // Keep FTS index in sync (same transaction — rolls back with the row above).
-    tx.execute(
-        "INSERT INTO knowledge_fts (rowid, title, content) VALUES ((SELECT rowid FROM knowledge_entries WHERE id = ?1), ?2, ?3)",
-        params![entry.id, entry.title, entry.content],
+    sync_fts(
+        &tx,
+        &entry.id,
+        FtsOp::Insert {
+            title: entry.title.clone(),
+            content: entry.content.clone(),
+        },
     )?;
     tx.commit()?;
     Ok(())
@@ -219,10 +267,13 @@ pub fn search_entries(
     // bm25 returns negative values by convention; ASC puts the most relevant
     // (most negative) first, updated_at as a tiebreaker.
     let mut stmt = conn.prepare(
-        "SELECT ke.* FROM knowledge_fts
-         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
-         WHERE knowledge_fts MATCH ?1
-         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
+        "SELECT ke.id, ke.project_hash, ke.category, ke.title, ke.content, \
+                ke.source_agent, ke.source_session_id, ke.source_type, ke.confidence, \
+                ke.created_at, ke.updated_at, ke.access_count, ke.status, ke.effectiveness \
+         FROM knowledge_fts \
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid \
+         WHERE knowledge_fts MATCH ?1 \
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC \
          LIMIT ?2",
     )?;
 
@@ -249,13 +300,16 @@ pub fn search_entries_for_project(
     // ranking (the old `rowid IN (subquery)` form could only sort by updated_at,
     // not bm25 — the doc/impl mismatch this fixes).
     let mut stmt = conn.prepare(
-        "SELECT ke.* FROM knowledge_fts
-         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
-         WHERE knowledge_fts MATCH ?1
-         AND ke.project_hash = ?2
-         AND ke.confidence >= ?3
-         AND ke.status = 'active'
-         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
+        "SELECT ke.id, ke.project_hash, ke.category, ke.title, ke.content, \
+                ke.source_agent, ke.source_session_id, ke.source_type, ke.confidence, \
+                ke.created_at, ke.updated_at, ke.access_count, ke.status, ke.effectiveness \
+         FROM knowledge_fts \
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid \
+         WHERE knowledge_fts MATCH ?1 \
+         AND ke.project_hash = ?2 \
+         AND ke.confidence >= ?3 \
+         AND ke.status = 'active' \
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC \
          LIMIT ?4",
     )?;
 
@@ -286,13 +340,16 @@ pub fn search_entries_cross_project(
     limit: usize,
 ) -> Result<Vec<KnowledgeEntry>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT ke.* FROM knowledge_fts
-         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid
-         WHERE knowledge_fts MATCH ?1
-         AND ke.project_hash != ?2
-         AND ke.confidence >= ?3
-         AND ke.status = 'active'
-         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC
+        "SELECT ke.id, ke.project_hash, ke.category, ke.title, ke.content, \
+                ke.source_agent, ke.source_session_id, ke.source_type, ke.confidence, \
+                ke.created_at, ke.updated_at, ke.access_count, ke.status, ke.effectiveness \
+         FROM knowledge_fts \
+         JOIN knowledge_entries ke ON ke.rowid = knowledge_fts.rowid \
+         WHERE knowledge_fts MATCH ?1 \
+         AND ke.project_hash != ?2 \
+         AND ke.confidence >= ?3 \
+         AND ke.status = 'active' \
+         ORDER BY bm25(knowledge_fts) ASC, ke.updated_at DESC \
          LIMIT ?4",
     )?;
 
@@ -447,10 +504,12 @@ pub fn entries_by_session(
          WHERE source_session_id = ?1 AND status = 'active'",
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        // F4: named-column reads (the SELECT is already explicit; this pins
+        // the reads to column names, not position).
         Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
+            row.get::<_, String>("id")?,
+            row.get::<_, String>("title")?,
+            row.get::<_, String>("content")?,
         ))
     })?;
     let mut out = Vec::new();
@@ -526,16 +585,17 @@ pub fn prune_old_entries(
         return Ok(0);
     }
 
-    // Delete FTS rows first (by rowid)
+    // Delete FTS rows first (by rowid) — F5: funneled through sync_fts.
+    // sync_fts's rowid lookup also surfaces rows that vanished between the
+    // collect-IDs SELECT and now (concurrent writer raced us); the `let _`
+    // discards that NotFound, matching the previous `if let Ok` guard. Order
+    // matters: FTS DELETE first, then main DELETE, so a mid-prune crash
+    // leaves a main row that is no longer in the FTS index — search excludes
+    // it (mildly bloated result count), but the main-row reference is still
+    // there for any external FK consumers. Reverse order would leave a
+    // dangling FTS rowid pointing at nothing; the JOIN silently drops it.
     for id in &ids {
-        let rowid: Result<i64, _> = tx.query_row(
-            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        );
-        if let Ok(rid) = rowid {
-            tx.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rid])?;
-        }
+        let _ = sync_fts(&tx, id, FtsOp::Delete);
     }
 
     // Delete main entries
@@ -564,8 +624,11 @@ pub fn get_entry_by_title_for_project(
     title: &str,
 ) -> Result<Option<KnowledgeEntry>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM knowledge_entries
-         WHERE project_hash = ?1 AND lower(title) = lower(?2) AND status = 'active'
+        "SELECT id, project_hash, category, title, content, source_agent, \
+                source_session_id, source_type, confidence, created_at, updated_at, \
+                access_count, status, effectiveness \
+         FROM knowledge_entries \
+         WHERE project_hash = ?1 AND lower(title) = lower(?2) AND status = 'active' \
          ORDER BY updated_at DESC LIMIT 1",
     )?;
     let mut entries = stmt.query_map(params![project_hash, title], row_to_entry)?;
@@ -581,7 +644,10 @@ pub fn get_entries_for_project(
     project_hash: &str,
 ) -> Result<Vec<KnowledgeEntry>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM knowledge_entries WHERE project_hash = ?1 ORDER BY updated_at DESC",
+        "SELECT id, project_hash, category, title, content, source_agent, \
+                source_session_id, source_type, confidence, created_at, updated_at, \
+                access_count, status, effectiveness \
+         FROM knowledge_entries WHERE project_hash = ?1 ORDER BY updated_at DESC",
     )?;
 
     let entries = stmt.query_map(params![project_hash], row_to_entry)?;
@@ -594,17 +660,25 @@ pub fn get_entries_for_project(
 
 /// Delete a knowledge entry by ID.
 pub fn delete_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), AppError> {
-    // Get rowid for FTS cleanup
-    let rowid: i64 = conn
-        .query_row(
-            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        )
-        .map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", id)))?;
-
-    conn.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
-    conn.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rowid])?;
+    // T6 atomicity: the main row and its FTS row must go together. Without a
+    // transaction wrapper, a crash between the two DELETEs leaves a dangling
+    // FTS rowid — the search JOIN silently drops it so the entry just stops
+    // matching (mild leak). Worse case: if main goes first and a future INSERT
+    // ever reuses that rowid, the new entry's add_entry DELETE-by-rowid (FTS
+    // sync path) would erase the wrong slot. Same consistency contract as
+    // add_entry / update_entry: row mutation + FTS sync share one transaction
+    // so a crash rolls both back together.
+    let tx = conn.unchecked_transaction()?;
+    // sync_fts FIRST: its internal `SELECT rowid FROM knowledge_entries
+    // WHERE id = ?1` must see the row still present, otherwise the lookup
+    // returns `QueryReturnedNoRows` → `NotFound`, and `tx` is dropped without
+    // commit, rolling the main DELETE back. Same FTS-first ordering as
+    // `prune_old_entries` (orphan main row, if a mid-prune crash happens, is
+    // a no-op for search; a deleted entry with a stale FTS row would silently
+    // match in searches).
+    sync_fts(&tx, id, FtsOp::Delete)?;
+    tx.execute("DELETE FROM knowledge_entries WHERE id = ?1", params![id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -624,14 +698,18 @@ pub fn update_entry(
     let now = chrono::Local::now().to_rfc3339();
     let tx = conn.unchecked_transaction()?;
     // Verify the row exists (mirrors delete_entry's NotFound contract) — a miss
-    // is a programming error, not a silent no-op.
-    let rowid: i64 = tx
-        .query_row(
-            "SELECT rowid FROM knowledge_entries WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        )
-        .map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", id)))?;
+    // is a programming error, not a silent no-op. Exists separately from
+    // sync_fts's rowid lookup; the helper resolves rowid at FTS op time, so
+    // total cost is `SELECT 1` (this) + `SELECT rowid` (sync_fts Delete) +
+    // `SELECT rowid` (sync_fts Insert) — three cheap point lookups in one
+    // transaction. F5's design (FTS-helper-is-source-of-rowid) trades this
+    // redundancy for "one place that knows how FTS rowid is wired".
+    tx.query_row(
+        "SELECT 1 FROM knowledge_entries WHERE id = ?1",
+        params![id],
+        |_| Ok(()),
+    )
+    .map_err(|_| AppError::NotFound(format!("Knowledge entry {} 不存在", id)))?;
     tx.execute(
         "UPDATE knowledge_entries SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
         params![title, content, now, id],
@@ -640,10 +718,14 @@ pub fn update_entry(
     // add_entry): delete the old indexed row, insert the new title/content. If
     // this were skipped the main row would show the edit but search would still
     // match the old text — an invisible lie about what the prompt injects.
-    tx.execute("DELETE FROM knowledge_fts WHERE rowid = ?1", params![rowid])?;
-    tx.execute(
-        "INSERT INTO knowledge_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
-        params![rowid, title, content],
+    sync_fts(&tx, id, FtsOp::Delete)?;
+    sync_fts(
+        &tx,
+        id,
+        FtsOp::Insert {
+            title: title.to_string(),
+            content: content.to_string(),
+        },
     )?;
     tx.commit()?;
     Ok(())
@@ -668,27 +750,30 @@ pub fn set_entry_confidence(
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Error> {
-    let agent_type_str: String = row.get(5)?;
+    // Named-column reads (F2/F3): `row.get("col")` makes a future schema add
+    // (e.g. a new NOT NULL column) fail-loud with `InvalidColumnName` at the
+    // first read instead of silently falling back to defaults. Pair with the
+    // explicit-column SELECTs above; a `SELECT *` path is still correct, but
+    // column names anchor this function to the schema, not to the SELECT order.
+    let agent_type_str: String = row.get("source_agent")?;
     let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
         .unwrap_or(AgentType::ClaudeCode);
 
     Ok(KnowledgeEntry {
-        id: row.get(0)?,
-        project_hash: row.get(1)?,
-        category: row.get(2)?,
-        title: row.get(3)?,
-        content: row.get(4)?,
+        id: row.get("id")?,
+        project_hash: row.get("project_hash")?,
+        category: row.get("category")?,
+        title: row.get("title")?,
+        content: row.get("content")?,
         source_agent: agent_type,
-        source_session_id: row.get(6)?,
-        source_type: row.get(7)?,
-        confidence: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        access_count: row.get(11)?,
-        // unwrap_or 防御：显式 SELECT 列表(如 knowledge_prompt_suffix 只取 title,content
-        // 不走本函数)或未来回归少列时，回退到 schema 默认值而非整查询失败。
-        status: row.get(12).unwrap_or_else(|_| "active".to_string()),
-        effectiveness: row.get(13).unwrap_or(0.0),
+        source_session_id: row.get("source_session_id")?,
+        source_type: row.get("source_type")?,
+        confidence: row.get("confidence")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        access_count: row.get("access_count")?,
+        status: row.get("status")?,
+        effectiveness: row.get("effectiveness")?,
     })
 }
 
@@ -751,6 +836,36 @@ mod tests {
         }
     }
 
+    /// F2/F3 regression: row_to_entry reads `status` and `effectiveness` from
+    /// the actual columns (not positional defaults). If a future schema change
+    /// drops a column or renames it, this test fails loud — better than a
+    /// silent `unwrap_or` fallback that would resurrect "active" rows or
+    /// zero-out the effectiveness feedback loop.
+    #[test]
+    fn row_to_entry_preserves_status_and_effectiveness() {
+        let db = TempDb::new();
+        // entry with non-default status + non-zero effectiveness
+        let mut entry = make_entry("k1", "proj_a", "Lesson", "Body");
+        entry.status = "superseded".to_string();
+        entry.effectiveness = 0.73;
+        add_entry(&db.conn, &entry).unwrap();
+
+        let rows = get_entries_for_project(&db.conn, "proj_a").unwrap();
+        assert_eq!(rows.len(), 1, "expected one entry, got {}", rows.len());
+        let got = &rows[0];
+        // F2: status read from the column, NOT the unwrap_or default.
+        assert_eq!(
+            got.status, "superseded",
+            "row_to_entry dropped status; the unwrap_or fallback would have produced 'active'"
+        );
+        // F2: effectiveness read from the column, NOT the unwrap_or default.
+        assert!(
+            (got.effectiveness - 0.73).abs() < 1e-9,
+            "row_to_entry dropped effectiveness (got {}); unwrap_or default is 0.0",
+            got.effectiveness
+        );
+    }
+
     #[test]
     fn test_add_and_search() {
         let db = TempDb::new();
@@ -811,6 +926,68 @@ mod tests {
         add_entry(&db.conn, &make_entry("k1", "proj_a", "Title", "Content")).unwrap();
         delete_entry(&db.conn, "k1").unwrap();
         assert!(delete_entry(&db.conn, "k1").is_err());
+    }
+
+    #[test]
+    fn delete_entry_removes_main_and_fts_atomically() {
+        // T6 regression guard: delete_entry wraps the main + FTS DELETEs in
+        // one transaction. A non-atomic version (main DELETE then FTS DELETE)
+        // would let a crash between them leak a dangling FTS rowid — search
+        // silently drops the orphan, so the entry just stops matching for
+        // good. Verify the happy path keeps both tables in sync.
+        let db = TempDb::new();
+        add_entry(
+            &db.conn,
+            &make_entry("k1", "proj_a", "findme", "searchable rust tokio content"),
+        )
+        .unwrap();
+
+        let rowid: i64 = db
+            .conn
+            .query_row(
+                "SELECT rowid FROM knowledge_entries WHERE id = 'k1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_before: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_fts WHERE rowid = ?1",
+                rusqlite::params![rowid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_before, 1, "FTS row must exist before delete");
+
+        delete_entry(&db.conn, "k1").unwrap();
+
+        let main_after: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_entries WHERE id = 'k1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(main_after, 0, "main row must be gone after delete");
+        let fts_after: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_fts WHERE rowid = ?1",
+                rusqlite::params![rowid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_after, 0, "FTS row must be gone after delete (atomic)");
+        // And the deleted entry no longer matches FTS search.
+        assert!(
+            !search_entries(&db.conn, "tokio", 10)
+                .unwrap()
+                .iter()
+                .any(|x| x.id == "k1"),
+            "deleted entry must not match FTS"
+        );
     }
 
     #[test]

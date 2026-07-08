@@ -11,6 +11,28 @@
 //! Exact tokenization is model-specific and not worth a dependency here;
 //! over-counting only leaves a little unused budget, which is safe.
 
+//! Token-budgeted selection for knowledge injected into the system prompt (D6).
+//!
+//! The experience / memory prompt suffixes used to take a HARDCODED number of
+//! entries (`take(3)` failures, `take(5)` memories). That's the wrong unit:
+//! prompt cost is measured in TOKENS, not rows. A few verbose entries could
+//! blow past the budget while many terse ones were artificially capped. These
+//! helpers pick entries front-to-back (after the caller's own ranking) while
+//! their RENDERED form fits a token budget — so we budget real prompt cost.
+//!
+//! The estimate is deliberately coarse (~3 chars/token) and conservative.
+//! Exact tokenization is model-specific and not worth a dependency here;
+//! over-counting only leaves a little unused budget, which is safe.
+
+/// Session-boundary quick GC (commands/agents.rs 会话开始时调用)。
+/// 与 [`KNOWLEDGE_PRUNE_STARTUP_DAYS`] 语义不同:此处只清"显然过期"的近期 GC,
+/// 启动期才做长周期 sweep。
+pub const KNOWLEDGE_PRUNE_SESSION_DAYS: i64 = 90;
+/// Startup long-cycle sweep (lib.rs 启动时调用)。
+/// 与 [`KNOWLEDGE_PRUNE_SESSION_DAYS`] 语义不同:启动期有充足时间做长周期清理,
+/// 会话边界只做快速 GC 避免阻塞首 token。
+pub const KNOWLEDGE_PRUNE_STARTUP_DAYS: i64 = 180;
+
 /// Rough token estimate for prompt-budgeting. ~3 chars/token covers mixed CJK +
 /// ASCII (the common case for this project's Chinese prompts) and rounds up so
 /// a single char still counts as one token (never zero for non-empty input).
