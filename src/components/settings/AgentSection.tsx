@@ -16,7 +16,7 @@ const NON_AGENT_TOOLS = ['code', 'git'];
  *    agent（OpaqueAgent 桥）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制；editor.rs 用
  *    它打开 VS Code；code/git 检测服务项目页 ToolButton。
  *  - 终端偏好（preferred_terminal）：open_terminal 经 terminal.rs:163 读它选终端 app，
- *    GitPanel「打开终端做 git commit」仍走此路径——与 CLI agent 执行无关。
+ *    供工具按钮打开终端时使用——与 CLI agent 执行无关。
  *
  * 已移除：「CLI 启动参数」（cli_flags）段——其唯一消费方是 launchTool 在外部终端启动
  * CLI agent（claude/pi/codex）时拼 --dangerously-skip-permissions 等启动 flag。CLI 取消
@@ -131,12 +131,12 @@ export function AgentSection() {
         </div>
       </div>
 
-      {/* Terminal preference — 仅 GitPanel「打开终端做 git commit」消费，与 CLI agent 执行无关 */}
+      {/* Terminal preference — 供工具按钮打开终端时使用，与 CLI agent 执行无关 */}
       <div className="settings-section">
         <h3 className="settings-section-title">终端偏好</h3>
         <p className="settings-section-desc">
-          选择 GitPanel「打开终端做 git commit」时启动的终端应用。
-          <strong>与 CLI agent 执行无关</strong>（CLI 路径已退役）—— 终端偏好保留供工具按钮使用。
+          选择工具按钮打开终端时启动的终端应用。
+          <strong>与 CLI agent 执行无关</strong>（CLI 路径已退役）。
         </p>
 
         <div className="settings-card-list">

@@ -27,24 +27,6 @@
   overflow: hidden;
 }
 
-/*
- * Task-mode 2-pane layout: chat content | right Git panel.
- * The global .app grid stays 2 columns; when the task view is active the main
- * stage itself becomes a 2-column grid (the GitPanel is a sibling of the chat
- * view inside .main-stage). Other views never add this class.
- */
-.main-stage.has-git-panel {
-  display: grid;
-  grid-template-columns: 1fr 280px;
-}
-
-.main-stage.has-git-panel > .main-stage-body {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
-
 /* === Placeholder View (temporary for unimplemented views) === */
 .placeholder-view {
   flex: 1;

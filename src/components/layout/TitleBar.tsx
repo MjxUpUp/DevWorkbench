@@ -15,8 +15,7 @@ import { WindowControls } from './WindowControls';
  * Layout (aligned to the target mockup):
  *   [brand mark, toggles the left column] · [breadcrumb: 项目 / 分支]   [window controls]
  *
- * Git branch lives in the breadcrumb here; the detailed Git tool (diff counts,
- * commit button) is the right-side GitPanel within the task view.
+ * Git branch lives in the breadcrumb here.
  */
 export function TitleBar() {
   const activeProject = useNavigationStore((s) => s.activeProject);

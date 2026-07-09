@@ -5,7 +5,6 @@ import { IconPlus, IconChat, IconSearch, IconSettings } from '../Icons';
  * ActivityBar — 48px 纯图标导航竖条（对齐原型 axis-workbench.html）。
  *
  * 视图导航从宽 Sidebar 顶部 nav 抽出，独立成 VS Code 式 activity-bar 常驻最左列。
- * 砍 DAG 编排画布后，Orchestrate 图标移除——不再有独立编排入口。
  *
  * 图标自上而下：
  *  - 新建会话（+，强调态）→ task 视图 + 清空当前对话（与 Ctrl+N 同语义）

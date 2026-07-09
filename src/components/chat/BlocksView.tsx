@@ -13,9 +13,8 @@ interface BlocksViewProps {
   running: boolean;
   /** Session id this block stream belongs to. Required to resolve the compact
    *  card's expand action (loads dropped-message archive via
-   *  read_compact_archive_cmd). Optional because the orchestrate canvas path
-   *  renders BlocksView per-node without a session id — there the compact card
-   *  shows its summary but the expand is disabled. */
+   *  read_compact_archive_cmd). Optional: paths rendered without a persisted
+   *  session id disable the compact card's expand (summary only). */
   sessionId?: string;
 }
 
@@ -251,7 +250,7 @@ function BlockCard({ event, running, sessionId, stepStatus }: { event: ChatStrea
 /** compact meta-event → 折叠摘要卡片。压缩发生时内核把被替换出模型历史的
  *  陈旧消息归档到 ~/.dev-workbench/agents/compact/{sid}.jsonl，并发出此事件。
  *  折叠态：一行摘要 + dropped 计数；展开态：异步 invoke 读 JSONL 原文（仅当
- *  有 sessionId；orchestrate canvas 路径无 sid 时禁用展开）。is_error 为熔断态
+ *  有 sessionId 时可展开；无 sid 时禁用）。is_error 为熔断态
  *  （连续 3 次压缩失败 MAX_CONSECUTIVE_COMPACT_FAILURES）——渲染为危险卡片。 */
 function CompactCard({ event, sessionId }: { event: Extract<ChatStreamEvent, { kind: 'compact' }>; sessionId?: string }) {
   const [expanded, setExpanded] = useState(false);

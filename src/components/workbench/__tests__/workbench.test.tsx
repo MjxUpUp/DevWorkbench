@@ -19,7 +19,7 @@ vi.mock('@tauri-apps/api/core', () => ({
  *  - PlanBar：activeView → mode-segmented 高亮（轴线A 位置）+ sessions → plan 进度
  *  - GateBar：sessions → 运行计数 + budget → 成本门控/熔断（块4）
  *
- * 砍 DAG 后 PlanBar mode-segmented 只剩 Chat / Trace 两段（orchestrate 用例移除）。
+ * PlanBar mode-segmented 两段（Chat / Trace）。
  */
 
 const mkSession = (status: SessionStatus, over: Partial<Session> = {}): Session => ({

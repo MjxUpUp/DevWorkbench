@@ -57,31 +57,6 @@ export interface GitStatus {
   deletions: number;
 }
 
-/** A2 — one file in the working-tree change set (list_changed_files). */
-export interface ChangedFile {
-  path: string;
-  /** Collapsed porcelain status: M / A / D / R / C / U(ntracked). */
-  status: string;
-  added: number;
-  removed: number;
-}
-
-/** One rendered line of a unified diff (get_file_diff). */
-export interface DiffLine {
-  kind: 'context' | 'add' | 'remove' | 'meta';
-  text: string;
-  oldNo?: number | null;
-  newNo?: number | null;
-}
-
-/** The parsed per-file diff payload (get_file_diff). Named `GitFileDiff` to
- *  avoid clashing with the pre-existing numstat `FileDiff` (ContextSnapshot). */
-export interface GitFileDiff {
-  path: string;
-  hunks: DiffLine[];
-  isBinary: boolean;
-}
-
 // ---- Agent Hub types ----
 
 export type AgentType =
