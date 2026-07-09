@@ -61,19 +61,12 @@ test('EvalPanel surfaces locked prompt, attribution badges, paired net-improve, 
   await expect(page.getByText('净提升 · 可准入')).toBeVisible();
   await expect(page.getByText('回归 · 拦')).toHaveCount(0);
 
-  // ── 4 evaluation objects (P4). All three platform objects are REAL drivers
-  //    now: 机制 (DAG engine, no LLM) / e2e (in-memory DB + real logic, no LLM)
-  //    / 加持 (skills OFF→ON paired, live key in prod — shim-served here). ──
+  // ── 3 evaluation objects (P4). Both remaining platform objects are REAL
+  //    drivers: e2e (in-memory DB + real logic, no LLM) / 加持 (skills OFF→ON
+  //    paired, live key in prod — shim-served here). ──
   await page.getByTestId('eval-nav-P4').click();
-  await expect(page.getByText('平台-机制')).toBeVisible();
   await expect(page.getByText('平台-e2e')).toBeVisible();
   await expect(page.getByText('平台-加持')).toBeVisible();
-  // 平台-机制 → real runner: 运行机制评测 button is live → PASS · 终态 done.
-  await page.locator('label', { hasText: '平台-机制' }).click();
-  await expect(page.getByRole('button', { name: /运行机制评测/ })).toBeVisible();
-  await expect(page.getByText(/需平台评测驱动/)).toHaveCount(0);
-  await page.getByRole('button', { name: /运行机制评测/ }).click();
-  await expect(page.getByText('PASS')).toBeVisible();
   // 平台-e2e → real runner (data plane, no LLM): 运行 e2e 评测 → PASS + checks.
   await page.locator('label', { hasText: '平台-e2e' }).click();
   await expect(page.getByRole('button', { name: /运行 e2e 评测/ })).toBeVisible();

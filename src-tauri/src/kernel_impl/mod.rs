@@ -1,6 +1,6 @@
-//! Trait implementations bridging kernel-core/kernel-compose to the existing
-//! DevWorkbench subsystems (pty agents, knowledge store, quality gates) plus
-//! the self-built transparent agent's tool ecosystem (MCP, Skills, Hooks).
+//! Trait implementations bridging kernel-core to the existing DevWorkbench
+//! subsystems (pty agents, quality gates) plus the self-built transparent
+//! agent's tool ecosystem (MCP, Skills, Hooks).
 
 pub mod acp_tool;
 pub mod anthropic_chat_model;
@@ -23,6 +23,4 @@ pub mod resource_budget;
 pub mod skill_tool;
 pub mod stream_health;
 pub mod subagent_spec;
-pub mod session_reflection;
 pub mod tool_call_repair;
-pub mod workflow_tool;

@@ -185,7 +185,7 @@ pub async fn run_replay(
     use kernel_core::Agent;
 
     // 1. Plan-mode agent — the workspace is fenced, the agent can't alter it.
-    //    No MCP / no WorkflowTool: replay isolates the agent down to its built-in
+    //    No MCP: replay isolates the agent down to its built-in
     //    read tools + (optionally) skills so the trajectory is deterministic
     //    w.r.t. the install, not whatever servers happened to be enabled. The
     //    platform-enablement eval flips `enable_skills` to measure the skill
@@ -207,8 +207,7 @@ pub async fn run_replay(
         Some(input.session_id.as_str()),
         skill_filter,               // skill_filter — toggled by enable_skills
         None,                       // mcp_filter
-        None,                       // knowledge_ids
-        None,                       // app — no WorkflowTool (single-agent)
+        None,                       // app — single-agent replay, no compaction archive
         None,                       // compaction_blocks
         None,                       // approval
     )?;

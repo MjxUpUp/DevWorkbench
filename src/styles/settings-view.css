@@ -1059,65 +1059,6 @@
   color: var(--text-secondary);
 }
 
-/* === ForgeExperienceSection — 待回顾经验回放 === */
-.forge-review-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.forge-review-item:last-child { border-bottom: none; }
-.forge-review-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-.forge-review-task {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--accent);
-  word-break: break-all;
-}
-.forge-grade {
-  font-family: var(--font-mono);
-  font-size: var(--text-xxs);
-  color: var(--text-secondary);
-  background: var(--surface-0);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 2px var(--space-2);
-  white-space: nowrap;
-}
-.forge-grade.low { color: var(--danger, #d94646); }
-.forge-low-dims {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.forge-low-dims li {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-.forge-low-dims strong {
-  color: var(--text-primary);
-  font-weight: 500;
-}
-.forge-action-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin: var(--space-3) 0;
-}
-.forge-result {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-
 /* === B3: MCP 运行时管理面板 === */
 .mcp-runtime {
   margin-top: var(--space-4);

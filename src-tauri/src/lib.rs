@@ -8,7 +8,6 @@ pub mod db;
 pub mod error;
 pub mod eval;
 pub mod kernel_impl;
-pub mod knowledge;
 pub mod mcp;
 pub mod migrate;
 pub mod models;
@@ -202,27 +201,14 @@ pub fn run() {
                     migrate::migrate_v22_to_v23(&conn)
                 );
                 run_migrate!(
-                    "v23→v24 knowledge memory system migration",
-                    migrate::migrate_v23_to_v24(&conn)
-                );
-                run_migrate!(
                     "v24→v25 block_finalize_log migration (P0 integrity audit)",
                     migrate::migrate_v24_to_v25(&conn)
                 );
+                run_migrate!(
+                    "v25→v26 drop memory/reflection/DAG tables migration",
+                    migrate::migrate_v25_to_v26(&conn)
+                );
 
-                match knowledge::store::prune_old_entries(
-                    &conn,
-                    knowledge::budget::KNOWLEDGE_PRUNE_STARTUP_DAYS,
-                ) {
-                    Ok(count) => {
-                        if count > 0 {
-                            log::info!("Pruned {} old knowledge entries", count);
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Knowledge prune failed (non-fatal): {}", e);
-                    }
-                }
                 // Lazy trace retention (2026-06-19 observability research): local
                 // apps aren't long-running, so TTL runs on startup, not a cron.
                 // Prune traces past their retention window, then VACUUM (throttled
@@ -292,24 +278,12 @@ pub fn run() {
                 log::info!("Circuit-breaker verdict consumer started");
             }
 
-            // Start knowledge file watchers (background thread, shares the pool)
-            match knowledge::watchers::start_knowledge_watchers(db_state.clone()) {
-                Ok(_guard) => {
-                    app.manage(_guard);
-                    log::info!("Knowledge watchers started");
-                }
-                Err(e) => {
-                    log::warn!("Knowledge watchers failed to start (non-fatal): {}", e);
-                }
-            }
-
             Ok(())
         })
         .manage(commands::agents::AgentState(std::sync::Arc::new(
             agents::pty::AgentProcesses::new(),
         )))
         .manage(mcp::registry::McpRegistry::new())
-        .manage(commands::workflows::ApprovalState::default())
         .manage(commands::agents::AgentApprovalState::default())
         .manage(agents::kernel_tasks::KernelTasks::new())
         .manage(agents::kernel_tasks::KernelLiveBlocks::new())
@@ -353,7 +327,6 @@ pub fn run() {
             commands::eval::run_eval_replay,
             commands::eval::preview_session_trajectory,
             commands::eval::score_eval_rubric,
-            commands::eval::eval_platform_mechanism,
             commands::eval::eval_platform_e2e,
             commands::eval::eval_platform_coverage,
             commands::eval::run_eval_enablement,
@@ -373,10 +346,6 @@ pub fn run() {
             commands::agents::pty_resize_cmd,
             commands::agents::get_project_activity,
             commands::agents::get_recent_activity,
-            commands::agents::search_knowledge,
-            commands::agents::get_knowledge_for_project,
-            commands::agents::delete_knowledge_entry,
-            commands::agents::update_knowledge_entry,
             commands::agents::load_mcp_config,
             commands::agents::save_mcp_config,
             commands::agents::apply_mcp_config,
@@ -385,15 +354,6 @@ pub fn run() {
             commands::provider_cmds::test_provider_connection,
             commands::agents::get_quality_reports,
             commands::agents::get_quality_report_for_session,
-            commands::experience::list_pending_forge_reviews,
-            commands::experience::replay_forge_experience,
-            commands::workflows::list_workflows,
-            commands::workflows::create_workflow,
-            commands::workflows::update_workflow,
-            commands::workflows::delete_workflow,
-            commands::workflows::run_workflow,
-            commands::workflows::approve_workflow_step,
-            commands::workflows::list_workflow_templates,
             commands::mcp_cmds::mcp_connect,
             commands::mcp_cmds::mcp_disconnect,
             commands::mcp_cmds::mcp_call_tool,

@@ -18,7 +18,6 @@ vi.mock('../../utils/evalApi', () => ({
     scoreRubric: vi.fn(),
     runSession: vi.fn(),
     listRuns: vi.fn(),
-    runPlatformMechanism: vi.fn(),
     runPlatformE2e: vi.fn(),
     runEnablement: vi.fn(),
     runPlatformCoverage: vi.fn(),
@@ -101,16 +100,6 @@ function mockAll(p: { cases?: EvalCaseRow[]; verdicts?: VerdictRow[]; trend?: un
     ],
     q_code: 1,
     hard_gate_triggered: false,
-  });
-  // P4 platform-mechanism: the linear sample graph runs in order + reaches
-  // done — a clean PASS verdict.
-  vi.mocked(evalApi.runPlatformMechanism).mockResolvedValue({
-    pass: true,
-    actual_order: ['prompt_1', 'agent_1', 'gate_1'],
-    actual_terminal: 'done',
-    expected_order: ['prompt_1', 'agent_1', 'gate_1'],
-    expected_terminal: 'done',
-    mismatches: [],
   });
   // P4 平台-e2e: clean data-plane verdict — all set expectations hit (1 approved
   // case, 2 total, 1 eval-gate verdict, replay grade optimal).
@@ -509,28 +498,6 @@ describe('EvalPanel', () => {
     await waitFor(() => {
       expect(screen.getByText(/仅 1 天数据/)).toBeInTheDocument();
     });
-  });
-
-  it('P4 runs the platform-mechanism eval (no LLM) and renders the verdict', async () => {
-    // Selecting 平台-机制 used to show a gap-note ("需平台评测驱动，未接入").
-    // Now it renders a real runner wired to eval_platform_mechanism — the only
-    // platform object closed end-to-end; e2e/enablement stay gap-noted.
-    mockAll({ cases: [case_()] });
-    render(<EvalPanel />);
-    fireEvent.click(screen.getByTestId('eval-nav-P4'));
-    fireEvent.click(screen.getByText('平台-机制'));
-    fireEvent.click(screen.getByRole('button', { name: /运行机制评测/ }));
-    await waitFor(() => {
-      expect(evalApi.runPlatformMechanism).toHaveBeenCalledWith(
-        expect.stringContaining('prompt_1'),
-        { seed: 'mechanism-eval' },
-        { expect_order: ['prompt_1', 'agent_1', 'gate_1'], expect_terminal: 'done' },
-      );
-    });
-    await waitFor(() => {
-      expect(screen.getByText('PASS')).toBeInTheDocument();
-    });
-    expect(screen.getByText(/终态 done/)).toBeInTheDocument();
   });
 
   it('P4 runs the platform-e2e eval (data plane, no LLM) and renders the checks', async () => {

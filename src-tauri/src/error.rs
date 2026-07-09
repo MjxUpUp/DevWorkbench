@@ -26,9 +26,6 @@ pub enum AppError {
     #[error("Agent error: {0}")]
     Agent(String),
 
-    #[error("Knowledge collection failed ({agent}): {reason}")]
-    KnowledgeCollection { agent: String, reason: String },
-
     #[error("Config write failed ({agent}): target file {path} not writable")]
     ConfigWriteFailed { agent: String, path: String },
 

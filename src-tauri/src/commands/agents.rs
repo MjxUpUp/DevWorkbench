@@ -298,68 +298,6 @@ fn react_chat_driver(
         log::warn!("[checkpoint] create failed for {session_id}: {e} (rollback disabled)");
     }
 
-    // D5 knowledge prune: lazily GC entries older than 90 days once per session
-    // start. prune_old_entries was previously defined but NEVER called (zero
-    // call sites), so the knowledge base accumulated indefinitely and only the
-    // per-prompt token budget front-truncated it. Best-effort — a DB error just
-    // logs (prune is hygiene, not a gate); count==0 returns early so this is
-    // cheap on a clean DB.
-    match db_conn.get() {
-        Ok(conn) => {
-            if let Err(e) = crate::knowledge::store::prune_old_entries(
-                &conn,
-                crate::knowledge::budget::KNOWLEDGE_PRUNE_SESSION_DAYS,
-            ) {
-                log::warn!("[knowledge] prune failed for {session_id}: {e}");
-            }
-        }
-        Err(e) => log::debug!("[knowledge] prune skipped (no conn): {e}"),
-    }
-
-    // T8 experience flywheel replay: pull Forge's pending *mandatory* reviews
-    // (low-score, unresolved) into the knowledge base as quality_failure lessons,
-    // which build_react_agent → experience_prompt_suffix (T7) surfaces in THIS
-    // session's system prompt. Best-effort + dedup → idempotent and non-blocking
-    // (forge missing / no pending reviews = no-op). Same blocking-subprocess-at-
-    // session-start pattern as the checkpoint above.
-    match crate::quality::experience::list_forge_reviews(std::path::Path::new(project_path)) {
-        Ok(reviews) => {
-            let pending = crate::quality::experience::pending_mandatory(&reviews);
-            let accepted = crate::quality::experience::accepted_only(&reviews);
-            let resolved = crate::quality::experience::resolved_not_accepted(&reviews);
-            if !pending.is_empty() || !accepted.is_empty() || !resolved.is_empty() {
-                if let Ok(conn) = db_conn.get() {
-                    let hash = crate::activity::hash_project_path(project_path);
-                    // Flywheel BOTH ways, with a split exit: replay pending
-                    // lessons INTO the store (project-local + one global per
-                    // dimension); ACCEPTED reviews purge their lessons OUT (full
-                    // exit — the user signed off); RESOLVED-only reviews DECAY
-                    // confidence (soft exit — improvement stays on record for
-                    // tracking). Global lessons are cross-project aggregates and
-                    // are never purged/decayed by a single project's resolve.
-                    let res = crate::quality::experience::replay_to_knowledge(
-                        &conn,
-                        project_path,
-                        &pending,
-                        agent_type,
-                    );
-                    let purged = crate::quality::experience::purge_lessons_for_resolved_reviews(
-                        &conn, &hash, &accepted,
-                    );
-                    let decayed = crate::quality::experience::decay_confidence_for_resolved_reviews(
-                        &conn, &hash, &resolved,
-                    );
-                    log::info!(
-                        "[experience] replayed {} lessons ({} skipped, {} global), purged {} accepted, decayed {} resolved for {session_id}",
-                        res.replayed, res.skipped, res.promoted_global, purged, decayed
-                    );
-                }
-            }
-        }
-        Err(crate::error::AppError::ForgeNotInstalled) => {} // forge absent → nothing new
-        Err(e) => log::warn!("[experience] replay failed for {session_id}: {e}"),
-    }
-
     // Prior conversation turns → structured Message history. This is the
     // ReactAgent analog of the CLI path's inject_conversation_context, but built
     // from persisted blocks (real user/assistant/tool turns) instead of a flat
@@ -425,9 +363,7 @@ fn react_chat_driver(
             Some(sid_drv.as_str()),
             None, // skill_filter
             None, // mcp_filter
-            None, // knowledge_ids
-            // Main orchestrator agent — give it WorkflowTool so it can
-            // self-plan a DAG for complex multi-step tasks.
+            // Main chat-path agent — AppHandle wires the compaction-archive sink.
             Some(app_drv.clone()),
             Some(std::sync::Arc::clone(&compaction_blocks)),
             approval_map,
@@ -587,148 +523,6 @@ fn react_chat_driver(
         } else {
             Some(final_output)
         };
-
-        // v1.3 T2 + D6: close the long-term-memory loop. A Completed kernel-
-        // agent session has no CLI log, so write its knowledge contributions
-        // directly — the natural-language `react_session` memory (what it SAID)
-        // AND the structured `react_reflection` companion (what it DID). The
-        // write core is factored into session_reflection::persist_completion_
-        // memory so it's unit-testable over a plain Connection; this surrounding
-        // closure holds a Tauri AppHandle + live ReactAgent stream and can't be
-        // driven from `cargo test`. Best-effort (a DB failure just logs). Only
-        // on Completed so a Failed/degraded run doesn't pollute memory.
-        if final_status == SessionStatus::Completed {
-            // I3 + I2: LLM-enhanced reflection, two layers deepening on success.
-            // Both reuse ONE one-shot ChatModel built from the SAME provider
-            // resolution as the main agent (__default__ + provider config), built
-            // OUTSIDE the db_drv.get() scope (chat construction needs &DbState).
-            //
-            // I3 first — fork a READ-ONLY subagent (CCB extractMemories analogue)
-            // to investigate the ACTUAL diff with read_file/grep and extract a
-            // deep lesson. Timeout-bounded (90s) so a stuck child never blocks
-            // finalize. The subagent RETURNS text; THIS hook owns the DB write,
-            // preserving the "子 agent 只读" invariant.
-            //
-            // On I3 timeout/failure → I2: a tool-less one-shot generate over the
-            // pure-rule stats + prose. I2 itself falls back to the pure rule on
-            // any error, so the write is never blocked by a flaky model.
-            let llm_reflection = match crate::kernel_impl::executor::build_one_shot_chat(
-                model_drv.as_deref(),
-                &db_drv,
-                &pp_drv,
-            ) {
-                Ok(chat) => {
-                    let i3 = tokio::time::timeout(
-                        std::time::Duration::from_secs(90),
-                        crate::kernel_impl::session_reflection::extract_lessons_via_subagent(
-                            std::sync::Arc::clone(&chat),
-                            &pp_drv,
-                            &sid_drv,
-                            &final_blocks,
-                            &prompt_drv,
-                            summary.as_deref(),
-                        ),
-                    )
-                    .await;
-                    match i3 {
-                        Ok(Some(r)) => Some(r),
-                        Ok(None) | Err(_) => {
-                            // I3 missed (no parse / dispatch error) or timed out
-                            // → I2 one-shot generate fallback.
-                            crate::kernel_impl::session_reflection::summarize_with_llm(
-                                &final_blocks,
-                                &prompt_drv,
-                                summary.as_deref(),
-                                chat.as_ref(),
-                            )
-                            .await
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::debug!("[react_chat] LLM reflection skipped ({e}) for {sid_drv}");
-                    None
-                }
-            };
-            if let Ok(conn) = db_drv.get() {
-                let hash = crate::activity::hash_project_path(&pp_drv);
-                let written = crate::kernel_impl::session_reflection::persist_completion_memory(
-                    &conn,
-                    &hash,
-                    &sid_drv,
-                    &prompt_drv,
-                    summary.as_deref(),
-                    &final_blocks,
-                    &at_drv,
-                    llm_reflection.as_ref(),
-                );
-                if written > 0 {
-                    log::info!("[react_chat] {written} knowledge entries recorded for {sid_drv}");
-                }
-                // I5: mark this Completed session's produced entries
-                // (react_session/react_reflection) effective +1 — a successful
-                // run's lessons rank higher in the next session's retrieval via
-                // reuse_boost. Best-effort; a DB error just logs.
-                if let Err(e) =
-                    crate::knowledge::store::bump_effectiveness_by_session(&conn, &sid_drv)
-                {
-                    log::warn!("[react_chat] effectiveness bump failed for {sid_drv}: {e}");
-                }
-                // I1 write-side: embed this session's new entries (title+content)
-                // and upsert into knowledge_embeddings, populating the vector
-                // store so the NEXT session's retrieve_relevant_with_vector can
-                // cosine-rank them when FTS confidence is low. OpenAI-compatible
-                // providers only; embed failure/timeout → just logs (never blocks
-                // completion).
-                if written > 0 {
-                    if let Some(embedder) =
-                        crate::kernel_impl::executor::build_one_shot_embedder(model_drv.as_deref())
-                    {
-                        match crate::knowledge::store::entries_by_session(&conn, &sid_drv) {
-                            Ok(rows) if !rows.is_empty() => {
-                                let texts: Vec<String> = rows
-                                    .iter()
-                                    .map(|(_, t, c)| format!("{t}\n{c}"))
-                                    .collect();
-                                let refs: Vec<&str> =
-                                    texts.iter().map(|s| s.as_str()).collect();
-                                let mid = embedder.embed_model_id().to_string();
-                                let emb = tokio::time::timeout(
-                                    std::time::Duration::from_secs(30),
-                                    embedder.embed(&refs),
-                                )
-                                .await;
-                                match emb {
-                                    Ok(Ok(embs)) => {
-                                        let mut ok = 0;
-                                        for ((id, _, _), vec) in rows.iter().zip(embs) {
-                                            if crate::knowledge::store::upsert_embedding(
-                                                &conn, id, &vec, &mid,
-                                            )
-                                            .is_ok()
-                                            {
-                                                ok += 1;
-                                            }
-                                        }
-                                        log::info!(
-                                            "[react_chat] embedded {ok}/{} entries for {sid_drv}",
-                                            rows.len()
-                                        );
-                                    }
-                                    Ok(Err(e)) => log::warn!(
-                                        "[react_chat] embed batch failed for {sid_drv}: {e}"
-                                    ),
-                                    Err(_) => {
-                                        log::warn!("[react_chat] embed batch timed out for {sid_drv}")
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
 
         // P0 (review M6): choose repair strategy from terminal shape.
 // had_partial_output now reads from `final_blocks` (Text/Thinking presence)
@@ -1087,44 +881,6 @@ pub fn get_recent_activity(
     crate::activity::get_recent_events(&conn, limit.unwrap_or(50))
 }
 
-// Knowledge commands
-#[tauri::command]
-pub fn search_knowledge(
-    db: State<'_, DbState>,
-    query: String,
-    limit: Option<usize>,
-) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
-    let conn = db.get()?;
-    crate::knowledge::store::search_entries(&conn, &query, limit.unwrap_or(20))
-}
-
-#[tauri::command]
-pub fn get_knowledge_for_project(
-    db: State<'_, DbState>,
-    project_path: String,
-) -> Result<Vec<crate::models::KnowledgeEntry>, AppError> {
-    let conn = db.get()?;
-    let hash = crate::activity::hash_project_path(&project_path);
-    crate::knowledge::store::get_entries_for_project(&conn, &hash)
-}
-
-#[tauri::command]
-pub fn delete_knowledge_entry(db: State<'_, DbState>, id: String) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::knowledge::store::delete_entry(&conn, &id)
-}
-
-#[tauri::command]
-pub fn update_knowledge_entry(
-    db: State<'_, DbState>,
-    id: String,
-    title: String,
-    content: String,
-) -> Result<(), AppError> {
-    let conn = db.get()?;
-    crate::knowledge::store::update_entry(&conn, &id, &title, &content)
-}
-
 // Config commands
 #[tauri::command]
 pub fn load_mcp_config(project_path: String) -> Result<crate::models::McpConfigFile, AppError> {
@@ -1320,14 +1076,14 @@ mod tests {
         assert_eq!(session_of_resume_token("approve____0"), None);
     }
 
-    /// B4: a workflow human-node approval token has the shape
-    /// `approve__{sid}__wf-{run_id}-{node}`. The verdict ledger persists it via
+    /// B4: a human-gate approval token has the shape
+    /// `approve__{sid}__{suffix}`. The verdict ledger persists it via
     /// this resolver, so session_of_resume_token MUST extract `sid` correctly
-    /// — including when the original node id contained `__` (workflow_tool
-    /// sanitizes `__`→`-` so the suffix stays `__`-free; this test pins that the
-    /// sanitized form parses, attributing the intervention to the right session).
+    /// — including when the suffix contains `-`-delimited segments (the suffix
+    /// is kept `__`-free; this test pins that such a form parses, attributing
+    /// the intervention to the right session).
     #[test]
-    fn session_of_resume_token_parses_workflow_human_token() {
+    fn session_of_resume_token_parses_human_gate_token_with_segmented_suffix() {
         // Plain node id.
         assert_eq!(
             session_of_resume_token("approve__550e8400-e29b__wf-r1-approve_step"),

@@ -1,10 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 
 /**
- * Frontend E2E for the three Settings ↔ backend gaps this task closes:
+ * Frontend E2E for the Settings ↔ backend gaps this suite covers:
  *   1. providers — model context window now editable + persisted (v2.0 fix)
- *   2. memory    — long-term memory flywheel list + delete (v1.3-T2 surface)
- *   3. skills    — registry list + catalog install (skills subsystem surface)
+ *   2. skills    — registry list + catalog install (skills subsystem surface)
  *
  * Real browser, real production components (the only mock is the Tauri IPC
  * boundary). Each test seeds the commands its section needs and asserts on the
@@ -41,7 +40,6 @@ test('providers: editing a model context window persists through save', async ({
     },
     set_providers_config: null,
     // Other sections mount simultaneously — empty responses keep them quiet.
-    get_knowledge_for_project: EMPTY,
     list_skills: EMPTY,
     skill_catalog: EMPTY,
   });
@@ -57,44 +55,9 @@ test('providers: editing a model context window persists through save', async ({
   expect(save!.args.config.providers[0].models[0].contextWindow).toBe(128000);
 });
 
-test('memory: lists project entries and deletes one on click', async ({ page }) => {
-  await seedMock(page, {
-    get_providers_config: EMPTY_PROVIDERS,
-    get_knowledge_for_project: [
-      {
-        id: 'k1',
-        projectHash: 'h',
-        category: 'memory',
-        title: 'root cause x',
-        content: 'the real root cause',
-        sourceAgent: 'react_kernel',
-        sourceSessionId: null,
-        sourceType: 'react_session',
-        confidence: 0.9,
-        createdAt: '2026-06-17T00:00:00Z',
-        updatedAt: '2026-06-17T00:00:00Z',
-        accessCount: 0,
-      },
-    ],
-    delete_knowledge_entry: null,
-    list_skills: EMPTY,
-    skill_catalog: EMPTY,
-  });
-  await page.goto('/settings.html');
-
-  await expect(page.getByText('root cause x')).toBeVisible();
-  await page.getByRole('button', { name: /删除记忆 root cause x/ }).click();
-
-  const all = await calls(page);
-  const del = all.find((c) => c.cmd === 'delete_knowledge_entry');
-  expect(del, 'delete_knowledge_entry must fire').toBeTruthy();
-  expect(del!.args).toMatchObject({ id: 'k1' });
-});
-
 test('skills: lists installed skills and installs a catalog entry', async ({ page }) => {
   await seedMock(page, {
     get_providers_config: EMPTY_PROVIDERS,
-    get_knowledge_for_project: EMPTY,
     list_skills: [
       {
         id: 's1',
@@ -146,7 +109,6 @@ test('skills: lists installed skills and installs a catalog entry', async ({ pag
 test('capability-overview: aggregates built-ins + skills + MCP tools (read-only)', async ({ page }) => {
   await seedMock(page, {
     get_providers_config: EMPTY_PROVIDERS,
-    get_knowledge_for_project: EMPTY,
     skill_catalog: EMPTY,
     // Skills group reuses the skills store — same list_skills source as SkillsSection.
     list_skills: [
@@ -182,7 +144,6 @@ test('capability-overview: aggregates built-ins + skills + MCP tools (read-only)
 test('hooks: lists existing rows and creates a pre_tool_use hook with a matcher', async ({ page }) => {
   await seedMock(page, {
     get_providers_config: EMPTY_PROVIDERS,
-    get_knowledge_for_project: EMPTY,
     list_skills: EMPTY,
     skill_catalog: EMPTY,
     list_user_hooks: [

@@ -1054,22 +1054,8 @@ pub fn spawn_pty_agent(
     };
 
     let injected_prompt = inject_conversation_context(prompt, &prior_turns, &agent_type);
-    // Inject project knowledge context into the prompt — run in background thread
-    // with a 2-second timeout to avoid blocking the UI on slow DB queries.
-    let injected_prompt =
-        inject_knowledge_with_timeout(&db_conn, &agent_type, project_path, &injected_prompt);
     // Inject @file references with actual file content
     let injected_prompt = inject_file_references(project_path, &injected_prompt);
-    // D3: resolve @memory:<title> explicit references against the project's
-    // active knowledge entries (after @file injection, before spawn). Best-effort:
-    // a DB error leaves the prompt untouched.
-    let injected_prompt = match db_conn.get() {
-        Ok(conn) => {
-            let hash = crate::activity::hash_project_path(project_path);
-            crate::knowledge::memory_ref::resolve_memory_refs(&injected_prompt, &conn, &hash)
-        }
-        Err(_) => injected_prompt,
-    };
     let config = build_spawn_config(&agent_type, project_path, &injected_prompt, model)?;
 
     // Unified pipe mode for all platforms. PTY path removed from runtime:
@@ -1368,8 +1354,8 @@ pub(crate) fn register_running_session(
 
 /// Write the final session state: status/finishedAt/exit/context/summary patch,
 /// a `session_completed`/`session_failed` activity event (carrying the changed
-/// file list), and emit `agent:completed`. Then kick off the post-session hooks
-/// (knowledge collection, quality gate) on a background thread. The caller
+/// file list), and emit `agent:completed`. Then kick off the post-session hook
+/// (forge quality gate) on a background thread. The caller
 /// prepares `output_summary` + `context_snapshot`; this fn only persists the
 /// terminal state — so the ReactAgent driver can call it with the same shape the
 /// pipe wait-thread does.
@@ -1521,7 +1507,6 @@ pub(crate) fn finalize_session(
         project_path.to_string(),
         session_id.to_string(),
         agent_type.clone(),
-        session_status,
     );
 }
 
@@ -2297,47 +2282,6 @@ fn read_pre_diff(session_id: &str) -> Option<Vec<String>> {
 }
 
 // ---------------------------------------------------------------------------
-// Knowledge injection with timeout (avoids blocking UI on slow DB queries)
-// ---------------------------------------------------------------------------
-
-/// Inject knowledge into the prompt in a background thread with a 2s timeout.
-/// Falls back to the original prompt if injection takes too long.
-fn inject_knowledge_with_timeout(
-    db_conn: &crate::db::DbState,
-    agent_type: &AgentType,
-    project_path: &str,
-    prompt: &str,
-) -> String {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let conn = db_conn.clone();
-    let at = agent_type.clone();
-    let pp = project_path.to_string();
-    let p = prompt.to_string();
-
-    std::thread::Builder::new()
-        .name("knowledge-inject".into())
-        .spawn(move || {
-            let result = match conn.get() {
-                Ok(conn) => crate::knowledge::injector::inject_for_agent(&conn, &at, &pp, &p),
-                Err(_) => p,
-            };
-            let _ = tx.send(result);
-        })
-        .ok();
-
-    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-        Ok(injected) => injected,
-        Err(_) => {
-            log::warn!(
-                "Knowledge injection timed out for project {}, using original prompt",
-                project_path
-            );
-            prompt.to_string()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // File reference injection (@path → actual file content)
 // ---------------------------------------------------------------------------
 
@@ -2481,31 +2425,19 @@ fn inject_file_references(project_path: &str, prompt: &str) -> String {
 // Post-session hooks (shared by PTY and Pipe paths)
 // ---------------------------------------------------------------------------
 
-/// Run knowledge collection and quality gate in a background thread.
+/// Run the forge quality gate in a background thread.
 /// Extracted to avoid code duplication between PTY and Pipe wait threads.
 fn run_post_session_hooks(
     db: crate::db::DbState,
     project_path: String,
     session_id: String,
     agent_type: AgentType,
-    session_status: SessionStatus,
 ) {
     let sid_for_log = session_id.clone();
     let result = std::thread::Builder::new()
         .name("post-session-hooks".into())
         .spawn(move || {
-            // 1. Knowledge collection (only on success)
-            if session_status == SessionStatus::Completed {
-                if let Ok(conn) = db.get() {
-                    let _ = crate::knowledge::collector::collect_from_session(
-                        &conn,
-                        &project_path,
-                        &session_id,
-                        &agent_type,
-                    );
-                }
-            }
-            // 2. Quality gate — run subprocess
+            // Quality gate — run subprocess
             let forge_result =
                 crate::quality::forge::run_forge_gate(std::path::Path::new(&project_path));
             match forge_result {

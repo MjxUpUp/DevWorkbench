@@ -27,8 +27,7 @@ use crate::eval::scoring::Matcher;
 use crate::trace::db::list_traces_for_session;
 
 /// Which DW feature the enablement run toggles. Only `skills` today; the enum
-/// leaves room to add MCP / knowledge / WorkflowTool toggles without reshaping
-/// the wire contract.
+/// leaves room to add MCP toggles without reshaping the wire contract.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EnablementFeature {

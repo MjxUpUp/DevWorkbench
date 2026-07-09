@@ -300,23 +300,6 @@ export interface ActivityEvent {
   metadata: unknown | null;
 }
 
-// ---- Knowledge types ----
-
-export interface KnowledgeEntry {
-  id: string;
-  projectHash: string;
-  category: string;
-  title: string;
-  content: string;
-  sourceAgent: AgentType;
-  sourceSessionId: string | null;
-  sourceType: string;
-  confidence: number;
-  createdAt: string;
-  updatedAt: string;
-  accessCount: number;
-}
-
 // ---- Skill types (mirror Rust models::Skill, serde camelCase) ----
 
 export interface Skill {
@@ -363,38 +346,6 @@ export interface QualityReport {
   checks: QualityCheck[];
   overallStatus: string;
   createdAt: string;
-}
-
-/** One low-scoring quality dimension surfaced by a Forge experience review.
- *  Mirrors Rust `quality::experience::LowDimension` (serde camelCase). */
-export interface LowDimension {
-  dimension: string;
-  score: number;
-  detail: string;
-}
-
-/** A Forge experience review for a task — Forge creates a `mandatory` pending
- *  review when a task scores below threshold. `list_pending_forge_reviews`
- *  returns the pending+mandatory subset. Mirrors Rust
- *  `quality::experience::ForgeExperienceReview` (serde camelCase). */
-export interface ForgeExperienceReview {
-  taskRef: string;
-  score: number;
-  grade: string;
-  lowDimensions: LowDimension[];
-  mandatory: boolean;
-  status: string;
-  createdAt: string;
-}
-
-/** Result of `invoke('replay_forge_experience', { projectPath })` — how many
- *  low-dimension lessons were replayed into the knowledge base (project-local
- *  + promoted global). Mirrors Rust `quality::experience::ReplayResult`
- *  (serde camelCase). */
-export interface ReplayResult {
-  replayed: number;
-  skipped: number;
-  promotedGlobal: number;
 }
 
 // ---- Config types ----
@@ -521,54 +472,6 @@ export interface BudgetInfo {
   spent: number;
   total: number;
   percentage: number;
-}
-
-// ---- Workflow types ----
-
-export interface Workflow {
-  id: string;
-  name: string;
-  yamlContent: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** A built-in workflow template (`list_workflow_templates`) — a starter YAML the
- * user clones into the YAML editor instead of authoring the DAG from scratch.
- * Mirrors Rust `commands::workflows::WorkflowTemplate` (serde camelCase). */
-export interface WorkflowTemplate {
-  name: string;
-  description: string;
-  category: string;
-  yamlContent: string;
-}
-
-// Note: WorkflowRun / WorkflowStep removed — the static run-tracking model was
-// never written to. Execution is now stream-based via the kernel-compose Graph
-// engine: run_workflow returns a { run_id, output } result and emits live
-// `workflow:progress` events the Orchestrate canvas subscribes to.
-
-/** Result of `invoke('run_workflow', { yamlContent, input, workingDir })`. */
-export interface WorkflowRunResult {
-  run_id: string;
-  output: unknown;
-}
-
-/** GraphEvent kinds emitted as `workflow:progress` payload.runId === run_id. */
-export type WorkflowProgressEvent =
-  | { kind: 'node_start'; node: string }
-  | { kind: 'node_end'; node: string; status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'waiting_approval' | 'interrupted' | 'retried'; error?: string }
-  | { kind: 'approval_required'; node: string; prompt: string; resume_token: string }
-  | { kind: 'node_output'; node: string; chunk: unknown }
-  | { kind: 'node_retried'; node: string; attempt: number; error: string }
-  | { kind: 'graph_done'; output: unknown }
-  | { kind: 'graph_failed'; error: string }
-  | { kind: 'graph_interrupted'; reason: string };
-
-/** The full `workflow:progress` Tauri event payload. */
-export interface WorkflowProgressPayload {
-  runId: string;
-  event: WorkflowProgressEvent;
 }
 
 // ---- Chat block stream types ----

@@ -5,9 +5,8 @@ import { CommandPalette } from '../CommandPalette';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStore } from '../../stores/agentStore';
-import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { invoke } from '@tauri-apps/api/core';
-import type { Project, KnowledgeEntry } from '../../types';
+import type { Project } from '../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -19,12 +18,6 @@ const makeProject = (id: string, name: string, path: string): Project => ({
   created_at: '2024-01-01T00:00:00.000Z', last_opened_tools: [], workspace_tools: [],
 });
 
-const makeKnowledge = (id: string, title: string): KnowledgeEntry =>
-  ({
-    id, title, content: 'c', category: 'bug', confidence: 0.9,
-    project_path: null, created_at: '2024-01-01T00:00:00.000Z',
-  }) as unknown as KnowledgeEntry;
-
 describe('CommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -35,7 +28,6 @@ describe('CommandPalette', () => {
     });
     useProjectStore.setState({ projects: [], loading: false, error: null });
     useAgentStore.setState({ sessions: [] } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
-    useKnowledgeStore.setState({ searchResults: [], loading: false, entries: [] });
   });
 
   it('renders nothing when closed', () => {
@@ -64,20 +56,6 @@ describe('CommandPalette', () => {
     expect(nav.activeProject?.id).toBe('p1');
     expect(nav.activeView).toBe('task');
     expect(nav.commandPaletteOpen).toBe(false);
-  });
-
-  it('renders knowledge hits as non-actionable rows (no button role)', async () => {
-    // Knowledge entries only surface after a backend search keyed off the query.
-    useKnowledgeStore.setState({ searchResults: [makeKnowledge('k1', 'crash fix')] });
-    const user = userEvent.setup();
-    render(<CommandPalette />);
-
-    await user.type(screen.getByPlaceholderText(/搜索/), 'crash');
-
-    expect(screen.getByText('crash fix')).toBeInTheDocument();
-    expect(screen.getByText(/置信度 90%/)).toBeInTheDocument();
-    // Knowledge has no deep link — it must render as a static row, not a button.
-    expect(screen.queryByRole('button', { name: /crash fix/ })).toBeNull();
   });
 
   it('closes on Escape', async () => {

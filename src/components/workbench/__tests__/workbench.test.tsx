@@ -2,11 +2,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { PlanBar } from '../PlanBar';
 import { GateBar } from '../GateBar';
-import { MemoryRail } from '../MemoryRail';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
 import { useDashboardStore } from '../../../stores/dashboardStore';
-import { useKnowledgeStore } from '../../../stores/knowledgeStore';
 import type { Session, SessionStatus, CostSummary } from '../../../types';
 
 // GateBar useEffect 调 fetchDashboard → invoke；mock 成 reject 让 fetchDashboard
@@ -204,111 +202,5 @@ describe('GateBar — 成本门控/熔断（块4，启示3）', () => {
     render(<GateBar />);
     expect(screen.queryByTestId('gate-budget')).toBeNull();
     expect(screen.getByTestId('gate-bar')).toHaveTextContent('累计 $2.50');
-  });
-});
-
-describe('MemoryRail — 记忆概览（块5，轴线C）', () => {
-  beforeEach(() => {
-    // trace 视图避开 GitPanel(其调 git invoke)；记忆统计与视图无关
-    useNavigationStore.setState({
-      activeView: 'trace',
-      activeProject: null,
-      selectedConversationId: null,
-    });
-    useAgentStore.setState({ sessions: [] });
-    useKnowledgeStore.setState({ entries: [], searchResults: [] });
-  });
-
-  it('compact events → 压缩次数 + 归档消息数', () => {
-    useNavigationStore.setState({ selectedConversationId: 'c1' });
-    useAgentStore.setState({
-      sessions: [
-        mkSession('completed', {
-          conversationId: 'c1',
-          blocks: [
-            { kind: 'compact', summary: 's1', archived_at: '2026-01-01T00:00:00Z', dropped_count: 5, is_error: false },
-            { kind: 'compact', summary: 's2', archived_at: '2026-01-01T00:00:00Z', dropped_count: 3, is_error: false },
-          ],
-        }),
-      ],
-    });
-    render(<MemoryRail />);
-    expect(screen.getByTestId('memory-compaction-stat')).toHaveTextContent('压缩 2 次 · 归档 8 条消息');
-  });
-
-  it('无 compact events → 占位', () => {
-    useNavigationStore.setState({ selectedConversationId: 'c1' });
-    useAgentStore.setState({
-      sessions: [
-        mkSession('completed', { conversationId: 'c1', blocks: [{ kind: 'text', content: 'x' }] }),
-      ],
-    });
-    render(<MemoryRail />);
-    expect(screen.queryByTestId('memory-compaction-stat')).toBeNull();
-    expect(screen.getByTestId('memory-rail')).toHaveTextContent('当前会话无压缩记录');
-    // 无 activeProject → 反射占位提示选工作区
-    expect(screen.getByTestId('reflection-placeholder')).toHaveTextContent('选择工作区后展示反思记录');
-  });
-
-  it('react_reflection 条目 → 反射列表（仅反射类目，按 createdAt 倒序）', () => {
-    // 块5b：复用既有 get_knowledge_for_project IPC + react_reflection category
-    // （后端 persist_completion_memory 已写）。此处直接注入 store 绕过 invoke。
-    useKnowledgeStore.setState({
-      entries: [
-        {
-          id: 'r-new',
-          projectHash: 'h',
-          category: 'react_reflection',
-          title: '修了 cargo 错',
-          content: '...',
-          sourceAgent: 'react_kernel',
-          sourceSessionId: null,
-          sourceType: 'session',
-          confidence: 0.9,
-          createdAt: '2026-07-02T10:00:00Z',
-          updatedAt: '2026-07-02T10:00:00Z',
-          accessCount: 0,
-        },
-        {
-          id: 'r-old',
-          projectHash: 'h',
-          category: 'react_reflection',
-          title: '老反思',
-          content: '...',
-          sourceAgent: 'react_kernel',
-          sourceSessionId: null,
-          sourceType: 'session',
-          confidence: 0.5,
-          createdAt: '2026-07-01T10:00:00Z',
-          updatedAt: '2026-07-01T10:00:00Z',
-          accessCount: 0,
-        },
-        {
-          id: 'x',
-          projectHash: 'h',
-          category: 'react_session',
-          title: '不该显示',
-          content: '...',
-          sourceAgent: 'react_kernel',
-          sourceSessionId: null,
-          sourceType: 'session',
-          confidence: 0.8,
-          createdAt: '2026-07-03T10:00:00Z',
-          updatedAt: '2026-07-03T10:00:00Z',
-          accessCount: 0,
-        },
-      ],
-      searchResults: [],
-    });
-    render(<MemoryRail />);
-    const list = screen.getByTestId('reflection-list');
-    expect(list).toHaveTextContent('修了 cargo 错');
-    expect(list).toHaveTextContent('老反思');
-    expect(list).not.toHaveTextContent('不该显示'); // 仅 react_reflection，排除 react_session
-    // 倒序：r-new(07-02) 排在 r-old(07-01) 之前
-    const txt = list.textContent ?? '';
-    expect(txt.indexOf('修了 cargo 错')).toBeLessThan(txt.indexOf('老反思'));
-    // C2: UI 文案改名"反思记录 · 最近"（react_reflection 后端 category key 保留不动）
-    expect(screen.getByText('反思记录 · 最近')).toBeInTheDocument();
   });
 });

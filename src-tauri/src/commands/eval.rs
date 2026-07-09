@@ -431,29 +431,6 @@ fn parse_names(json: Option<&str>) -> Vec<String> {
 }
 
 // ===========================================================================
-// P4 platform-mechanism eval — exercise the kernel-compose DAG engine itself
-// (routing / gate / skip / fail behavior) with a deterministic stub executor.
-// No LLM: the verdict is a fact about the engine's GraphEvent sequence.
-// ===========================================================================
-
-/// Run a platform-mechanism case: compile the YAML workflow, drive it with a
-/// stub executor (agent echoes input / gate passes), and compare the observed
-/// node-start order + terminal outcome against `expect`. The P4 "平台-机制"
-/// object calls this — closing the gap where the 3 platform objects were
-/// gap-noted. Returns the verdict (also surfaced in the panel; a persisted
-/// verdict variant is a follow-on).
-#[tauri::command]
-pub async fn eval_platform_mechanism(
-    graph_yaml: String,
-    input_json: serde_json::Value,
-    expect: crate::eval::platform::MechanismExpect,
-) -> Result<crate::eval::platform::MechanismVerdict, AppError> {
-    crate::eval::platform::run_platform_mechanism(&graph_yaml, input_json, expect)
-        .await
-        .map_err(AppError::Internal)
-}
-
-// ===========================================================================
 // P4 platform-e2e eval — exercise the full eval data-plane (persistence logic →
 // in-memory DB → return shape) against a seeded database. No LLM, no browser:
 // the verdict is a fact about the data contracts the frontend consumes. The

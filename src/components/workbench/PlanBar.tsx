@@ -9,9 +9,7 @@ import styles from './workbench.module.css';
  * 顶栏承载：运行模式切换（mode-segmented）+ plan/结果物理落点 + plan 执行进度（轻量
  * 文本）+ 当前工作区。
  *
- * 砍 DAG 手动画布后，运行模式只剩 Chat（plan ∈ LLM context 隐式）与 Trace（可观测）。
- * agent 自规划 DAG 仍在 Chat 内由 WorkflowTool 触发，进度归 Stage 里消息内的
- * WorkflowProgressStrip，顶栏不再有独立 DAG 模式。
+ * 编排画布移除后，运行模式只剩 Chat（plan ∈ LLM context 隐式）与 Trace（可观测）。
  *
  * 设计修正（B1）：不在顶栏渲染 tool 调用序列。chat 模式 plan ∈ LLM context 隐式，前端
  * 拿不到真正的 plan 阶段；旧 planStepper 用 tool_use 序列当「代理」，只是把 Stage 已有

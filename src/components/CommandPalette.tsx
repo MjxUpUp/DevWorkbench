@@ -2,28 +2,25 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useAgentStore } from '../stores/agentStore';
 import { useProjectStore } from '../stores/projectStore';
-import { useKnowledgeStore } from '../stores/knowledgeStore';
 
-type ResultKind = 'command' | 'project' | 'conversation' | 'knowledge';
+type ResultKind = 'command' | 'project' | 'conversation';
 
 interface ResultItem {
   kind: ResultKind;
   /** Main label. */
   label: string;
-  /** Secondary line (path / agent / category) — optional. */
+  /** Secondary line (path / agent) — optional. */
   secondary?: string;
-  /** Action on pick. Knowledge hits have none (informational, like SearchView). */
+  /** Action on pick. Every item here is actionable. */
   action?: () => void;
 }
 
 /**
  * Transparent overlay + centered input — the single search surface (问题3).
  *
- * Replaces the legacy persistent SearchView, consolidating all retrieval into
- * one modal: commands, projects, conversations, and the backend knowledge base.
- * The knowledge dimension is what the old SearchView added and the bare palette
- * lacked — without it the 搜索 button lost project + knowledge search when it
- * was rewired here. Open via the sidebar 搜索 item or Ctrl/Cmd+K.
+ * Replaces the legacy persistent SearchView, consolidating retrieval into
+ * one modal: commands, projects, and conversations. Open via the sidebar
+ * 搜索 item or Ctrl/Cmd+K.
  */
 export function CommandPalette() {
   const open = useNavigationStore((s) => s.commandPaletteOpen);
@@ -35,8 +32,6 @@ export function CommandPalette() {
 
   const conversations = useAgentStore((s) => s.conversations);
   const projects = useProjectStore((s) => s.projects);
-  const knowledgeResults = useKnowledgeStore((s) => s.searchResults);
-  const searchKnowledge = useKnowledgeStore((s) => s.search);
 
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -47,15 +42,6 @@ export function CommandPalette() {
       inputRef.current?.focus();
     }
   }, [open]);
-
-  // Debounced backend knowledge search — only with a real query, mirroring the
-  // old SearchView's behavior. The palette is transient, so clear on close.
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) return;
-    const id = setTimeout(() => { searchKnowledge(q, 20); }, 250);
-    return () => clearTimeout(id);
-  }, [query, searchKnowledge]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -116,19 +102,12 @@ export function CommandPalette() {
     },
   }));
 
-  const knowledgeItems: ResultItem[] = (q ? knowledgeResults : []).map((k) => ({
-    kind: 'knowledge' as const,
-    label: k.title,
-    secondary: `${k.category} · 置信度 ${Math.round(k.confidence * 100)}%`,
-  }));
-
   const commandItems = q ? commands.filter((c) => c.label.toLowerCase().includes(q)) : commands;
 
   const grouped: { kind: ResultKind; title: string; items: ResultItem[] }[] = [];
   if (commandItems.length) grouped.push({ kind: 'command', title: '操作', items: commandItems });
   if (projectItems.length) grouped.push({ kind: 'project', title: '工作区', items: projectItems });
   if (conversationItems.length) grouped.push({ kind: 'conversation', title: '对话', items: conversationItems });
-  if (knowledgeItems.length) grouped.push({ kind: 'knowledge', title: '知识', items: knowledgeItems });
 
   const flat = grouped.flatMap((g) => g.items);
   const firstActionable = flat.find((i) => i.action);
@@ -140,7 +119,7 @@ export function CommandPalette() {
           ref={inputRef}
           className="command-palette-input"
           type="text"
-          placeholder="搜索操作、工作区、对话、知识…"
+          placeholder="搜索操作、工作区、对话…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {

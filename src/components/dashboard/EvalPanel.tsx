@@ -10,7 +10,6 @@ import {
   type FullTrajectory,
   type Span,
   type RubricScore,
-  type MechanismVerdict,
   type E2ESeed,
   type E2EExpect,
   type E2EVerdict,
@@ -775,20 +774,8 @@ function SessionToCase({
   );
 }
 
-// ── P4 评测任务配置（4 类评测对象）──
-type EvalObject = 'agent' | 'platform-mechanism' | 'platform-e2e' | 'platform-enablement';
-
-/// P4 平台-机制 eval 的默认 DAG 样例（linear：prompt → agent → gate）。改
-/// YAML / 期望即可复测引擎的 routing / gate / fail 行为。
-const SAMPLE_MECHANISM_YAML = `start: prompt_1
-end: gate_1
-nodes:
-  prompt_1: { type: prompt, text: "refactor auth" }
-  agent_1:  { type: agent,  agent: stub, prompt: "do work" }
-  gate_1:   { type: gate,   gate: forge }
-edges:
-  - { from: prompt_1, to: agent_1 }
-  - { from: agent_1,  to: gate_1 }`;
+// ── P4 评测任务配置（3 类评测对象）──
+type EvalObject = 'agent' | 'platform-e2e' | 'platform-enablement';
 
 function ReplayLaunch({
   cases,
@@ -851,7 +838,6 @@ function ReplayLaunch({
         {(
           [
             ['agent', 'Agent', 'coding 任务 → agent 工具/可靠性 · 轻量'],
-            ['platform-mechanism', '平台-机制', 'DAG/gate/compaction 行为 · 后端'],
             ['platform-e2e', '平台-e2e', 'IPC+前端+数据流 · 全栈'],
             ['platform-enablement', '平台-加持', '开/关 DW 功能 → agent 增量'],
           ] as [EvalObject, string, string][]
@@ -863,7 +849,6 @@ function ReplayLaunch({
           </label>
         ))}
       </div>
-      {obj === 'platform-mechanism' && <PlatformMechanismRunner />}
       {obj === 'platform-e2e' && <PlatformE2eRunner />}
       {obj === 'platform-enablement' && <PlatformEnablementRunner cases={cases} />}
 
@@ -882,7 +867,6 @@ function ReplayLaunch({
             </label>
             {(
               [
-                ['MemoryRail', '记忆注入'],
                 ['GateBar', '熔断'],
                 ['Harness', '测试 harness'],
                 ['compaction', '上下文压缩'],
@@ -901,7 +885,7 @@ function ReplayLaunch({
             placeholder="模型 id（留空=默认；glm-4.6 / deepseek-chat / kimi …）"
           />
           <div className="eval-hint">
-            环境控制：模型切换（大窗口 Kimi/DeepSeek 与 GLM 的窗口差异由 provider 配置处理）。MemoryRail/GateBar/Harness/compaction
+            环境控制：模型切换（大窗口 Kimi/DeepSeek 与 GLM 的窗口差异由 provider 配置处理）。GateBar/Harness/compaction
             在 replay 单轮只读沙箱中本就不注入——矩阵如实标注，不造假开关。
           </div>
 
@@ -965,96 +949,6 @@ function ReplayLaunch({
             </div>
           )}
         </>
-      )}
-    </div>
-  );
-}
-
-// ── P4 平台-机制 eval 运行器（真驱动，无 LLM：判决=引擎 GraphEvent 序的客观事实）──
-function PlatformMechanismRunner() {
-  const [yaml, setYaml] = useState(SAMPLE_MECHANISM_YAML);
-  const [orderText, setOrderText] = useState('prompt_1, agent_1, gate_1');
-  const [terminal, setTerminal] = useState('done');
-  const [running, setRunning] = useState(false);
-  const [verdict, setVerdict] = useState<MechanismVerdict | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  async function run() {
-    setRunning(true);
-    setErr(null);
-    setVerdict(null);
-    try {
-      const expect_order = orderText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const v = await evalApi.runPlatformMechanism(
-        yaml,
-        { seed: 'mechanism-eval' },
-        { expect_order, expect_terminal: terminal },
-      );
-      setVerdict(v);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  return (
-    <div className="eval-mechanism">
-      <div className="eval-section-label">机制契约（kernel-compose DAG YAML）</div>
-      <textarea
-        className="eval-yaml mono"
-        value={yaml}
-        onChange={(e) => setYaml(e.target.value)}
-        rows={10}
-        spellCheck={false}
-      />
-      <div className="eval-hint">
-        stub executor：agent 节点回显 prompt 大写、gate 全过——判决只反映引擎的节点序 + 终态（反刷分 #1：客观事实，无 LLM）。
-      </div>
-
-      <div className="eval-section-label">期望（确定性契约）</div>
-      <div className="eval-row2">
-        <input
-          className="eval-input"
-          value={orderText}
-          onChange={(e) => setOrderText(e.target.value)}
-          placeholder="期望节点序（逗号分隔；留空=不查）"
-        />
-        <select className="eval-input" value={terminal} onChange={(e) => setTerminal(e.target.value)}>
-          <option value="">不查终态</option>
-          <option value="done">done</option>
-          <option value="failed">failed</option>
-          <option value="interrupted">interrupted</option>
-        </select>
-      </div>
-      <div className="eval-hint">
-        ⚠ 波式并行：同波独立节点可能交错，expect_order 仅对 linear/branch/selector 图确定性；并行图留空只查终态。
-      </div>
-
-      <div className="eval-actions">
-        <Button variant="primary" onClick={run} disabled={running}>
-          {running ? '驱动引擎…' : '▶ 运行机制评测'}
-        </Button>
-        {verdict && (
-          <span className="eval-replay-result">
-            <VerdictBadge verdict={verdict.pass ? 'PASS' : 'FAIL'} />
-            <span className="mono">
-              {' '}
-              终态 {verdict.actual_terminal} · 序 {verdict.actual_order.join(' → ') || '∅'}
-            </span>
-          </span>
-        )}
-        {err && <span className="eval-hint eval-hint-err">{err}</span>}
-      </div>
-      {verdict && !verdict.pass && (
-        <div className="eval-locked mono">
-          {verdict.mismatches.map((m, i) => (
-            <div key={i}>✗ {m}</div>
-          ))}
-        </div>
       )}
     </div>
   );

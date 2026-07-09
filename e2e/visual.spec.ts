@@ -42,15 +42,14 @@ test.describe('Visual regression — component baselines', () => {
   });
 
   test('settings — sections 视觉基线', async ({ page }) => {
-    // 截 settings.html harness 实际挂载的 5 个 section（providers/memory/skills/hooks/capability）。
+    // 截 settings.html harness 实际挂载的 4 个 section（providers/skills/hooks/capability）。
     // 注：左侧导航 (.settings-view-nav) 属 SettingsView 外壳，当前 harness 未挂载——
     // 这是既有设计取舍（section harness 服务功能测试 settings.spec.ts）。
     // nav 视觉基线待补 dedicated full-shell harness（重构 SettingsView 时一并补）。
-    // settings.html 依赖 __MOCK_INVOKE__ 注入，否则 5 个 section 调 invoke 返回 null 渲染失败。
+    // settings.html 依赖 __MOCK_INVOKE__ 注入，否则 4 个 section 调 invoke 返回 null 渲染失败。
     await page.addInitScript(() => {
       (window as any).__MOCK_INVOKE__ = {
         get_providers_config: { providers: [], modelMapping: {} },
-        get_knowledge_for_project: [],
         list_skills: [],
         skill_catalog: [],
         list_user_hooks: [],

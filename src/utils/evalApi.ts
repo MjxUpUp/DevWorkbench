@@ -81,23 +81,6 @@ export interface RubricScore {
   hard_gate_triggered: boolean;
 }
 
-/** P4 平台-机制 eval 的确定性契约：期望的节点执行序 + 终态。任一字段空=不查。 */
-export interface MechanismExpect {
-  expect_order: string[];
-  /** "done" | "failed" | "interrupted"；空=不查。 */
-  expect_terminal: string;
-}
-
-/** P4 平台-机制 eval 的判决。pass=所有非空期望都命中引擎实际行为。 */
-export interface MechanismVerdict {
-  pass: boolean;
-  actual_order: string[];
-  actual_terminal: string;
-  expected_order: string[];
-  expected_terminal: string;
-  mismatches: string[];
-}
-
 // ── P4 平台-e2e eval（数据平面：persistence → DB → 返回形状）──
 /** 一个要 seed 进 eval_cases 的 case 行。 */
 export interface E2ESeedCase {
@@ -344,16 +327,6 @@ export const evalApi = {
    *  装配 RubricInput 全部来自已记录事实（trace 步/失败、activity 文件、case 契约）。 */
   scoreRubric: (sessionId: string, caseId: string, matcher: Matcher = 'exact_match') =>
     invoke<RubricScore>('score_eval_rubric', { sessionId, caseId, matcher }),
-
-  // ----- P4 平台-机制 eval -----
-  /** 跑一个平台-机制 case：编译 YAML 工作流，stub executor 驱动，对比节点序+终态。
-   *  无 LLM——判决是引擎 GraphEvent 序的客观事实（反刷分 #1）。 */
-  runPlatformMechanism: (
-    graphYaml: string,
-    inputJson: unknown,
-    expect: MechanismExpect,
-  ) =>
-    invoke<MechanismVerdict>('eval_platform_mechanism', { graphYaml, inputJson, expect }),
 
   // ----- P4 平台-e2e eval（数据平面）-----
   /** 跑一个平台-e2e case：临时内存库（真 schema）→ seed → 对真持久化/逻辑函数

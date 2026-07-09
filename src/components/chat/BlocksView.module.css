@@ -162,49 +162,6 @@
   color: var(--text-tertiary);
 }
 
-/* 自规划工作流实时节点状态条——run_workflow_graph tool_use 旁。
- * 主题 token 全走 variables.css（mirror .result.ok/.failed，明暗分叉安全）。 */
-.workflowStrip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 2px 14px 6px;
-}
-.workflowChip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  font-family: var(--font-mono);
-  font-size: var(--text-xxs);
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-1);
-  color: var(--text-secondary);
-}
-.wfDone {
-  color: var(--color-success);
-  border-color: var(--success-muted);
-  background: var(--success-muted);
-}
-.wfFailed {
-  color: var(--color-error);
-  border-color: var(--danger-muted);
-  background: var(--danger-muted);
-}
-.wfRunning {
-  color: var(--accent);
-  border-color: var(--accent-muted);
-  background: var(--accent-muted);
-}
-.wfSkipped,
-.wfInterrupted {
-  color: var(--text-tertiary);
-}
-.wfRetry {
-  opacity: 0.75;
-}
-
 /* compact 卡片——长会话上下文压缩摘要（meta-event，不进模型历史）。
  * info 态用 accent-muted（中性提示），error 态用 danger-muted（熔断）。
  * 折叠态只露一行摘要 + dropped 计数；展开态异步读 JSONL 原文归档。 */

@@ -237,7 +237,8 @@ fn insert_settings(conn: &Connection, s: &AppSettings) -> Result<(), AppError> {
 
 /// Migrate v0.8 to v1.0 schema (v9).
 ///
-/// v1.0 adds workflows, skills, cost_records, and budget_settings tables.
+/// v1.0 adds skills, cost_records, and budget_settings tables. (workflows was
+/// also added at v1.0 but has since been dropped — see migrate_v25_to_v26.)
 /// These tables are created by CREATE TABLE IF NOT EXISTS in db.rs SCHEMA,
 /// so this function only records the migration version.
 pub fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
@@ -965,74 +966,6 @@ pub fn migrate_v22_to_v23(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-/// v23→v24: 记忆系统全面优化（D1-D5 + I1-I5）。
-/// - knowledge_entries 加 `status`(I4 门控 active/pending/superseded) +
-///   `effectiveness`(I5 反馈分) 两列。
-/// - 新建 knowledge_embeddings 表（I1 向量检索，FTS 置信度不足时 fallback）。
-/// ADD COLUMN 带 constant DEFAULT 是 SQLite instant 操作（不重写表，对照
-/// migrate_v16_to_v17 cache_* 列先例）。
-pub fn migrate_v23_to_v24(conn: &Connection) -> Result<(), AppError> {
-    let version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if version >= 24 {
-        return Ok(());
-    }
-
-    let status_exists = conn
-        .prepare("SELECT status FROM knowledge_entries LIMIT 0")
-        .is_ok();
-    if !status_exists {
-        conn.execute(
-            "ALTER TABLE knowledge_entries ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
-            [],
-        )?;
-    }
-    let eff_exists = conn
-        .prepare("SELECT effectiveness FROM knowledge_entries LIMIT 0")
-        .is_ok();
-    if !eff_exists {
-        conn.execute(
-            "ALTER TABLE knowledge_entries ADD COLUMN effectiveness REAL NOT NULL DEFAULT 0.0",
-            [],
-        )?;
-    }
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS knowledge_embeddings (
-            entry_id TEXT PRIMARY KEY,
-            embedding BLOB NOT NULL,
-            dim INTEGER NOT NULL,
-            model TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (entry_id) REFERENCES knowledge_entries(id) ON DELETE CASCADE
-        )",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model ON knowledge_embeddings(model)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge_entries(status)",
-        [],
-    )?;
-
-    if !status_exists || !eff_exists {
-        log::info!("Migrated schema v23→v24: knowledge_entries status/effectiveness + knowledge_embeddings (memory system D/I)");
-    }
-
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (24, ?1)",
-        [chrono::Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
 /// v24→v25: P0 Block Stream Integrity — add `block_finalize_log` audit table.
 ///
 /// The table is already created via `CREATE TABLE IF NOT EXISTS` in db.rs's
@@ -1092,6 +1025,42 @@ pub fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
         [chrono::Utc::now().to_rfc3339()],
     )?;
     log::info!("Migrated schema v24→v25: block_finalize_log (P0 integrity audit)");
+    Ok(())
+}
+
+/// v25→v26: 删除记忆 / 反思 / DAG 三系统残留表。
+///
+/// 记忆系统（knowledge_entries / knowledge_fts / knowledge_embeddings）与 DAG
+/// 编排（workflows）已从代码中整体移除。旧用户 DB 里这些表仍在（孤儿表，已无
+/// 代码读写）。本迁移用 `DROP TABLE IF EXISTS` 一次性清掉，让运行时数据与代
+/// 码同样"删干净"。`DROP TABLE` 自动级联删除其索引；顺序先删 knowledge_
+/// embeddings（FK 引用 knowledge_entries）再删主表。幂等（IF EXISTS）。
+pub fn migrate_v25_to_v26(conn: &Connection) -> Result<(), AppError> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if version >= 26 {
+        return Ok(());
+    }
+
+    for stmt in [
+        "DROP TABLE IF EXISTS knowledge_embeddings",
+        "DROP TABLE IF EXISTS knowledge_fts",
+        "DROP TABLE IF EXISTS knowledge_entries",
+        "DROP TABLE IF EXISTS workflows",
+    ] {
+        conn.execute(stmt, [])?;
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (26, ?1)",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    log::info!("Migrated schema v25→v26: dropped memory/reflection/DAG tables");
     Ok(())
 }
 
@@ -1748,109 +1717,40 @@ mod tests {
         assert_eq!(rows[0].span_name.as_deref(), Some("subagent"));
     }
 
-    /// v1.0.6 regression guard. A v1.0.5 DB has knowledge_entries WITHOUT the
-    /// v24 `status`/`effectiveness` columns (schema_version pinned to 23). The
-    /// upgrade path runs init_db (full SCHEMA) THEN the migrate chain. SCHEMA's
-    /// `CREATE TABLE IF NOT EXISTS knowledge_entries` is a no-op on the legacy
-    /// table, so a `CREATE INDEX ... (status)` in SCHEMA would abort init_db
-    /// with "no such column: status" before migrate_v23_to_v24 can add the
-    /// column — exactly the v1.0.6 install failure. This pins that init_db
-    /// survives a legacy DB and migrate_v23_to_v24 then repairs it.
+    /// v25→v26 drops the memory/reflection/DAG tables. On a legacy DB still
+    /// carrying them the tables are gone after the migration; on a fresh DB
+    /// (tables never existed) the DROP IF EXISTS is a no-op. Idempotent +
+    /// records version 26.
     #[test]
-    fn init_db_then_migrate_v23_to_v24_repairs_legacy_db_without_status() {
+    fn migrate_v25_to_v26_drops_legacy_memory_dag_tables() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("legacy24.db");
+        let path = tmp.path().join("legacy26.db");
         {
-            // Build a v1.0.5-shape DB: knowledge_entries WITHOUT status/effectiveness,
-            // schema_version = 23 (pre-memory-system).
+            // Legacy DB still carrying the removed tables, pinned to v25.
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);
-                 INSERT INTO schema_version (version, applied_at) VALUES (23, '2026-07-01T00:00:00Z');
-                 CREATE TABLE knowledge_entries (
-                     id TEXT PRIMARY KEY,
-                     project_hash TEXT NOT NULL,
-                     category TEXT NOT NULL,
-                     title TEXT NOT NULL,
-                     content TEXT NOT NULL,
-                     source_agent TEXT NOT NULL,
-                     source_session_id TEXT,
-                     source_type TEXT NOT NULL,
-                     confidence REAL NOT NULL DEFAULT 0.5,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL,
-                     access_count INTEGER NOT NULL DEFAULT 0
-                 );
-                 CREATE INDEX idx_knowledge_project ON knowledge_entries(project_hash);",
+                 INSERT INTO schema_version (version, applied_at) VALUES (25, '2026-07-01T00:00:00Z');
+                 CREATE TABLE knowledge_entries (id TEXT PRIMARY KEY);
+                 CREATE TABLE knowledge_embeddings (entry_id TEXT PRIMARY KEY);
+                 CREATE TABLE workflows (id TEXT PRIMARY KEY);",
             )
             .unwrap();
-            assert!(
-                conn.prepare("SELECT status FROM knowledge_entries LIMIT 0")
-                    .is_err(),
-                "legacy DB must lack the status column"
-            );
         }
-
-        // Upgrade path: app opens the existing DB → init_db runs full SCHEMA.
-        // Must NOT abort on the legacy table (this is the v1.0.6 regression).
-        let conn = db::init_db(&path)
-            .expect("init_db must not abort on a legacy DB missing the status column");
-        migrate_v23_to_v24(&conn)
-            .expect("migrate_v23_to_v24 must add status/effectiveness + index");
-
-        // Columns now present.
-        assert!(
-            conn.prepare("SELECT status FROM knowledge_entries LIMIT 0")
-                .is_ok(),
-            "status column must exist after migrate"
-        );
-        assert!(
-            conn.prepare("SELECT effectiveness FROM knowledge_entries LIMIT 0")
-                .is_ok(),
-            "effectiveness column must exist after migrate"
-        );
-        // Index created by the migration (not by SCHEMA).
-        let idx_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_knowledge_status'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(idx_exists, 1, "idx_knowledge_status must be created by migrate");
-        // Version bumped.
-        let version: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version),0) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 24);
-        // Idempotent re-run.
-        migrate_v23_to_v24(&conn).expect("migrate_v23_to_v24 must be idempotent");
-    }
-
-    /// Fresh-install guard: a brand-new DB has an empty schema_version, so
-    /// MAX(version)=0 < 24 and migrate_v23_to_v24 still runs. SCHEMA already
-    /// created knowledge_entries WITH the status column, so the migration skips
-    /// the ALTER but MUST still create idx_knowledge_status (the index was
-    /// removed from SCHEMA to fix the upgrade abort). This pins that a fresh
-    /// install does not lose the index.
-    #[test]
-    fn migrate_v23_to_v24_on_fresh_db_creates_status_index() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("fresh24.db");
+        // init_db runs SCHEMA (which no longer creates these tables) without
+        // touching the legacy ones, then the v26 migration drops them.
         let conn = db::init_db(&path).unwrap();
-        migrate_v23_to_v24(&conn).expect("fresh DB v24 migration must succeed");
-        let idx_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_knowledge_status'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(idx_exists, 1, "fresh install must still get idx_knowledge_status via migrate");
+        migrate_v25_to_v26(&conn).expect("v26 drop migration must succeed");
+        for tbl in ["knowledge_entries", "knowledge_embeddings", "knowledge_fts", "workflows"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [&tbl],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{tbl} must be dropped by v26 migration");
+        }
         let version: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version),0) FROM schema_version",
@@ -1858,7 +1758,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 24);
+        assert_eq!(version, 26);
+        // Idempotent re-run.
+        migrate_v25_to_v26(&conn).expect("v26 migration must be idempotent");
     }
 
     /// v24→v25 adds `block_finalize_log` (P0 Block Stream Integrity). On a

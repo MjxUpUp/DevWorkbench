@@ -30,9 +30,9 @@ path = "src/bin/dev-workbench-acp.rs"
 # (frontendDist: "../dist") keep working unchanged. The main crate (dev-workbench,
 # i.e. `.`) stays the Tauri entry point; kernel-* crates hold the new eino-inspired
 # kernel. Phase 0 only adds kernel-core (trait/schema shell); existing modules
-# (agents/, knowledge/, quality/, mcp/) remain in the main crate and will migrate
+# (agents/, quality/, mcp/) remain in the main crate and will migrate
 # incrementally in later phases.
-members = ["crates/kernel-core", "crates/kernel-compose"]
+members = ["crates/kernel-core"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -65,7 +65,6 @@ notify = { version = "7", features = ["macos_kqueue"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync"] }
 kernel-core = { path = "crates/kernel-core" }
-kernel-compose = { path = "crates/kernel-compose" }
 async-trait = "0.1"
 futures = "0.3"
 async-stream = "0.3"

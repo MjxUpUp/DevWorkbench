@@ -82,16 +82,6 @@ useAgentStore.setState({ sessions: [] } as never);
       ],
     },
   }),
-  // P4 platform-mechanism: the default linear sample graph (prompt → agent →
-  // gate) runs in order + reaches done — a clean PASS.
-  eval_platform_mechanism: () => ({
-    pass: true,
-    actual_order: ['prompt_1', 'agent_1', 'gate_1'],
-    actual_terminal: 'done',
-    expected_order: ['prompt_1', 'agent_1', 'gate_1'],
-    expected_terminal: 'done',
-    mismatches: [],
-  }),
   // P4 platform-e2e: the default seed (1 approved + 1 draft case, 1 eval-gate
   // verdict) drives the in-memory DB + real logic functions to a clean PASS —
   // all set expectations hit. Lets the spec click 运行 e2e 评测 and assert the

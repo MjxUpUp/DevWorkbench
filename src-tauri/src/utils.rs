@@ -1,6 +1,5 @@
 //! Shared utilities — single home for helpers used across modules to avoid
-//! the duplicated-strip-ansi drift that previously lived in agents/pty.rs and
-//! knowledge/collector.rs.
+//! the duplicated-strip-ansi drift that previously lived in agents/pty.rs.
 
 /// Strip ANSI CSI escape sequences from a string.
 ///

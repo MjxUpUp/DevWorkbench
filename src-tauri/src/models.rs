@@ -285,30 +285,6 @@ pub struct ActivityEvent {
     pub metadata: Option<serde_json::Value>,
 }
 
-// ---- Knowledge types ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeEntry {
-    pub id: String,
-    pub project_hash: String,
-    pub category: String,
-    pub title: String,
-    pub content: String,
-    pub source_agent: AgentType,
-    pub source_session_id: Option<String>,
-    pub source_type: String,
-    pub confidence: f64,
-    pub created_at: String,
-    pub updated_at: String,
-    pub access_count: i64,
-    /// I4 门控状态：active(注入) / pending(待确认) / superseded(被同主题新 entry 取代,不注入)。
-    /// 新沉淀默认 active(保持现行注入行为);add_entry 去重时把旧同 title 标 superseded。
-    pub status: String,
-    /// I5 反馈分：注入被采用 + 会话成功完成时累加,衡量 entry 实际有用度(对标 Forge blind_spot_rate)。
-    pub effectiveness: f64,
-}
-
 // ---- Quality types ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,23 +325,6 @@ pub struct McpServerConfig {
 pub struct McpConfigFile {
     pub servers: Vec<McpServerConfig>,
 }
-
-// ---- Workflow types ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Workflow {
-    pub id: String,
-    pub name: String,
-    pub yaml_content: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-// Note: WorkflowRun / WorkflowStep are intentionally removed.
-// The previous run-tracking model was never written to — run_workflow was a stub.
-// Execution state will be reintroduced in Phase 1 via the kernel-compose Graph engine,
-// modeled as AgentEvent streams + checkpoint persistence (not these static rows).
 
 // ---- Skill types ----
 

@@ -12,8 +12,8 @@ const NON_AGENT_TOOLS = ['code', 'git'];
  *
  * CLI 默认执行路径已退役（起底重构：ReactKernel 唯一执行路径），但下列工具配置仍有
  * 真实消费链，故保留：
- *  - OpaqueAgent 二进制路径（detect_tools + tool_paths 自定义）：workflow 节点
- *    接外部 CLI）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制；editor.rs 用
+ *  - OpaqueAgent 二进制路径（detect_tools + tool_paths 自定义）：接外部 CLI
+ *    agent（OpaqueAgent 桥）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制；editor.rs 用
  *    它打开 VS Code；code/git 检测服务项目页 ToolButton。
  *  - 终端偏好（preferred_terminal）：open_terminal 经 terminal.rs:163 读它选终端 app，
  *    GitPanel「打开终端做 git commit」仍走此路径——与 CLI agent 执行无关。
@@ -101,7 +101,7 @@ export function AgentSection() {
       <div className="settings-section">
         <h3 className="settings-section-title">OpaqueAgent 二进制路径（高级）</h3>
         <p className="settings-section-desc">
-          列出 workflow 外部节点接 CLI 时需要定位的二进制。
+          列出接入外部 CLI agent（OpaqueAgent 桥）时需要定位的二进制。
           <strong>CLI agent 执行路径已退役 —— 此处不是默认 agent 选择</strong>，仅供自定义二进制位置（<code>tool_paths</code>）。
         </p>
         <div className="settings-card-list">

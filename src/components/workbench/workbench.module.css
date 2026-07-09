@@ -1,9 +1,8 @@
 /* 轴线化工作面（起底重构 块1 骨架）
  *
- * 替换旧 .main-stage 的 chat|git 2-col 布局，重组为三轴线 + 门控层 4 区网格：
+ * 替换旧 .main-stage 的 chat|git 2-col 布局，重组为两轴线 + 门控层 3 区网格：
  *   PlanBar（轴线A·谁持有 plan）   顶栏，横跨
- *   Stage（轴线B·编排在何处）       中左，按模式自适应
- *   MemoryRail（轴线C·结果落点）    中右，常驻
+ *   Stage（轴线B·编排在何处）       中部，按模式自适应
  *   GateBar（门控层）               底栏，横跨
  *
  * 根 .workbench 占据 .app 网格的 main-stage 槽位（grid-area: main-stage）。
@@ -11,12 +10,11 @@
 .workbench {
   grid-area: main-stage;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
   grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas:
-    "plan-bar     plan-bar"
-    "stage        memory-rail"
-    "gate-bar     gate-bar";
+    "plan-bar"
+    "stage"
+    "gate-bar";
   min-width: 600px;
   overflow: hidden;
   background: var(--bg-canvas);
@@ -104,78 +102,6 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-}
-
-/* === 轴线 C：MemoryRail === */
-.memoryRail {
-  grid-area: memory-rail;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  border-left: 1px solid var(--border-subtle);
-  background: var(--surface-1);
-}
-.railSection {
-  padding: var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
-}
-.railTitle {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
-  margin: 0 0 var(--space-2) 0;
-}
-.railPlaceholder {
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-  opacity: 0.55;
-  line-height: 1.5;
-}
-.railStat {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-/* 反思/归档卡片网格（块5b，轴线C 活记忆可见；原型 axis-workbench.html mr-card 274-283） */
-.railReflectionList {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-/* mr-card：反思紫边 / 归档橙边（border-left 色带区分类目）。 */
-.railCard {
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-xs);
-}
-.railCardReflection {
-  border-left: 3px solid var(--accent);
-}
-.railCardArchive {
-  border-left: 3px solid var(--color-warning);
-}
-.railCardTitle {
-  color: var(--text-primary);
-  line-height: 1.45;
-  margin-bottom: 4px;
-}
-.railCardMeta {
-  font-size: 10px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}
-.railGitWrap {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
 }
 
 /* === 门控层：GateBar === */

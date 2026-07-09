@@ -715,12 +715,12 @@ pub struct ReactAgent {
     thinking: Option<kernel_core::ThinkingConfig>,
     /// Session id this agent run belongs to (chat path only). When set, the
     /// compaction sink can archive the dropped原文 + emit a Compact meta-event
-    /// scoped to this session. Workflow/ACP agents leave it None (no archive,
+    /// scoped to this session. ACP agents leave it None (no archive,
     /// no UI event — pure compaction). v1.3 C2.
     session_id: Option<String>,
     /// Tauri AppHandle for emitting the Compact meta-event on `agent:event`.
-    /// Held directly (NOT via ToolContext) — same pattern as `WorkflowTool`.
-    /// None for tests / workflow agents / ACP → sink becomes a no-op. The
+    /// Held directly (NOT via ToolContext).
+    /// None for tests / ACP → sink becomes a no-op. The
     /// Option is shared with session_id above; both must be Some to archive.
     app: Option<tauri::AppHandle>,
     /// Shared buffer the compaction sink appends Compact events into, so the
@@ -728,12 +728,12 @@ pub struct ReactAgent {
     /// AgentEvent stream, so it can't be collected there). Held via Arc<Mutex>
     /// so the FnMut sink (which the try_stream owns) and the driver (which owns
     /// the agent) both see the same Vec. None = sink doesn't persist into this
-    /// buffer (workflow/test path).
+    /// buffer (test path).
     compaction_blocks: Option<Arc<Mutex<Vec<crate::agents::pty::ChatStreamEvent>>>>,
     /// Approval registry for the Human Gate (Clutch #3). When set, every
     /// destructive tool call in this run suspends for interactive approval before
     /// landing; the user resolves it via `resolve_human_gate_cmd`. None = Human
-    /// Gate off (default; workflows/tests/ACP leave it unset). Shares the same
+    /// Gate off (default; tests/ACP leave it unset). Shares the same
     /// `ApprovalMap` instance as `commands::agents::AgentApprovalState` so the
     /// resolve command delivers to this run's suspended call. Reuses `app` /
     /// `session_id` set via [`with_compaction_archive`]; if either is None the
@@ -4096,112 +4096,6 @@ mod tests {
         );
     }
 
-    // --- completion-hook fidelity: real agent stream → FileChanged → persist ---
-    //
-    // The completion hook (commands/agents.rs) consumes a ReactAgent's event
-    // stream, maps each AgentEvent to a ChatStreamEvent, accumulates them, and
-    // on Completed hands the blocks to persist_completion_memory. The hook's
-    // wrapping closure (Tauri AppHandle.emit + tokio::spawn + live model) can't
-    // run in `cargo test`, but everything INSIDE it that matters can: drive a
-    // real ReactAgent with a mock model + ProbeTool (a write_file stand-in that
-    // records calls but writes nothing), consume its ACTUAL stream exactly like
-    // the driver does, then persist. Proves a write the agent really emits flows
-    // unchanged into a queryable react_reflection row — the input shape the hook
-    // depends on, verified end-to-end minus only the GUI glue.
-
-    #[tokio::test]
-    async fn run_stream_filechanged_flows_into_persisted_reflection() {
-        use futures::StreamExt;
-        use kernel_core::Agent;
-        let write_calls = Arc::new(Mutex::new(Vec::new()));
-        let mut reg = ToolRegistry::new();
-        reg.push(ProbeTool {
-            name: "write_file",
-            read_only: false,
-            calls: write_calls.clone(),
-        });
-        // turn 0: a write_file tool call → agent executes ProbeTool + emits
-        // FileChanged(src/a.rs); turn 1: bare text → convergence → Done(Completed).
-        let model = ScriptedModel::new(vec![
-            Message {
-                role: Role::Assistant,
-                content: String::new(),
-                tool_calls: vec![probe_call(
-                    "write_file",
-                    r#"{"path":"src/a.rs","content":"x"}"#,
-                )],
-                tool_call_id: None,
-                reasoning: None,
-                reasoning_signature: None,
-                compact_boundary: None,
-            },
-            Message::assistant("done, wrote src/a.rs"),
-        ]);
-        let agent = ReactAgent::new(model, reg, "sys");
-        let mut s = agent.run(go_input()).unwrap();
-
-        // Mirror react_chat_driver's consumption (agents.rs:294-336): every
-        // AgentEvent → map_agent_event → accumulate; capture status + summary.
-        let mut final_blocks: Vec<crate::agents::pty::ChatStreamEvent> = Vec::new();
-        let mut completed = false;
-        let mut summary = String::new();
-        while let Some(Ok(ev)) = s.next().await {
-            if let kernel_core::AgentEvent::Done(o) = &ev {
-                completed = matches!(o.status, kernel_core::AgentRunStatus::Completed);
-                if let Some(sm) = &o.output_summary {
-                    summary = sm.clone();
-                }
-            }
-            final_blocks.extend(crate::agents::react_chat::map_agent_event(ev, 0));
-        }
-        assert!(completed, "agent must converge Completed");
-        assert!(
-            !write_calls.lock().unwrap().is_empty(),
-            "write_file must have actually executed"
-        );
-
-        // The completion hook's core, fed the REAL accumulated blocks (not a
-        // hand-built fixture): a prose summary + a write tool → 2 entries.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let conn = crate::db::init_db(&tmp.path().join("e.db")).unwrap();
-        let hash = crate::activity::hash_project_path("/proj");
-        let n = crate::kernel_impl::session_reflection::persist_completion_memory(
-            &conn,
-            &hash,
-            "sid",
-            "write src/a.rs",
-            if summary.is_empty() {
-                None
-            } else {
-                Some(&summary)
-            },
-            &final_blocks,
-            &crate::models::AgentType::ClaudeCode,
-            None,
-        );
-        assert_eq!(
-            n, 2,
-            "prose summary + write tool → react_session + react_reflection"
-        );
-        let got = crate::knowledge::store::get_entries_for_project(&conn, &hash).unwrap();
-        let refl = got
-            .iter()
-            .find(|e| e.category == "react_reflection")
-            .expect("react_reflection written from a real agent stream");
-        // The agent REALLY emitted FileChanged("src/a.rs"); it survived
-        // map_agent_event into the structured reflection content verbatim.
-        assert!(
-            refl.content.contains("src/a.rs"),
-            "real file path landed: {}",
-            refl.content
-        );
-        assert!(
-            refl.content.contains("write_file"),
-            "tool counted: {}",
-            refl.content
-        );
-    }
-
     /// ScriptedModel that ALSO records every history snapshot passed into
     /// `stream()` — so a test can assert what the REAL run loop fed back to the
     /// model on a later turn (e.g. consecutive Role::Tool Messages produced by
@@ -4991,8 +4885,7 @@ mod tests {
             None, // session_id: test agents — traces record with a null session_id
             None, // skill_filter
             None, // mcp_filter
-            None, // knowledge_ids
-            None, // app — test agents get no WorkflowTool
+            None, // app — no compaction archive in tests
             None, // compaction_blocks — test agents don't persist Compact events
             None, // approval — test agents don't run the Human Gate
         )
@@ -5068,8 +4961,7 @@ mod tests {
             None,
             None, // skill_filter
             None, // mcp_filter
-            None, // knowledge_ids
-            None, // app — test agents get no WorkflowTool
+            None, // app — no compaction archive in tests
             None, // compaction_blocks — test agents don't persist Compact events
             None, // approval — test agents don't run the Human Gate
         )
@@ -5300,8 +5192,7 @@ mod tests {
             None, // session_id: test agents — traces record with a null session_id
             None, // skill_filter
             None, // mcp_filter
-            None, // knowledge_ids
-            None, // app — test agents get no WorkflowTool
+            None, // app — no compaction archive in tests
             None, // compaction_blocks — test agents don't persist Compact events
             None, // approval — test agents don't run the Human Gate
         )
@@ -5417,8 +5308,7 @@ mod tests {
             None, // session_id: test agents — traces record with a null session_id
             None, // skill_filter
             None, // mcp_filter
-            None, // knowledge_ids
-            None, // app — test agents get no WorkflowTool
+            None, // app — no compaction archive in tests
             None, // compaction_blocks — test agents don't persist Compact events
             None, // approval — test agents don't run the Human Gate
         )

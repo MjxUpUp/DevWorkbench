@@ -3,12 +3,6 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BlocksView } from '../BlocksView';
 import type { ChatStreamEvent } from '../../../types';
 
-// run_workflow_graph tool_use mounts WorkflowProgressStrip, which subscribes
-// to a Tauri event. Stub listen so the strip's effect is inert under jsdom.
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
-}));
-
 // compact-card expand calls invoke('read_compact_archive_cmd'). Default stub
 // returns null (no archive file on disk); per-test overrides via mockResolvedValue.
 const invokeMock = vi.fn(
@@ -172,22 +166,6 @@ describe('BlocksView', () => {
     render(<BlocksView events={[{ kind: 'file_changed', path: '/src/app.rs' }]} running={false} />);
     expect(screen.getByText('/src/app.rs')).toBeInTheDocument();
     expect(screen.getByTestId('chat-block-file')).not.toBeNull();
-  });
-
-  it('derives a friendly node-count desc for run_workflow_graph', () => {
-    render(
-      <BlocksView
-        events={[
-          {
-            kind: 'tool_use',
-            name: 'run_workflow_graph',
-            input: { graph: { nodes: { a: {}, b: {}, c: {} }, edges: [], start: 'a', end: 'c' } },
-          },
-        ]}
-        running={true}
-      />,
-    );
-    expect(screen.getByText(/自规划工作流 · 3 节点/)).toBeInTheDocument();
   });
 
   it('renders a compact summary card with dropped-count badge (collapsed, no sessionId)', () => {

@@ -10,9 +10,9 @@
  * the callback/event stubs `core.js` touches) returning canned demo data.
  *
  * Scope: covers the **data-query** commands the UI renders against (projects,
- * sessions, knowledge, settings, providers, workflows, tools, git). It does
- * NOT emulate stateful/native commands (spawn_agent_session, pty_write_cmd,
- * run_workflow) — those need the real backend (axum HTTP bridge or
+ * sessions, settings, providers, tools, git). It does
+ * NOT emulate stateful/native commands (spawn_agent_session, pty_write_cmd)
+ * — those need the real backend (axum HTTP bridge or
  * tauri-driver); see the search-regression E2E notes.
  *
  * Guarded by `import.meta.env.DEV` so production builds tree-shake it out, and
@@ -42,15 +42,6 @@ const sessions = [
   { id: 's1', prompt: '重构 providers 设置页交互', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-14T10:00:00.000Z', finishedAt: '2025-06-14T11:00:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '完成了 providers 设置页交互重构：拆分为三栏布局…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c1' },
   { id: 's2', prompt: '修复 OpaqueAgent honesty 审计', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-13T14:00:00.000Z', finishedAt: '2025-06-13T15:30:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '修复了 OpaqueAgent honesty 审计的断言弱化检测…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c2' },
   { id: 's3', prompt: '改用 codex 复核并补测试', agentType: 'codex', status: 'running', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-15T09:00:00.000Z', finishedAt: null, model: null, exitCode: null, outputSummary: null, contextSnapshot: null, linkedRequirementId: null, parentSessionId: 's1', conversationId: 'c1' },
-];
-
-const knowledge = (q: string) => [
-  { id: 'k1', title: `${q} 相关的崩溃修复经验`, content: '...', category: 'bug', confidence: 0.92, projectPath: 'E:/DevWorkbench', projectHash: null, sourceAgent: 'claude_code', sourceSessionId: 's1', sourceType: 'session', createdAt: '2025-06-14T00:00:00.000Z' },
-  { id: 'k2', title: `${q} 的架构决策记录`, content: '...', category: 'decision', confidence: 0.85, projectPath: null, projectHash: null, sourceAgent: null, sourceSessionId: null, sourceType: null, createdAt: '2025-06-13T00:00:00.000Z' },
-];
-
-const workflows = [
-  { id: 'w1', name: '示例审批流', yaml_content: 'start: prompt_1\nend: gate_1\nnodes:\n  prompt_1:\n    type: prompt\n    text: "demo"\n  gate_1:\n    type: gate\n    gate: forge\nedges:\n  - { from: prompt_1, to: gate_1 }\n', created_at: '2025-06-01T00:00:00.000Z', updated_at: '2025-06-01T00:00:00.000Z' },
 ];
 
 // Wire format mirroring the Rust ProvidersConfig serde schema — the old mock
@@ -97,9 +88,6 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   },
   update_conversation: () => null,
   read_session_output_cmd: () => null,
-  search_knowledge: (args) => knowledge(String(args.query ?? '')),
-  get_knowledge_for_project: () => [],
-  list_workflows: () => workflows,
   load_settings: () => ({ scan_directories: [], tool_paths: {}, theme: 'light', palette: 'pi', preferred_terminal: '', cli_flags: {}, onboarding_completed: false }),
   save_settings: () => null,
   get_providers_config: () => providers,
@@ -136,14 +124,8 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   skill_catalog: () => [],
   mcp_catalog: () => [],
   mcp_servers: () => [],
-  // D5: workflow template starters + MCP fine-grained CRUD / live-reconnect.
-  // list_workflow_templates returns demo templates so workflow template chips
-  // render in plain-browser dev mode; the mcp_* stubs are best-effort no-ops
-  // (stateful — the real backend owns them).
-  list_workflow_templates: () => [
-    { name: 'code-review', description: '代码审查 agent + Forge 门禁', category: '质量', yamlContent: 'start: p\nend: g\nnodes:\n  p:\n    type: prompt\n    text: "审查改动"\n  g:\n    type: gate\n    gate: forge\nedges:\n  - { from: p, to: g }\n' },
-    { name: 'refactor', description: '重构 agent + 门禁验收', category: '研发', yamlContent: 'start: p\nend: g\nnodes:\n  p:\n    type: prompt\n    text: "重构模块"\n  a:\n    type: agent\n    agent: claude_code\n  g:\n    type: gate\n    gate: forge\nedges:\n  - { from: p, to: a }\n  - { from: a, to: g }\n' },
-  ],
+  // D5: MCP fine-grained CRUD / live-reconnect.
+  // The mcp_* stubs are best-effort no-ops (stateful — the real backend owns them).
   mcp_load_enabled: () => 0,
   mcp_set_enabled: () => null,
   mcp_update_server: () => null,

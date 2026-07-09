@@ -3,7 +3,6 @@ import { AppearanceSection } from './AppearanceSection';
 import { AgentSection } from './AgentSection';
 import { ProvidersSection } from './ProvidersSection';
 import { McpSection } from './McpSection';
-import { MemorySection } from './MemorySection';
 import { SkillsSection } from './SkillsSection';
 import { UsageStatsSection } from './UsageStatsSection';
 import { PlaceholderSection } from './PlaceholderSection';
@@ -12,15 +11,14 @@ import { CommandsSection } from './CommandsSection';
 import { HooksSection } from './HooksSection';
 import { SubAgentsSection } from './SubAgentsSection';
 import { TraceSection } from './TraceSection';
-import { ForgeExperienceSection } from './ForgeExperienceSection';
 import { OnboardingRelaunchSection } from '../onboarding/OnboardingWizard';
 import type { SettingsSection } from './types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   IconSun, IconTerminal, IconCpu,
   IconSparkles, IconBrain, IconInbox,
-  IconUser, IconPlay, IconEdit, IconStar,
-  IconDashboard, IconCode, IconChat, IconShield, IconX,
+  IconUser, IconPlay, IconEdit,
+  IconDashboard, IconCode, IconChat, IconX,
 } from '../Icons';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -44,8 +42,8 @@ interface SectionDef {
   Icon: SettingsIcon;
   Component?: React.FC;
   placeholder?: { title: string; desc: string; hint?: string };
-  /** 语义分组（v3：14 tab 按业务聚类，不再平铺）。 */
-  group: '智能体' | '能力扩展' | '记忆与输出' | '数据与诊断' | '入门';
+  /** 语义分组（v3：tab 按业务聚类，不再平铺）。 */
+  group: '智能体' | '能力扩展' | '输出' | '数据与诊断' | '入门';
 }
 
 const SECTIONS: SectionDef[] = [
@@ -59,18 +57,16 @@ const SECTIONS: SectionDef[] = [
   { id: 'mcp', label: 'MCP 服务器', Icon: IconBrain, Component: McpSection, group: '能力扩展' },
   { id: 'commands', label: '命令', Icon: IconPlay, Component: CommandsSection, group: '能力扩展' },
   { id: 'hooks', label: '钩子', Icon: IconEdit, Component: HooksSection, group: '能力扩展' },
-  // 记忆与输出
-  { id: 'memory', label: '记忆', Icon: IconStar, Component: MemorySection, group: '记忆与输出' },
-  { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection, group: '记忆与输出' },
+  // 输出
+  { id: 'output-style', label: '输出样式', Icon: IconSun, Component: AppearanceSection, group: '输出' },
   // 数据与诊断
   { id: 'usage-stats', label: '使用统计', Icon: IconDashboard, Component: UsageStatsSection, group: '数据与诊断' },
   { id: 'trace', label: 'LLM 追踪', Icon: IconCode, Component: TraceSection, group: '数据与诊断' },
-  { id: 'quality-experience', label: '质量经验', Icon: IconShield, Component: ForgeExperienceSection, group: '数据与诊断' },
   // 入门
   { id: 'onboarding', label: '引导', Icon: IconChat, Component: OnboardingRelaunchSection, group: '入门' },
 ];
 
-const GROUP_ORDER: SectionDef['group'][] = ['智能体', '能力扩展', '记忆与输出', '数据与诊断', '入门'];
+const GROUP_ORDER: SectionDef['group'][] = ['智能体', '能力扩展', '输出', '数据与诊断', '入门'];
 
 export function SettingsView() {
   // 外部入口（命令面板「技能」）可指定进设置页时直达的分区：initializer 消费一次，
