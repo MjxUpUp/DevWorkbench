@@ -104,7 +104,7 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
     { name: 'code', installed: true, path: '/usr/local/bin/code' },
     { name: 'git', installed: true, path: '/usr/bin/git' },
   ],
-  get_git_status: () => ({ branch: 'feature/kernel-refactor', ahead: 0, behind: 0, modified: ['src/App.tsx'], staged: [], untracked: [] }),
+  get_git_status: () => ({ branch: 'feature/kernel-refactor' }),
   get_recent_activity: () => [],
   get_project_activity: () => [],
   get_cost_summary: () => ({ total_usd: 1.23, by_agent: {}, by_day: [] }),

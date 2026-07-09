@@ -46,15 +46,8 @@ export interface GitRepo {
 }
 
 export interface GitStatus {
+  /** Current HEAD branch name. Only field the frontend reads (breadcrumb). */
   branch: string;
-  isDirty: boolean;
-  ahead: number;
-  behind: number;
-  lastCommitTime: string | null;
-  /** Lines added (tracked HEAD→worktree + untracked file contents). */
-  insertions: number;
-  /** Lines deleted (tracked HEAD→worktree). */
-  deletions: number;
 }
 
 // ---- Agent Hub types ----

@@ -71,18 +71,11 @@ fn default_palette() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitStatus {
+    /// Current HEAD branch name (or "HEAD (detached)"). This is the only field
+    /// the frontend reads — TitleBar/StatusBar show it as the breadcrumb branch.
+    /// The richer dirty/ahead-behind/line-stat fields were dropped together with
+    /// their sole consumer (GitPanel, removed in the workspace-refactor).
     pub branch: String,
-    pub is_dirty: bool,
-    pub ahead: u32,
-    pub behind: u32,
-    pub last_commit_time: Option<String>,
-    /// Lines added across HEAD→worktree (tracked files). Untracked files count
-    /// their full content as insertions. 0 when there is no HEAD (empty repo).
-    #[serde(default)]
-    pub insertions: u64,
-    /// Lines deleted across HEAD→worktree (tracked files). 0 when there is no HEAD.
-    #[serde(default)]
-    pub deletions: u64,
 }
 
 // ---- Agent Hub types ----
