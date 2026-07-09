@@ -43,8 +43,6 @@ pub struct AppSettings {
     #[serde(default = "default_palette")]
     pub palette: String,
     #[serde(default)]
-    pub preferred_terminal: String,
-    #[serde(default)]
     pub cli_flags: std::collections::HashMap<String, String>,
     /// Whether the user has completed the first-run onboarding wizard.
     /// false on a fresh install → the wizard overlay shows; flipped to true
@@ -538,7 +536,6 @@ mod tests {
             "scan_directories": ["/tmp"],
             "tool_paths": {"go": "/usr/bin/go"},
             "theme": "dark",
-            "preferred_terminal": "wezterm",
             "cli_flags": {"pi": "--model glm"}
         }"#;
         let s: AppSettings = serde_json::from_str(json).expect("legacy JSON must parse");
@@ -573,7 +570,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "light".into(),
             palette: "moss".into(),
-            preferred_terminal: String::new(),
             cli_flags: std::collections::HashMap::new(),
             onboarding_completed: false,
         };

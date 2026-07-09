@@ -309,12 +309,6 @@ fn test_validate_command_rejects_shell_metacharacters() {
 // === Path Validation Tests ===
 
 #[test]
-fn test_open_terminal_validates_path() {
-    let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
-    assert!(!path.exists(), "Path should not exist for this test");
-}
-
-#[test]
 fn test_open_in_finder_validates_path() {
     let path = std::path::Path::new("/nonexistent/path");
     assert!(!path.exists());

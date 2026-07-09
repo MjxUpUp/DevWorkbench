@@ -221,14 +221,13 @@ fn insert_project(conn: &Connection, p: &Project) -> Result<(), AppError> {
 fn insert_settings(conn: &Connection, s: &AppSettings) -> Result<(), AppError> {
     conn.execute(
         "INSERT OR REPLACE INTO settings
-            (id, scan_directories, tool_paths, theme, palette, preferred_terminal, cli_flags)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, scan_directories, tool_paths, theme, palette, cli_flags)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             serde_json::to_string(&s.scan_directories)?,
             serde_json::to_string(&s.tool_paths)?,
             s.theme,
             s.palette,
-            s.preferred_terminal,
             serde_json::to_string(&s.cli_flags)?,
         ],
     )?;
@@ -2139,7 +2138,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "dark".into(),
             palette: "moss".into(),
-            preferred_terminal: String::new(),
             cli_flags: std::collections::HashMap::new(),
             onboarding_completed: false,
         };
@@ -2220,7 +2218,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "auto".into(),
             palette: "pi".into(),
-            preferred_terminal: String::new(),
             cli_flags: std::collections::HashMap::new(),
             onboarding_completed: true,
         };

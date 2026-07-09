@@ -26,7 +26,6 @@ describe('AgentSection crash defense', () => {
         tool_paths: {},
         theme: 'auto',
         palette: 'pi' as const,
-        preferred_terminal: '',
         cli_flags: {},
         onboarding_completed: true,
       },
@@ -34,10 +33,9 @@ describe('AgentSection crash defense', () => {
     });
   });
 
-  it('does not crash when detect_tools / detect_terminals return null', async () => {
+  it('does not crash when detect_tools returns null', async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'detect_tools') return Promise.resolve(null);
-      if (cmd === 'detect_terminals') return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
 
@@ -45,16 +43,12 @@ describe('AgentSection crash defense', () => {
     expect(() => render(<AgentSection />)).not.toThrow();
 
     expect(await screen.findByText('OpaqueAgent 二进制路径（高级）')).toBeInTheDocument();
-    expect(screen.getByText('终端偏好')).toBeInTheDocument();
-    expect(screen.queryByText('CLI 启动参数')).toBeNull(); // CLI 取消后已移除
     expect(mockInvoke).toHaveBeenCalledWith('detect_tools');
-    expect(mockInvoke).toHaveBeenCalledWith('detect_terminals');
   });
 
-  it('does not crash when detect_tools / detect_terminals reject', async () => {
+  it('does not crash when detect_tools rejects', async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'detect_tools') return Promise.reject(new Error('boom'));
-      if (cmd === 'detect_terminals') return Promise.reject(new Error('boom'));
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
 
@@ -67,7 +61,6 @@ describe('AgentSection crash defense', () => {
     // real-world trigger (TS believed ToolStatus[] but runtime got an object).
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'detect_tools') return Promise.resolve({ error: 'nope' });
-      if (cmd === 'detect_terminals') return Promise.resolve('not-an-array');
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
 
