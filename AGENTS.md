@@ -39,7 +39,7 @@ forge task start --ref fix/xxx --title "描述"
 
 ### 中止任务（清理 ghost/卡住任务）
 
-任务无法推进（如在非 git 项目半启动、门禁死循环、或临时放弃）时，用 `forge task abort --ref <ref>` 删除任务状态文件并清空 active task ref，**不评分、不创建 review**。代码改动保留不动。task-verify 现为 advisory（仅记录问题不阻塞会话）；但 ghost 任务仍会污染 `task list`，需手动 abort 清理。
+任务无法推进（如在非 git 项目半启动、门禁死循环、或临时放弃）时，用 `forge task abort --ref <ref>` 删除任务状态文件并清空 active task ref，**不评分**。代码改动保留不动。task-verify 现为 advisory（仅记录问题不阻塞会话）；但 ghost 任务仍会污染 `task list`，需手动 abort 清理。
 
 ### 提交时机（重要，避免被 file-sentinel 拦）
 
@@ -52,6 +52,7 @@ forge task start --ref fix/xxx --title "描述"
 - **file-sentinel**（PostToolUse Bash）：对比 Bash 前后文件状态，未授权源码变更 quarantine 到用户级 DataDir/quarantine/（`forge data-dir` 查看路径）
 - **自保护**：`.forge/*` 和 `.claude/settings*` 不能被直接修改，只能通过 `forge` 命令操作
 - **skill-scan**（SessionStart）：会话开始扫描 `~/.claude/skills` 安全性（forge audit 19 规则，advisory）——补 install 门控缺口，覆盖手动 clone/junction/git pull 进入的 skill；全局 hook，不依赖 forge project
+- **task-resume**（SessionStart）：会话启动自动注入活跃任务的接续上下文（`forge task resume --hook`：目标/计划/决策/阻塞/门禁进度/git 已改未提交）+ 把当前 session 锚定到任务——接手方冷启动即知任务在哪一步，无需手动 `forge task resume`；无活跃任务静默；项目级 hook（advisory，不阻塞）
 - **辅助检查（仅 WARN 不阻塞）**：先读再改/聚焦变更/避免重复等判断性规则已下沉为 forge-quality 的 Red Flags 文本。
 
 ### 常见错误
@@ -66,11 +67,8 @@ forge task start --ref fix/xxx --title "描述"
 | task already exists | 任务已启动 | 用 `forge task status --ref <ref>` 查看 |
 | Quarantined by file-sentinel | Bash 写了源码但无任务 | 文件在用户级 DataDir/quarantine/（`forge data-dir` 查看路径），可恢复。先启动任务 |
 | complete 后提交被 file-sentinel 拦 | complete 已清 active task ref | 先 commit 再 complete；或开 `chore/*-commit` 任务放行 |
-| Pending mandatory review detected | 低分任务（<70）有未解除的 mandatory review | `forge experience list` → `forge experience accept <id>`；无可 accept 的提案时用 `forge experience resolve <task-ref>` 兜底 |
 | trace/老任务历史消失 | retention（默认启用）自动清超期 checklog/toollog 归档 + 已完成任务文件 | 行为正常；`FORGE_LOG_RETENTION_DAYS` 控制保留天数（默认 30，≤0 禁用）；`forge act rebuild` 全量重建，被 retention 删的任务无法重建 |
 
-通过 forge CLI（forge task/gate/experience）或 forge MCP 工具执行上述质量流程。
+通过 forge CLI（forge task/gate）或 forge MCP 工具执行上述质量流程。
 
 <!-- FORGE:END -->
-
-
