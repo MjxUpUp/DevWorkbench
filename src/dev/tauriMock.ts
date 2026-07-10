@@ -88,7 +88,7 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   },
   update_conversation: () => null,
   read_session_output_cmd: () => null,
-  load_settings: () => ({ scan_directories: [], tool_paths: {}, theme: 'light', palette: 'pi', cli_flags: {}, onboarding_completed: false }),
+  load_settings: () => ({ scan_directories: [], tool_paths: {}, theme: 'light', palette: 'pi', onboarding_completed: false }),
   save_settings: () => null,
   get_providers_config: () => providers,
   set_providers_config: () => null,

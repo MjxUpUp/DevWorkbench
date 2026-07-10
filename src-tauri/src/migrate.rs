@@ -221,14 +221,13 @@ fn insert_project(conn: &Connection, p: &Project) -> Result<(), AppError> {
 fn insert_settings(conn: &Connection, s: &AppSettings) -> Result<(), AppError> {
     conn.execute(
         "INSERT OR REPLACE INTO settings
-            (id, scan_directories, tool_paths, theme, palette, cli_flags)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+            (id, scan_directories, tool_paths, theme, palette)
+         VALUES (1, ?1, ?2, ?3, ?4)",
         rusqlite::params![
             serde_json::to_string(&s.scan_directories)?,
             serde_json::to_string(&s.tool_paths)?,
             s.theme,
             s.palette,
-            serde_json::to_string(&s.cli_flags)?,
         ],
     )?;
     Ok(())
@@ -2138,7 +2137,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "dark".into(),
             palette: "moss".into(),
-            cli_flags: std::collections::HashMap::new(),
             onboarding_completed: false,
         };
         crate::commands::projects::save_settings_to_db(&g.conn, &custom).unwrap();
@@ -2218,7 +2216,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "auto".into(),
             palette: "pi".into(),
-            cli_flags: std::collections::HashMap::new(),
             onboarding_completed: true,
         };
         crate::commands::projects::save_settings_to_db(&g.conn, &completed).unwrap();

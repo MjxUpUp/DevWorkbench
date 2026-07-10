@@ -20,7 +20,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   tool_paths: {},
   theme: 'auto',
   palette: 'pi',
-  cli_flags: {},
   onboarding_completed: false,
 };
 

@@ -15,12 +15,9 @@ const NON_AGENT_TOOLS = ['code', 'git'];
  * （OpaqueAgent 桥）经 discovery.rs 用 tool_paths 定位 claude/codex 二进制。
  *
  * 已移除（CLI 退役遗留，外部终端启动链整体清理）：
- *  - 「终端偏好」（preferred_terminal）段——其唯一消费方是已删的 open_terminal 命令
- *    （terminal.rs 读 preferred_terminal 选终端 app）。ToolButton/launchTool/terminal.rs
- *    整条外部终端启动链随 CLI 退役移除，preferred_terminal 应用层字段同步删除
- *    （DB 列保留以免迁移）。
- *  - 「CLI 启动参数」（cli_flags）段——其唯一消费方是已删的 launchTool 拼启动 flag。
- *    AppSettings.cli_flags 字段 + DB 列保留以免迁移，设置页不暴露编辑。
+ *  - 「终端偏好」（preferred_terminal）+「CLI 启动参数」（cli_flags）两段——唯一消费方
+ *    分别是已删的 open_terminal / launchTool。两者应用层字段均删；DB schema 列保留以免
+ *    迁移（废弃列无害，INSERT 不写用 DEFAULT）。
  *  - 通用能力 open_in_editor/open_in_finder 保留（独立于 CLI 退役，当前无 UI 入口但合法）。
  */
 export function AgentSection() {

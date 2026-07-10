@@ -245,7 +245,7 @@ pub fn record_tool_open(
 /// Internal settings loader — can be called from other modules with a Connection.
 pub fn load_settings_from_db(conn: &rusqlite::Connection) -> Result<AppSettings, String> {
     let result = conn.query_row(
-        "SELECT scan_directories, tool_paths, theme, palette, cli_flags, onboarding_completed FROM settings WHERE id = 1",
+        "SELECT scan_directories, tool_paths, theme, palette, onboarding_completed FROM settings WHERE id = 1",
         [],
         |row| {
             let sd: String = row.get(0)?;
@@ -254,17 +254,15 @@ pub fn load_settings_from_db(conn: &rusqlite::Connection) -> Result<AppSettings,
             // COLUMN with no NOT NULL); fall back to the default so a NULL row
             // still yields AppSettings.palette == "pi".
             let palette: Option<String> = row.get(3)?;
-            let cf: String = row.get(4)?;
-            // onboarding_completed (col 5) is nullable on DBs upgraded via
+            // onboarding_completed (col 4) is nullable on DBs upgraded via
             // migrate_v19_to_v20 (ALTER COLUMN with no NOT NULL); NULL → false
             // so a pre-v20 row still triggers the first-run wizard once.
-            let oc: Option<i64> = row.get(5)?;
+            let oc: Option<i64> = row.get(4)?;
             Ok(AppSettings {
                 scan_directories: serde_json::from_str(&sd).unwrap_or_default(),
                 tool_paths: serde_json::from_str(&tp).unwrap_or_default(),
                 theme: row.get(2)?,
                 palette: palette.unwrap_or_else(|| "pi".to_string()),
-                cli_flags: serde_json::from_str(&cf).unwrap_or_default(),
                 onboarding_completed: oc.map(|v| v != 0).unwrap_or(false),
             })
         },
@@ -277,11 +275,10 @@ pub fn load_settings_from_db(conn: &rusqlite::Connection) -> Result<AppSettings,
                 tool_paths: std::collections::HashMap::new(),
                 theme: "obsidian".to_string(),
                 palette: "pi".to_string(),
-                cli_flags: std::collections::HashMap::new(),
                 onboarding_completed: false,
             };
             conn.execute(
-                "INSERT OR IGNORE INTO settings (id, scan_directories, tool_paths, theme, palette, cli_flags, onboarding_completed) VALUES (1, '[]', '{}', 'auto', 'pi', '{}', 0)",
+                "INSERT OR IGNORE INTO settings (id, scan_directories, tool_paths, theme, palette, onboarding_completed) VALUES (1, '[]', '{}', 'auto', 'pi', 0)",
                 [],
             ).map_err(|e| e.to_string())?;
             Ok(defaults)
@@ -296,13 +293,12 @@ pub fn save_settings_to_db(
     settings: &AppSettings,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT OR REPLACE INTO settings (id, scan_directories, tool_paths, theme, palette, cli_flags, onboarding_completed) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO settings (id, scan_directories, tool_paths, theme, palette, onboarding_completed) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
         params![
             serde_json::to_string(&settings.scan_directories).map_err(|e| e.to_string())?,
             serde_json::to_string(&settings.tool_paths).map_err(|e| e.to_string())?,
             settings.theme,
             settings.palette,
-            serde_json::to_string(&settings.cli_flags).map_err(|e| e.to_string())?,
             settings.onboarding_completed as i64,
         ],
     ).map_err(|e| e.to_string())?;

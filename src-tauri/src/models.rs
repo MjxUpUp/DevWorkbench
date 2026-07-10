@@ -42,8 +42,6 @@ pub struct AppSettings {
     /// fires on JSON deserialization, not on the DB path.
     #[serde(default = "default_palette")]
     pub palette: String,
-    #[serde(default)]
-    pub cli_flags: std::collections::HashMap<String, String>,
     /// Whether the user has completed the first-run onboarding wizard.
     /// false on a fresh install → the wizard overlay shows; flipped to true
     /// when the user finishes it (or relaunches it from Settings). serde(default)
@@ -535,8 +533,7 @@ mod tests {
         let json = r#"{
             "scan_directories": ["/tmp"],
             "tool_paths": {"go": "/usr/bin/go"},
-            "theme": "dark",
-            "cli_flags": {"pi": "--model glm"}
+            "theme": "dark"
         }"#;
         let s: AppSettings = serde_json::from_str(json).expect("legacy JSON must parse");
         assert_eq!(
@@ -570,7 +567,6 @@ mod tests {
             tool_paths: std::collections::HashMap::new(),
             theme: "light".into(),
             palette: "moss".into(),
-            cli_flags: std::collections::HashMap::new(),
             onboarding_completed: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");

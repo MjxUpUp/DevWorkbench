@@ -27,7 +27,6 @@ export interface AppSettings {
   /** 调色板风格：pi (pi.dev 暖纸，默认) | ink (墨砚) | moss (苔藓)。
  *  v3 三套主题切换——与 theme (亮/暗) 正交，组合出 6 种外观。 */
   palette: 'pi' | 'ink' | 'moss';
-  cli_flags: Record<string, string>;
   /** Whether the user finished the first-run onboarding wizard. false on a fresh
  *  install → the wizard overlay shows; flipped true on completion. */
   onboarding_completed: boolean;

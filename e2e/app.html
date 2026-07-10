@@ -157,7 +157,7 @@
                 // chat composer, so app.spec's ws-tab click times
                 // out and visual.spec's app-shell baseline captures the wizard
                 // instead of the app shell.
-                return Promise.resolve({ theme: 'light', scan_directories: [], tool_paths: {}, cli_flags: {}, onboarding_completed: true });
+                return Promise.resolve({ theme: 'light', scan_directories: [], tool_paths: {}, onboarding_completed: true });
               case 'discover_agents_cmd':
                 return Promise.resolve([
                   { agentType: 'claude_code', displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/local/bin/claude', supportsResume: true },

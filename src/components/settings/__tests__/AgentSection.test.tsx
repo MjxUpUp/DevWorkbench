@@ -26,7 +26,6 @@ describe('AgentSection crash defense', () => {
         tool_paths: {},
         theme: 'auto',
         palette: 'pi' as const,
-        cli_flags: {},
         onboarding_completed: true,
       },
       error: null,
