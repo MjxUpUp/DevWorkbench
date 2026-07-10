@@ -79,79 +79,17 @@ pub struct GitStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentType {
-    // NOTE: do NOT derive Copy — contains variants without trivial copy
-    ClaudeCode,
-    Codex,
-    CursorAgent,
-    GeminiCli,
-    Copilot,
-    QwenCode,
-    Pi,
-    /// Self-hosted ReactAgent (kernel layer). NOT a CLI — never discovered, never
-    /// spawned as a subprocess. spawn_agent_session routes kernel=true to the
-    /// react_chat driver. Exists as a variant so the DB/session/activity layer
-    /// can record + render it like any other agent. Deliberately absent from
-    /// all()/from_spec so discovery + workflow dispatch stay CLI-only.
+    /// Self-hosted ReactAgent (kernel layer) — the only agent. The legacy
+    /// "external CLI agent via pty" chain was retired; historical DB rows
+    /// carrying `claude_code`/`codex`/… deserialize to this via the
+    /// `#[serde(other)]` fallback, so no DB migration is needed.
+    #[serde(other)]
     ReactKernel,
 }
 
 impl AgentType {
-    pub fn command_name(&self) -> &str {
-        match self {
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
-            Self::CursorAgent => "cursor-agent",
-            Self::GeminiCli => "gemini",
-            Self::Copilot => "github-copilot-cli",
-            Self::QwenCode => "qwen",
-            Self::Pi => "pi",
-            // No CLI binary — ReactKernel runs in-process via the react_chat
-            // driver, never as a subprocess. Empty so resolve_agent_exe fails
-            // fast if a ReactKernel is ever misrouted to the pty spawn path.
-            Self::ReactKernel => "",
-        }
-    }
-
-    /// Parse an AgentType from a workflow node spec string. Accepts the snake_case
-    /// variant name (e.g. "claude_code"), the command name ("claude"), or
-    /// display-ish forms. Returns None for unknown agents (the caller may treat
-    /// that as a transparent/self-built agent).
-    pub fn from_spec(spec: &str) -> Option<Self> {
-        match spec.to_ascii_lowercase().as_str() {
-            "claude_code" | "claude-code" | "claudecode" | "claude" => Some(Self::ClaudeCode),
-            "codex" => Some(Self::Codex),
-            "cursor_agent" | "cursor-agent" | "cursor" => Some(Self::CursorAgent),
-            "gemini_cli" | "gemini-cli" | "gemini" => Some(Self::GeminiCli),
-            "copilot" | "github_copilot_cli" => Some(Self::Copilot),
-            "qwen_code" | "qwen-code" | "qwen" => Some(Self::QwenCode),
-            "pi" => Some(Self::Pi),
-            _ => None,
-        }
-    }
-
     pub fn display_name(&self) -> &str {
-        match self {
-            Self::ClaudeCode => "Claude Code",
-            Self::Codex => "Codex",
-            Self::CursorAgent => "Cursor Agent",
-            Self::GeminiCli => "Gemini CLI",
-            Self::Copilot => "GitHub Copilot",
-            Self::QwenCode => "Qwen Code",
-            Self::Pi => "Pi",
-            Self::ReactKernel => "Kernel Agent",
-        }
-    }
-
-    pub fn all() -> Vec<AgentType> {
-        vec![
-            Self::ClaudeCode,
-            Self::Codex,
-            Self::CursorAgent,
-            Self::GeminiCli,
-            Self::Copilot,
-            Self::QwenCode,
-            Self::Pi,
-        ]
+        "Kernel Agent"
     }
 }
 

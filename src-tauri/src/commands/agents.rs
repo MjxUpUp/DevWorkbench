@@ -1,4 +1,3 @@
-use crate::agents::discovery::{discover_agents, recommend_agent, AgentInfo};
 use crate::agents::kernel_tasks::{KernelLiveBlocks, KernelTasks};
 use crate::agents::pty;
 use crate::agents::react_chat;
@@ -10,11 +9,7 @@ use crate::mcp::registry::McpRegistry;
 use crate::models::SessionStatus;
 use crate::models::{AgentType, Conversation, Session};
 use kernel_core::{Agent, AgentEvent, AgentInput, AgentRunStatus};
-use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
-
-/// Tauri managed state wrapping AgentProcesses (PTY-based)
-pub struct AgentState(pub Arc<pty::AgentProcesses>);
 
 /// Managed registry of in-flight Human-Gate approvals. Thin wrapper around the
 /// kernel-side [`ApprovalMap`](crate::kernel_impl::human_gate::ApprovalMap) so
@@ -117,31 +112,11 @@ fn session_of_resume_token(token: &str) -> Option<&str> {
     }
 }
 
-// Agent discovery commands
-#[tauri::command]
-pub fn discover_agents_cmd(db: State<'_, DbState>) -> Result<Vec<AgentInfo>, AppError> {
-    let conn = db.get()?;
-    Ok(discover_agents(Some(&conn)))
-}
-
-#[tauri::command]
-pub fn recommend_agent_for_project(tags: Vec<String>) -> Result<Option<AgentType>, AppError> {
-    Ok(recommend_agent(&tags))
-}
-
 // Session commands
 #[tauri::command]
 pub fn load_sessions(db: State<'_, DbState>) -> Result<Vec<Session>, AppError> {
     let conn = db.get()?;
     crate::agents::session::load_sessions_from_db(&conn)
-}
-
-/// Read the FULL (ANSI-stripped) output for a session, for the completed-session terminal view.
-/// Unlike the stored `outputSummary` (tail-truncated to OUTPUT_SUMMARY_MAX_CHARS), this returns
-/// the complete text so the completed session isn't cut off mid-reply.
-#[tauri::command]
-pub fn read_session_output_cmd(session_id: String) -> Result<Option<String>, AppError> {
-    Ok(pty::read_full_session_output(&session_id))
 }
 
 /// Read all archived compaction chunks for a session (v1.3 C2). Each chunk is
@@ -204,13 +179,11 @@ pub async fn spawn_agent_session(
     // reactor running", and because that panic is on the main thread it can't
     // unwind across the Tauri/webview FFI boundary → process aborts (闪退). The
     // async command body is driven on Tauri's tokio runtime, so the runtime
-    // context is present and `tokio::spawn` succeeds. The CLI path
-    // (spawn_pty_agent) uses `std::thread::spawn` and never had this issue.
+    // context is present and `tokio::spawn` succeeds.
     let prompt = expand_slash_command(db.inner(), prompt)?;
-    // 砍 CLI（用户决定 1）：chat 唯一执行路径 = 自研 ReactKernel。原 kernel=false
-    // 的 pty::spawn_pty_agent 分支退役——CLI agent 选项已从 ChatHeader 移除，
-    // pty::spawn_pty_agent 仅由 OpaqueAgent（工作流节点桥接外部 CLI）调用。
-    // 多模型通过协议层（Anthropic/OpenAI，de-glm 已落地）支撑，不靠 CLI 壳。
+    // chat 唯一执行路径 = 自研 ReactKernel（外部 CLI agent 经 pty 执行的链路
+    // 已彻底退役：spawn_pty_agent / OpaqueAgent / discovery 全删）。多模型通过
+    // 协议层（Anthropic/OpenAI，de-glm 已落地）支撑，不靠 CLI 壳。
     Ok(react_chat_driver(
         &app,
         db.inner().clone(),
@@ -704,14 +677,14 @@ pub fn get_conversation_branches(
 #[tauri::command]
 pub fn stop_agent_session(
     app: tauri::AppHandle,
-    state: State<'_, AgentState>,
     db: State<'_, DbState>,
     kernel_tasks: State<'_, KernelTasks>,
     approval_state: State<'_, AgentApprovalState>,
     session_id: String,
 ) -> Result<(), AppError> {
-    // Kernel agents have no PID — abort their driver task. Returns true iff this
-    // session was a kernel task, in which case we skip the pty/PID kill below.
+    // Abort the kernel driver task. Returns true iff this session was a kernel
+    // task (always true now — the only agent is ReactKernel); the return value
+    // still gates the live-block drain below.
     let was_kernel = kernel_tasks.abort(&session_id);
     // v2 Human Gate: reclaim any pending approval for this session. Aborting the
     // driver task drops its future, which drops the Receiver of a suspended
@@ -719,10 +692,6 @@ pub fn stop_agent_session(
     // Clearing here also lets a still-live check() auto-reject promptly (its
     // Receiver gets None → Reject) instead of waiting the full 300s timeout.
     approval_state.clear_session(&session_id);
-    if !was_kernel {
-        // Best-effort PID kill; process may already be dead (stale session)
-        let _ = pty::stop_agent(&state.0, &session_id);
-    }
     // gap4 + P0 (review C3): persist the streamed-so-far transcript so a mid-run
     // stop doesn't lose the whole turn. The driver's `final_blocks` was
     // dropped with the aborted future; drain the live mirror (only kernel
@@ -804,64 +773,6 @@ pub fn stop_agent_session(
     Ok(())
 }
 
-/// Append a synthetic error `tool_result` for every trailing `tool_use` that
-/// has no matching result — the interrupt pre-empted the tool mid-flight. The
-/// persisted transcript must stay internally consistent for BlocksView replay
-/// (a tool_use card with no result card looks stuck). Each synthesized result
-/// carries the SAME `tool_use_id` as its `tool_use` card (both paths fill id
-/// now — OpaqueAgent wire id and ReactKernel ToolCall.id); `None` only for
-/// legacy/pre-id wire. Preserves replay pairing by id instead of degrading to FIFO.
-/// The orphan tail is the only case: any non-`tool_use` block ends it.
-///
-/// **DEPRECATED for new code** (review C3): kernel sessions now route through
-/// `blocks_integrity::finalize_for_storage(UserInterrupt)` in
-/// `stop_agent_session`, which has the same "synthesize error tool_result"
-/// effect AND also writes a `block_finalize_log` audit row. Calling this fn
-/// from a path that already fed its blocks through finalize_for_storage
-/// would synthesize a second tool_result on top of the first one. Kept only
-/// because its unit tests still cover the orphan-tail invariant directly.
-#[allow(dead_code)]
-fn synthesize_interrupt_tool_results(
-    mut events: Vec<pty::ChatStreamEvent>,
-) -> Vec<pty::ChatStreamEvent> {
-    // Collect the trailing tool_use ids back-to-front, then reverse so the
-    // synthesized results align with their cards in original order.
-    let mut orphan_ids: Vec<Option<String>> = Vec::new();
-    for ev in events.iter().rev() {
-        match ev {
-            pty::ChatStreamEvent::ToolUse { id, .. } => orphan_ids.push(id.clone()),
-            _ => break,
-        }
-    }
-    for id in orphan_ids.into_iter().rev() {
-        events.push(pty::ChatStreamEvent::ToolResult {
-            tool_use_id: id,
-            content: "[已中断：用户停止了本次会话]".into(),
-            is_error: true,
-        });
-    }
-    events
-}
-
-#[tauri::command]
-pub fn pty_write_cmd(
-    state: State<'_, AgentState>,
-    session_id: String,
-    data: String,
-) -> Result<(), AppError> {
-    pty::pty_write(&state.0, &session_id, &data).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub fn pty_resize_cmd(
-    state: State<'_, AgentState>,
-    session_id: String,
-    cols: u16,
-    rows: u16,
-) -> Result<(), AppError> {
-    pty::pty_resize(&state.0, &session_id, cols, rows).map_err(AppError::from)
-}
-
 // Activity commands
 #[tauri::command]
 pub fn get_project_activity(
@@ -930,127 +841,6 @@ pub fn get_quality_report_for_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn synthesize_interrupt_appends_one_result_per_trailing_tool_use() {
-        // Two trailing tool_uses with no results → two synthetic error results.
-        let events = vec![
-            pty::ChatStreamEvent::Text { content: "thinking…".into() },
-            pty::ChatStreamEvent::ToolUse {
-                id: None,
-                name: "bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            },
-            pty::ChatStreamEvent::ToolUse {
-                id: None,
-                name: "read_file".into(),
-                input: serde_json::json!({"file_path": "a.rs"}),
-            },
-        ];
-        let out = synthesize_interrupt_tool_results(events);
-        assert_eq!(out.len(), 5, "3 originals + 2 synthetic results");
-        for ev in &out[3..] {
-            match ev {
-                pty::ChatStreamEvent::ToolResult { content, is_error, .. } => {
-                    assert!(is_error, "synthetic result must be error");
-                    assert_eq!(content, "[已中断：用户停止了本次会话]");
-                }
-                _ => panic!("expected ToolResult, got {ev:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn synthesize_interrupt_carries_tool_use_id_when_present() {
-        // A trailing tool_use that CARRIED an id (OpaqueAgent path) must get a
-        // synthetic result with the SAME id — so replay pairing holds by id
-        // instead of degrading to FIFO (defect ①). Both OpaqueAgent (wire id)
-        // and ReactKernel (ToolCall.id) fill id now; None only for legacy/pre-id
-        // wire (covered by the test above). Order must align: the synthesized
-        // results mirror their tool_use cards positionally.
-        let events = vec![
-            pty::ChatStreamEvent::ToolUse {
-                id: Some("toolu_xyz".into()),
-                name: "bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            },
-            pty::ChatStreamEvent::ToolUse {
-                id: Some("toolu_abc".into()),
-                name: "read_file".into(),
-                input: serde_json::json!({"file_path": "a.rs"}),
-            },
-        ];
-        let out = synthesize_interrupt_tool_results(events);
-        assert_eq!(out.len(), 4, "2 originals + 2 synthetic results");
-        match &out[2] {
-            pty::ChatStreamEvent::ToolResult { tool_use_id, is_error, .. } => {
-                assert_eq!(tool_use_id.as_deref(), Some("toolu_xyz"));
-                assert!(is_error, "synthetic result must be error");
-            }
-            _ => panic!("expected ToolResult at [2], got {:?}", out[2]),
-        }
-        match &out[3] {
-            pty::ChatStreamEvent::ToolResult { tool_use_id, .. } => {
-                assert_eq!(tool_use_id.as_deref(), Some("toolu_abc"));
-            }
-            _ => panic!("expected ToolResult at [3], got {:?}", out[3]),
-        }
-    }
-
-    #[test]
-    fn synthesize_interrupt_noop_when_trailing_tool_use_already_matched() {
-        // tool_use immediately followed by tool_result → no orphan, no append.
-        let events = vec![
-            pty::ChatStreamEvent::ToolUse {
-                id: None,
-                name: "bash".into(),
-                input: serde_json::json!({}),
-            },
-            pty::ChatStreamEvent::ToolResult {
-                tool_use_id: None,
-                content: "ok".into(),
-                is_error: false,
-            },
-        ];
-        let out = synthesize_interrupt_tool_results(events);
-        assert_eq!(out.len(), 2, "no synthetic result should be appended");
-    }
-
-    #[test]
-    fn synthesize_interrupt_only_orphans_tail() {
-        // A mid-list tool_use with its own result is fine; only the trailing
-        // unmatched one gets a synthetic result.
-        let events = vec![
-            pty::ChatStreamEvent::ToolUse {
-                id: None,
-                name: "a".into(),
-                input: serde_json::json!({}),
-            },
-            pty::ChatStreamEvent::ToolResult {
-                tool_use_id: None,
-                content: "r1".into(),
-                is_error: false,
-            },
-            pty::ChatStreamEvent::ToolUse {
-                id: None,
-                name: "b".into(),
-                input: serde_json::json!({}),
-            },
-        ];
-        let out = synthesize_interrupt_tool_results(events);
-        assert_eq!(out.len(), 4);
-        assert!(matches!(
-            out.last(),
-            Some(pty::ChatStreamEvent::ToolResult { is_error: true, .. })
-        ));
-    }
-
-    #[test]
-    fn synthesize_interrupt_empty_and_text_only_noop() {
-        assert!(synthesize_interrupt_tool_results(vec![]).is_empty());
-        let events = vec![pty::ChatStreamEvent::Text { content: "hi".into() }];
-        assert_eq!(synthesize_interrupt_tool_results(events).len(), 1);
-    }
 
     /// The resume token embeds the session id as `approve__{sid}__{seq}` — the
     /// human-gate ledger write recovers the session from it. Pin the shape so

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfigStore } from '../../stores/configStore';
-import { useAgentStore } from '../../stores/agentStore';
 import { Button } from '../ui/Button/Button';
 import { McpServerList } from '../McpServerList';
 import { McpRuntimePanel } from './McpRuntimePanel';
@@ -17,7 +16,6 @@ const EMPTY_SERVER: Omit<McpServerConfig, 'name'> = {
 
 export function McpSection() {
   const activeProject = useNavigationStore((s) => s.activeProject);
-  const agents = useAgentStore((s) => s.agents);
   const { mcpConfig, loading, loadConfig, saveConfig, applyConfig } = useConfigStore();
 
   const [servers, setServers] = useState<McpServerConfig[]>([]);
@@ -26,8 +24,6 @@ export function McpSection() {
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [applyResult, setApplyResult] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const installedAgents = agents.filter((a) => a.installed);
 
   // Refs to detect unsaved local edits on project switch without widening the
   // load effect's dep array. `serversRef` mirrors the live local edits;
@@ -194,16 +190,6 @@ export function McpSection() {
 
       {/* B3: 运行时管理（即时连接/断开/工具试跑） */}
       <McpRuntimePanel servers={servers} />
-
-      {/* Installed agents info */}
-      {installedAgents.length > 0 && (
-        <div className="config-agents-info">
-          <span className="config-agents-label">已安装的 Agent：</span>
-          {installedAgents.map((a) => (
-            <span key={a.agentType} className="config-agent-badge">{a.displayName}</span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

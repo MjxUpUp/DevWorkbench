@@ -18,10 +18,10 @@ use crate::kernel_impl::context_compact::summary_with_fence;
 use crate::models::{Session, SessionStatus};
 use kernel_core::{
     AgentEvent, AgentRunStatus, CompactBoundaryMeta, FunctionCall, Message, Role, ToolCall,
-    ToolCallEvent, ToolCallStatus,
+    ToolCallStatus,
 };
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Defect ③: Pairing invariant check — orphans detected, not silently stripped.
@@ -123,18 +123,6 @@ pub(crate) fn validate_block_pairs(blocks: &[ChatStreamEvent]) -> Vec<PairingVio
     violations
 }
 
-/// Drain pending_tools and return descriptions of any orphaned entries.
-/// Call at end-of-stream (after the last ChatStreamEvent) to catch cuts-short pairs.
-pub(crate) fn drain_pending_orphans(
-    pending_tools: &mut VecDeque<(Option<String>, String, String)>,
-) -> Vec<PairingViolation> {
-    let mut orphans = Vec::new();
-    while let Some((id, name, _args)) = pending_tools.pop_front() {
-        orphans.push(PairingViolation::OrphanToolCall { id, name });
-    }
-    orphans
-}
-
 /// Map one kernel-core `AgentEvent` to zero or more chat wire events for the
 /// `agent:event` channel. Pure + testable: the caller passes `secs` (elapsed
 /// since the run started) so the Result block's duration is deterministic under
@@ -159,10 +147,8 @@ pub fn map_agent_event(ev: AgentEvent, secs: u64) -> Vec<ChatStreamEvent> {
         AgentEvent::Reasoning(s) => vec![ChatStreamEvent::Thinking { content: s }],
         AgentEvent::ToolCall(tc) => match tc.status {
             ToolCallStatus::Started => vec![ChatStreamEvent::ToolUse {
-                // id round-trips end-to-end on BOTH paths: OpaqueAgent (claude
-                // wire `id` / gemini `tool_id`, preserved via pty to_event →
-                // chat_event_to_agent_events → here) AND ReactKernel (ToolCall.id
-                // → ToolCallEvent.id, forwarded by react_agent). None only for
+                // id round-trips end-to-end: ReactKernel (ToolCall.id →
+                // ToolCallEvent.id, forwarded by react_agent). None only for
                 // legacy/pre-id wire or ACP/test construction. Carrying it here
                 // keeps persisted (DB) blocks pairable on replay by id instead
                 // of degrading to FIFO (defect ①).
@@ -204,130 +190,6 @@ fn parse_tool_arguments(raw: &str) -> Value {
         return Value::Null;
     }
     serde_json::from_str(trimmed).unwrap_or(Value::Null)
-}
-
-/// Reverse of `map_agent_event`: turn a claude `agent:event` wire block back
-/// into kernel-core `AgentEvent`s for the OpaqueAgent stream. Unlike the
-/// forward map (ReactAgent Succeeded/Failed → placeholder "(ok)"), claude's
-/// ToolResult.content is the REAL tool output — but `ToolCallEvent` has no
-/// content field (kernel-core/agent.rs:81), so the reverse map restores only
-/// name/arguments via positional pairing. The workflow path's downstream
-/// `map_agent_to_chunks` then re-emits the ReactAgent "(ok)"/"(failed)"
-/// placeholder for the tool_result card (inherited behavior, same as a
-/// transparent agent's tool call).
-///
-/// `pending_tools`: queue of `(id, name, arguments_json)` — enqueued on
-/// ToolUse, dequeued on ToolResult. Pairing is **id-first, FIFO-fallback**:
-///
-/// - When the ToolResult carries `tool_use_id` (OpaqueAgent path — claude's
-///   stream-json always emits it, now preserved end-to-end via `to_event`),
-///   dequeue the pending entry whose id matches. This is order-independent:
-///   batched `use(A), use(B), result(B), result(A)` now pairs correctly, not
-///   just the same-order case the old FIFO hack handled.
-/// - When `tool_use_id` is absent (ReactKernel forward replays a wire that
-///   never carried an id, or legacy pre-id session blocks), fall back to FIFO
-///   `pop_front` — preserving the old positional behavior as a safety net.
-///
-/// This closes defect ①'s root cause: the wire schema no longer drops the
-/// pairing key, so the reverse map stops guessing.
-///
-/// Mapping:
-/// - `Text{content}`                 → `[Token(content)]`
-/// - `ToolUse{id, name, input}`      → enqueue; `[ToolCall(Started)]`
-/// - `ToolResult{tool_use_id, content, is_error}` → id-match (or FIFO) paired
-///   `[ToolCall(Succeeded|Failed)]`; orphan (no match) `[Token(content)]`
-///   (demote — never drop the signal)
-/// - `Result{..}`                    → `[]` (Done owned by agent:completed;
-///   emitting here would duplicate the terminal event and double-end the stream)
-pub fn chat_event_to_agent_events(
-    ev: &ChatStreamEvent,
-    pending_tools: &mut VecDeque<(Option<String>, String, String)>,
-) -> Vec<AgentEvent> {
-    match ev {
-        ChatStreamEvent::Text { content } => vec![AgentEvent::Token(content.clone())],
-        ChatStreamEvent::Thinking { content } => vec![AgentEvent::Reasoning(content.clone())],
-        ChatStreamEvent::ToolUse { id, name, input } => {
-            let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-            pending_tools.push_back((id.clone(), name.clone(), args.clone()));
-            vec![AgentEvent::ToolCall(ToolCallEvent {
-                tool: name.clone(),
-                arguments: args,
-                status: ToolCallStatus::Started,
-                // Carry the wire id through so map_agent_event can re-emit it on
-                // the persisted ChatStreamEvent (DB replay pairs by id, not FIFO).
-                id: id.clone(),
-                result: None,
-            })]
-        }
-        ChatStreamEvent::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } => {
-            // Id-first: locate the pending ToolUse whose id matches tool_use_id.
-            // FIFO fallback when the wire carries no id (legacy/forward replay).
-            let paired = match tool_use_id {
-                Some(tid) => pending_tools
-                    .iter()
-                    .position(|(pid, _, _)| pid.as_deref() == Some(tid.as_str()))
-                    .and_then(|i| pending_tools.remove(i)),
-                None => pending_tools.pop_front(),
-            };
-            match paired {
-                // Paired: restore name/arguments/id from the matched ToolUse.
-                Some((id, name, args)) => {
-                    let status = if *is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Succeeded
-                    };
-                    vec![AgentEvent::ToolCall(ToolCallEvent {
-                        tool: name,
-                        arguments: args,
-                        status,
-                        // The matched ToolUse's id — carried through so the
-                        // forward map re-emits tool_use_id on the persisted block.
-                        id,
-                        // claude's ToolResult.content IS the real tool output —
-                        // carry it through so downstream renders the actual result.
-                        result: Some(content.clone()),
-                    })]
-                }
-                // Orphan (no pending ToolUse matches): demote content to a Token
-                // so it surfaces as text rather than vanishing. Do NOT fabricate
-                // a ToolCall(Started) — would desync downstream use/result counts.
-                None => {
-                    log::warn!(
-                        "[chat_event_to_agent_events] orphan ToolResult (tool_use_id={:?}); content demoted to text: {}",
-                        tool_use_id,
-                        content.chars().take(80).collect::<String>()
-                    );
-                    vec![AgentEvent::Token(content.clone())]
-                }
-            }
-        }
-        // Done is owned by agent:completed; emitting here would duplicate the
-        // terminal event and double-end the stream.
-        ChatStreamEvent::Result { .. } => Vec::new(),
-        // FileChanged never arrives on the chat wire from an opaque CLI (CLIs
-        // don't surface per-write events); it's emitted only by the transparent
-        // ReactAgent forward path. The reverse map exists for the OpaqueAgent
-        // stream, so this arm keeps the match exhaustive as a no-op rather than
-        // fabricating a kernel event.
-        ChatStreamEvent::FileChanged { .. } => Vec::new(),
-        // Compact is a meta-event emitted by the compaction sink, never by an
-        // opaque CLI — kept exhaustive. It carries no kernel AgentEvent (it
-        // never enters the model's stream, only the UI's block list).
-        ChatStreamEvent::Compact { .. } => Vec::new(),
-        // §4.2 缺项3: CompactBoundary is the boundary-marker meta-event emitted
-        // alongside Compact. Never an AgentEvent — same bypass. It's
-        // reconstructed into a boundary Message by blocks_to_history (below),
-        // not mapped to a kernel event here.
-        ChatStreamEvent::CompactBoundary { .. } => Vec::new(),
-        // Human-Gate control signal — UI-only (opens a modal); never an
-        // AgentEvent, never model history. Same bypass as Compact.
-        ChatStreamEvent::ApprovalRequired { .. } => Vec::new(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -735,23 +597,6 @@ mod tests {
     }
 
     #[test]
-    fn thinking_wire_block_round_trips_to_reasoning_event() {
-        // Reverse map (opaque → kernel): a Thinking wire block becomes a
-        // Reasoning AgentEvent, independent of the tool-use pairing queue.
-        let mut pending = std::collections::VecDeque::new();
-        let evs = chat_event_to_agent_events(
-            &ChatStreamEvent::Thinking { content: "deliberation".into() },
-            &mut pending,
-        );
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            AgentEvent::Reasoning(s) => assert_eq!(s, "deliberation"),
-            other => panic!("expected Reasoning, got {:?}", other),
-        }
-        assert!(pending.is_empty(), "thinking must not enqueue a tool pairing");
-    }
-
-    #[test]
     fn tool_call_started_maps_to_tool_use_with_parsed_input() {
         let ev = AgentEvent::ToolCall(ToolCallEvent {
             tool: "Read".to_string(),
@@ -961,235 +806,6 @@ mod tests {
         assert_eq!(v["b"], "x");
     }
 
-    // ---- chat_event_to_agent_events (reverse map for OpaqueAgent) ----
-
-    /// Assert an AgentEvent is a ToolCall with the given name + status.
-    fn assert_tool(ev: &AgentEvent, expected_name: &str, expected_status: ToolCallStatus) {
-        match ev {
-            AgentEvent::ToolCall(tc) => {
-                assert_eq!(tc.tool, expected_name, "tool name mismatch");
-                assert_eq!(tc.status, expected_status, "status mismatch");
-            }
-            other => panic!("expected ToolCall({expected_name}), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn chat_text_maps_to_token() {
-        let mut pending = VecDeque::new();
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::Text { content: "hi".into() },
-            &mut pending,
-        );
-        assert_eq!(out.len(), 1);
-        match &out[0] {
-            AgentEvent::Token(s) => assert_eq!(s, "hi"),
-            other => panic!("expected Token, got {:?}", other),
-        }
-        assert!(pending.is_empty(), "Text must not touch the pending queue");
-    }
-
-    #[test]
-    fn chat_tool_use_enqueues_and_emits_started() {
-        let mut pending = VecDeque::new();
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse {
-                id: None,
-                name: "Read".into(),
-                input: serde_json::json!({"file_path": "/x"}),
-            },
-            &mut pending,
-        );
-        assert_eq!(out.len(), 1);
-        assert_tool(&out[0], "Read", ToolCallStatus::Started);
-        // Arguments round-trip the input JSON exactly (serde_json::to_string).
-        match &out[0] {
-            AgentEvent::ToolCall(tc) => assert_eq!(tc.arguments, r#"{"file_path":"/x"}"#),
-            _ => unreachable!(),
-        }
-        assert_eq!(pending.len(), 1);
-        let front = pending.front().unwrap();
-        assert_eq!(front.0, None); // id (absent on this wire)
-        assert_eq!(front.1, "Read");
-        assert_eq!(front.2, r#"{"file_path":"/x"}"#);
-    }
-
-    #[test]
-    fn chat_tool_use_null_input_enqueues_null_args() {
-        let mut pending = VecDeque::new();
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { id: None, name: "X".into(), input: Value::Null },
-            &mut pending,
-        );
-        match &out[0] {
-            AgentEvent::ToolCall(tc) => assert_eq!(tc.arguments, "null"),
-            other => panic!("expected ToolCall, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn chat_tool_result_dequeues_and_emits_succeeded() {
-        let mut pending = VecDeque::new();
-        pending.push_back((None, "Read".to_string(), r#"{"file_path":"/x"}"#.to_string()));
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { content: "res".into(), tool_use_id: None, is_error: false },
-            &mut pending,
-        );
-        assert_eq!(out.len(), 1);
-        assert_tool(&out[0], "Read", ToolCallStatus::Succeeded);
-        match &out[0] {
-            AgentEvent::ToolCall(tc) => assert_eq!(tc.arguments, r#"{"file_path":"/x"}"#),
-            _ => unreachable!(),
-        }
-        assert!(pending.is_empty(), "dequeue must drain the paired ToolUse");
-    }
-
-    #[test]
-    fn chat_tool_result_is_error_emits_failed() {
-        let mut pending = VecDeque::new();
-        pending.push_back((None, "Bash".to_string(), "{}".to_string()));
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { content: "boom".into(), tool_use_id: None, is_error: true },
-            &mut pending,
-        );
-        assert_tool(&out[0], "Bash", ToolCallStatus::Failed);
-    }
-
-    #[test]
-    fn chat_tool_result_orphan_demotes_to_token() {
-        // Orphan (no pending ToolUse): content must surface as text, never
-        // vanish, and must NOT fabricate a Started ToolCall (would desync
-        // downstream use/result counts).
-        let mut pending = VecDeque::new();
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { content: "orphan".into(), tool_use_id: None, is_error: false },
-            &mut pending,
-        );
-        assert_eq!(out.len(), 1);
-        match &out[0] {
-            AgentEvent::Token(s) => assert_eq!(s, "orphan"),
-            other => panic!("orphan must demote to Token, got {:?}", other),
-        }
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn chat_result_event_emits_nothing_and_leaves_pending() {
-        let mut pending = VecDeque::new();
-        pending.push_back((None, "Read".to_string(), "{}".to_string()));
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::Result { is_error: false, secs: 5 },
-            &mut pending,
-        );
-        assert!(out.is_empty(), "Result must not emit — Done is owned by agent:completed");
-        assert_eq!(pending.len(), 1, "Result must leave the pending queue untouched");
-    }
-
-    #[test]
-    fn chat_multiple_tools_pair_fifo_fallback() {
-        // FIFO fallback path: when the wire carries NO tool_use_id (ReactKernel
-        // forward replay, or legacy pre-id session blocks), pairing degrades to
-        // positional FIFO. Claude batches tool_uses then returns results in order:
-        //   use(A), use(B), result(A), result(B)
-        // FIFO dequeue (front) pairs result(A)→A, result(B)→B. A LIFO stack
-        // would mis-pair result(A) onto B — this test guards that regression.
-        let mut pending = VecDeque::new();
-        let a = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { name: "A".into(), input: serde_json::json!({}), id: None },
-            &mut pending,
-        );
-        let b = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { name: "B".into(), input: serde_json::json!({}), id: None },
-            &mut pending,
-        );
-        let r1 = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { content: "ra".into(), tool_use_id: None, is_error: false },
-            &mut pending,
-        );
-        let r2 = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { content: "rb".into(), tool_use_id: None, is_error: false },
-            &mut pending,
-        );
-        assert_tool(&a[0], "A", ToolCallStatus::Started);
-        assert_tool(&b[0], "B", ToolCallStatus::Started);
-        // FIFO: first result dequeues A (front), second dequeues B.
-        assert_tool(&r1[0], "A", ToolCallStatus::Succeeded);
-        assert_tool(&r2[0], "B", ToolCallStatus::Succeeded);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn chat_tools_pair_by_id_out_of_order() {
-        // Id-first pairing (OpaqueAgent path — claude wire always emits
-        // tool_use_id): results arriving OUT of pending order still pair to the
-        // right ToolUse by id, not by position. The old FIFO hack only happened
-        // to be right when use/result order matched; id pairing is
-        // order-independent (defect ① root cause).
-        let mut pending = VecDeque::new();
-        let _a = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { id: Some("u_A".into()), name: "A".into(), input: json!({}) },
-            &mut pending,
-        );
-        let _b = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { id: Some("u_B".into()), name: "B".into(), input: json!({}) },
-            &mut pending,
-        );
-        // result(B) arrives BEFORE result(A) — FIFO would mis-pair it onto A.
-        let rb = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { tool_use_id: Some("u_B".into()), content: "rb".into(), is_error: false },
-            &mut pending,
-        );
-        let ra = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { tool_use_id: Some("u_A".into()), content: "ra".into(), is_error: false },
-            &mut pending,
-        );
-        assert_tool(&rb[0], "B", ToolCallStatus::Succeeded); // id u_B → B (not FIFO's A)
-        assert_tool(&ra[0], "A", ToolCallStatus::Succeeded); // id u_A → A
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn chat_tool_result_orphan_when_id_unmatched() {
-        // tool_use_id present but no pending ToolUse with that id (the match was
-        // already consumed, or its ToolUse never arrived): content demotes to
-        // Token — never silently dropped, never fabricated as Started (would
-        // desync use/result counts).
-        let mut pending = VecDeque::new();
-        let _ = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolUse { id: Some("u_X".into()), name: "X".into(), input: json!({}) },
-            &mut pending,
-        );
-        // id u_Y was never enqueued — orphan by id mismatch (not by empty queue).
-        let out = chat_event_to_agent_events(
-            &ChatStreamEvent::ToolResult { tool_use_id: Some("u_Y".into()), content: "stray".into(), is_error: false },
-            &mut pending,
-        );
-        assert_eq!(out.len(), 1);
-        match &out[0] {
-            AgentEvent::Token(s) => assert_eq!(s, "stray"),
-            other => panic!("unmatched-id ToolResult must demote to Token, got {:?}", other),
-        }
-        // The pending u_X is left untouched (its result never arrived).
-        assert_eq!(pending.len(), 1);
-    }
-
-    #[test]
-    fn chat_roundtrip_text_preserves_token() {
-        // AgentEvent::Token → map_agent_event → Text → chat_event_to_agent_events
-        // → Token. Round-trip on the Text/Token axis (the axis claude's wire
-        // actually exercises) proves the two maps are consistent inverses.
-        let forward = map_agent_event(AgentEvent::Token("x".to_string()), 0);
-        assert_eq!(forward.len(), 1);
-        let mut pending = VecDeque::new();
-        let back = chat_event_to_agent_events(&forward[0], &mut pending);
-        assert_eq!(back.len(), 1);
-        match &back[0] {
-            AgentEvent::Token(s) => assert_eq!(s, "x"),
-            other => panic!("roundtrip lost Token, got {:?}", other),
-        }
-        assert!(pending.is_empty());
-    }
-
     // ---- turns_to_history ----
 
     use crate::models::{AgentType, ContextSnapshot, Session};
@@ -1200,7 +816,7 @@ mod tests {
         Session {
             id: id.to_string(),
             project_path: "/p".to_string(),
-            agent_type: AgentType::ClaudeCode,
+            agent_type: AgentType::ReactKernel,
             status: SessionStatus::Completed,
             prompt: prompt.to_string(),
             model: None,
@@ -1848,26 +1464,4 @@ mod tests {
         assert!(violations.is_empty(), "error result does not create dangling or orphan");
     }
 
-    #[test]
-    fn drain_pending_orphans_finds_all() {
-        let mut pending = VecDeque::new();
-        pending.push_back((Some("a".into()), "Read".to_string(), "{}".to_string()));
-        pending.push_back((None, "Bash".to_string(), "ls".to_string()));
-        pending.push_back((Some("b".into()), "Edit".to_string(), "{}".to_string()));
-
-        let violations = drain_pending_orphans(&mut pending);
-        assert_eq!(violations.len(), 3);
-        // All should be OrphanToolCall.
-        for v in &violations {
-            assert!(matches!(v, PairingViolation::OrphanToolCall { .. }));
-        }
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn drain_pending_orphans_empty_when_all_paired() {
-        let mut pending = VecDeque::new();
-        let violations = drain_pending_orphans(&mut pending);
-        assert!(violations.is_empty(), "empty queue → no orphans");
-    }
 }

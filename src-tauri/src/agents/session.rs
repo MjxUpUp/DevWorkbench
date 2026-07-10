@@ -49,7 +49,7 @@ pub fn load_sessions_from_db(conn: &rusqlite::Connection) -> Result<Vec<Session>
     let sessions = stmt.query_map([], |row| {
         let agent_type_str: String = row.get(2)?;
         let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
-            .unwrap_or(AgentType::ClaudeCode);
+            .unwrap_or(AgentType::ReactKernel);
 
         let status_str: String = row.get(3)?;
         let status = match status_str.as_str() {
@@ -250,7 +250,7 @@ pub fn get_sessions_for_project_db(conn: &rusqlite::Connection, project_path: &s
     let sessions = stmt.query_map(params![project_path], |row| {
         let agent_type_str: String = row.get(2)?;
         let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
-            .unwrap_or(AgentType::ClaudeCode);
+            .unwrap_or(AgentType::ReactKernel);
 
         let status_str: String = row.get(3)?;
         let status = match status_str.as_str() {
@@ -457,7 +457,7 @@ pub fn load_turns_for_conversation_db(
     let sessions = stmt.query_map(params![conversation_id], |row| {
         let agent_type_str: String = row.get(2)?;
         let agent_type: AgentType = serde_json::from_value(serde_json::Value::String(agent_type_str))
-            .unwrap_or(AgentType::ClaudeCode);
+            .unwrap_or(AgentType::ReactKernel);
         let status_str: String = row.get(3)?;
         let status = match status_str.as_str() {
             "running" => SessionStatus::Running,
@@ -540,7 +540,7 @@ pub fn get_session_by_id_db(
                 let agent_type_str: String = row.get(2)?;
                 let agent_type: AgentType =
                     serde_json::from_value(serde_json::Value::String(agent_type_str))
-                        .unwrap_or(AgentType::ClaudeCode);
+                        .unwrap_or(AgentType::ReactKernel);
                 let status_str: String = row.get(3)?;
                 let status = match status_str.as_str() {
                     "running" => SessionStatus::Running,
@@ -757,7 +757,7 @@ mod tests {
         Session {
             id: id.to_string(),
             project_path: project.to_string(),
-            agent_type: AgentType::ClaudeCode,
+            agent_type: AgentType::ReactKernel,
             status,
             prompt: "test prompt".to_string(),
             model: None,

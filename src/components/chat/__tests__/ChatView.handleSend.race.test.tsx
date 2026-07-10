@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ChatView } from '../ChatView';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
-import type { Project, Session, AgentInfo } from '../../../types';
+import type { Project, Session } from '../../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(null)) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
@@ -27,15 +27,6 @@ const project: Project = {
   last_opened_tools: [],
   workspace_tools: [],
 };
-
-const agent = (t: AgentInfo['agentType']): AgentInfo => ({
-  agentType: t,
-  displayName: 'Claude Code',
-  commandName: t,
-  installed: true,
-  path: null,
-  supportsResume: true,
-});
 
 function makeSession(id: string, status: Session['status']): Session {
   return {
@@ -66,11 +57,9 @@ describe('ChatView — handleSend re-entry guard (F12: closure race)', () => {
       selectedConversationId: null,
     });
     useAgentStore.setState({
-      agents: [agent('claude_code')],
       sessions: [],
       conversations: [],
       loading: false,
-      ptyOutput: new Map(),
       qualityReports: new Map(),
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
   });
@@ -97,7 +86,6 @@ describe('ChatView — handleSend re-entry guard (F12: closure race)', () => {
       if (cmd === 'list_conversations') return [];
       if (cmd === 'load_sessions') return [makeSession('s-running', 'running')];
       if (cmd === 'get_quality_report_for_session') return null;
-      if (cmd === 'recommend_agent_for_project') return null;
       return null;
     };
     vi.mocked(invoke).mockImplementation(impl as never);

@@ -4,8 +4,9 @@
 //! ## Why this exists
 //!
 //! Before this module, pairing invariant was scattered:
-//! - Writing end: `commands/agents.rs::synthesize_interrupt_tool_results`
-//!   only handled the user-interrupt path; normal completion / stream-truncated
+//! - Writing end: only the user-interrupt path synthesized trailing
+//!   `tool_result` blocks (an old inline helper in `commands/agents.rs`, since
+//!   removed); normal completion / stream-truncated
 //!   / max-steps / crash paths could leave orphan `tool_use` blocks on disk.
 //! - Reading end: `agents/session.rs::load_turns_for_conversation_db` only
 //!   `log::warn!`'d the violation — it did NOT repair, so the orphan blocks
@@ -33,8 +34,8 @@
 //! - `Normal`: only strip if violation found (paranoid — never silently
 //!   delete on the happy path).
 //! - `UserInterrupt`: synthesize `is_error=true` `tool_result` blocks for
-//!   trailing orphan `tool_use` (matches old behavior of
-//!   `synthesize_interrupt_tool_results`).
+//!   trailing orphan `tool_use` (this fn is the single home for that synthesis,
+//!   replacing the removed inline helper).
 //! - `StreamTruncated` / `MaxSteps`: STRIP trailing orphan `tool_use` blocks
 //!   (do NOT synthesize a fake result — the model's mid-thought tail was
 //!   truncated and we have nothing truthful to put there).

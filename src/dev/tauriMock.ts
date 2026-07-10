@@ -11,7 +11,7 @@
  *
  * Scope: covers the **data-query** commands the UI renders against (projects,
  * sessions, settings, providers, tools, git). It does
- * NOT emulate stateful/native commands (spawn_agent_session, pty_write_cmd)
+ * NOT emulate stateful/native commands (spawn_agent_session)
  * — those need the real backend (axum HTTP bridge or
  * tauri-driver); see the search-regression E2E notes.
  *
@@ -26,22 +26,21 @@ const projects = [
   { id: 'p3', name: 'ZCode Adapter', description: '', path: 'E:/ZCodeAdapter', tags: [], cover_image: null, open_count: 3, last_opened_at: null, starred: false, created_at: '2025-05-01T00:00:00.000Z', last_opened_tools: [], workspace_tools: [] },
 ];
 
-// Conversations = the topic containers (Claude-Code "session" semantics). c1 is
-// a cross-agent thread (claude → codex) so the P3 agent-switch divider renders;
-// c2 is a single claude turn. Both under p1 so the sidebar list shows them when
-// p1 is active.
+// Conversations = the topic containers (Claude-Code "session" semantics). Both
+// under p1 so the sidebar list shows them when p1 is active. lastAgent is always
+// react_kernel now (sole agent after retiring the external CLI link).
 const conversations = [
-  { id: 'c1', projectPath: 'E:/DevWorkbench', title: '重构 providers 设置页交互', lastAgent: 'codex', status: 'active', startedAt: '2025-06-14T10:00:00.000Z', lastActivityAt: '2025-06-15T09:00:00.000Z', pinned: false },
-  { id: 'c2', projectPath: 'E:/DevWorkbench', title: '修复 OpaqueAgent honesty 审计', lastAgent: 'claude_code', status: 'active', startedAt: '2025-06-13T14:00:00.000Z', lastActivityAt: '2025-06-13T15:30:00.000Z', pinned: true },
+  { id: 'c1', projectPath: 'E:/DevWorkbench', title: '重构 providers 设置页交互', lastAgent: 'react_kernel', status: 'active', startedAt: '2025-06-14T10:00:00.000Z', lastActivityAt: '2025-06-15T09:00:00.000Z', pinned: false },
+  { id: 'c2', projectPath: 'E:/DevWorkbench', title: '修复 OpaqueAgent honesty 审计', lastAgent: 'react_kernel', status: 'active', startedAt: '2025-06-13T14:00:00.000Z', lastActivityAt: '2025-06-13T15:30:00.000Z', pinned: true },
 ];
 
-// Sessions = turns. c1 has two turns by DIFFERENT agents (the divider case); the
-// running turn (s3) belongs to c1 too. All Session required fields populated so
-// the TS contract (and AgentMessage rendering) doesn't read undefined.
+// Sessions = turns. All turns use react_kernel (sole agent). The running turn
+// (s3) belongs to c1. All Session required fields populated so the TS contract
+// (and AgentMessage rendering) doesn't read undefined.
 const sessions = [
-  { id: 's1', prompt: '重构 providers 设置页交互', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-14T10:00:00.000Z', finishedAt: '2025-06-14T11:00:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '完成了 providers 设置页交互重构：拆分为三栏布局…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c1' },
-  { id: 's2', prompt: '修复 OpaqueAgent honesty 审计', agentType: 'claude_code', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-13T14:00:00.000Z', finishedAt: '2025-06-13T15:30:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '修复了 OpaqueAgent honesty 审计的断言弱化检测…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c2' },
-  { id: 's3', prompt: '改用 codex 复核并补测试', agentType: 'codex', status: 'running', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-15T09:00:00.000Z', finishedAt: null, model: null, exitCode: null, outputSummary: null, contextSnapshot: null, linkedRequirementId: null, parentSessionId: 's1', conversationId: 'c1' },
+  { id: 's1', prompt: '重构 providers 设置页交互', agentType: 'react_kernel', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-14T10:00:00.000Z', finishedAt: '2025-06-14T11:00:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '完成了 providers 设置页交互重构：拆分为三栏布局…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c1' },
+  { id: 's2', prompt: '修复 OpaqueAgent honesty 审计', agentType: 'react_kernel', status: 'completed', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-13T14:00:00.000Z', finishedAt: '2025-06-13T15:30:00.000Z', model: 'sonnet', exitCode: 0, outputSummary: '修复了 OpaqueAgent honesty 审计的断言弱化检测…', contextSnapshot: null, linkedRequirementId: null, parentSessionId: null, conversationId: 'c2' },
+  { id: 's3', prompt: '复核并补测试', agentType: 'react_kernel', status: 'running', projectPath: 'E:/DevWorkbench', startedAt: '2025-06-15T09:00:00.000Z', finishedAt: null, model: null, exitCode: null, outputSummary: null, contextSnapshot: null, linkedRequirementId: null, parentSessionId: 's1', conversationId: 'c1' },
 ];
 
 // Wire format mirroring the Rust ProvidersConfig serde schema — the old mock
@@ -87,20 +86,15 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
     return conversations.filter((c) => c.projectPath === projectPath);
   },
   update_conversation: () => null,
-  read_session_output_cmd: () => null,
   load_settings: () => ({ scan_directories: [], tool_paths: {}, theme: 'light', palette: 'pi', onboarding_completed: false }),
   save_settings: () => null,
   get_providers_config: () => providers,
   set_providers_config: () => null,
   test_provider_connection: () => ({ ok: true, status: 200, message: '连接成功 (mock)' }),
-  // ToolStatus[] contract — {name, installed, path} per item. The old object
-  // shape ({git,node,rust}) matched no consumer (useTools/AgentSection both
-  // invoke<ToolStatus[]>), so the dev tool-status list silently rendered empty
-  // (Array.isArray guard swallowed it). Mirrors Rust detect_tools: all agent
-  // command_names + NON_AGENT_TOOLS (code, git).
+  // ToolStatus[] contract — {name, installed, path} per item. detect_tools now
+  // returns only the non-agent tools (code/git); the agent command_name loop
+  // was removed with the CLI agent retirement.
   detect_tools: () => [
-    { name: 'claude', installed: true, path: '/usr/local/bin/claude' },
-    { name: 'codex', installed: true, path: '/usr/local/bin/codex' },
     { name: 'code', installed: true, path: '/usr/local/bin/code' },
     { name: 'git', installed: true, path: '/usr/bin/git' },
   ],
@@ -111,15 +105,6 @@ export const handlers: Record<string, (args: Record<string, unknown>) => unknown
   get_cost_trend: () => [],
   load_budget: () => ({ monthly_usd: 50 }),
   load_mcp_config: () => ({ servers: [] }),
-  discover_agents_cmd: () => [
-    // Full AgentInfo contract (commandName/path/supportsResume) — missing
-    // commandName made AgentSection's `key={a.commandName}` collide (every
-    // entry key=undefined → React "unique key" warnings). Matches the Rust
-    // AgentInfo serde(rename_all = "camelCase") shape.
-    { agentType: 'claude_code', displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/local/bin/claude', supportsResume: true },
-    { agentType: 'codex', displayName: 'Codex CLI', commandName: 'codex', installed: true, path: '/usr/local/bin/codex', supportsResume: true },
-  ],
-  recommend_agent_for_project: () => 'claude_code',
   list_skills: () => [],
   skill_catalog: () => [],
   mcp_catalog: () => [],

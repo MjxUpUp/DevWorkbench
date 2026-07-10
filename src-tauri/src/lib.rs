@@ -280,9 +280,6 @@ pub fn run() {
 
             Ok(())
         })
-        .manage(commands::agents::AgentState(std::sync::Arc::new(
-            agents::pty::AgentProcesses::new(),
-        )))
         .manage(mcp::registry::McpRegistry::new())
         .manage(commands::agents::AgentApprovalState::default())
         .manage(agents::kernel_tasks::KernelTasks::new())
@@ -304,8 +301,6 @@ pub fn run() {
             commands::git::get_git_status,
             commands::checkpoint::get_checkpoint,
             commands::checkpoint::rollback_to_checkpoint,
-            commands::agents::discover_agents_cmd,
-            commands::agents::recommend_agent_for_project,
             commands::agents::spawn_agent_session,
             commands::mission::mission_init,
             commands::mission::mission_load_prd,
@@ -328,7 +323,6 @@ pub fn run() {
             commands::eval::run_eval_enablement,
             commands::agents::stop_agent_session,
             commands::agents::load_sessions,
-            commands::agents::read_session_output_cmd,
             commands::agents::read_compact_archive_cmd,
             commands::agents::resolve_human_gate_cmd,
             commands::agents::list_conversations,
@@ -338,8 +332,6 @@ pub fn run() {
             commands::agents::restore_conversation,
             commands::agents::edit_and_regenerate,
             commands::agents::get_conversation_branches,
-            commands::agents::pty_write_cmd,
-            commands::agents::pty_resize_cmd,
             commands::agents::get_project_activity,
             commands::agents::get_recent_activity,
             commands::agents::load_mcp_config,
@@ -387,17 +379,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            // B3: on exit, kill every tracked agent child so closing the window
-            // while an agent is running doesn't orphan the CLI processes
-            // (claude/codex/gemini keep holding file locks + burning API quota).
-            // `taskkill /F /T` takes the whole tree, MCP grandchildren included.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(state) = app.try_state::<commands::agents::AgentState>() {
-                    state.inner().0.kill_all();
-                }
-            }
-        });
+        .run(|_app, _event| {});
 }
 
 /// Format a migration / DB-init failure into a user-facing message for the

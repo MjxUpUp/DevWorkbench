@@ -77,7 +77,7 @@ mod tests {
             created_at: chrono::Local::now().to_rfc3339(),
         };
 
-        create_feedback(&db.conn, &report, "/proj/a", &AgentType::ClaudeCode).unwrap();
+        create_feedback(&db.conn, &report, "/proj/a", &AgentType::ReactKernel).unwrap();
 
         let events = crate::activity::get_events_for_project(&db.conn, "/proj/a").unwrap();
         assert_eq!(events.len(), 1);

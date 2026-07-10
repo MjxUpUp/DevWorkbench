@@ -54,7 +54,7 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
     expect(screen.getByText('dispatch_subagent', { exact: false })).toBeInTheDocument();
   });
 
-  it('defaults to the agent-tools section (not capability)', () => {
+  it('defaults to the providers section (not capability)', () => {
     render(<SettingsView />);
     // The capability overview is NOT the default landing section.
     expect(screen.queryByText('内置工具')).not.toBeInTheDocument();
@@ -62,7 +62,7 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
 
   it('lands on the skills section when entered via settingsInitialSection', () => {
     // 命令面板「技能」会先把 settingsInitialSection 置为 'skills'，SettingsView 应消费它
-    // 直达技能分区（技能目录统一归设置页管理的入口路径），而非默认的 agent-tools。
+    // 直达技能分区（技能目录统一归设置页管理的入口路径），而非默认的 providers。
     useNavigationStore.setState({ settingsInitialSection: 'skills' });
     render(<SettingsView />);
     expect(screen.getByText('技能管理')).toBeInTheDocument();
@@ -78,7 +78,7 @@ describe('SettingsView (A7 plugins→capability rename)', () => {
     expect(useNavigationStore.getState().settingsInitialSection).toBeNull();
     unmount();
 
-    // 第二次进入：用户菜单正常进设置（无直达意图）→ 应回默认 agent-tools。
+    // 第二次进入：用户菜单正常进设置（无直达意图）→ 应回默认 providers。
     render(<SettingsView />);
     expect(screen.queryByText('技能管理')).not.toBeInTheDocument();
   });

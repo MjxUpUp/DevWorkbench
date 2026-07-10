@@ -3,7 +3,12 @@ import { useActivityStore } from './activityStore';
 import { useNavigationStore } from './navigationStore';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentInfo, Session, AgentType, AgentMode, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
+import type { Session, AgentType, AgentMode, Conversation, QualityReport, ChatStreamEvent, BranchNode } from '../types';
+
+/** Fixed agent type — ReactKernel is the sole execution path after retiring the
+ *  external CLI agent link. Sent to the backend on every spawn so the DB column
+ *  still receives a value (historical rows may carry legacy CLI values). */
+const REACT_KERNEL: AgentType = 'react_kernel';
 
 /** A destructive tool call paused for interactive approval (Human Gate). The
  *  agent:event listener short-circuits an `approval_required` block into this
@@ -20,26 +25,22 @@ export interface PendingApproval {
 }
 
 interface AgentState {
-  agents: AgentInfo[];
   /** All turns (sessions) across every project. A turn is one user prompt →
    *  one agent run; turns group into conversations via `conversationId`. */
   sessions: Session[];
   /** All conversation containers, across every project. */
   conversations: Conversation[];
   loading: boolean;
-  ptyOutput: Map<string, Uint8Array[]>;
   /** Live in-memory structured blocks per session, accumulated from the
    *  `agent:event` channel while a session runs. Cleared on agent:completed —
    *  finalized sessions replay from the persisted `session.blocks` column. */
   sessionBlocks: Map<string, ChatStreamEvent[]>;
   qualityReports: Map<string, QualityReport>;
 
-  refreshAgents: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   refreshConversations: (projectPath: string) => Promise<void>;
   spawnAgent: (
     projectPath: string,
-    agentType: AgentType,
     prompt: string,
     model?: string,
     linkedRequirementId?: string,
@@ -64,18 +65,15 @@ interface AgentState {
    *  drop it from local state immediately. Undo via `restore_conversation`
    *  re-surfaces it because the DB list then includes it again. */
   deleteConversation: (id: string, projectPath: string) => Promise<void>;
-  recommendAgent: (tags: string[]) => Promise<AgentType | null>;
   fetchQualityReport: (sessionId: string) => Promise<QualityReport | null>;
   getQualityReport: (sessionId: string) => QualityReport | null;
   /** First turn of a brand-new conversation (no conversation_id yet). */
-  createConversation: (projectPath: string, prompt: string, agentType: AgentType, mode?: AgentMode, model?: string) => Promise<Session>;
-  /** Append a follow-up turn to an existing conversation. The agent may differ
-   *  from prior turns — that's the whole point of the conversation container. */
+  createConversation: (projectPath: string, prompt: string, mode?: AgentMode, model?: string) => Promise<Session>;
+  /** Append a follow-up turn to an existing conversation. */
   continueConversation: (
     projectPath: string,
     conversationId: string,
     prompt: string,
-    agentType: AgentType,
     mode?: AgentMode,
     model?: string,
     parentSessionId?: string,
@@ -87,8 +85,6 @@ interface AgentState {
   /** 拉取一个 conversation 的扁平分支节点(turn + parent 指针),供前端渲染
    *  分支切换器。 */
   getConversationBranches: (conversationId: string) => Promise<BranchNode[]>;
-  appendPtyOutput: (sessionId: string, data: Uint8Array) => void;
-  clearPtyOutput: (sessionId: string) => void;
   appendBlock: (sessionId: string, event: ChatStreamEvent) => void;
   clearBlocks: (sessionId: string) => void;
   /** The destructive tool call currently paused for approval, if any. The modal
@@ -102,23 +98,12 @@ interface AgentState {
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
-  agents: [],
   sessions: [],
   conversations: [],
   loading: true,
-  ptyOutput: new Map(),
   sessionBlocks: new Map(),
   qualityReports: new Map(),
   pendingApproval: null,
-
-  refreshAgents: async () => {
-    try {
-      const result = await invoke<AgentInfo[]>('discover_agents_cmd');
-      set({ agents: result });
-    } catch (e) {
-      console.error('Failed to discover agents:', e);
-    }
-  },
 
   refreshSessions: async () => {
     try {
@@ -158,7 +143,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  spawnAgent: async (projectPath, agentType, prompt, model, linkedRequirementId, parentSessionId, conversationId, mode) => {
+  spawnAgent: async (projectPath, prompt, model, linkedRequirementId, parentSessionId, conversationId, mode) => {
     // A2: `model || null` is intentional. The backend (build_react_agent) maps
     // None → '__default__' alias, which resolve_provider expands to the user's
     // configured default model — so an unset model is the LEGAL "use default"
@@ -169,7 +154,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // compact_threshold, so the static-fallback mismatch can't recur.
     const session = await invoke<Session>('spawn_agent_session', {
       projectPath,
-      agentType,
+      agentType: REACT_KERNEL,
       prompt,
       model: model || null,
       linkedRequirementId: linkedRequirementId || null,
@@ -264,10 +249,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     await get().refreshConversations(projectPath);
   },
 
-  recommendAgent: async (tags) => {
-    return invoke<AgentType | null>('recommend_agent_for_project', { tags });
-  },
-
   fetchQualityReport: async (sessionId) => {
     try {
       const report = await invoke<QualityReport | null>('get_quality_report_for_session', { sessionId });
@@ -289,22 +270,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return get().qualityReports.get(sessionId) ?? null;
   },
 
-  createConversation: async (projectPath, prompt, agentType, mode, model) => {
-    if (!agentType) {
-      throw new Error('没有可用的 Agent');
-    }
+  createConversation: async (projectPath, prompt, mode, model) => {
     // No conversation_id → backend creates a new container and attaches this
     // turn as its first. `model` flows through to spawn_agent_session so the
     // chosen provider/model actually routes（砍 CLI 后唯一内核 ReactKernel，
     // 多模型靠协议层 Anthropic/OpenAI 支撑，不再靠 CLI 壳）。
-    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, undefined, undefined, mode);
+    return get().spawnAgent(projectPath, prompt, model, undefined, undefined, undefined, mode);
   },
 
-  continueConversation: async (projectPath, conversationId, prompt, agentType, mode, model, parentSessionId) => {
-    if (!agentType) {
-      throw new Error('没有可用的 Agent');
-    }
-    return get().spawnAgent(projectPath, agentType, prompt, model, undefined, parentSessionId, conversationId, mode);
+  continueConversation: async (projectPath, conversationId, prompt, mode, model, parentSessionId) => {
+    return get().spawnAgent(projectPath, prompt, model, undefined, parentSessionId, conversationId, mode);
   },
 
   editAndRegenerate: async (sessionId, newPrompt) => {
@@ -334,23 +309,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // Defensive: invoke may resolve null (test mocks, or a transient backend
     // hiccup) — coerce to [] so the branch UI never throws on a non-array.
     return Array.isArray(result) ? result : [];
-  },
-
-  appendPtyOutput: (sessionId, data) => {
-    set((s) => {
-      const next = new Map(s.ptyOutput);
-      const existing = next.get(sessionId) || [];
-      next.set(sessionId, [...existing, data]);
-      return { ptyOutput: next };
-    });
-  },
-
-  clearPtyOutput: (sessionId) => {
-    set((s) => {
-      const next = new Map(s.ptyOutput);
-      next.delete(sessionId);
-      return { ptyOutput: next };
-    });
   },
 
   appendBlock: (sessionId, event) => {
@@ -466,15 +424,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().fetchQualityReport(sessionId);
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
-    const p3 = listen<{ sessionId: string; data: number[] }>('pty:output', (event) => {
-      get().appendPtyOutput(event.payload.sessionId, new Uint8Array(event.payload.data));
-    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
-
     // Structured agent output — one ChatStreamEvent per parsed block of the
-    // agent's stream (claude stream-json today; ReactAgent later). The chat UI
-    // folds these into block cards via BlocksView. Raw agents (pi) emit no
-    // agent:event, so they keep the TerminalView/Markdown path unchanged.
-    const p4 = listen<{ sessionId: string; event: ChatStreamEvent }>('agent:event', (event) => {
+    // agent's stream (ReactKernel). The chat UI folds these into block cards
+    // via BlocksView.
+    const p3 = listen<{ sessionId: string; event: ChatStreamEvent }>('agent:event', (event) => {
       const { sessionId, event: ev } = event.payload;
       // Human Gate: an approval_required block is a CONTROL signal, not a chat
       // block — short-circuit into pendingApproval so the modal opens, and never
@@ -497,8 +450,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Initial load
-    Promise.all([get().refreshAgents(), refreshSessions()])
-      .finally(() => set({ loading: false }));
+    refreshSessions().finally(() => set({ loading: false }));
 
     return () => {
       cancelled = true;
@@ -506,7 +458,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // callbacks will call fn() immediately to clean up.
       unlisteners.forEach((fn) => fn());
       // Also await pending promises to ensure no listeners leak
-      Promise.all([p1, p2, p3, p4]).catch(() => {});
+      Promise.all([p1, p2, p3]).catch(() => {});
     };
   },
 }));

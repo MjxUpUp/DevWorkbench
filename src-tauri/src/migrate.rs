@@ -1087,7 +1087,7 @@ mod tests {
         Session {
             id: id.to_string(),
             project_path: project.to_string(),
-            agent_type: AgentType::ClaudeCode,
+            agent_type: AgentType::ReactKernel,
             status: SessionStatus::Completed,
             prompt: format!("prompt-{}", id),
             model: None,

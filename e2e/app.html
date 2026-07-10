@@ -158,14 +158,11 @@
                 // out and visual.spec's app-shell baseline captures the wizard
                 // instead of the app shell.
                 return Promise.resolve({ theme: 'light', scan_directories: [], tool_paths: {}, onboarding_completed: true });
-              case 'discover_agents_cmd':
-                return Promise.resolve([
-                  { agentType: 'claude_code', displayName: 'Claude Code', commandName: 'claude', installed: true, path: '/usr/local/bin/claude', supportsResume: true },
-                ]);
-              case 'recommend_agent_for_project':
-                return Promise.resolve('claude_code');
               case 'detect_tools':
-                return Promise.resolve([{ name: 'claude', installed: true, path: '/usr/local/bin/claude' }]);
+                return Promise.resolve([
+                  { name: 'code', installed: true, path: '/usr/local/bin/code' },
+                  { name: 'git', installed: true, path: '/usr/bin/git' },
+                ]);
               case 'get_providers_config':
                 return Promise.resolve({
                   providers: [
@@ -193,8 +190,6 @@
               }
               case 'update_conversation':
                 return Promise.resolve(null);
-              case 'read_session_output_cmd':
-                return Promise.resolve(null);
               case 'get_quality_report_for_session':
                 return Promise.resolve(null);
               case 'get_project_activity':
@@ -212,7 +207,7 @@
                 const conversationId = 'conv-' + spawnCount;
                 const projectPath = String(args.projectPath ?? '');
                 const prompt = String(args.prompt ?? '');
-                const agentType = String(args.agentType ?? 'claude_code');
+                const agentType = String(args.agentType ?? 'react_kernel');
                 const session = {
                   id: sessionId,
                   prompt: prompt,

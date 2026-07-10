@@ -1,12 +1,10 @@
-import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useState } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import {
   IconX,
   IconFolderOpen,
   IconCpu,
-  IconTerminal,
   IconShield,
   IconChevronRight,
   IconSparkles,
@@ -38,33 +36,13 @@ type StepId = 0 | 1 | 2 | 3;
 
 const STEP_LABELS = ['工作区', '接入方式', '权限说明', '开始使用'] as const;
 
-interface ToolStatus {
-  name: string;
-  installed: boolean;
-  path: string | null;
-}
-
 export function OnboardingWizard({ onDone, onClose, closable }: OnboardingWizardProps) {
   const [step, setStep] = useState<StepId>(0);
   const [workspacePath, setWorkspacePath] = useState<string>('');
   const [pickError, setPickError] = useState<string | null>(null);
-  const [cliTools, setCliTools] = useState<ToolStatus[] | null>(null);
 
   const scanDirectories = useSettingsStore((s) => s.settings.scan_directories);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
-
-  // Detect CLI agents once when the user reaches the backend step, so the CLI
-  // card shows what's already installed (claude / codex / gemini ...). Errors
-  // degrade to an empty list rather than blocking the wizard.
-  useEffect(() => {
-    if (step !== 1 || cliTools !== null) return;
-    invoke<ToolStatus[]>('detect_tools')
-      .then((tools) => setCliTools(tools))
-      .catch((e) => {
-        console.error('[onboarding] detect_tools failed', e);
-        setCliTools([]);
-      });
-  }, [step, cliTools]);
 
   const pickWorkspace = async () => {
     setPickError(null);
@@ -131,7 +109,7 @@ export function OnboardingWizard({ onDone, onClose, closable }: OnboardingWizard
           {step === 1 && (
             <div className="onboarding-step">
               <h2>选择接入方式</h2>
-              <p>二选一（都可稍后混用）：直接接入云模型，或使用已安装的 CLI Agent。</p>
+              <p>接入云模型即可开始——自研内核（ReactKernel）直接调度，无需安装外部 CLI。</p>
               <div className="onboarding-cards">
                 <div className="onboarding-card-option">
                   <IconCpu size={28} />
@@ -141,22 +119,8 @@ export function OnboardingWizard({ onDone, onClose, closable }: OnboardingWizard
                     仅存本机钥匙串。
                   </p>
                 </div>
-                <div className="onboarding-card-option">
-                  <IconTerminal size={28} />
-                  <h3>CLI Agent</h3>
-                  <p>本机已安装的命令行 Agent：</p>
-                  <ul className="onboarding-cli-list">
-                    {cliTools === null && <li className="muted">检测中…</li>}
-                    {cliTools !== null &&
-                      cliTools.map((t) => (
-                        <li key={t.name} className={t.installed ? 'ok' : 'muted'}>
-                          <code>{t.name}</code> {t.installed ? '已安装' : '未检测到'}
-                        </li>
-                      ))}
-                  </ul>
-                </div>
               </div>
-              <div className="onboarding-hint">完成后可在「设置 → 模型供应商 / 智能体工具」详细配置。</div>
+              <div className="onboarding-hint">完成后可在「设置 → 模型供应商」详细配置。</div>
             </div>
           )}
 
@@ -171,10 +135,6 @@ export function OnboardingWizard({ onDone, onClose, closable }: OnboardingWizard
                 </li>
                 <li>
                   <b>上下文自动压缩</b>：长会话接近上下文上限时，中间轮次会被折叠为摘要并归档，原文可展开查看。
-                </li>
-                <li>
-                  <b>CLI Agent</b>：第三方 CLI 子进程（claude/codex/gemini）按其自身权限运行，Dev
-                  Workbench 不插入同步审批，仅在界面标注。
                 </li>
                 <li>
                   <b>本地优先</b>：代码、会话、凭据都留在本机；云模型只在你主动调用时联网。

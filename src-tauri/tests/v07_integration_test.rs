@@ -28,7 +28,7 @@ fn test_activity_record_and_query() {
     let e1 = app_lib::activity::make_activity_event(
         "s1",
         "/proj/a",
-        &app_lib::models::AgentType::ClaudeCode,
+        &app_lib::models::AgentType::ReactKernel,
         "session_started",
         "Started session",
         None,
@@ -37,7 +37,7 @@ fn test_activity_record_and_query() {
     let e2 = app_lib::activity::make_activity_event(
         "s1",
         "/proj/a",
-        &app_lib::models::AgentType::ClaudeCode,
+        &app_lib::models::AgentType::ReactKernel,
         "session_completed",
         "Completed session",
         Some("All tests passed".to_string()),
@@ -46,7 +46,7 @@ fn test_activity_record_and_query() {
     let e3 = app_lib::activity::make_activity_event(
         "s2",
         "/proj/b",
-        &app_lib::models::AgentType::Codex,
+        &app_lib::models::AgentType::ReactKernel,
         "session_started",
         "Started Codex session",
         None,
@@ -65,7 +65,7 @@ fn test_activity_record_and_query() {
 
     let proj_b = app_lib::activity::get_events_for_project(&db.conn, "/proj/b").unwrap();
     assert_eq!(proj_b.len(), 1);
-    assert_eq!(proj_b[0].agent_type, app_lib::models::AgentType::Codex);
+    assert_eq!(proj_b[0].agent_type, app_lib::models::AgentType::ReactKernel);
 
     // Recent across all projects
     let recent = app_lib::activity::get_recent_events(&db.conn, 10).unwrap();
@@ -152,7 +152,7 @@ fn test_quality_feedback_creates_activity() {
         &db.conn,
         &report,
         "/test/feedback/project",
-        &app_lib::models::AgentType::ClaudeCode,
+        &app_lib::models::AgentType::ReactKernel,
     )
     .unwrap();
 

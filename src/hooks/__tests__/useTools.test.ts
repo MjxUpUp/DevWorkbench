@@ -10,9 +10,8 @@ import { invoke } from '@tauri-apps/api/core';
 const mockedInvoke = vi.mocked(invoke);
 
 const mockTools = [
-  { name: 'claude', installed: true, path: '/usr/local/bin/claude' },
-  { name: 'cursor', installed: false, path: null },
   { name: 'code', installed: true, path: '/usr/local/bin/code' },
+  { name: 'git', installed: false, path: null },
 ];
 
 describe('useTools', () => {
@@ -67,7 +66,6 @@ describe('useTools', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(result.current.isInstalled('claude')).toBe(true);
     expect(result.current.isInstalled('code')).toBe(true);
   });
 
@@ -80,7 +78,7 @@ describe('useTools', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(result.current.isInstalled('cursor')).toBe(false);
+    expect(result.current.isInstalled('git')).toBe(false);
   });
 
   it('isInstalled returns false for unknown tools', async () => {

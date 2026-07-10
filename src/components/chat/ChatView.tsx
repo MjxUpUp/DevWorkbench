@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAgentStore } from '../../stores/agentStore';
-import type { AgentType, BranchNode, Session } from '../../types';
+import type { BranchNode, Session } from '../../types';
 import { ConversationBookmarks } from './ConversationBookmarks';
 import { SubagentBoard } from './SubagentBoard';
 import { UserMessage } from './UserMessage';
@@ -24,10 +24,9 @@ export function ChatView() {
   const selectConversation = useNavigationStore((s) => s.selectConversation);
   const toast = useToast();
 
-  // 砍 CLI + 移除 agent/模式选择器后：agent 固定 Kernel Agent（唯一自研内核），执行
+  // 砍 CLI + 移除 agent/模式选择器后：agent 固定 ReactKernel（唯一自研内核），执行
   // 模式不暴露给用户手切（破坏性操作由 ApprovalModal 在触发时承接，后端用默认 mode）。
-  // 不再用 selectedAgent/agentMode state——canSend/handleSend 直接用常量 AGENT。
-  const AGENT: AgentType = 'react_kernel';
+  // spawnAgent 内部固定 react_kernel，调用方不再传 agentType。
   const [selectedModel, setSelectedModel] = useState('default');
   // Providers config (providers.toml) — the source of truth for the model
   // picker, so the chat selector lists the SAME models Settings → Providers
@@ -53,7 +52,6 @@ export function ChatView() {
 
   // Stores
   const allSessions = useAgentStore((s) => s.sessions);
-  const agents = useAgentStore((s) => s.agents);
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const getTurnsForConversation = useAgentStore((s) => s.getTurnsForConversation);
   const createConversation = useAgentStore((s) => s.createConversation);
@@ -153,14 +151,14 @@ export function ChatView() {
 
   const displaySession = runningSession ?? turns[turns.length - 1] ?? null;
 
-  const installedAgents = useMemo(() => agents.filter((a) => a.installed), [agents]);
-
-  // Map an agent type to its display name (falls back to the raw type). Used by
-  // the agent-switch divider between turns of different agents（砍 CLI 后唯一
-  // react_kernel，divider 实际不会触发——保留以应对未来多内核）。
+  // Map an agent type to its display name (falls back to the raw type with
+  // underscores → spaces). Used by the agent-switch divider between turns of
+  // different agents（砍 CLI 后唯一 react_kernel，divider 实际不会触发——保留以
+  // 应对未来多内核）。No longer reads a discovery store: agent display names
+  // come from the raw agentType string.
   const agentDisplayName = useCallback(
-    (t: AgentType) => agents.find((a) => a.agentType === t)?.displayName ?? t.replace(/_/g, ' '),
-    [agents],
+    (t: string) => t.replace(/_/g, ' '),
+    [],
   );
 
   // Fetch quality report when session completes
@@ -272,12 +270,12 @@ export function ChatView() {
       const model = selectedModel && selectedModel !== 'default' ? selectedModel : undefined;
       if (activeConversationId && !runningSession) {
         const parentSessionId = turns.length > 0 ? turns[turns.length - 1].id : undefined;
-        const session = await continueConversation(project.path, activeConversationId, text, AGENT, undefined, model, parentSessionId);
+        const session = await continueConversation(project.path, activeConversationId, text, undefined, model, parentSessionId);
         void session;
         // Force store sync to guarantee ChatView re-render with new turn
         void useAgentStore.getState().refreshSessions();
       } else {
-        const session = await createConversation(project.path, text, AGENT, undefined, model);
+        const session = await createConversation(project.path, text, undefined, model);
         selectConversation(session.conversationId);
         // Force store sync to guarantee ChatView re-render with new turn
         void useAgentStore.getState().refreshSessions();
@@ -324,11 +322,6 @@ export function ChatView() {
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>
             从底部选择工作区，或点击「+」添加新工作区开始任务
           </p>
-          {installedAgents.length > 0 && (
-            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-              内核 Agent 已就绪：{installedAgents.map((a) => a.displayName).join('、')}
-            </p>
-          )}
         </div>
       </div>
     );

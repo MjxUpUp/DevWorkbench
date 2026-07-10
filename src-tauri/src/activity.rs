@@ -85,7 +85,7 @@ pub fn get_events_for_project(
         let agent_type_str: String = row.get(2)?;
         let agent_type: AgentType =
             serde_json::from_value(serde_json::Value::String(agent_type_str))
-                .unwrap_or(AgentType::ClaudeCode);
+                .unwrap_or(AgentType::ReactKernel);
 
         let files_str: Option<String> = row.get(6)?;
         let files_changed: Option<Vec<String>> = files_str
@@ -133,7 +133,7 @@ pub fn get_recent_events(
         let agent_type_str: String = row.get(2)?;
         let agent_type: AgentType =
             serde_json::from_value(serde_json::Value::String(agent_type_str))
-                .unwrap_or(AgentType::ClaudeCode);
+                .unwrap_or(AgentType::ReactKernel);
 
         let files_str: Option<String> = row.get(6)?;
         let files_changed: Option<Vec<String>> = files_str
@@ -222,7 +222,7 @@ mod tests {
         ActivityEvent {
             id: id.to_string(),
             project_hash: hash_project_path(project),
-            agent_type: AgentType::ClaudeCode,
+            agent_type: AgentType::ReactKernel,
             event_type: event_type.to_string(),
             title: title.to_string(),
             description: None,

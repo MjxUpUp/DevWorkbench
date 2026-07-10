@@ -21,7 +21,7 @@ fn make_session(id: &str) -> Session {
     Session {
         id: id.to_string(),
         project_path: "E:/DevWorkbench".to_string(),
-        agent_type: AgentType::ClaudeCode,
+        agent_type: AgentType::ReactKernel,
         status: SessionStatus::Completed,
         prompt: "test prompt".to_string(),
         model: None,

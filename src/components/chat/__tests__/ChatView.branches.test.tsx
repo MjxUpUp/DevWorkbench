@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ChatView } from '../ChatView';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useAgentStore } from '../../../stores/agentStore';
-import type { Project, Session, AgentInfo } from '../../../types';
+import type { Project, Session } from '../../../types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(null)) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
@@ -26,15 +26,6 @@ const project: Project = {
   last_opened_tools: [],
   workspace_tools: [],
 };
-
-const agent = (t: AgentInfo['agentType']): AgentInfo => ({
-  agentType: t,
-  displayName: t === 'claude_code' ? 'Claude Code' : 'Codex',
-  commandName: t,
-  installed: true,
-  path: null,
-  supportsResume: true,
-});
 
 const turn = (
   id: string,
@@ -81,11 +72,9 @@ describe('ChatView — branches effect (F10: no per-token refetch)', () => {
       selectedConversationId: 'c1',
     });
     useAgentStore.setState({
-      agents: [agent('claude_code')],
       sessions: [turn('t1', '2026-01-01T00:00:00Z')],
       conversations: [],
       loading: false,
-      ptyOutput: new Map(),
       qualityReports: new Map(),
     } as Partial<ReturnType<typeof useAgentStore.getState>> as never);
   });

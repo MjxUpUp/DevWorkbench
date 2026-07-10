@@ -1,5 +1,5 @@
 use crate::db::DbState;
-use crate::models::{AgentType, ToolStatus};
+use crate::models::ToolStatus;
 use tauri::State;
 
 /// macOS GUI 应用 PATH 不包含 brew 等路径，需要手动扩展
@@ -178,13 +178,9 @@ pub fn detect_tools(db: State<'_, DbState>) -> Vec<ToolStatus> {
 
     let mut results = Vec::new();
 
-    // Agent tools — derived from AgentType enum (single source of truth)
-    for agent_type in AgentType::all() {
-        let cmd = agent_type.command_name();
-        results.push(detect_one(cmd, &custom_paths));
-    }
-
-    // Non-agent tools (IDE, VCS)
+    // Non-agent tools only (IDE, VCS). The agent surface collapsed to the single
+    // in-process ReactKernel (no CLI binary to detect), so there is no agent
+    // discovery loop anymore — see the AgentType convergence.
     for &name in NON_AGENT_TOOLS {
         results.push(detect_one(name, &custom_paths));
     }

@@ -10,6 +10,6 @@
  * 编译报错。
  */
 export type SettingsSection =
-  | 'agent-tools' | 'providers' | 'capability'
+  | 'providers' | 'capability'
   | 'skills' | 'mcp' | 'sub-agents' | 'commands' | 'hooks'
   | 'output-style' | 'usage-stats' | 'trace' | 'onboarding';

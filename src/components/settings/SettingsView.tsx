@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { AppearanceSection } from './AppearanceSection';
-import { AgentSection } from './AgentSection';
 import { ProvidersSection } from './ProvidersSection';
 import { McpSection } from './McpSection';
 import { SkillsSection } from './SkillsSection';
@@ -15,7 +14,7 @@ import { OnboardingRelaunchSection } from '../onboarding/OnboardingWizard';
 import type { SettingsSection } from './types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
-  IconSun, IconTerminal, IconCpu,
+  IconSun, IconCpu,
   IconSparkles, IconBrain, IconInbox,
   IconUser, IconPlay, IconEdit,
   IconDashboard, IconCode, IconChat, IconX,
@@ -48,7 +47,6 @@ interface SectionDef {
 
 const SECTIONS: SectionDef[] = [
   // 智能体
-  { id: 'agent-tools', label: '工作流外部节点', Icon: IconTerminal, Component: AgentSection, group: '智能体' },
   { id: 'providers', label: '模型供应商', Icon: IconCpu, Component: ProvidersSection, group: '智能体' },
   { id: 'capability', label: '能力总览', Icon: IconInbox, Component: CapabilitySection, group: '智能体' },
   { id: 'sub-agents', label: '子智能体', Icon: IconUser, Component: SubAgentsSection, group: '智能体' },
@@ -78,7 +76,7 @@ export function SettingsView() {
       const match = SECTIONS.find((s) => s.id === initial);
       if (match) return match.id;
     }
-    return 'agent-tools';
+    return 'providers';
   });
   const loadSettings = useSettingsStore((s) => s.loadSettings);
   const setActiveView = useNavigationStore((s) => s.setActiveView);

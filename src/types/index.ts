@@ -44,15 +44,12 @@ export interface GitStatus {
 
 // ---- Agent Hub types ----
 
-export type AgentType =
-  | 'claude_code'
-  | 'codex'
-  | 'cursor_agent'
-  | 'gemini_cli'
-  | 'copilot'
-  | 'qwen_code'
-  | 'pi'
-  | 'react_kernel';
+/** Agent execution backend. Converged to a single variant after retiring the
+ *  external CLI agent (pty) link — ReactKernel is the only execution path now.
+ *  Historical DB rows may carry legacy values (claude_code/codex/…); fields
+ *  below use `string` to tolerate those without a migration. New sessions are
+ *  always `react_kernel`. */
+export type AgentType = 'react_kernel';
 
 export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -69,15 +66,6 @@ export type AgentMode =
   | 'silent'
   | 'skip-permissions'
   | 'human-gate';
-
-export interface AgentInfo {
-  agentType: AgentType;
-  displayName: string;
-  commandName: string;
-  installed: boolean;
-  path: string | null;
-  supportsResume: boolean;
-}
 
 export interface FileDiff {
   path: string;
@@ -130,7 +118,9 @@ export interface BranchNode {
 export interface Session {
   id: string;
   projectPath: string;
-  agentType: AgentType;
+  /** Historical DB rows may carry legacy CLI agent values (claude_code/codex/…);
+   *  new sessions are always react_kernel. Typed `string` to tolerate both. */
+  agentType: string;
   status: SessionStatus;
   prompt: string;
   model: string | null;
@@ -234,8 +224,9 @@ export interface Conversation {
   projectPath: string;
   title: string;
   /** The agent of the most recent turn. Null only if the conversation has no
-   *  turns yet (shouldn't happen in practice — creating one always spawns turn 1). */
-  lastAgent: AgentType | null;
+   *  turns yet (shouldn't happen in practice — creating one always spawns turn 1).
+   *  `string` to tolerate historical legacy values without a DB migration. */
+  lastAgent: string | null;
   status: string;
   startedAt: string;
   lastActivityAt: string;
@@ -247,7 +238,8 @@ export interface Conversation {
 export interface ActivityEvent {
   id: string;
   projectHash: string;
-  agentType: AgentType;
+  /** `string` to tolerate historical legacy CLI agent values from the DB. */
+  agentType: string;
   eventType: string;
   title: string;
   description: string | null;
@@ -448,16 +440,16 @@ export type ChatStreamEvent =
       kind: 'tool_use';
       name: string;
       input: unknown;
-      /** tool_call_id pairing key. Present on the OpaqueAgent path (claude wire
-       *  carries `id`); absent on the ReactKernel forward path. Optional so
-       *  pre-id session blocks (no `id` field) still parse. */
+      /** tool_call_id pairing key. Carried by ReactKernel (ToolCall.id) and by
+       *  legacy claude-wire blocks. Optional so pre-id session blocks (no `id`
+       *  field) still parse. */
       id?: string | null;
     }
   | {
       kind: 'tool_result';
-      /** Points back to the tool_use block this result answers. Present on the
-       *  OpaqueAgent path; absent on the ReactKernel forward path / legacy
-       *  blocks. Optional for backward compatibility. */
+      /** Points back to the tool_use block this result answers. Mirrors the
+       *  tool_use id (ReactKernel) or the legacy claude-wire id. Optional for
+       *  backward compatibility (pre-id blocks). */
       tool_use_id?: string | null;
       content: string;
       is_error: boolean;

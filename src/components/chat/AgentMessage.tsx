@@ -1,11 +1,7 @@
-import { useState, useMemo, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useState, useMemo } from 'react';
 import type { Session, QualityReport, ChatStreamEvent } from '../../types';
 import { useAgentStore } from '../../stores/agentStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { TerminalView } from '../TerminalView';
 import { QualityReportPanel } from '../QualityReportPanel';
 import { BlocksView } from './BlocksView';
 import { IconEdit, IconCpu, IconStar, IconX, IconStop } from '../Icons';
@@ -44,95 +40,18 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
       // clipboard 不可用时退化为选中 prompt（webview 非 secure / 权限拒绝等）
     }
   };
-  // Full agent reply for completed sessions. session.outputSummary is the
-  // tail-truncated (2000-char) preview of the same log file the terminal reads,
-  // so rendering it as Markdown produced a duplicated, cut-off block next to
-  // the terminal. For completed sessions we instead load the FULL output via
-  // read_session_output_cmd (ANSI-stripped, untruncated) and render that.
-  const [fullOutput, setFullOutput] = useState<string | null>(null);
 
   const statusDot = running ? 'running' : session.status === 'completed' ? 'completed' : 'failed';
   const statusLabel = running ? '运行中' : session.status === 'completed' ? '已完成' : '失败';
 
-  // Structured agent output blocks (from `agent:event`). When present, the
-  // output area renders BlocksView instead of the terminal/markdown path —
-  // this is the chat-blocks UI for claude (and later ReactAgent). Raw agents
-  // (pi) emit no agent:event, so they keep the existing terminal/markdown path.
-  // Declared before the fullOutput effect below, which short-circuits on it.
+  // Structured agent output blocks. ReactKernel is the sole agent now, so every
+  // session renders BlocksView: live in-memory blocks win while running; once
+  // finalized the live Map is cleared (agent:completed) and we fall back to the
+  // persisted session.blocks read from the DB. Historical raw-agent sessions
+  // (legacy pi/codex with no agent:event stream) have no blocks and render
+  // BlocksView's empty state — the terminal raw-output path is gone.
   const liveBlocks = useAgentStore((s) => s.sessionBlocks.get(session.id) ?? EMPTY_BLOCKS);
-  // Live in-memory blocks win while a session is running; once finalized the
-  // live Map is cleared (agent:completed) and we fall back to the persisted
-  // session.blocks read from the DB — so a reloaded or switched-away session
-  // still renders its block cards instead of the raw terminal log.
   const blocks = liveBlocks.length > 0 ? liveBlocks : (session.blocks ?? EMPTY_BLOCKS);
-  const useBlocks = blocks.length > 0;
-  // Structured agents (claude_code / react_kernel / gemini_cli / qwen_code) emit
-  // `agent:event` blocks and must NEVER render the terminal form — even before
-  // the first block arrives (e.g. the model gateway is holding its response).
-  // Without this gate, claude showed a terminal box "等待输出" during that
-  // running-but-empty window, contradicting the B-plan goal of eliminating the
-  // terminal form for structured agents. gemini_cli/qwen_code run in
-  // `-o stream-json` (same structured reader path as claude), so they join here.
-  // Raw agents (pi/codex/…) emit only pty:output bytes, so they keep the
-  // terminal path. `showBlocks` drives the render branch below; BlocksView
-  // itself renders a chat-blocks "waiting" hint when empty + running.
-  const isStructured =
-    session.agentType === 'claude_code' ||
-    session.agentType === 'react_kernel' ||
-    session.agentType === 'gemini_cli' ||
-    session.agentType === 'qwen_code';
-  // Structured agents reach the BlocksView form in EVERY state — running with
-  // zero blocks (gateway holding the response → waiting hint), running with
-  // accumulating blocks, AND completed (persisted session.blocks). The previous
-  // `(isStructured && running)` gate left a hole: on `agent:completed` the live
-  // sessionBlocks Map is cleared and refreshSessions' DB read is async, so for a
-  // frame `useBlocks=false` + `running=false` → showBlocks=false → the render
-  // fell through to the terminal/loading branch → a terminal box flashed before
-  // the persisted blocks loaded (the "终端闪现" symptom). Dropping `&& running`
-  // closes it: structured agents NEVER render the terminal form, matching the
-  // design intent stated in the comment above. An empty BlocksView (completed
-  // turn whose blocks are still loading) is harmless and self-corrects on the
-  // next render once session.blocks arrives.
-  const showBlocks = useBlocks || isStructured;
-
-  // Completed session → load the full reply text once. Falls back to the
-  // (truncated) outputSummary if the log file is gone, so something always shows.
-  useEffect(() => {
-    // BlocksView handles display when structured blocks are available — either
-    // the live in-memory Map (running session) or the persisted session.blocks
-    // (finalized/reloaded). Skip the full-output log load in both cases.
-    if (running || useBlocks) {
-      setFullOutput(null);
-      return;
-    }
-    let cancelled = false;
-    invoke<string | null>('read_session_output_cmd', { sessionId: session.id })
-      .then((full) => {
-        if (cancelled) return;
-        setFullOutput(full ?? session.outputSummary);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setFullOutput(session.outputSummary);
-      });
-    return () => { cancelled = true; };
-  }, [session.id, session.outputSummary, running, useBlocks]);
-
-  // pty 缓存是否含本会话输出。区分"刚完成的当前会话"（缓存仍在，可作占位）
-  // 与"历史会话重新加载"（缓存空，用 loading 占位，不显示空 terminal）。
-  const hasCachedPty = useAgentStore((s) => {
-    const chunks = s.ptyOutput.get(session.id);
-    return !!(chunks && chunks.length > 0);
-  });
-
-  // 输出区三态互斥（避免完成瞬间 terminal 卸载残留造成的"一闪"）：
-  //   running                             → Terminal 实时流式
-  //   刚完成 + pty 缓存仍在 + 输出未就绪    → Terminal 占位（不卸载，直到 Markdown 同帧替换）
-  //   完整输出就绪                         → Markdown 渲染
-  //   历史会话 + 输出未就绪                → loading 占位
-  const showTerminal = running || (!running && !fullOutput && hasCachedPty);
-  const showMarkdown = !running && !!fullOutput;
-  const showOutputLoading = !running && !fullOutput && !hasCachedPty;
 
   // Build decision chain steps from session data
   const chainSteps = useMemo(() => {
@@ -221,57 +140,20 @@ export function AgentMessage({ session, running, qualityReport, elapsed }: Agent
         </div>
       )}
 
-      {/* 输出区（结构化 agent 永远走 chat-blocks，含等待态；raw agent 三态）：
-          - 结构化（claude/react_kernel）有 blocks / 运行中：BlocksView（运行且无
-            block 时 BlocksView 渲染"等待模型响应"等待态，绝不回退 terminal）
-          - raw agent running：Terminal 实时流式
-          - raw 刚完成 + pty 缓存仍在 + 完整输出未就绪：保留 Terminal 作占位（NOT
-            卸载 TerminalView，完成→就绪同帧 swap，杜绝 terminal"一闪"）
-          - raw 完整输出就绪：Markdown 渲染（完整、未截断）
-          - raw 历史会话（无 pty 缓存）未就绪：loading 占位 */}
-      {showBlocks ? (
-        <div className="agent-block">
-          <button type="button" className="agent-block-header" aria-expanded={!terminalCollapsed} onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
-            <span className="agent-block-title">输出</span>
-            <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
-          </button>
-          {!terminalCollapsed && (
-            <div className="agent-block-body agent-output">
-              <BlocksView events={blocks} running={running} sessionId={session.id} />
-            </div>
-          )}
-        </div>
-      ) : showTerminal ? (
-        <div className="agent-block">
-          <button type="button" className="agent-block-header" aria-expanded={!terminalCollapsed} onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
-            <span className="agent-block-title">{running ? 'Terminal Output' : '输出'}</span>
-            <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
-          </button>
-          {!terminalCollapsed && (
-            <div className="agent-block-body" style={{ padding: 0 }}>
-              <TerminalView sessionId={session.id} completedSession={null} />
-            </div>
-          )}
-        </div>
-      ) : (showMarkdown || showOutputLoading) ? (
-        <div className="agent-block">
-          <div className="agent-block-header">
-            <span className="agent-block-title">输出</span>
-            {showOutputLoading && (
-              <span className="agent-block-badge" style={{ color: 'var(--text-tertiary)' }}>加载中…</span>
-            )}
-          </div>
+      {/* 输出区：ReactKernel 唯一 agent，恒走 chat-blocks（BlocksView）。运行中且
+          无 block 时 BlocksView 渲染"等待模型响应"等待态；完成后从持久化
+          session.blocks 回放。raw terminal/Markdown 路径已随 CLI 退役删除。 */}
+      <div className="agent-block">
+        <button type="button" className="agent-block-header" aria-expanded={!terminalCollapsed} onClick={() => setTerminalCollapsed(!terminalCollapsed)}>
+          <span className="agent-block-title">输出</span>
+          <span className="agent-block-collapse">{terminalCollapsed ? '▸' : '▾'}</span>
+        </button>
+        {!terminalCollapsed && (
           <div className="agent-block-body agent-output">
-            {showMarkdown ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {fullOutput}
-              </ReactMarkdown>
-            ) : (
-              <span style={{ color: 'var(--text-tertiary)' }}>（加载中…）</span>
-            )}
+            <BlocksView events={blocks} running={running} sessionId={session.id} />
           </div>
-        </div>
-      ) : null}
+        )}
+      </div>
 
       {/* File Changes block */}
       {fileChanges.length > 0 && !running && (

@@ -17,7 +17,6 @@ pub mod mission;
 pub mod mcp_tool;
 pub mod model_router;
 pub mod openai_chat_model;
-pub mod opaque_agent;
 pub mod react_agent;
 pub mod resource_budget;
 pub mod skill_tool;
